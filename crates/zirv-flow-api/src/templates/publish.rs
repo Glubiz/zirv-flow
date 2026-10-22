@@ -1,0 +1,285 @@
+//! Publishing a template's draft into an immutable version, and reading the versions. Publishing
+//! needs the workspace admin role (ruling 43163028).
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use serde::Serialize;
+use serde_json::{Value, json};
+use time::OffsetDateTime;
+use utoipa::ToSchema;
+use uuid::Uuid;
+use zirv_flow_core::{Cause, TraceContext, UserId, WorkspaceId};
+use zirv_flow_store::{PgPool, Template, TemplateVersion};
+use zirv_flow_templates::{Issue, validate_document};
+
+use super::crud::TemplateBody;
+use super::{field_catalog, issue_problems, stored_document, template_error};
+use crate::AppState;
+use crate::admin::{self, Context};
+use crate::auth::{Need, Principal, authorize, path_id};
+use crate::problem::{ApiError, Problem, TemplateIssueProblem};
+use crate::trace::request_trace;
+
+/// One immutable published version.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateVersionBody {
+    version: i32,
+    /// The document as it was published.
+    #[schema(value_type = Object)]
+    document: Value,
+    /// The warnings found when it was published; a blocking issue refuses the publish.
+    warnings: Vec<TemplateIssueProblem>,
+    published_by: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    published_at: OffsetDateTime,
+}
+
+impl From<&TemplateVersion> for TemplateVersionBody {
+    fn from(version: &TemplateVersion) -> Self {
+        Self {
+            version: version.version,
+            document: version.document.clone(),
+            warnings: stored_warnings(&version.validation),
+            published_by: version.published_by,
+            published_at: version.published_at,
+        }
+    }
+}
+
+/// The issues stored with a version, as the response carries them.
+fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
+    let Some(issues) = validation.as_array() else {
+        return Vec::new();
+    };
+    let text = |issue: &Value, key: &str| issue[key].as_str().map(str::to_owned);
+    issues
+        .iter()
+        .filter_map(|issue| {
+            Some(TemplateIssueProblem {
+                code: text(issue, "code")?,
+                severity: text(issue, "severity")?,
+                at: text(issue, "at")?,
+                field: text(issue, "field"),
+                message: text(issue, "message"),
+            })
+        })
+        .collect()
+}
+
+/// The new version and the template after the publish.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct PublishedBody {
+    template: TemplateBody,
+    version: TemplateVersionBody,
+}
+
+/// Validates the draft under the template's lock and publishes it as the next version, or changes
+/// nothing. Audited as `template.published`; records a `template.publish` decision caused by a
+/// definition change.
+pub(crate) async fn publish_template(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    id: Uuid,
+    published_by: Option<UserId>,
+) -> Result<(Template, TemplateVersion), ApiError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
+        .await
+        .map_err(template_error)?;
+    let doc = stored_document(&locked.draft().document)?;
+    let catalog =
+        field_catalog(zirv_flow_store::read_template_field_catalog(&mut tx, workspace).await?);
+    // The sample render is CPU work: keep it off the async executor.
+    let issues: Vec<Issue> = tokio::task::spawn_blocking(move || validate_document(&doc, &catalog))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(|_| ApiError::template_content_unsupported())?;
+    if issues.iter().any(Issue::is_blocking) {
+        // Dropping the transaction writes nothing.
+        return Err(ApiError::template_invalid(issue_problems(&issues)));
+    }
+    let validation = serde_json::to_value(&issues).map_err(|_| ApiError::internal())?;
+    let trace = TraceContext {
+        trace_id: request_trace().trace_id,
+        cause: Cause::definition_change(id),
+    };
+    let (template, version) = zirv_flow_store::publish_template(
+        &mut tx,
+        workspace,
+        &locked,
+        &validation,
+        published_by,
+        &trace,
+    )
+    .await
+    .map_err(template_error)?;
+    admin::audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "template.published",
+        Some(("template", id)),
+        json!({ "name": template.name, "version": version.version, "warnings": issues.len() }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok((template, version))
+}
+
+/// Publishes the draft as the next immutable version. The draft is validated against the
+/// workspace's field registry and event catalog and the reserved `person.email`; a blocking issue
+/// is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
+/// successful publish are in the response and stored with the version. Audited as
+/// `template.published`.
+#[utoipa::path(
+    post,
+    operation_id = "publish_template",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/publish",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id")
+    ),
+    responses(
+        (status = 201, description = "The template and its new version", body = PublishedBody),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn publish(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id)): Path<(String, String)>,
+) -> Result<(StatusCode, Json<PublishedBody>), ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let (template, version) = publish_template(
+        &state.pool,
+        &principal.context(),
+        workspace.id,
+        path_id(&id)?,
+        principal.user_id(),
+    )
+    .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(PublishedBody {
+            template: TemplateBody::from(&template),
+            version: TemplateVersionBody::from(&version),
+        }),
+    ))
+}
+
+/// The versions of a template, newest first.
+#[utoipa::path(
+    get,
+    operation_id = "list_template_versions",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/versions",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id")
+    ),
+    responses(
+        (status = 200, description = "The versions", body = Vec<TemplateVersionBody>),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn versions(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id)): Path<(String, String)>,
+) -> Result<Json<Vec<TemplateVersionBody>>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let id = path_id(&id)?;
+    zirv_flow_store::find_template(&state.pool, workspace.id, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let versions = zirv_flow_store::list_template_versions(&state.pool, workspace.id, id).await?;
+    Ok(Json(
+        versions.iter().map(TemplateVersionBody::from).collect(),
+    ))
+}
+
+/// One version of a template.
+#[utoipa::path(
+    get,
+    operation_id = "get_template_version",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id"),
+        ("n" = i32, Path, description = "Version number")
+    ),
+    responses(
+        (status = 200, description = "The version", body = TemplateVersionBody),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, template or version, or no access", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn version(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id, n)): Path<(String, String, String)>,
+) -> Result<Json<TemplateVersionBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let version = zirv_flow_store::find_template_version(
+        &state.pool,
+        workspace.id,
+        path_id(&id)?,
+        path_id(&n)?,
+    )
+    .await?
+    .ok_or_else(ApiError::not_found)?;
+    Ok(Json(TemplateVersionBody::from(&version)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_warnings_read_back_what_publish_stored() {
+        let stored = json!([
+            {"code": "missing_lang", "severity": "warning", "at": "/email/lang"},
+            {"code": "insecure_link", "severity": "warning", "at": "/email/html",
+             "field": "person.x", "message": "http"},
+            {"code": "broken"}
+        ]);
+
+        let warnings = stored_warnings(&stored);
+
+        assert_eq!(warnings.len(), 2);
+        assert_eq!(warnings[0].code, "missing_lang");
+        assert_eq!(warnings[1].field.as_deref(), Some("person.x"));
+        assert_eq!(warnings[1].message.as_deref(), Some("http"));
+        assert!(stored_warnings(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn issues_survive_the_round_trip_through_the_stored_json() {
+        let doc = zirv_flow_templates::TemplateDocument::email_code(
+            zirv_flow_templates::EmailContent::default(),
+        );
+        let issues =
+            zirv_flow_templates::validate(&doc, &zirv_flow_templates::FieldCatalog::default());
+        let stored = serde_json::to_value(&issues).unwrap();
+
+        let back = stored_warnings(&stored);
+
+        assert_eq!(back.len(), issues.len());
+        assert_eq!(back[0].code, issues[0].code);
+    }
+}

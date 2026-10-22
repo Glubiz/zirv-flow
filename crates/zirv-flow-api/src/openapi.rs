@@ -24,11 +24,13 @@ use crate::people::{self, CreateTraitRequest, TraitBody, UpdateTraitRequest};
 use crate::privacy::{self, erasures, exports};
 use crate::problem::{
     FlowIssueProblem, ItemProblem, Problem, SegmentIssueProblem, SegmentRefProblem,
+    TemplateIssueProblem,
 };
 use crate::segments::{self, SegmentSchemas};
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::sources;
+use crate::templates;
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
@@ -158,6 +160,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         segments::members::refresh,
         segments::explain::explain,
         segments::preview::preview,
+        templates::crud::list,
+        templates::crud::create,
+        templates::crud::get,
+        templates::crud::update,
+        templates::crud::archive,
+        templates::crud::put_draft,
+        templates::publish::publish,
+        templates::publish::versions,
+        templates::publish::version,
+        templates::where_used::where_used,
+        templates::preview::preview,
         sources::kinds::list,
         sources::crud::list,
         sources::crud::create,
@@ -396,6 +409,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         flows::signing::SigningSecretBody,
         flows::signing::IssuedSigningSecretBody,
         FlowIssueProblem,
+        TemplateIssueProblem,
         segments::crud::SegmentBody,
         segments::crud::SegmentVersionBody,
         segments::crud::SegmentDetailBody,
@@ -411,6 +425,20 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         segments::preview::SampleBody,
         segments::preview::DataAgeBody,
         segments::preview::DataSourceBody,
+        templates::crud::TemplateBody,
+        templates::crud::DraftBody,
+        templates::crud::TemplateDetailBody,
+        templates::crud::CreateTemplateRequest,
+        templates::crud::UpdateTemplateRequest,
+        templates::crud::SaveDraftRequest,
+        templates::crud::ChannelRequest,
+        templates::crud::CategoryRequest,
+        templates::publish::TemplateVersionBody,
+        templates::publish::PublishedBody,
+        templates::where_used::TemplateUseBody,
+        templates::preview::PreviewRequest,
+        templates::preview::PreviewBody,
+        templates::preview::HeaderBody,
         SegmentIssueProblem,
         SegmentRefProblem,
         lists::members::ListMembersBody,
