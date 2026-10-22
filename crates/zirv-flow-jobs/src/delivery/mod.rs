@@ -4,8 +4,8 @@
 //! arrive, so a retry rule or a row shape is changed in one place.
 //!
 //! - [`send`] calls a destination and judges the result into a [`Verdict`].
-//! - [`settle`] records the attempt for a destination that has a row and counts it once the job
-//!   transaction has committed. A call with no destination row, such as the raw URL of an
+//! - [`settle`] records the attempt for a destination that has a row, in a transaction of its own,
+//!   and counts it after that commits. A call with no destination row, such as the raw URL of an
 //!   `action.webhook` node, records nothing and touches no rate bucket.
 
 pub(crate) mod attempt;
@@ -60,7 +60,7 @@ mod tests {
     use zirv_flow_connectors::http::HttpLimits;
     use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::{Cause, Slug, TraceContext, WorkspaceName};
-    use zirv_flow_store::{NewDeliveryAttempt, NewJob, SubjectKind};
+    use zirv_flow_store::{AttemptOutcome, NewDeliveryAttempt, NewJob, SubjectKind};
 
     use super::attempt::AttemptTarget;
     use super::*;
@@ -115,6 +115,7 @@ mod tests {
     async fn fixture_delivery_send(
         ctx: &mut JobContext<'_>,
         target: &AttemptTarget,
+        number: i32,
         kind: &str,
         config: &Value,
         credential: &Credential,
@@ -143,7 +144,7 @@ mod tests {
             OffsetDateTime::UNIX_EPOCH,
         )
         .await;
-        settle(ctx, Some(target), 1, &done)
+        settle(ctx, Some(target), number, &done)
             .await
             .unwrap()
             .expect("a destination row records the attempt")
@@ -207,7 +208,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed);
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(worker_pool(&pool));
         let mut credential = Credential::new();
         credential.insert(
             "signing_secret",
@@ -221,12 +222,10 @@ mod tests {
                 subject_kind: SubjectKind::Message,
                 subject_id: Uuid::from_u128(5),
             };
-            rows.push(fixture_delivery_send(&mut ctx, &target, kind, config, &credential).await);
+            rows.push(fixture_delivery_send(&mut ctx, &target, 1, kind, config, &credential).await);
         }
-        let counted = ctx.take_after_commit().len();
         zirv_flow_store::commit(tx).await.unwrap();
 
-        assert_eq!(counted, 2, "each attempt is counted once, after the commit");
         let stored: Vec<(String, String, String, i32)> = sqlx::query_as(
             "SELECT outcome, status_class, subject_kind, attempt FROM delivery_attempts \n             ORDER BY destination_id = $1 DESC",
         )
@@ -276,7 +275,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed);
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(worker_pool(&pool));
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
@@ -285,11 +284,116 @@ mod tests {
         let recorded = settle(&mut ctx, None, 1, &done).await.unwrap();
 
         assert!(recorded.is_none());
-        assert!(ctx.take_after_commit().is_empty());
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM delivery_attempts")
             .fetch_one(&mut *tx)
             .await
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    fn worker_pool(pool: &PgPool) -> crate::context::IngestSettings {
+        crate::context::IngestSettings {
+            pool: pool.clone(),
+            redaction_key: None,
+            batch_size: 1,
+            shards: 1,
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_attempt_row_survives_the_rollback_of_a_job_that_retries(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let name = WorkspaceName::parse("retry").unwrap();
+        let slug = Slug::parse("retry").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &slug)
+            .await
+            .unwrap()
+            .id;
+        let app = Router::new().route("/hook", post(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/hook", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = json!({"url": url});
+        let destination = zirv_flow_store::create_destination(
+            &pool,
+            ws,
+            &zirv_flow_store::NewDestination {
+                id: Uuid::now_v7(),
+                kind: "webhook",
+                name: "hook",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut job = NewJob::new(
+            "test.delivery",
+            TraceContext::root(Cause::api("test-request")),
+        );
+        job.workspace_id = Some(ws);
+        zirv_flow_store::enqueue(&pool, &job).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &["test.delivery"],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut credential = Credential::new();
+        credential.insert(
+            "signing_secret",
+            zirv_flow_core::SecretString::new("zfwh_x".into()),
+        );
+        let target = AttemptTarget {
+            destination_id: destination.id,
+            subject_kind: SubjectKind::Message,
+            subject_id: Uuid::from_u128(5),
+        };
+
+        // The first attempt is retried: the job returns an error and its transaction rolls back.
+        {
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(worker_pool(&pool));
+            let row =
+                fixture_delivery_send(&mut ctx, &target, 1, "webhook", &config, &credential).await;
+            assert_eq!(row.outcome, AttemptOutcome::Retryable);
+            drop(tx);
+        }
+        let after_retry: Vec<(String, i32)> =
+            sqlx::query_as("SELECT outcome, attempt FROM delivery_attempts ORDER BY attempt")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after_retry, [("retryable".to_owned(), 1)]);
+
+        // The second attempt succeeds and commits.
+        let second = target;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(worker_pool(&pool));
+        let done = Attempt {
+            verdict: Verdict::Succeeded { status: 200 },
+            elapsed: Duration::ZERO,
+        };
+        settle(&mut ctx, Some(&second), 2, &done).await.unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let all: Vec<(String, i32)> =
+            sqlx::query_as("SELECT outcome, attempt FROM delivery_attempts ORDER BY attempt")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            all,
+            [("retryable".to_owned(), 1), ("delivered".to_owned(), 2)]
+        );
     }
 }

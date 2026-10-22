@@ -46,8 +46,8 @@ pub(crate) fn attempt_of(
     }
 }
 
-/// Records the attempt in the job's transaction and counts it in the metrics once that
-/// transaction has committed, so a rolled-back attempt is never counted. With no `target` (a call
+/// Records the attempt in a short transaction of its own on the worker pool and counts it after
+/// that commits, so it persists whether the job commits, retries or fails. With no `target` (a call
 /// to a raw URL, which has no destination row) nothing is recorded.
 pub(crate) async fn settle(
     ctx: &mut JobContext<'_>,
@@ -59,9 +59,16 @@ pub(crate) async fn settle(
         return Ok(None);
     };
     let new = attempt_of(target, number, &done.verdict, done.elapsed);
-    record_delivery_attempt(ctx.conn(), workspace, &new).await?;
-    let counted = new.clone();
-    ctx.after_commit(move || count_delivery_attempt(workspace, &counted));
+    // The attempt happened whatever the job does next, so it commits on its own: a retry rolls the
+    // job back, and the row and the count must survive that.
+    let pool = ctx
+        .pool()
+        .cloned()
+        .ok_or_else(|| JobError::new("the worker has no pool to record the attempt on"))?;
+    let mut tx = zirv_flow_store::begin(&pool).await?;
+    record_delivery_attempt(&mut *tx, workspace, &new).await?;
+    zirv_flow_store::commit(tx).await?;
+    count_delivery_attempt(workspace, &new);
     Ok(Some(new))
 }
 

@@ -42,7 +42,6 @@ pub struct JobContext<'a> {
     rate_limits: Arc<RateLimits>,
     clock: Clock,
     render_pool: Option<RenderPool>,
-    after_commit: Vec<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 impl<'a> JobContext<'a> {
@@ -58,19 +57,7 @@ impl<'a> JobContext<'a> {
             rate_limits: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
-            after_commit: Vec::new(),
         }
-    }
-
-    /// Runs `action` once this job's transaction has committed, and never when it rolls back or
-    /// the lease is lost. For what must happen once per committed attempt, such as a metric.
-    pub(crate) fn after_commit(&mut self, action: impl FnOnce() + Send + Sync + 'static) {
-        self.after_commit.push(Box::new(action));
-    }
-
-    /// The actions to run after the commit, in the order they were added.
-    pub(crate) fn take_after_commit(&mut self) -> Vec<Box<dyn FnOnce() + Send + Sync>> {
-        std::mem::take(&mut self.after_commit)
     }
 
     /// Gives the handler the isolated renderer.

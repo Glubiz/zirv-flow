@@ -26,19 +26,27 @@ use super::error::DestinationError;
 use super::spec::{Capabilities, DestinationSpec};
 use crate::sources::{Credential, FieldKind, FieldSpec};
 
-/// The content type of a body no template named another for.
+/// The content type of the body.
 const CONTENT_TYPE: &str = "application/json";
 
-/// Headers a template cannot set: the destination owns them, or the connection does.
-const RESERVED: [&str; 8] = [
+/// Headers a template cannot set: the destination owns them (the body is signed JSON, so the
+/// content type is always `application/json`), or they describe the connection (hop-by-hop).
+const RESERVED: [&str; 15] = [
+    "content-type",
     "x-zirv-signature",
     "x-zirv-timestamp",
     "x-zirv-idempotency-key",
     "host",
     "content-length",
-    "transfer-encoding",
-    "connection",
     "expect",
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
 ];
 
 pub(crate) struct Webhook;
@@ -138,11 +146,7 @@ impl Destination for Webhook {
                 if RESERVED.contains(&name.to_ascii_lowercase().as_str()) {
                     continue;
                 }
-                if name.eq_ignore_ascii_case("content-type") {
-                    headers[0] = (name.clone(), value.to_owned());
-                } else {
-                    headers.push((name.clone(), value.to_owned()));
-                }
+                headers.push((name.clone(), value.to_owned()));
             }
         }
         headers.push((TIMESTAMP_HEADER.into(), timestamp_text));
@@ -337,7 +341,7 @@ mod tests {
                 "X-Custom": "yes",
                 "x-zirv-signature": "forged",
                 "Host": "evil.test",
-                "Content-Type": "application/vnd.test+json"
+                "Content-Type": "text/plain"
             }
         });
 
@@ -364,7 +368,8 @@ mod tests {
         assert_eq!(header(headers, "x-custom"), ["yes"]);
         assert_eq!(
             header(headers, "content-type"),
-            ["application/vnd.test+json"]
+            ["application/json"],
+            "the signed JSON body is always sent as JSON"
         );
         assert_eq!(header(headers, "x-zirv-timestamp"), ["1700000000"]);
         assert_eq!(header(headers, "x-zirv-idempotency-key"), ["key-1"]);
@@ -376,6 +381,52 @@ mod tests {
             ]
         );
         assert_ne!(header(headers, "host"), ["evil.test"]);
+    }
+
+    #[tokio::test]
+    async fn a_template_cannot_set_a_hop_by_hop_header() {
+        let (url, seen) = serve(204, None).await;
+        let payload = json!({
+            "body": "{}",
+            "timestamp": 1,
+            "headers": {
+                "TE": "trailers",
+                "Upgrade": "websocket",
+                "Keep-Alive": "timeout=5",
+                "Trailer": "X-A",
+                "Proxy-Connection": "keep-alive",
+                "Proxy-Authorization": "Basic eA==",
+                "Transfer-Encoding": "chunked",
+                "Connection": "upgrade",
+                "X-Kept": "yes"
+            }
+        });
+
+        Webhook
+            .deliver(
+                &ctx(),
+                &json!({"url": url}),
+                &credential("s", None),
+                &message(&payload),
+            )
+            .await
+            .unwrap();
+
+        let seen = seen.lock().unwrap();
+        let (headers, _) = &seen[0];
+        for name in [
+            "te",
+            "upgrade",
+            "keep-alive",
+            "trailer",
+            "proxy-connection",
+            "proxy-authorization",
+        ] {
+            assert!(header(headers, name).is_empty(), "{name}");
+        }
+        assert_ne!(header(headers, "transfer-encoding"), ["chunked"]);
+        assert_ne!(header(headers, "connection"), ["upgrade"]);
+        assert_eq!(header(headers, "x-kept"), ["yes"]);
     }
 
     #[tokio::test]
