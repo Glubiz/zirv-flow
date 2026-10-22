@@ -67,7 +67,7 @@ fn hrefs(html: &str) -> Vec<Href> {
             .is_some_and(|b| b.eq_ignore_ascii_case(&b'a'))
             && bytes
                 .get(start + 2)
-                .is_some_and(|b| b.is_ascii_whitespace());
+                .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0));
         if !is_anchor {
             continue;
         }
@@ -83,7 +83,7 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
     loop {
         while bytes
             .get(at)
-            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/')
+            .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0))
         {
             at += 1;
         }
@@ -336,6 +336,19 @@ mod tests {
         assert_eq!(
             out,
             r#"<a href="https://preview.example/inert">1</a><a href="https://preview.example/inert">2</a>"#
+        );
+    }
+
+    #[test]
+    fn slash_and_nul_separate_the_anchor_name_from_its_attributes() {
+        let html = "<a/href=\"https://a.example/1\">1</a><a\0href=\"https://a.example/2\">2</a>";
+        assert_eq!(
+            link_urls(html),
+            ["https://a.example/1", "https://a.example/2"]
+        );
+        assert_eq!(
+            rewrite_links(html, &live(), &[]),
+            "<a/href=\"https://t.example/c/t0-19\">1</a><a\0href=\"https://t.example/c/t1-19\">2</a>"
         );
     }
 
