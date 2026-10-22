@@ -232,7 +232,7 @@ the registry enumerates implementations.
 | Connectors | `Source` | `zirv-flow-connectors` | One source module and one source-registry line |
 | Destinations and channels | `Destination` | `zirv-flow-connectors` | One destination module and one destination-registry line |
 | Template content types | `TemplateContent` | `zirv-flow-templates` | One content-type module and one content-registry line |
-| Job kinds | `JobHandler` | `zirv-flow-jobs` | One handler module and one job-registry line |
+| Job kinds | `JobKind` | `zirv-flow-jobs` | One handler module and one job-registry line |
 | AI tools | `AiTool` (defined in `zirv-flow-ai`) | `zirv-flow-api` (`assistant` feature module) | One tool module and one tool-registry line; tools live in `api` because they call validators and store reads that `ai` may not depend on (5.1) |
 
 No other registry is introduced. Domain catalogs such as the field and event
@@ -1092,7 +1092,7 @@ send time** (consent can change while a person waits):
 | 1 | Enrollment active, flow not paused | dropped |
 | 2 | Channel address present and valid (registry channel-address trait) | `skipped: no_address` |
 | 3 | Effective consent under the workspace consent policy (below); the default is the topic's policy (explicit opt-in, or allowed unless opted out) | `skipped: no_consent` |
-| 4 | Suppression check on the address hash | `skipped: suppressed` |
+| 4 | Suppression check on the address hash, in both scopes: the workspace and the organization (below) | `skipped: suppressed` |
 | 5 | Frequency cap per person, channel, window; check-and-record under a per-person transaction advisory lock | `skipped: frequency_cap` or deferred (configurable) |
 | 6 | Quiet hours in the recipient's time zone | deferred to the next allowed time |
 | 7 | Template render (section 11; sandboxed, strict undefined) | `failed: render_error` |
@@ -1124,15 +1124,90 @@ it further, for example by product vertical. Zirv Flow therefore separates:
   that rule, and a policy change appends a `definition_change` decision. The
   default policy is the topic policy above.
 
-OQ-32 settles the dimension model and how the policy reuses the AST.
+**Consent model (OQ-32, decided)** (supervisor ruling, unparsed reply).
+
+- **Dimensions.** Dimensions are a per-workspace catalog with enumerated value
+  keys. The channel is built in. The existing topics become the values of a
+  built-in `topic` dimension, with no data rewrite. A consent record holds one
+  value per dimension; an omitted dimension means all values.
+- **Reading consent.** A send's message carries one value per dimension. Among
+  the records that cover it, the latest change wins, ordered by (`changed_at`,
+  change id). No record means the topic policy's default. A vertical-scoped
+  unsubscribe covers only sends with that vertical.
+- **The policy.** An ordered list of named rules over the M4 AST, compiled to
+  SQL and evaluated for one person in the send transaction. It is versioned and
+  published like a segment; publishing appends a `definition_change` decision.
+- **Deny-only rules** (orchestrator decision). The send proceeds when no rule matches,
+  and the deciding rule is the first rule that matches. The built-in `recorded
+  consent` rule can be moved but not removed; it matches when the read above
+  does not allow the send. The `consent` leaf exposes `granted`, `denied` and
+  `none`, so a soft opt-in is a deny rule such as "consent is none and not a
+  customer" under an "allowed unless opted out" topic policy.
+- **AST leaves.** The AST gains a `consent` leaf (status for the message's
+  channel and dimension values) and a `messages` leaf (count, or the last send,
+  on a channel within a window, filterable by dimension values).
+
+**Suppression scope (OQ-19, decided)** (supervisor ruling, unparsed reply). Suppression rows carry
+the scope `workspace` or `organization`. A hard bounce suppresses
+organization-wide, because the address does not exist. Complaints and
+unsubscribes stay per workspace, because workspaces are distinct brands. The
+Owner manages organization-wide entries. Manual and imported suppressions name
+their scope, defaulting to `workspace`. Gate 4 checks both scopes for marketing
+and transactional sends. It reuses the deployment-wide `identifier_hash`, which
+leaves the workspace out of the hash, so nothing is rehashed.
+
+**Provider-manifest destinations (M6)** (supervisor ruling, unparsed reply). Email-provider
+destinations are manifest only. The M3 manifest format gains a destination
+section:
+
+- the send request mapping;
+- the idempotency-key header;
+- the rate limit;
+- error classification: retry, terminal, or permanent recipient failure;
+- an optional domain-status request;
+- a feedback-webhook mapping with explicit signature verification.
+
+Fixture provider manifests and a local fake prove the whole contract in tests:
+sending, zero duplicates, error classification, verified bounce and complaint
+webhooks, and domain status. Bundled real-provider manifests come later, as
+data only.
+
+**Webhook move (M6)** (supervisor ruling, unparsed reply). The `action.webhook` node contract stays:
+`url`, `trait_keys`, the signing, headers, the guarded client with no redirects,
+jobs that never go dead, the `webhook.succeeded` and `webhook.failed` events and
+the decisions. `webhook.call` becomes the built-in `webhook` `Destination`
+implementation and shares the delivery code, verdicts and attempt records with
+the other destinations. The node gains an optional template (11.7: headers and a
+JSON body, with MiniJinja only inside string values). Without one, the fixed
+envelope stays. Raw-URL webhooks have no rate bucket.
+
+**Messages and the send job (M6)** (orchestrator decision).
+
+- An `action.send` effect enqueues `delivery.send`, with the effect key as its
+  unique key.
+- The job creates the `messages` row (v7 id) on its first run. The message id is
+  the idempotency key across every retry.
+- Gates 1 to 8 run in the job transaction. Gate 5 is check-and-record under a
+  per-person transaction advisory lock, and the message's reserved slot counts.
+- Delivery runs outside any database lock, following the webhook pattern: read,
+  call, then lock and write the outcome.
+- A deferral (quiet hours, rate limit, or a cap configured to defer) re-runs the
+  job at `run_at`. A deferral appears only in the message log, not as an event.
+- **Address.** A registry trait flagged `channel_address` for email takes
+  precedence when it holds a valid address. Otherwise the person's most recently
+  seen email identity is used. With neither, the send is `skipped: no_address`.
+- **Events.** The reserved `email.` prefix covers `email.sent`, `email.skipped`,
+  `email.failed`, `email.delivered`, `email.bounced` (hard or soft),
+  `email.complained`, `email.opened`, `email.clicked` and `email.unsubscribed`.
 
 ### 10.2 Email, tracking and feedback
 
 - **Templates:** content model, builder, rendering, validation and preview are in section 11. Marketing email must contain an unsubscribe link (publish fails otherwise); messages carry `List-Unsubscribe` and `List-Unsubscribe-Post` (RFC 8058 one-click).
-- **Categories:** `marketing` or `transactional`. Transactional skips the marketing-consent gate, never suppression; a dedicated transactional API is OQ-11. DKIM and signing domains are the relay's or provider's job (documented).
-- **Tracking:** open pixel `/t/o/{token}`, click redirect `/t/c/{token}`, unsubscribe page and one-click endpoint `/u/{token}` on `server.public_url`. Tokens are HMAC-signed (message id, link index, no personal data); redirects only go to links recorded for that message.
-- **Feedback:** provider webhooks map to `email.delivered`, `email.bounced` (`hard`/`soft`), `email.complained`; hard bounce and complaint add a suppression. SMTP-only bounce handling is OQ-12. Engagement events (`email.opened`, `email.clicked`, `email.unsubscribed`) are ordinary person events usable in segments and waits; opens are low-confidence because some clients prefetch images (OQ-10).
-- **Webhooks and sync:** outbound webhooks are HMAC-signed with a timestamp and send `Idempotency-Key`, with timeout and retries. Keeping a segment in an external system is a flow (entry: `action.sync` upsert; exit: remove), not a second mechanism. Deletion and erasure call the destination's remove/erase capability where declared.
+- **Categories:** `marketing` or `transactional`. Transactional skips the marketing-consent gate and always honours suppression. There is no dedicated transactional API in v1 (OQ-11, decided): transactional email is a flow started by the M5 API trigger, with an `action.send` of a `transactional` template, through the same send pipeline. The job-queue hops (trigger, `flow.enroll`, `flow.step`, `delivery.send`) add latency, which the docs state. A dedicated API is a post-1.0 (M9) theme (supervisor ruling, unparsed reply).
+- **Sender authentication** (supervisor ruling, unparsed reply): the roadmap wins over the earlier "relay's job" position. A workspace registers sending domains. Zirv Flow generates the DKIM key pair, shows the DNS record text to publish, verifies the published records, and signs SMTP mail with the key. Sending from an unverified domain is refused. Key generation uses the `rsa` crate already in the workspace (it passes the dependency advisory check with no ignores); signing goes through `rsa` or `ring`, which the implementing issue picks. Provider destinations use the provider's own domain-status request (10.1).
+- **Tracking:** open pixel `/t/o/{token}`, click redirect `/t/c/{token}`, unsubscribe page and one-click endpoint `/u/{token}` on `server.public_url`. Tokens are HMAC-signed (message id, link index, no personal data); redirects only go to links recorded for that message. `email.opened` carries `machine` (bool) and `machine_reason`, computed at request time from a known prefetch-proxy user agent or a short delay after delivery; neither the IP nor the user agent is stored (OQ-10, decided) (supervisor ruling, unparsed reply). The segment builder and the wait and goal editors add a visible, removable `machine = false` filter when `email.opened` is chosen; the AST and compiler do not change. `machine = false` means "not detected as machine-generated", not "verified human".
+- **Feedback:** provider webhooks map to `email.delivered`, `email.bounced` (`hard`/`soft`), `email.complained`; hard bounce and complaint add a suppression (hard bounces organization-wide, complaints per workspace). SMTP bounce handling is synchronous only (OQ-12, decided) (supervisor ruling, unparsed reply): a permanent recipient failure at RCPT or DATA, a 5xx whose enhanced status is 5.1.x or one the destination classifies as a recipient failure, records `email.bounced` hard and suppresses. A 5xx caused by authentication, relay policy or content fails the message without suppressing the recipient. Exhausted 4xx retries record a soft bounce with no suppression. VERP, DSN mailbox polling and raw-DSN HTTP intake are post-1.0; the docs point SMTP-only setups at relays that reject synchronously, or at providers with webhooks. Feedback and tracking decisions are appended under the message's originating trace (12.4). Engagement events (`email.opened`, `email.clicked`, `email.unsubscribed`) are ordinary person events usable in segments and waits; opens are low-confidence because some clients prefetch images (see Tracking).
+- **Webhooks and sync:** outbound webhooks are HMAC-signed with a timestamp and send `X-Zirv-Idempotency-Key` (the shipped header; provider manifests name their own), with timeout and retries. Keeping a segment in an external system is a flow (entry: `action.sync` upsert; exit: remove), not a second mechanism. Deletion and erasure call the destination's remove/erase capability where declared.
 
 ## 11. Templates and the builder
 
@@ -1435,7 +1510,10 @@ For enrollments a segment trigger keeps the cause of the membership change; an e
 trigger is cause `event` with the event id; a schedule trigger is cause `schedule`, the
 API trigger cause `api`, and operator actions (retry, skip, bulk exit, manual audience
 enrollment) cause `manual`. Every enrollment, step, branch, wait, failure, retry and
-skip decision stays under the originating trace. Every external-effect step decision
+skip decision stays under the originating trace. Email feedback and tracking
+decisions (delivered, bounced, complained, opened, clicked, unsubscribed) are
+appended under the message's originating trace with the original cause; M6 adds
+no cause kind (orchestrator decision). Every external-effect step decision
 records the freshness of the flow's inputs (9.1, OQ-14).
 A sync writes one decision per record, appended with one multi-row insert per
 batch in the apply-batch transaction.
@@ -1510,6 +1588,19 @@ are visible, re-drivable and represented in the decision log. Metrics expose
 per-destination queue depth, oldest-item lag, attempts and outcomes. Erasure
 removes pending and dead forwarding payloads and calls destination erase where
 the destination declares that capability.
+
+**Transactional outbox (M6)** (supervisor ruling, unparsed reply). Forwarding is a transactional outbox on
+every event-writing path: ingest, sync, system writers, and segment and email
+events. Matching delivery rows are inserted atomically with the accepted events,
+unique on (`destination_id`, `event_id`), with a stable event-and-destination
+idempotency key, and delivered through the existing job retry machinery. Replay
+never triggers flows. Reason: a v7 cursor with a settle lag can permanently skip
+an event whose transaction commits late.
+
+**Ingest constraint** (orchestrator decision). Ingest p99 is already over target (#209), so the
+outbox step is set-based per batch. With no active forwarding destination in the
+workspace, it costs at most one cached or indexed lookup. Ingest is measured
+before and after on the same input.
 
 ## 13. LLM assistance
 
@@ -1714,6 +1805,11 @@ cron, timezone, next_run_at, payload)` holds recurring work. Kinds: `sync.run`,
 `kafka.consume`, `ingest.drain`, `ingest.replay`, `event.forward`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
 `flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `webhook.call`,
 `template.test_send`, `privacy.export`, `privacy.erase`, `maintenance.*`.
+Handlers implement `JobKind` (a `KIND` name and `run(ctx, payload)`), with one
+line in the job registry. The M6 kinds are `delivery.send` (10.1),
+`event.forward` (12.5), `delivery.sync` and `template.test_send`; `webhook.call`
+keeps its kind name while the handler moves onto the built-in `webhook`
+destination (10.1).
 
 `kafka.consume` is a long-running consumer job per Kafka stream with a time
 budget: it heartbeats its lease, applies batches that each commit the partition
@@ -1776,7 +1872,18 @@ and nothing yet shows the cap is not enough. M8 validates the cap under load.
 | Idempotency | Database effects are idempotent by construction (upserts, unique keys, `state_version`). External effects carry stable keys: effectively-once where the destination honours them; where it cannot (SMTP), a crash between provider acceptance and recording can duplicate a send. Documented, not hidden. |
 | Scheduler | Leader enqueues due schedules with unique key `(schedule_id, slot)`, reaps expired leases, pre-creates event partitions and watches the default partition, enforces retention, refreshes the stream freshness gauges every 30 s (stale-source detection: the state is derived on each pass, nothing is marked), triggers scheduled segment refreshes. |
 | Hygiene | Completed jobs are deleted at once (history only for failures/dead); aggressive autovacuum on `jobs`; applied inbox rows deleted; dead-tuple counts exported as metrics. |
-| Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` shrinks the rate and honours `Retry-After`. Cross-workspace fairness is a per-workspace running cap (OQ-8, below). |
+| Rate limits | Per-destination token bucket in a row; workers take tokens in blocks with one `UPDATE ... RETURNING`; `429` halves the rate and honours `Retry-After` (OQ-9, below). Cross-workspace fairness is a per-workspace running cap (OQ-8, below). |
+
+**Rate-limit blocks (OQ-9, decided)** (supervisor ruling, unparsed reply). The bucket row holds rate, burst,
+tokens and `refilled_at`. A worker takes k = clamp(ceil(rate x 0.1 s), 1, 50)
+tokens in one statement, granted only up to what the bucket holds. A block is
+valid for a 1 s lease from its grant. Unused tokens are discarded, never
+returned, and a worker discards expired tokens before sending. The bound is:
+sends in any window T are at most rate x (T + lease) + burst. The M6
+exit-criterion test states its tolerance from this bound. A `429` halves the
+rate (floor 1/s) until `Retry-After` has passed, then the rate recovers
+additively. There is no adaptive sizing and no returning of tokens. Raw-URL
+webhooks have no bucket (10.1).
 
 ## 15. API and UI
 
@@ -1980,6 +2087,10 @@ people, and pending inbox rows by hash with the master key). Exports are `privac
 admin-only, audited and answers 410 after 24 hours, and the leader's hourly upkeep drops expired
 content. A request whose job went dead reads as `failed`. Destination `erase` calls, message and
 enrollment tables and backup-copy handling of the ledger (OQ-13) are not built yet.
+M6 erases the `messages` rows and their message links, the test-send log
+entries and the pending and dead forwarding payloads of the person, and calls
+`erase` on each forwarding or delivery destination that declares it, recording
+the result per destination.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's
@@ -2157,15 +2268,10 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-9 | Rate-limit token block size and behaviour under worker churn | M6 |
-| OQ-10 | How to flag machine-generated opens, and whether segments exclude them by default | M6 |
-| OQ-11 | Scope and timing of a dedicated transactional messaging API | M6 |
-| OQ-12 | Bounce handling for SMTP-only setups without provider webhooks (VERP, DSN mailbox polling)? | M6 |
 | OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M8 |
 | OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? Decided in M1: OIDC SSO through any compliant provider, with Keycloak as the reference. | Closed (M1) |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
-| OQ-19 | Suppression scope: per workspace only, or also organization-wide across brands? | M6 |
 | OQ-21 | Asset limits: per-file size, per-workspace quota, and when object storage becomes required rather than optional | M7 |
 | OQ-22 | Dark-mode handling: themed dark variants, or rely on client inversion with contrast checks? | M7 |
 | OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
@@ -2174,7 +2280,6 @@ they were ruled as their capabilities were added to the plan.
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
-| OQ-32 | Consent dimensions and policies: are dimensions a per-workspace catalog with typed values, or topics with categories? How does the policy reuse the M4 condition AST, and how does a recorded-consent read address dimension values? | M6, before the send pipeline ships |
 
 ### 21.1 Decided questions
 
@@ -2276,3 +2381,31 @@ they were ruled as their capabilities were added to the plan.
 - **OQ-15:** PostgreSQL 16 is the minimum supported version. CI covers
   PostgreSQL 16 and 18. Reassess the minimum before v1.0 against the versions
   supported at that release date.
+
+- **OQ-9:** Rate-limit blocks are small and leased. A worker takes k = clamp(ceil(rate x 0.1 s), 1, 50)
+  tokens, valid for a 1 s lease, with unused tokens discarded. Sends in any window T are bounded by
+  rate x (T + lease) + burst, and the exit-criterion test states its tolerance from that. A `429` halves
+  the rate until `Retry-After` passes. Reason: a lease bounds the overshoot that worker churn can cause
+  without returning tokens, which would need a second write path. Section 14 (supervisor ruling, unparsed reply).
+- **OQ-10:** `email.opened` carries `machine` and `machine_reason`, computed at request time from a known
+  prefetch-proxy user agent or a short delay after delivery. The segment builder and the wait and goal
+  editors add a visible, removable `machine = false` filter, with no AST change. Reason: the detection
+  is a guess, so the operator sees and controls it. Section 10.2 (supervisor ruling, unparsed reply).
+- **OQ-11:** No dedicated transactional API in v1. Transactional email is a flow started by the M5 API
+  trigger with an `action.send` of a `transactional` template. Reason: it reuses the one send pipeline and
+  its gates, at the cost of job-queue hops, which the docs state. A dedicated API is a post-1.0 (M9) theme.
+  Section 10.2 (supervisor ruling, unparsed reply).
+- **OQ-12:** SMTP bounce handling is synchronous only: a permanent recipient failure at RCPT or DATA
+  records a hard bounce and suppresses; other 5xx failures fail the message without suppressing, and
+  exhausted 4xx retries record a soft bounce. VERP, DSN mailbox polling and raw-DSN HTTP intake are
+  post-1.0. Reason: asynchronous bounce intake is a separate subsystem with its own deployment burden.
+  Section 10.2 (supervisor ruling, unparsed reply).
+- **OQ-19:** Suppression is per workspace plus organization-wide. Hard bounces suppress organization-wide;
+  complaints and unsubscribes stay per workspace; the Owner manages organization-wide entries. Reason:
+  a nonexistent address is nonexistent for every brand, but a complaint is about one brand. The gate
+  checks both scopes and reuses `identifier_hash`. Section 10.1 (supervisor ruling, unparsed reply).
+- **OQ-32:** Consent dimensions are a per-workspace catalog with enumerated value keys, and topics become
+  the built-in `topic` dimension. The policy is an ordered, versioned list of deny-only rules over the M4
+  AST, with a built-in `recorded consent` rule and new `consent` and `messages` leaves. Reason: a catalog
+  keeps values typed and addressable by the read rule, and reusing the AST adds no second language.
+  Section 10.1 (supervisor ruling, unparsed reply; the deny-only refinement is an orchestrator decision).
