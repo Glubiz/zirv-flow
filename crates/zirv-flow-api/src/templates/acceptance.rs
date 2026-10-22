@@ -60,10 +60,16 @@ mod tests {
         lead: Login,
     }
 
-    /// The render host of the pool under test: a no-op unless the pool started it. In `hang_first`
-    /// mode the first child announces itself and then never answers, so the pool must kill it.
+    /// The render host of the pool under test: a no-op unless the pool started it.
+    ///
+    /// In `hang_first` and `slow_first` mode the first child announces itself, reads its first
+    /// request, creates the signal file (so a test knows the request reached a child) and then
+    /// either never answers (`hang_first`, so the pool must kill it) or answers after a pause
+    /// (`slow_first`).
     #[test]
     fn render_host_child() {
+        use std::io::Read;
+
         let Ok(mode) = std::env::var("ZIRV_FLOW_TEST_TEMPLATE_HOST") else {
             return;
         };
@@ -71,16 +77,28 @@ mod tests {
             let marker = std::env::var("ZIRV_FLOW_TEST_TEMPLATE_MARKER").unwrap_or_default();
             if !std::path::Path::new(&marker).exists() {
                 std::fs::write(&marker, b"x").expect("the marker can be written");
-                let ready = br#"{"kind":"ready"}"#;
-                let mut out = std::io::stdout().lock();
-                out.write_all(&u32::try_from(ready.len()).unwrap().to_be_bytes())
-                    .unwrap();
-                out.write_all(ready).unwrap();
-                out.flush().unwrap();
-                drop(out);
+                let frame = |out: &mut std::io::StdoutLock<'_>, bytes: &[u8]| {
+                    out.write_all(&u32::try_from(bytes.len()).unwrap().to_be_bytes())
+                        .unwrap();
+                    out.write_all(bytes).unwrap();
+                    out.flush().unwrap();
+                };
+                frame(&mut std::io::stdout().lock(), br#"{"kind":"ready"}"#);
+                let mut input = std::io::stdin().lock();
+                let mut prefix = [0u8; 4];
+                input.read_exact(&mut prefix).unwrap();
+                let mut request = vec![0u8; u32::from_be_bytes(prefix) as usize];
+                input.read_exact(&mut request).unwrap();
+                let signal = std::env::var("ZIRV_FLOW_TEST_TEMPLATE_SIGNAL").unwrap_or_default();
+                std::fs::write(signal, b"x").expect("the signal can be written");
                 if mode == "slow_first" {
-                    // Serves, but only after a pause: a slow render, not a stuck one.
-                    std::thread::sleep(Duration::from_millis(10_000));
+                    // Answers, but only after a pause: a slow render, not a stuck one.
+                    std::thread::sleep(Duration::from_secs(3));
+                    let request: zirv_flow_templates::RenderRequest<'_> =
+                        serde_json::from_slice(&request).unwrap();
+                    let response = serde_json::to_vec(&request.run()).unwrap();
+                    frame(&mut std::io::stdout().lock(), &response);
+                    drop(input);
                     let served = zirv_flow_render::host::serve(
                         std::io::stdin().lock(),
                         std::io::stdout().lock(),
@@ -96,8 +114,18 @@ mod tests {
     }
 
     async fn start_pool(mode: &str, deadline: Duration) -> RenderPool {
+        start_signalling_pool(mode, deadline).await.0
+    }
+
+    /// A pool whose first child creates the returned file once it has received a request.
+    async fn start_signalling_pool(
+        mode: &str,
+        deadline: Duration,
+    ) -> (RenderPool, std::path::PathBuf) {
         let marker =
             std::env::temp_dir().join(format!("zirv-flow-template-host-{}", Uuid::now_v7()));
+        let signal =
+            std::env::temp_dir().join(format!("zirv-flow-template-signal-{}", Uuid::now_v7()));
         let command = ChildCommand::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -107,10 +135,23 @@ mod tests {
             .args(["--test-threads", "1", "-q"])
             .env("ZIRV_FLOW_TEST_TEMPLATE_HOST", mode)
             .env("ZIRV_FLOW_TEST_TEMPLATE_MARKER", marker)
+            .env("ZIRV_FLOW_TEST_TEMPLATE_SIGNAL", &signal)
             .skip_stdout_until("running 1 test\n");
-        RenderPool::start(command, PoolConfig { size: 1, deadline })
+        let pool = RenderPool::start(command, PoolConfig { size: 1, deadline })
             .await
-            .unwrap()
+            .unwrap();
+        (pool, signal)
+    }
+
+    /// Waits until the child has received its request. The bound is only a guard against a hang.
+    async fn request_reached_a_child(signal: &std::path::Path) {
+        for _ in 0..3000 {
+            if signal.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("no child received a request within a minute");
     }
 
     async fn send(
@@ -1079,14 +1120,17 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_saved_while_a_publish_validates_is_a_409_and_writes_no_version(pool: PgPool) {
-        let render_pool = start_pool("slow_first", Duration::from_secs(30)).await;
+        let (render_pool, signal) =
+            start_signalling_pool("slow_first", Duration::from_secs(30)).await;
         let f = fixture_with(&pool, Some(render_pool)).await;
         let id = f.create("Welcome", email_doc("Hi", "x")).await;
 
         let publish_tail = format!("/{id}/publish");
         let publish = f.lead("POST", &publish_tail, None);
+        // The save goes in only once the validate request is at the child, so the publish has
+        // already read the draft it is validating.
         let edit = async {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            request_reached_a_child(&signal).await;
             f.put_draft(&id, email_doc("Changed", "y")).await
         };
         let (published, edited) = tokio::join!(publish, edit);
@@ -1109,29 +1153,34 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_save_is_not_blocked_while_a_publish_waits_on_a_slow_validate(pool: PgPool) {
-        let render_pool = start_pool("hang_first", Duration::from_secs(4)).await;
+        let (render_pool, signal) =
+            start_signalling_pool("hang_first", Duration::from_secs(15)).await;
         let f = fixture_with(&pool, Some(render_pool)).await;
         let id = f.create("Welcome", email_doc("Hi", "x")).await;
 
         let publish_tail = format!("/{id}/publish");
-        let publish = f.lead("POST", &publish_tail, None);
-        let edit = async {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let started = std::time::Instant::now();
-            let reply = f.put_draft(&id, email_doc("Edited", "y")).await;
-            (reply, started.elapsed())
-        };
-        let (published, (edited, took)) = tokio::join!(publish, edit);
+        let mut publish = std::pin::pin!(f.lead("POST", &publish_tail, None));
+        let mut edit = std::pin::pin!(async {
+            request_reached_a_child(&signal).await;
+            f.put_draft(&id, email_doc("Edited", "y")).await
+        });
 
+        // The save must finish while the publish is still waiting on the stuck child: if it
+        // were queued behind a lock the publish holds, the publish would end first.
+        let edited = tokio::select! {
+            edited = &mut edit => edited,
+            published = &mut publish => {
+                panic!("the publish ended before the save did: {:?}", published.body)
+            }
+        };
+        let published = publish.await;
+
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
         assert_eq!(
             published.body["code"], "render_deadline",
             "{:?}",
             published.body
         );
-        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
-        // The publish was still waiting on the stuck child (4 s deadline) when the save went
-        // through, so the save held no lock behind it.
-        assert!(took < Duration::from_secs(2), "the save waited {took:?}");
     }
 
     #[sqlx::test]
