@@ -534,9 +534,6 @@ fn render_host_command(
         .skip_stdout_until("running 1 test\n")
 }
 
-/// Starts the render-host children this process renders through: copies of this executable
-/// running the hidden `render-host` command. On failure it reports the problem and returns the
-/// exit code.
 /// The resolver sending-domain checks read DNS through, from the system's name servers. Without
 /// one the checks fail until the host is fixed and the process restarted; nothing else needs it.
 fn system_resolver() -> Option<Arc<dyn zirv_flow_jobs::DnsResolver>> {
@@ -549,6 +546,9 @@ fn system_resolver() -> Option<Arc<dyn zirv_flow_jobs::DnsResolver>> {
     }
 }
 
+/// Starts the render-host children this process renders through: copies of this executable
+/// running the hidden `render-host` command. On failure it reports the problem and returns the
+/// exit code.
 async fn start_render_pool(config: &Config) -> Result<zirv_flow_render::RenderPool, u8> {
     let program = std::env::current_exe().map_err(|error| {
         error!(%error, "could not find this executable to start the render host");

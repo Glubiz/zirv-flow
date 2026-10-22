@@ -784,7 +784,7 @@ mod tests {
             let mut doc = doc(&source);
             if let Some(email) = doc.email.as_mut() {
                 email.syntax = Syntax::Mjml;
-                email.sender = Some("snd_1".into());
+                email.sender = Some("00000000-0000-7000-8000-000000000001".into());
                 if name == "footer_unsubscribe" {
                     email.category = Category::Marketing;
                 }

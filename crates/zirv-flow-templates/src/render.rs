@@ -355,7 +355,7 @@ mod tests {
     fn email(category: Category, html: &str) -> TemplateDocument {
         TemplateDocument::email_code(EmailContent {
             subject: "Hi {{ person.name }}".into(),
-            sender: Some("snd_1".into()),
+            sender: Some("00000000-0000-7000-8000-000000000001".into()),
             lang: Some("en".into()),
             category,
             syntax: Default::default(),

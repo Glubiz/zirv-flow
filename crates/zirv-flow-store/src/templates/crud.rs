@@ -23,7 +23,9 @@ pub struct Template {
     pub channel: String,
     /// `marketing` or `transactional`; the database checks the set.
     pub category: String,
-    /// The sender identity of an email template; not yet a foreign key.
+    /// The sender identity the draft's document names, or none. Derived: every draft write sets
+    /// it from `email.sender`, and it is none when that names no sender identity of this
+    /// workspace. It is never set on its own.
     pub sender_identity_id: Option<Uuid>,
     /// The newest published version; none before the first publish.
     pub current_version: Option<i32>,
@@ -67,7 +69,6 @@ pub struct NewTemplate {
     pub name: String,
     pub channel: String,
     pub category: String,
-    pub sender_identity_id: Option<Uuid>,
     /// The first draft.
     pub document: Value,
 }
@@ -77,8 +78,15 @@ pub struct NewTemplate {
 #[derive(Clone, Debug, Default)]
 pub struct TemplatePatch {
     pub name: Option<String>,
-    /// `Some(None)` clears the sender identity.
-    pub sender_identity_id: Option<Option<Uuid>>,
+}
+
+/// The sender identity id a content document names (`email.sender`, a UUID), if it names one. A
+/// sender that is not a UUID names no identity.
+pub fn document_sender(document: &Value) -> Option<Uuid> {
+    document
+        .pointer("/email/sender")
+        .and_then(Value::as_str)
+        .and_then(|sender| sender.trim().parse().ok())
 }
 
 /// Why a template write was refused.
@@ -120,7 +128,9 @@ pub async fn create_template(
 ) -> Result<(Template, TemplateDraft), StoreError> {
     let template: Template = sqlx::query_as(concat!(
         "INSERT INTO templates (id, workspace_id, name, channel, category, sender_identity_id, \
-            created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ",
+            created_by) VALUES ($1, $2, $3, $4, $5, \
+            (SELECT id FROM sender_identities WHERE workspace_id = $2 AND id = $6), $7) \
+         RETURNING ",
         template_columns!()
     ))
     .bind(new.id)
@@ -128,7 +138,7 @@ pub async fn create_template(
     .bind(&new.name)
     .bind(&new.channel)
     .bind(&new.category)
-    .bind(new.sender_identity_id)
+    .bind(document_sender(&new.document))
     .bind(created_by.map(|user| user.as_uuid()))
     .fetch_one(&mut *connection)
     .await
@@ -237,15 +247,12 @@ pub async fn update_template(
     lock_live_template(connection, workspace, id).await?;
     let template = sqlx::query_as(concat!(
         "UPDATE templates SET name = COALESCE($3, name), \
-            sender_identity_id = CASE WHEN $4 THEN $5 ELSE sender_identity_id END, \
             updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING ",
         template_columns!()
     ))
     .bind(workspace.as_uuid())
     .bind(id)
     .bind(patch.name.as_deref())
-    .bind(patch.sender_identity_id.is_some())
-    .bind(patch.sender_identity_id.flatten())
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)?;
@@ -271,7 +278,19 @@ pub async fn save_template_draft(
     .bind(id)
     .bind(document)
     .bind(updated_by.map(|user| user.as_uuid()))
-    .fetch_one(connection)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    // The template's sender follows the draft's document.
+    sqlx::query(
+        "UPDATE templates SET sender_identity_id = \
+            (SELECT id FROM sender_identities WHERE workspace_id = $1 AND id = $3) \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(document_sender(document))
+    .execute(connection)
     .await
     .map_err(StoreError::query)?;
     Ok(draft)
@@ -373,7 +392,6 @@ mod tests {
             template.id,
             &TemplatePatch {
                 name: Some("New".into()),
-                ..TemplatePatch::default()
             },
         )
         .await;
@@ -384,19 +402,11 @@ mod tests {
         assert!(matches!(renamed, Err(TemplateError::Archived)));
         assert!(matches!(again, Err(TemplateError::Archived)));
     }
-
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_patch_changes_only_the_given_settings(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         let template = create(&pool, ws, "Welcome").await;
-        let domain = crate::sending::fixtures::plant_domain(&pool, ws, "example.com")
-            .await
-            .unwrap();
-        let sender =
-            crate::sending::fixtures::plant_identity(&pool, ws, domain, "news@example.com")
-                .await
-                .unwrap();
         let mut connection = pool.acquire().await.unwrap();
 
         let named = update_template(
@@ -405,18 +415,6 @@ mod tests {
             template.id,
             &TemplatePatch {
                 name: Some("Hello".into()),
-                sender_identity_id: Some(Some(sender)),
-            },
-        )
-        .await
-        .unwrap();
-        let cleared = update_template(
-            &mut connection,
-            ws,
-            template.id,
-            &TemplatePatch {
-                name: None,
-                sender_identity_id: Some(None),
             },
         )
         .await
@@ -427,10 +425,80 @@ mod tests {
                 .unwrap();
 
         assert_eq!(named.name, "Hello");
-        assert_eq!(named.sender_identity_id, Some(sender));
-        assert_eq!(cleared.sender_identity_id, None);
         assert_eq!(untouched.name, "Hello");
         assert_eq!(named.channel, template.channel);
+    }
+
+    fn document_from(sender: &str) -> Value {
+        serde_json::json!({"schema": 1, "channel": "email", "mode": "code",
+                           "email": {"subject": "s", "sender": sender, "html": "<p>x</p>"}})
+    }
+
+    #[test]
+    fn a_document_names_a_sender_only_with_a_uuid() {
+        let id = Uuid::now_v7();
+
+        assert_eq!(document_sender(&document_from(&id.to_string())), Some(id));
+        assert_eq!(
+            document_sender(&document_from(&format!(" {id} "))),
+            Some(id)
+        );
+        assert_eq!(document_sender(&document_from("snd_1")), None);
+        assert_eq!(document_sender(&document("x")), None);
+        assert_eq!(document_sender(&serde_json::json!({})), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_templates_sender_follows_the_drafts_document(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let domain = crate::sending::fixtures::plant_domain(&pool, ws, "example.com")
+            .await
+            .unwrap();
+        let sender =
+            crate::sending::fixtures::plant_identity(&pool, ws, domain, "news@example.com")
+                .await
+                .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        let mut new = new_template("Welcome");
+        new.document = document_from(&sender.to_string());
+        let (created, _) = create_template(&mut connection, ws, &new, None)
+            .await
+            .unwrap();
+        assert_eq!(created.sender_identity_id, Some(sender));
+
+        let sender_of = |pool: PgPool, id: Uuid| async move {
+            find_template(&pool, ws, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .sender_identity_id
+        };
+        save_template_draft(&mut connection, ws, created.id, &document("none"), None)
+            .await
+            .unwrap();
+        assert_eq!(sender_of(pool.clone(), created.id).await, None);
+        save_template_draft(
+            &mut connection,
+            ws,
+            created.id,
+            &document_from(&sender.to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sender_of(pool.clone(), created.id).await, Some(sender));
+        // A sender that is not an identity of the workspace leaves the column empty.
+        save_template_draft(
+            &mut connection,
+            ws,
+            created.id,
+            &document_from(&Uuid::now_v7().to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(sender_of(pool.clone(), created.id).await, None);
     }
 
     #[sqlx::test]

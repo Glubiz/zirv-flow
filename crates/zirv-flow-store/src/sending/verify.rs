@@ -3,7 +3,7 @@
 //! direction appends a `sending_domain.verify` decision.
 
 use serde_json::json;
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::sending::{RecordKind, RecordStatus};
 use zirv_flow_core::{TraceContext, WorkspaceId};
@@ -18,8 +18,11 @@ pub const SENDING_DOMAIN_VERIFY_KIND: &str = "sending_domain.verify";
 
 /// Queues a check of the domain's DNS records under `trace`. At most one check per domain is
 /// ready or running at a time: a second request while one waits is a no-op, and returns false.
-pub async fn enqueue_domain_verify<'e>(
-    executor: impl PgExecutor<'e>,
+///
+/// A queued check stamps the domain's `last_attempt_at`, which the leader's scan reads as the
+/// start of a back-off, so a check that keeps failing is not re-queued at once.
+pub async fn enqueue_domain_verify(
+    connection: &mut PgConnection,
     workspace: WorkspaceId,
     domain: Uuid,
     trace: TraceContext,
@@ -28,7 +31,19 @@ pub async fn enqueue_domain_verify<'e>(
     job.workspace_id = Some(workspace);
     job.payload = json!({"workspace_id": workspace.to_string(), "domain_id": domain.to_string()});
     job.unique_key = Some(format!("{SENDING_DOMAIN_VERIFY_KIND}:{domain}"));
-    enqueue(executor, &job).await
+    let queued = enqueue(&mut *connection, &job).await?;
+    if queued {
+        sqlx::query(
+            "UPDATE sending_domains SET last_attempt_at = now() \
+             WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(domain)
+        .execute(connection)
+        .await
+        .map_err(StoreError::query)?;
+    }
+    Ok(queued)
 }
 
 /// How many observed TXT records, and how many characters of each, a record keeps.
@@ -351,12 +366,21 @@ mod tests {
         let id = plant_domain(&pool, ws, "example.com").await.unwrap();
         let trace = TraceContext::root(Cause::manual(zirv_flow_core::UserId::new()));
 
-        let first = enqueue_domain_verify(&pool, ws, id, trace.clone())
+        let mut connection = pool.acquire().await.unwrap();
+        let first = enqueue_domain_verify(&mut connection, ws, id, trace.clone())
             .await
             .unwrap();
-        let second = enqueue_domain_verify(&pool, ws, id, trace).await.unwrap();
+        let second = enqueue_domain_verify(&mut connection, ws, id, trace)
+            .await
+            .unwrap();
 
         assert!(first && !second);
+        let attempt: Option<time::OffsetDateTime> =
+            sqlx::query_scalar("SELECT last_attempt_at FROM sending_domains")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(attempt.is_some(), "a queued check stamps the attempt");
         let (kind, payload): (String, serde_json::Value) =
             sqlx::query_as("SELECT kind, payload FROM jobs")
                 .fetch_one(&pool)

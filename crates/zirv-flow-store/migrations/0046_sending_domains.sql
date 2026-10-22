@@ -31,6 +31,9 @@ CREATE TABLE sending_domains (
     -- When the domain last became verified; kept while it stays verified.
     verified_at      timestamptz,
     last_checked_at  timestamptz,
+    -- When a check was last queued, whether or not it finished. The leader re-queues a domain only
+    -- after a back-off from this, so a DNS outage does not make it re-pick the same domains.
+    last_attempt_at  timestamptz,
     created_by       uuid REFERENCES users (id),
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
@@ -94,10 +97,20 @@ CREATE UNIQUE INDEX sender_identities_address_idx ON sender_identities (workspac
     WHERE archived_at IS NULL;
 CREATE INDEX sender_identities_domain_idx ON sender_identities (workspace_id, domain_id);
 
--- A template's sender identity is now a real reference. No identity existed before this
--- migration, so every value written before it dangled; clear them, then add the key. MATCH
--- SIMPLE: a template with no sender is allowed.
+-- A template's sender identity is now a real reference, and it is derived: every draft write sets
+-- it from the draft document's `email.sender`, which is the source of truth (published versions
+-- are immutable documents). Clearing the old values is deliberate. They were written before any
+-- identity existed and had no foreign key, so they may dangle; losing them is acceptable
+-- pre-alpha, and the next draft save derives the column again. MATCH SIMPLE: a template with no
+-- sender is allowed.
 UPDATE templates SET sender_identity_id = NULL WHERE sender_identity_id IS NOT NULL;
 ALTER TABLE templates ADD CONSTRAINT templates_sender_identity_fkey
     FOREIGN KEY (workspace_id, sender_identity_id) REFERENCES sender_identities (workspace_id, id);
 CREATE INDEX templates_sender_identity_idx ON templates (workspace_id, sender_identity_id);
+
+-- The sender a published version names, set when it is published. No foreign key: a version is
+-- immutable history. A sending domain cannot be deleted while a template's current version names
+-- one of its identities; the answer needs this column, because the document is opaque JSON.
+ALTER TABLE template_versions ADD COLUMN sender_identity_id uuid;
+CREATE INDEX template_versions_sender_identity_idx
+    ON template_versions (workspace_id, sender_identity_id) WHERE sender_identity_id IS NOT NULL;

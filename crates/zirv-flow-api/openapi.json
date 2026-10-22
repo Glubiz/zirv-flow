@@ -16584,7 +16584,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Changes a template's name or sender identity. The channel and the category are fixed when the\ntemplate is made. Audited as `template.updated`.",
+        "summary": "Changes a template's name. The channel and the category are fixed when the\ntemplate is made. Audited as `template.updated`.",
         "operationId": "update_template",
         "parameters": [
           {
@@ -20957,13 +20957,6 @@
             "type": "string",
             "description": "1 to 100 characters after trimming; unique among the workspace's live templates, ignoring\ncase.",
             "example": "Order shipped"
-          },
-          "sender_identity_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
           }
         }
       },
@@ -29866,7 +29859,7 @@
               "null"
             ],
             "format": "uuid",
-            "description": "The sender identity of an email template."
+            "description": "The sender identity the draft's document names (`email.sender`), when it is an identity of\nthis workspace. Read-only: it follows the draft, which is where the sender is set."
           },
           "updated_at": {
             "type": "string",
@@ -31049,14 +31042,6 @@
               "string",
               "null"
             ]
-          },
-          "sender_identity_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "`null` clears it."
           }
         }
       },

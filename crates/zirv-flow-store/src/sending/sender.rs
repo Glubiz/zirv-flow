@@ -54,9 +54,10 @@ struct Row {
 
 /// The sender identity `identity` of the workspace when it is live and its domain is verified.
 ///
-/// `executor` can be the connection of the transaction that is about to rely on the answer. The
-/// answer is as of the last check: a domain that falls back to unverified a moment later still
-/// let this message through, and the next one is refused.
+/// Both rows are read `FOR SHARE`: run inside the transaction that relies on the answer, an
+/// archive of the identity or a check that unverifies the domain waits for that transaction to end,
+/// so a publish never commits a sender that stopped being valid under it. Outside a transaction
+/// the answer is only as of the read.
 pub async fn require_verified_sender<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -67,7 +68,7 @@ pub async fn require_verified_sender<'e>(
                 i.reply_to, i.archived_at IS NOT NULL AS archived, d.status = 'verified' AS verified \
          FROM sender_identities i \
          JOIN sending_domains d ON d.workspace_id = i.workspace_id AND d.id = i.domain_id \
-         WHERE i.workspace_id = $1 AND i.id = $2",
+         WHERE i.workspace_id = $1 AND i.id = $2 FOR SHARE OF i, d",
     )
     .bind(workspace.as_uuid())
     .bind(identity)
@@ -158,5 +159,49 @@ mod tests {
             require_verified_sender(&pool, one, identity).await,
             Err(SenderError::Archived)
         ));
+    }
+
+    /// Runs `statement` in a second transaction with a short lock timeout; true when it was
+    /// blocked by a lock held elsewhere.
+    async fn blocked(pool: &PgPool, statement: &str, bind: Uuid) -> bool {
+        let mut tx = crate::begin(pool).await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '300ms'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let result = sqlx::query(sqlx::AssertSqlSafe(statement.to_owned()))
+            .bind(bind)
+            .execute(&mut *tx)
+            .await;
+        result.is_err()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_check_holds_the_identity_and_the_domain_until_its_transaction_ends(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let identity = plant_verified_sender(&pool, ws, "example.com")
+            .await
+            .unwrap();
+        let domain: Uuid = sqlx::query_scalar("SELECT domain_id FROM sender_identities")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let archive = "UPDATE sender_identities SET archived_at = now() WHERE id = $1";
+        let unverify = "SELECT id FROM sending_domains WHERE id = $1 FOR UPDATE";
+
+        let mut open = crate::begin(&pool).await.unwrap();
+        require_verified_sender(&mut *open, ws, identity)
+            .await
+            .unwrap();
+        assert!(blocked(&pool, archive, identity).await, "the archive waits");
+        assert!(blocked(&pool, unverify, domain).await, "the unverify waits");
+        crate::commit(open).await.unwrap();
+
+        assert!(!blocked(&pool, unverify, domain).await);
+        crate::archive_sender_identity(&pool, ws, identity)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

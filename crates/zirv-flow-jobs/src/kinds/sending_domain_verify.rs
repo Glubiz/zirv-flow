@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use zirv_flow_connectors::dns::{DnsError, DnsResolver};
-use zirv_flow_core::sending::{RecordKind, check_record, record_host};
+use zirv_flow_core::sending::{RecordKind, check_record, record_host, redact_observed};
 use zirv_flow_store::{
     DomainRecord, RecordFinding, SENDING_DOMAIN_VERIFY_KIND, SendingDomain, find_sending_domain,
     list_domain_records, record_domain_check,
@@ -45,7 +45,8 @@ async fn lookup(
     Ok(Some(RecordFinding {
         kind,
         status: check_record(kind, &record.expected_text, &observed),
-        observed,
+        // Only text of the expected type is kept; see `redact_observed`.
+        observed: redact_observed(kind, &observed),
     }))
 }
 
@@ -109,6 +110,7 @@ mod tests {
     use serde_json::json;
     use sqlx::PgPool;
     use zirv_flow_connectors::dns::FixtureResolver;
+    use zirv_flow_core::sending::OTHER_TXT;
     use zirv_flow_core::{Cause, TraceContext, WorkspaceId};
     use zirv_flow_store::sending_fixtures::plant_domain;
     use zirv_flow_store::{NewJob, SendingDomain, list_trace};
@@ -250,6 +252,44 @@ mod tests {
             (1, "unverified")
         );
         assert_eq!(down_log[0].action, "sending_domain.verify");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_txt_record_of_another_type_is_reported_as_present_and_never_stored(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        let id = plant_domain(&pool, ws, "example.com").await.unwrap();
+        let dns = FixtureResolver::new();
+        dns.set(
+            "example.com",
+            &["internal-token=hunter2", "google-site-verification=abc"],
+        );
+        dns.set(
+            "_dmarc.example.com",
+            &["v=DMARC1; p=none", "other=secret-two"],
+        );
+
+        run(&pool, &dns, ws, id).await.0.unwrap();
+
+        let records = list_domain_records(&pool, ws, id).await.unwrap();
+        assert_eq!(records[1].status, "missing");
+        assert_eq!(
+            records[1].observed_text,
+            [OTHER_TXT, OTHER_TXT],
+            "present, not echoed"
+        );
+        assert_eq!(records[2].observed_text, ["v=DMARC1; p=none", OTHER_TXT]);
+        let stored: String = sqlx::query_scalar(
+            "SELECT string_agg(observed_text::text, '') FROM sending_domain_records",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !stored.contains("hunter2") && !stored.contains("secret-two"),
+            "{stored}"
+        );
     }
 
     #[sqlx::test]

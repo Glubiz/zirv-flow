@@ -233,9 +233,15 @@ pub async fn delete_sending_domain(
     let in_use: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sender_identities i \
              WHERE i.workspace_id = $1 AND i.domain_id = $2 \
-               AND (i.archived_at IS NULL OR EXISTS ( \
-                    SELECT 1 FROM templates t \
-                    WHERE t.workspace_id = i.workspace_id AND t.sender_identity_id = i.id)))",
+               AND (i.archived_at IS NULL \
+                    OR EXISTS ( \
+                        SELECT 1 FROM templates t \
+                        WHERE t.workspace_id = i.workspace_id AND t.sender_identity_id = i.id) \
+                    OR EXISTS ( \
+                        SELECT 1 FROM templates t \
+                        JOIN template_versions v ON v.workspace_id = t.workspace_id \
+                            AND v.template_id = t.id AND v.version = t.current_version \
+                        WHERE t.workspace_id = i.workspace_id AND v.sender_identity_id = i.id)))",
     )
     .bind(workspace.as_uuid())
     .bind(id)
@@ -259,20 +265,34 @@ pub async fn delete_sending_domain(
     })
 }
 
-/// The domains whose last check is older than `older_than_secs` seconds, or that were never
-/// checked, least recently checked first: `(workspace, domain)`. At most `limit`.
+/// The domains due a DNS check, least recently checked first: `(workspace, domain)`. At most
+/// `limit`.
+///
+/// A domain is due when its last check is older than `older_than_secs` seconds (or never
+/// happened), it has no check queued or running, and no check was queued for it within the last
+/// `retry_backoff_secs`. The last two keep the same domains from filling every batch: one with a
+/// check in flight is skipped, and one whose checks keep failing (a DNS outage stamps no check
+/// time) waits out the back-off, so a domain past the first `limit` is still reached.
 pub async fn due_sending_domains<'e>(
     executor: impl PgExecutor<'e>,
     older_than_secs: f64,
+    retry_backoff_secs: f64,
     limit: i64,
 ) -> Result<Vec<(WorkspaceId, Uuid)>, StoreError> {
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT workspace_id, id FROM sending_domains \
-         WHERE last_checked_at IS NULL \
-            OR last_checked_at < now() - make_interval(secs => $1) \
-         ORDER BY last_checked_at NULLS FIRST, id LIMIT $2",
+        "SELECT d.workspace_id, d.id FROM sending_domains d \
+         WHERE (d.last_checked_at IS NULL \
+                OR d.last_checked_at < now() - make_interval(secs => $1)) \
+           AND (d.last_attempt_at IS NULL \
+                OR d.last_attempt_at < now() - make_interval(secs => $2)) \
+           AND NOT EXISTS ( \
+                SELECT 1 FROM jobs j \
+                WHERE j.unique_key = 'sending_domain.verify:' || d.id::text \
+                  AND j.state IN ('ready', 'running')) \
+         ORDER BY d.last_checked_at NULLS FIRST, d.id LIMIT $3",
     )
     .bind(older_than_secs)
+    .bind(retry_backoff_secs)
     .bind(limit)
     .fetch_all(executor)
     .await
@@ -451,16 +471,95 @@ mod tests {
             .await
             .unwrap();
 
-        let due = due_sending_domains(&pool, 6.0 * 3600.0, 10).await.unwrap();
+        let due = due_sending_domains(&pool, 6.0 * 3600.0, 0.0, 10)
+            .await
+            .unwrap();
 
         assert_eq!(due, [(ws, never), (ws, stale)]);
         assert_eq!(
-            due_sending_domains(&pool, 6.0 * 3600.0, 1)
+            due_sending_domains(&pool, 6.0 * 3600.0, 0.0, 1)
                 .await
                 .unwrap()
                 .len(),
             1
         );
+    }
+
+    fn naming(sender: Uuid) -> serde_json::Value {
+        serde_json::json!({"schema": 1, "channel": "email", "mode": "code",
+                           "email": {"subject": "s", "sender": sender, "html": "<p>x</p>"}})
+    }
+
+    async fn publish(pool: &PgPool, ws: WorkspaceId, template: Uuid) {
+        let mut tx = crate::begin(pool).await.unwrap();
+        let locked = crate::lock_template(&mut tx, ws, template).await.unwrap();
+        let trace =
+            zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::definition_change(template));
+        crate::publish_template(&mut tx, ws, &locked, &serde_json::json!([]), None, &trace)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+    }
+
+    async fn draft(pool: &PgPool, ws: WorkspaceId, template: Uuid, document: &serde_json::Value) {
+        let mut connection = pool.acquire().await.unwrap();
+        crate::save_template_draft(&mut connection, ws, template, document, None)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_domain_is_in_use_while_a_draft_or_the_current_version_names_its_identity(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let domain = plant_domain(&pool, ws, "example.com").await.unwrap();
+        let identity = plant_identity(&pool, ws, domain, "news@example.com")
+            .await
+            .unwrap();
+        let template = crate::templates::tests_support::create(&pool, ws, "t").await;
+        let deletable = |pool: PgPool| async move {
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let outcome = delete_sending_domain(&mut tx, ws, domain).await.unwrap();
+            // Rolled back: this only asks.
+            drop(tx);
+            outcome
+        };
+
+        // A published version names the identity; the draft then moves on.
+        draft(&pool, ws, template.id, &naming(identity)).await;
+        publish(&pool, ws, template.id).await;
+        draft(
+            &pool,
+            ws,
+            template.id,
+            &crate::templates::tests_support::document("x"),
+        )
+        .await;
+        crate::archive_sender_identity(&pool, ws, identity)
+            .await
+            .unwrap();
+        let current_version_names_it = deletable(pool.clone()).await;
+        assert_eq!(current_version_names_it, DomainDelete::InUse);
+
+        // A draft names it (the version no longer is the current one).
+        publish(&pool, ws, template.id).await;
+        draft(&pool, ws, template.id, &naming(identity)).await;
+        assert_eq!(deletable(pool.clone()).await, DomainDelete::InUse);
+
+        // Only an old version names it: the delete goes ahead.
+        draft(
+            &pool,
+            ws,
+            template.id,
+            &crate::templates::tests_support::document("y"),
+        )
+        .await;
+        assert!(matches!(
+            deletable(pool.clone()).await,
+            DomainDelete::Deleted { .. }
+        ));
     }
 
     #[sqlx::test]

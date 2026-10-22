@@ -2088,8 +2088,22 @@ M1 ships owner, admin and member; the full matrix lands in M8. The **audit
 log** is append-only (actor, action, object, time, request id, change summary
 without personal data values) and covers sign-ins, membership and key changes,
 credential access, publishes, imports, exports, erasures and configuration.
-Assistant calls also write the dedicated call log in section 13.4 whether they
-succeed, fail validation or are stopped by policy or budget.
+Assistant calls also write the dedicated call log in section 13.4 whether they succeed, fail validation or are stopped by policy or budget.
+
+**Sending-domain DNS lookups.** The check of a sending domain's DKIM, SPF and DMARC
+records (`sending_domain.verify`) reads TXT records through the operator-configured
+system resolver, not through the guarded HTTP client, so the HTTP egress policy does not
+apply to it: that policy governs outbound connections to addresses a tenant supplies,
+and a name lookup opens none to a tenant-chosen host (the resolver is the operator's, and
+the name goes to its configured name servers). What a tenant could learn through the check
+is bounded instead by two rules. A domain name must be a public one: single labels, IP
+literals and the special-use or never-delegated suffixes (`localhost`, `local`,
+`internal`, `arpa`, `test`, `example`, `invalid`, `onion`, `alt`, `corp`, `home`, `mail`)
+are refused, so the check cannot be pointed at a private zone by name. And only TXT text
+of the expected type is stored or returned (`v=spf1` at the domain, `v=DMARC1` at
+`_dmarc`, a DKIM record at the selector name); any other string is reported as present,
+never echoed. A private zone reachable under a public-looking name stays the operator's
+to split-horizon.
 
 ### 16.3 Export, erasure and retention
 

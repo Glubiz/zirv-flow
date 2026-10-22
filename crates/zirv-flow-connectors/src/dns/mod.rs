@@ -4,6 +4,13 @@
 //! [`SystemResolver`], asks the operating system's configured name servers over plain DNS with
 //! `hickory-resolver` (no TLS or DNSSEC feature, so neither OpenSSL nor aws-lc is linked). The
 //! fixture resolver, behind `test-support`, serves a map, so tests need no network.
+//!
+//! Lookups do not go through the HTTP egress policy (`GuardedClient`). That policy governs
+//! outbound connections to addresses a tenant supplies; a TXT lookup opens none, it sends the
+//! name to the name servers the operator configured for the host. What a tenant can learn through
+//! it is bounded by the callers: a sending domain must be a public name (`parse_domain` refuses
+//! internal and special-use suffixes), and only TXT text of the expected record type is stored or
+//! returned (`redact_observed`). Architecture 16.2 records the reasoning.
 
 use std::future::Future;
 use std::pin::Pin;

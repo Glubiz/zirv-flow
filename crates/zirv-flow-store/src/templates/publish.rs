@@ -89,7 +89,9 @@ pub async fn publish_template(
     let number = template.current_version.unwrap_or(0) + 1;
     let version: TemplateVersion = sqlx::query_as(concat!(
         "INSERT INTO template_versions (workspace_id, template_id, version, document, validation, \
-            published_by, trace_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ",
+            published_by, trace_id, sender_identity_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, \
+            (SELECT id FROM sender_identities WHERE workspace_id = $1 AND id = $8)) RETURNING ",
         version_columns!()
     ))
     .bind(workspace.as_uuid())
@@ -99,6 +101,7 @@ pub async fn publish_template(
     .bind(validation)
     .bind(published_by.map(|user| user.as_uuid()))
     .bind(trace.trace_id.as_uuid())
+    .bind(super::document_sender(&locked.draft.document))
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;

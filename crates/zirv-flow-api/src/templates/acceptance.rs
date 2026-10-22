@@ -482,7 +482,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn publish_is_refused_for_an_unknown_archived_foreign_or_malformed_sender(pool: PgPool) {
+    async fn publish_is_refused_for_an_unknown_archived_or_foreign_sender(pool: PgPool) {
         use zirv_flow_store::sending_fixtures::plant_verified_sender;
 
         let f = fixture(&pool).await;
@@ -500,7 +500,6 @@ mod tests {
             archived.to_string(),
             foreign.to_string(),
             uuid::Uuid::now_v7().to_string(),
-            "snd_1".to_owned(),
         ] {
             let refused = publish_names(&f, &sender).await;
             assert_eq!(
@@ -516,7 +515,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_webhook_template_needs_no_sender_and_the_senders_column_must_name_a_live_identity(
+    async fn a_webhook_template_needs_no_sender_and_the_senders_column_follows_the_draft(
         pool: PgPool,
     ) {
         let f = fixture(&pool).await;
@@ -543,55 +542,86 @@ mod tests {
             published.body
         );
 
-        let unknown = f
+        // The template's sender is read-only: it follows the draft's document, and an id in an
+        // update is not a way to set it.
+        let id = f.create("Mail", email_doc("Hi", "x")).await;
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(read.body["sender_identity_id"], SENDER);
+        let ignored = f
             .lead(
-                "POST",
-                "",
-                Some(
-                    json!({"name": "Mail", "channel": "email", "document": email_doc("Hi", "x"),
-                            "sender_identity_id": uuid::Uuid::now_v7()}),
-                ),
+                "PUT",
+                &format!("/{id}"),
+                Some(json!({"name": "Mail 2", "sender_identity_id": uuid::Uuid::now_v7()})),
             )
             .await;
+        assert_eq!(ignored.status, StatusCode::OK, "{:?}", ignored.body);
+        assert_eq!(ignored.body["sender_identity_id"], SENDER);
+        let unknown = f
+            .put_draft(&id, email_doc_from(&uuid::Uuid::now_v7().to_string()))
+            .await;
+        assert_eq!(unknown.status, StatusCode::OK, "{:?}", unknown.body);
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+        assert!(read.body["sender_identity_id"].is_null());
+        f.put_draft(&id, email_doc("Hi", "x")).await;
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(read.body["sender_identity_id"], SENDER);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sender_that_is_not_an_id_is_a_missing_sender_not_an_unverified_one(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Mail", email_doc_from("snd_1")).await;
+
+        let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+
         assert_eq!(
-            unknown.status,
+            refused.status,
             StatusCode::UNPROCESSABLE_ENTITY,
             "{:?}",
-            unknown.body
+            refused.body
         );
+        assert_eq!(refused.body["code"], "template_invalid");
+        let issues = refused.body["template_issues"].as_array().unwrap();
         assert!(
-            unknown.body["detail"]
-                .as_str()
-                .unwrap()
-                .contains("sender_identity_id")
+            issues
+                .iter()
+                .any(|issue| issue["code"] == "missing_sender" && issue["at"] == "/email/sender"),
+            "{issues:?}"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_domain_cannot_be_deleted_under_a_published_version_that_names_its_sender(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
         let id = f.create("Mail", email_doc("Hi", "x")).await;
-        let named = f
-            .lead(
-                "PUT",
-                &format!("/{id}"),
-                Some(json!({"sender_identity_id": SENDER})),
-            )
-            .await;
-        assert_eq!(named.status, StatusCode::OK, "{:?}", named.body);
-        assert_eq!(named.body["sender_identity_id"], SENDER);
-        let bad = f
-            .lead(
-                "PUT",
-                &format!("/{id}"),
-                Some(json!({"sender_identity_id": uuid::Uuid::now_v7()})),
-            )
-            .await;
-        assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let cleared = f
-            .lead(
-                "PUT",
-                &format!("/{id}"),
-                Some(json!({"sender_identity_id": null})),
-            )
-            .await;
-        assert_eq!(cleared.status, StatusCode::OK);
-        assert!(cleared.body["sender_identity_id"].is_null());
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        // The draft moves on and the identity is archived; the published version still names it.
+        f.put_draft(&id, email_doc_from("")).await;
+        let sender: uuid::Uuid = SENDER.parse().unwrap();
+        zirv_flow_store::archive_sender_identity(&pool, f.ws, sender)
+            .await
+            .unwrap();
+        let domain: uuid::Uuid = sqlx::query_scalar("SELECT domain_id FROM sender_identities")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+
+        let outcome = zirv_flow_store::delete_sending_domain(&mut tx, f.ws, domain)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, zirv_flow_store::DomainDelete::InUse);
     }
 
     #[sqlx::test]

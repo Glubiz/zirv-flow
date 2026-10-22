@@ -2694,7 +2694,7 @@ export interface paths {
         /** One template with its draft. */
         get: operations["get_template"];
         /**
-         * Changes a template's name or sender identity. The channel and the category are fixed when the
+         * Changes a template's name. The channel and the category are fixed when the
          *     template is made. Audited as `template.updated`.
          */
         put: operations["update_template"];
@@ -3827,8 +3827,6 @@ export interface components {
              * @example Order shipped
              */
             name: string;
-            /** Format: uuid */
-            sender_identity_id?: string | null;
         };
         CreateTopicRequest: {
             /**
@@ -7268,7 +7266,8 @@ export interface components {
             name: string;
             /**
              * Format: uuid
-             * @description The sender identity of an email template.
+             * @description The sender identity the draft's document names (`email.sender`), when it is an identity of
+             *     this workspace. Read-only: it follows the draft, which is where the sender is set.
              */
             sender_identity_id?: string | null;
             /** Format: date-time */
@@ -7681,11 +7680,6 @@ export interface components {
         };
         UpdateTemplateRequest: {
             name?: string | null;
-            /**
-             * Format: uuid
-             * @description `null` clears it.
-             */
-            sender_identity_id?: string | null;
         };
         UpdateTopicRequest: {
             archived?: boolean | null;

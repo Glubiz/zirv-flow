@@ -24,6 +24,25 @@ const MAX_DOMAIN: usize = 253;
 const MAX_LABEL: usize = 63;
 const MAX_MECHANISM: usize = 255;
 
+/// Top labels that are special-use or never delegated in the public DNS (RFC 6761, RFC 8375 and
+/// RFC 9476, plus the suffixes private networks use by convention). A name under one resolves,
+/// if at all, in a private zone, and a sending domain is looked up through the system resolver, so
+/// these are refused: a workspace admin could otherwise read internal DNS through the check.
+const NON_PUBLIC_SUFFIXES: [&str; 12] = [
+    "localhost",
+    "local",
+    "internal",
+    "arpa",
+    "test",
+    "example",
+    "invalid",
+    "onion",
+    "alt",
+    "corp",
+    "home",
+    "mail",
+];
+
 /// Which of a domain's three DNS records.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RecordKind {
@@ -118,6 +137,11 @@ pub fn parse_domain(value: &str) -> Result<String, ValidationError> {
     if labels < 2 || last.chars().all(|character| character.is_ascii_digit()) {
         return Err(invalid(
             "must have at least two labels and a non-numeric top label",
+        ));
+    }
+    if NON_PUBLIC_SUFFIXES.contains(&last) {
+        return Err(invalid(
+            "must be a public domain name; special-use and internal suffixes are not allowed",
         ));
     }
     Ok(value.to_owned())
@@ -322,6 +346,35 @@ pub fn check_record(kind: RecordKind, expected: &str, observed: &[String]) -> Re
     }
 }
 
+/// What stands in for a TXT record that is not one of the expected types.
+pub const OTHER_TXT: &str = "(another TXT record, not shown)";
+
+/// The TXT records found at a record's name, as they may be stored and returned: only text of the
+/// expected type is kept (`v=spf1` at the domain, `v=DMARC1` at `_dmarc`, a DKIM record with
+/// `v=DKIM1` or a `p=` tag at the selector name). Any other string is reported as present, as
+/// [`OTHER_TXT`], and never echoed, so the check cannot be used to read arbitrary TXT content.
+pub fn redact_observed(kind: RecordKind, observed: &[String]) -> Vec<String> {
+    observed
+        .iter()
+        .map(|text| {
+            let expected = match kind {
+                RecordKind::Spf => is_spf(text),
+                RecordKind::Dmarc => is_dmarc_prefix(text),
+                RecordKind::Dkim => {
+                    let tags = tags(text);
+                    tag(&tags, "p").is_some()
+                        || tag(&tags, "v").is_some_and(|v| v.eq_ignore_ascii_case("DKIM1"))
+                }
+            };
+            if expected {
+                text.clone()
+            } else {
+                OTHER_TXT.to_owned()
+            }
+        })
+        .collect()
+}
+
 /// Why a DKIM key could not be made or read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DkimKeyError;
@@ -424,6 +477,67 @@ mod tests {
         }
         assert!(parse_domain(&format!("{}.com", "a".repeat(64))).is_err());
         assert!(parse_domain(&format!("{}.com", "a".repeat(63))).is_ok());
+    }
+
+    #[test]
+    fn names_that_resolve_only_in_private_zones_are_refused() {
+        for suffix in NON_PUBLIC_SUFFIXES {
+            for name in [format!("vault.{suffix}"), format!("a.b.{suffix}")] {
+                let error = parse_domain(&name).unwrap_err();
+                assert_eq!(error.field(), "domain", "{name}");
+                assert!(error.message().contains("public"), "{name}");
+            }
+        }
+        for name in [
+            "printer.home.arpa",
+            "1.0.0.127.in-addr.arpa",
+            "10.0.0.1",
+            "[::1]",
+            "::1",
+            "localhost",
+            "intranet",
+        ] {
+            assert!(parse_domain(name).is_err(), "{name}");
+        }
+        // A public name that merely contains a refused word is fine.
+        for name in [
+            "example.com",
+            "mail.example.org",
+            "internal.example.com",
+            "home.co",
+        ] {
+            assert!(parse_domain(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn only_text_of_the_expected_type_is_shown_from_what_dns_returned() {
+        let found = texts(&[
+            "v=spf1 -all",
+            "v=DMARC1; p=none",
+            "v=DKIM1; k=rsa; p=AAAA",
+            "k=rsa; p=BBBB",
+            "internal-token=hunter2",
+        ]);
+
+        assert_eq!(
+            redact_observed(RecordKind::Spf, &found),
+            ["v=spf1 -all", OTHER_TXT, OTHER_TXT, OTHER_TXT, OTHER_TXT]
+        );
+        assert_eq!(
+            redact_observed(RecordKind::Dmarc, &found)[1],
+            "v=DMARC1; p=none"
+        );
+        let dkim = redact_observed(RecordKind::Dkim, &found);
+        assert_eq!(dkim[2], "v=DKIM1; k=rsa; p=AAAA");
+        assert_eq!(dkim[3], "k=rsa; p=BBBB");
+        for kind in RecordKind::ALL {
+            let shown = redact_observed(kind, &found).join("\n");
+            assert!(!shown.contains("hunter2"), "{kind:?}");
+        }
+        // Redacting twice changes nothing more.
+        let once = redact_observed(RecordKind::Spf, &found);
+        assert_eq!(redact_observed(RecordKind::Spf, &once), once);
     }
 
     #[test]

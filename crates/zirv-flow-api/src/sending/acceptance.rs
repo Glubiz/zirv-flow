@@ -519,9 +519,13 @@ mod tests {
         let bad_mechanism =
             post(json!({"domain": "a.example.com", "spf_mechanism": "redirect=x.com"})).await;
         let taken = post(json!({"domain": "EXAMPLE.com."})).await;
+        let internal = post(json!({"domain": "vault.corp"})).await;
+        let private_ip = post(json!({"domain": "10.0.0.5"})).await;
 
         for (reply, field) in [
             (&bad_domain, "domain"),
+            (&internal, "domain"),
+            (&private_ip, "domain"),
             (&bad_selector, "selector"),
             (&bad_mechanism, "spf_mechanism"),
         ] {

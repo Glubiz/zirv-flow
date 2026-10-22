@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::sending::{
     DEFAULT_SELECTOR, RecordKind, generate_dkim_key, parse_domain, parse_selector,
-    parse_spf_mechanism, record_host,
+    parse_spf_mechanism, record_host, redact_observed,
 };
 use zirv_flow_core::{SecretPurpose, TraceContext, UserId, WorkspaceId};
 use zirv_flow_store::{
@@ -94,7 +94,7 @@ impl SendingDomainBody {
                         host: record_host(kind, &domain.selector, &domain.domain),
                         expected_text: record.expected_text.clone(),
                         status: record.status.clone(),
-                        observed_text: record.observed_text.clone(),
+                        observed_text: redact_observed(kind, &record.observed_text),
                         checked_at: record.checked_at,
                     })
                 })
@@ -194,7 +194,7 @@ pub(crate) async fn create_sending_domain(
             error.into()
         }
     })?;
-    zirv_flow_store::enqueue_domain_verify(&mut *tx, workspace, created.id, trace).await?;
+    zirv_flow_store::enqueue_domain_verify(&mut tx, workspace, created.id, trace).await?;
     admin::audit(
         &mut tx,
         context,
@@ -221,7 +221,7 @@ pub(crate) async fn request_verification(
     let domain = zirv_flow_store::find_sending_domain(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let queued = zirv_flow_store::enqueue_domain_verify(&mut *tx, workspace, id, trace).await?;
+    let queued = zirv_flow_store::enqueue_domain_verify(&mut tx, workspace, id, trace).await?;
     admin::audit(
         &mut tx,
         context,
