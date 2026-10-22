@@ -1622,16 +1622,8 @@ mod tests {
             "{first}"
         );
         assert!(
-            first.contains(&format!(
-                "zirv_flow_destination_attempts_total{{{labels}}} 2"
-            )),
-            "{first}"
-        );
-        assert!(
-            first.contains(&format!(
-                "zirv_flow_destination_outcomes_total{{{labels},outcome=\"delivered\"}} 2"
-            )),
-            "{first}"
+            !first.contains("zirv_flow_destination_attempts_total"),
+            "the leader publishes no destination counter: {first}"
         );
         // Archived: the gauges are zeroed, not left at their last value.
         assert!(
