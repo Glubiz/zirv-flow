@@ -1,7 +1,7 @@
 //! Rendering: code-mode email and webhook content through the sandbox (architecture 11.5, 11.7).
 
 use minijinja::{Environment, Value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::context::RenderContext;
 use crate::document::{
@@ -16,7 +16,7 @@ use crate::sandbox::{
 };
 
 /// A rendered email.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Rendered {
     /// One line: line breaks in the rendered subject become spaces.
     pub subject: String,
@@ -27,7 +27,7 @@ pub struct Rendered {
 }
 
 /// A rendered webhook payload.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RenderedWebhook {
     /// Header name to value, in name order.
     pub headers: Vec<(String, String)>,
@@ -112,21 +112,40 @@ pub fn render_email(
         }
         Category::Transactional => Vec::new(),
     };
+    apply_tracking(
+        Rendered {
+            subject,
+            html,
+            text,
+            headers,
+        },
+        context,
+        hooks,
+    )
+}
+
+/// The click-tracking step of [`render_email`]: rewrite the links of `rendered.html` as `hooks`
+/// say, leaving the message's own unsubscribe and preference URLs alone.
+///
+/// It is split out so a caller that rendered with [`Hooks::untracked`] elsewhere (the isolated
+/// render host cannot carry the caller's token function across a process boundary) finishes in
+/// its own process with the same code, and gets the same bytes as [`render_email`] with `hooks`.
+pub fn apply_tracking(
+    mut rendered: Rendered,
+    context: &RenderContext,
+    hooks: &Hooks<'_>,
+) -> Result<Rendered, RenderError> {
+    let system = &context.system;
     let keep = [
         system.unsubscribe_url.as_str(),
         system.preferences_url.as_str(),
     ];
-    let html = rewrite_links(&html, &hooks.tracking, &keep);
+    rendered.html = rewrite_links(&rendered.html, &hooks.tracking, &keep);
     // Rewriting lengthens each link, so the cap that held for the render is checked again.
-    if html.len() > MAX_HTML_BYTES {
+    if rendered.html.len() > MAX_HTML_BYTES {
         return Err(RenderError::OutputTooLarge { field: "html" });
     }
-    Ok(Rendered {
-        subject,
-        html,
-        text,
-        headers,
-    })
+    Ok(rendered)
 }
 
 /// Render webhook content: the header values and the JSON body.

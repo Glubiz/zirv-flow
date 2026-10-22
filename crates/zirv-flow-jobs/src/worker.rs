@@ -10,6 +10,7 @@ use tracing::{Instrument, Span, info, info_span, warn};
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
+use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, PgPool, begin, claim_job,
     complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
@@ -58,6 +59,8 @@ pub struct WorkerConfig {
     pub rate_limits: Arc<RateLimits>,
     /// The clock segment refreshes read: the database's in production, a manual one in tests.
     pub clock: Clock,
+    /// The isolated renderer that send handlers render through; none leaves them without one.
+    pub render_pool: Option<RenderPool>,
 }
 
 impl WorkerConfig {
@@ -78,6 +81,7 @@ impl WorkerConfig {
             egress: Arc::default(),
             rate_limits: Arc::default(),
             clock: Clock::default(),
+            render_pool: None,
         }
     }
 }
@@ -382,6 +386,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_event_retention(shared.config.event_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_clock(shared.config.clock.clone())
+            .with_render_pool(shared.config.render_pool.clone())
             .with_outbound(
                 shared.config.keyring.clone(),
                 Arc::clone(&shared.config.egress),
@@ -639,6 +644,7 @@ mod tests {
             egress: Arc::default(),
             rate_limits: Arc::default(),
             clock: Clock::default(),
+            render_pool: None,
         }
     }
 

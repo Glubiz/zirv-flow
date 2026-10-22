@@ -18,7 +18,20 @@ const ENV_PREFIX: &str = "ZIRV_FLOW_";
 /// The most concurrent drain loops per workspace `ingest.drain_shards` may ask for.
 const MAX_DRAIN_SHARDS: u32 = 16;
 
-const CONFIG_KEYS: [&str; 45] = [
+/// The most render-host children `render.pool_size` may ask for.
+const MAX_RENDER_POOL: u32 = 32;
+
+/// The longest `render.deadline_ms`: ten minutes.
+const MAX_RENDER_DEADLINE_MS: u64 = 600_000;
+
+/// The least address space a render-host child needs to start and render: the loaded binary and
+/// its libraries count against `RLIMIT_AS` as well as the heap.
+const MIN_RENDER_MEMORY_MIB: u64 = 64;
+
+/// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
+const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
+
+const CONFIG_KEYS: [&str; 48] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -57,6 +70,9 @@ const CONFIG_KEYS: [&str; 45] = [
     "explorer.export_timeout_ms",
     "explorer.interactive_row_limit",
     "explorer.export_row_limit",
+    "render.pool_size",
+    "render.deadline_ms",
+    "render.memory_limit_mib",
     "egress.allow",
     "ai.providers",
     "ai.rate_limit_per_user_per_minute",
@@ -86,6 +102,7 @@ pub(crate) struct Config {
     ingest: IngestConfig,
     imports: ImportsConfig,
     explorer: ExplorerConfig,
+    render: RenderConfig,
     #[serde(default)]
     egress: EgressConfig,
     /// The model allowlist of the AI assistant; empty means the assistant is unavailable.
@@ -322,6 +339,19 @@ struct IngestConfig {
     drain_shards: u32,
 }
 
+/// The render host: the child processes that render templates with an OS memory limit
+/// (architecture 11.9).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenderConfig {
+    /// Child processes, and so renders at once, in each process that renders (`serve`, `worker`).
+    pool_size: u32,
+    /// Milliseconds one render may take before its child is killed and replaced.
+    deadline_ms: u64,
+    /// Mebibytes of address space a child may use (`RLIMIT_AS`, Linux only).
+    memory_limit_mib: u64,
+}
+
 /// What a CSV upload may be.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -509,6 +539,9 @@ impl Config {
                 "explorer.export_row_limit",
                 1_000_000_u32,
             ))
+            .merge(Serialized::default("render.pool_size", 2_u32))
+            .merge(Serialized::default("render.deadline_ms", 5_000_u64))
+            .merge(Serialized::default("render.memory_limit_mib", 512_u64))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -628,6 +661,7 @@ impl Config {
             return Err(ConfigError::new(error.key, error.reason, source));
         }
 
+        config.validate_render(path, &env_sources)?;
         config.validate_events(path, &env_sources)?;
         config.validate_ingest(path, &env_sources)?;
         if config.imports.max_file_bytes == 0 {
@@ -683,6 +717,31 @@ impl Config {
 
         config.validate_auth(path, &env_sources)?;
         Ok(config)
+    }
+
+    /// The pool needs a child and a deadline, and a child needs room to run at all.
+    fn validate_render(
+        &self,
+        path: Option<&Path>,
+        env_sources: &HashMap<String, String>,
+    ) -> Result<(), ConfigError> {
+        let render = &self.render;
+        let fail = |key: &str, reason: &str| {
+            ConfigError::new(key, reason, source_for(key, path, env_sources))
+        };
+        if !(1..=MAX_RENDER_POOL).contains(&render.pool_size) {
+            return Err(fail("render.pool_size", "must be between 1 and 32"));
+        }
+        if !(1..=MAX_RENDER_DEADLINE_MS).contains(&render.deadline_ms) {
+            return Err(fail("render.deadline_ms", "must be between 1 and 600000"));
+        }
+        if !(MIN_RENDER_MEMORY_MIB..=MAX_RENDER_MEMORY_MIB).contains(&render.memory_limit_mib) {
+            return Err(fail(
+                "render.memory_limit_mib",
+                "must be between 64 and 1048576",
+            ));
+        }
+        Ok(())
     }
 
     /// The retention bounds must be ordered, and the default must lie within them.
@@ -954,6 +1013,17 @@ impl Config {
     /// Concurrent drain loops per workspace in `ingest.drain`.
     pub(crate) fn ingest_drain_shards(&self) -> u32 {
         self.ingest.drain_shards
+    }
+
+    /// The render pool's size and per-render deadline, and the children's memory limit in bytes.
+    pub(crate) fn render_pool(&self) -> (zirv_flow_render::PoolConfig, u64) {
+        (
+            zirv_flow_render::PoolConfig {
+                size: self.render.pool_size as usize,
+                deadline: std::time::Duration::from_millis(self.render.deadline_ms),
+            },
+            self.render.memory_limit_mib * 1024 * 1024,
+        )
     }
 
     /// The egress policy built from `egress.allow`, which `load` has validated.
@@ -2270,6 +2340,73 @@ output_price_per_mtok = 15000000
             let error = Config::load(None, env).unwrap_err().to_string();
 
             assert!(error.contains("must be at least 1"), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_render_defaults_are_two_children_five_seconds_and_512_mib() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        let (pool, memory) = config.render_pool();
+
+        assert_eq!(pool.size, 2);
+        assert_eq!(pool.deadline, std::time::Duration::from_secs(5));
+        assert_eq!(memory, 512 * 1024 * 1024);
+        assert!(toml::to_string(&config).unwrap().contains("[render]"));
+    }
+
+    #[test]
+    fn the_render_settings_come_from_the_environment_or_the_file_and_are_bounded() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_RENDER__POOL_SIZE".into(), "4".into()));
+        env.push(("ZIRV_FLOW_RENDER__DEADLINE_MS".into(), "250".into()));
+        let (pool, memory) = Config::load(None, env).unwrap().render_pool();
+        assert_eq!(pool.size, 4);
+        assert_eq!(pool.deadline, std::time::Duration::from_millis(250));
+        assert_eq!(memory, 512 * 1024 * 1024);
+
+        let file = TestFile::new(
+            "[database]\nurl = \"postgres://localhost/database\"\n\n[render]\nmemory_limit_mib = 128\n",
+        );
+        let (_, memory) = Config::load(Some(&file.0), Vec::new())
+            .unwrap()
+            .render_pool();
+        assert_eq!(memory, 128 * 1024 * 1024);
+
+        for (key, value, expected) in [
+            (
+                "POOL_SIZE",
+                "0",
+                "render.pool_size: must be between 1 and 32",
+            ),
+            (
+                "POOL_SIZE",
+                "33",
+                "render.pool_size: must be between 1 and 32",
+            ),
+            ("DEADLINE_MS", "0", "render.deadline_ms: must be between"),
+            (
+                "DEADLINE_MS",
+                "600001",
+                "render.deadline_ms: must be between",
+            ),
+            (
+                "MEMORY_LIMIT_MIB",
+                "63",
+                "render.memory_limit_mib: must be between 64",
+            ),
+            (
+                "MEMORY_LIMIT_MIB",
+                "1048577",
+                "render.memory_limit_mib: must be between 64",
+            ),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((format!("ZIRV_FLOW_RENDER__{key}").into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(expected), "{key}={value}: {error}");
         }
     }
 }

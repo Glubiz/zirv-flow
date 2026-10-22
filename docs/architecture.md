@@ -1315,15 +1315,37 @@ refuses a document whose schema is newer than the server's.
 
 ### 11.9 Render isolation
 
-Fuel and output caps do not bound the memory a template allocates mid-render (ruling f5213fbb),
-so `api` (preview) and `jobs` (send and test send) render in a child process through
-`zirv-flow-render`, never in their own address space.
+Fuel, the recursion limit and the output caps (11.5) bound a render's work and its
+result, not the memory a template allocates on the way there: a loop that doubles a
+string exhausts memory long before either trips. So a render never runs in the API
+or a worker process. `zirv-flow-render` keeps a small fixed pool of child processes,
+each a copy of the binary running the hidden `render-host` command, and a render is
+one request to a free child.
 
-- **Host.** The `zirv-flow` binary has a hidden `render-host` subcommand. It reads length-prefixed JSON requests on stdin and writes responses on stdout, one render at a time, and calls the `templates` renderer.
-- **Limits.** On Linux the child sets `RLIMIT_AS` on itself, through a safe wrapper, before it reads its first request. Other operating systems run without the OS limit and log a startup warning (development only). The parent enforces a per-render deadline and the existing output caps.
-- **Failure.** A child that exits, is killed by the limit or overruns its deadline is killed and respawned, and that render fails with a typed render error (`render_error` on a send). It never stops the worker, and the next render succeeds.
-- **Pool and metrics.** A fixed-size pool per process (size is configuration) with metrics for queue wait, render time, restarts and failures by reason.
-- **Equality.** The host calls the same renderer functions as an in-process call, so preview and send give the same bytes.
+- **Wire.** A request (the render call and its inputs) and a response (the result or
+  the renderer's typed error) are serde types in `templates`. The framing is a 4-byte
+  big-endian length followed by JSON, bounded in both directions (16 MiB); the parent
+  refuses an oversized response. Click tracking is applied by the caller on the
+  child's result (`apply_tracking`), because the token function cannot cross the
+  process boundary; the bytes equal an in-process render's.
+- **Memory.** On Linux the child sets `RLIMIT_AS` on itself, through the `rlimit`
+  crate, before it reads its first request (`render.memory_limit_mib`, default 512).
+  A failed allocation then aborts the child with the standard
+  `memory allocation of N bytes failed` line on standard error; the pool reads the
+  tail of the child's standard error to tell that from any other death. Other
+  operating systems run the child without the limit and log one warning at its
+  start (development only).
+- **Time.** The pool enforces `render.deadline_ms` per render; on overrun it kills the
+  child.
+- **Failure.** `memory_limit`, `deadline`, `child_exited` and `protocol` are distinct
+  from the renderer's own errors. The pool kills and replaces any child that fails,
+  and the failure costs that one render: a send maps it to `failed: render_error`,
+  preview returns problem+json, and the worker and the API carry on. A child killed by
+  something other than the limit (for example the kernel's OOM killer) is
+  `child_exited`.
+- **Metrics.** `zirv_flow_render_duration_seconds{channel}`,
+  `zirv_flow_render_wait_seconds` (waiting for a free child),
+  `zirv_flow_render_restarts_total` and `zirv_flow_render_failures_total{reason}`.
 
 ## 12. Event logging and traceability
 

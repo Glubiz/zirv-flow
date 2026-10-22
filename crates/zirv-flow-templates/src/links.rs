@@ -11,8 +11,9 @@ use crate::error::RenderError;
 /// The token every rewritten link carries in inert (preview) mode.
 pub const INERT_TOKEN: &str = "inert";
 
-/// The caller's token function: `(link_index, url) -> token`.
-type TokenFn<'a> = dyn Fn(usize, &str) -> String + 'a;
+/// The caller's token function: `(link_index, url) -> token`. It is `Sync` so a render call that
+/// holds the hooks across an await (the isolated render host's pool) is still `Send`.
+type TokenFn<'a> = dyn Fn(usize, &str) -> String + Sync + 'a;
 
 /// What to do with the links in the rendered HTML.
 #[derive(Clone, Copy)]
@@ -346,9 +347,9 @@ mod tests {
 
     #[test]
     fn token_function_sees_the_decoded_url() {
-        let seen = std::cell::RefCell::new(Vec::new());
+        let seen = std::sync::Mutex::new(Vec::new());
         let record = |index: usize, url: &str| {
-            seen.borrow_mut().push((index, url.to_owned()));
+            seen.lock().unwrap().push((index, url.to_owned()));
             "x".to_owned()
         };
         let tracking = Tracking::Rewrite {
@@ -361,7 +362,7 @@ mod tests {
             &[],
         );
         assert_eq!(
-            seen.into_inner(),
+            seen.into_inner().unwrap(),
             vec![(0, "https://a.example/?a=1&b=2".to_owned())]
         );
     }

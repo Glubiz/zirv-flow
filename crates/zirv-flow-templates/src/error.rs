@@ -66,6 +66,39 @@ impl RenderError {
         }
     }
 
+    /// The error with this [`code`](Self::code) and [`field`](Self::field), as read back from a
+    /// response of the render host. `None` for a code this crate does not define.
+    pub fn from_wire(code: &str, field: Option<&str>) -> Option<Self> {
+        let field = match field {
+            Some("subject") => "subject",
+            Some("html") => "html",
+            Some("text") => "text",
+            Some("headers") => "headers",
+            Some("body") => "body",
+            _ => "unknown",
+        };
+        Some(match code {
+            "unsupported_schema" => Self::UnsupportedSchema,
+            "wrong_document" => Self::WrongDocument,
+            "source_too_large" => Self::SourceTooLarge { field },
+            "syntax_error" => Self::Syntax { field },
+            "undefined_value" => Self::Undefined { field },
+            "out_of_fuel" => Self::OutOfFuel { field },
+            "recursion_limit" => Self::RecursionLimit { field },
+            "output_too_large" => Self::OutputTooLarge { field },
+            "template_error" => Self::Template { field },
+            "invalid_json_body" => Self::InvalidBody,
+            "template_in_key" => Self::TemplateInKey,
+            "body_too_large" => Self::BodyTooLarge,
+            "invalid_header_name" => Self::InvalidHeaderName,
+            "too_many_headers" => Self::TooManyHeaders,
+            "headers_too_large" => Self::HeadersTooLarge,
+            "missing_unsubscribe" => Self::MissingUnsubscribe,
+            "invalid_unsubscribe_url" => Self::InvalidUnsubscribeUrl,
+            _ => return None,
+        })
+    }
+
     /// The field the error concerns (`subject`, `html`, `text`, `headers`, `body`), if any.
     pub const fn field(&self) -> Option<&'static str> {
         match self {
@@ -104,5 +137,35 @@ mod tests {
         );
         assert_eq!(RenderError::BodyTooLarge.to_string(), "body_too_large");
         assert_eq!(RenderError::InvalidBody.field(), None);
+    }
+
+    #[test]
+    fn every_error_survives_its_wire_form() {
+        let all = [
+            RenderError::UnsupportedSchema,
+            RenderError::WrongDocument,
+            RenderError::SourceTooLarge { field: "body" },
+            RenderError::Syntax { field: "subject" },
+            RenderError::Undefined { field: "html" },
+            RenderError::OutOfFuel { field: "text" },
+            RenderError::RecursionLimit { field: "headers" },
+            RenderError::OutputTooLarge { field: "html" },
+            RenderError::Template { field: "body" },
+            RenderError::InvalidBody,
+            RenderError::TemplateInKey,
+            RenderError::BodyTooLarge,
+            RenderError::InvalidHeaderName,
+            RenderError::TooManyHeaders,
+            RenderError::HeadersTooLarge,
+            RenderError::MissingUnsubscribe,
+            RenderError::InvalidUnsubscribeUrl,
+        ];
+        for error in all {
+            assert_eq!(
+                RenderError::from_wire(error.code(), error.field()),
+                Some(error)
+            );
+        }
+        assert_eq!(RenderError::from_wire("nope", None), None);
     }
 }

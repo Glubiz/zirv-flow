@@ -3,7 +3,7 @@ members = ["crates/*", "tools/loadgen"]
 resolver = "3"
 
 [workspace.package]
-version = "0.77.0"
+version = "0.78.0"
 edition = "2024"
 authors = ["Jonathan Solskov <josj@zirv.io>"]
 license = "MIT"
@@ -37,6 +37,7 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 rand = "0.8.5"
+rlimit = "0.11.0"
 # Only here to choose the TLS stack for the OTLP exporter's HTTP client: rustls on the ring provider
 # the tree already uses, never aws-lc or OpenSSL.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
@@ -76,6 +77,7 @@ zirv-flow-core = { path = "crates/zirv-flow-core" }
 zirv-flow-engine = { path = "crates/zirv-flow-engine" }
 zirv-flow-identity = { path = "crates/zirv-flow-identity" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
+zirv-flow-render = { path = "crates/zirv-flow-render" }
 zirv-flow-segments = { path = "crates/zirv-flow-segments" }
 zirv-flow-store = { path = "crates/zirv-flow-store" }
 zirv-flow-templates = { path = "crates/zirv-flow-templates" }
