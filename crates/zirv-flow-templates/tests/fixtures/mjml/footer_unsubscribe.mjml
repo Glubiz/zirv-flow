@@ -1,0 +1,19 @@
+<mjml lang="en">
+  <mj-head>
+    <mj-title>Footer</mj-title>
+  </mj-head>
+  <mj-body width="600px">
+    <mj-section>
+      <mj-column>
+        <mj-text>Thanks for reading, {{ person.name }}.</mj-text>
+      </mj-column>
+    </mj-section>
+    <mj-section>
+      <mj-column>
+        <mj-text font-size="12px" align="center">
+          <a href="{{ system.unsubscribe_url }}">Unsubscribe</a> | <a href="{{ system.preferences_url }}">Preferences</a>
+        </mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

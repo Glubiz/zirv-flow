@@ -1,0 +1,15 @@
+<mjml lang="en">
+  <mj-head>
+    <mj-title>Two columns</mj-title>
+  </mj-head>
+  <mj-body width="600px">
+    <mj-section>
+      <mj-column>
+        <mj-text>Left, {{ person.name }}.</mj-text>
+      </mj-column>
+      <mj-column>
+        <mj-text>Right column.</mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

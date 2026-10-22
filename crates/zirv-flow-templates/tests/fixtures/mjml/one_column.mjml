@@ -1,0 +1,12 @@
+<mjml lang="en">
+  <mj-head>
+    <mj-title>One column</mj-title>
+  </mj-head>
+  <mj-body width="600px">
+    <mj-section>
+      <mj-column>
+        <mj-text>Hello {{ person.name }}, this is a single column.</mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

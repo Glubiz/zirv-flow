@@ -217,4 +217,371 @@ mod tests {
         assert_eq!(line_and_column("ab\ncé x", 7), (2, 4));
         assert_eq!(line_and_column("abc", 99), (1, 4));
     }
+
+    // ----- the golden corpus and the render path (#237, OQ-25) -----------------------------
+
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use serde_json::json;
+
+    use crate::document::Category;
+    use crate::error::RenderError;
+    use zirv_flow_core::people::TraitType;
+
+    use crate::issue::{Issue, Severity, code};
+    use crate::links::{Hooks, Tracking};
+    use crate::render::{Rendered, apply_tracking, render_email};
+    use crate::{RenderContext, validate};
+
+    const UNSUBSCRIBE: &str = "https://u.example/u/1?s=a&t=b";
+
+    /// The fixtures: name and category. Only the footer carries the unsubscribe link, so the
+    /// others are written as transactional mail.
+    const CORPUS: [(&str, Category); 6] = [
+        ("one_column", Category::Transactional),
+        ("two_columns", Category::Transactional),
+        ("three_columns", Category::Transactional),
+        ("hero_image", Category::Transactional),
+        ("button", Category::Transactional),
+        ("footer_unsubscribe", Category::Marketing),
+    ];
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mjml")
+    }
+
+    fn source(name: &str) -> String {
+        fs::read_to_string(fixtures().join(format!("{name}.mjml")))
+            .unwrap()
+            .replace("\r\n", "\n")
+    }
+
+    fn mjml_doc(category: Category, source: &str) -> TemplateDocument {
+        TemplateDocument::email_code(EmailContent {
+            subject: "Hi {{ person.name }}".into(),
+            sender: Some("snd_1".into()),
+            lang: None,
+            category,
+            syntax: Syntax::Mjml,
+            html: source.into(),
+            text: "Hello {{ person.name }}".into(),
+        })
+    }
+
+    fn context() -> RenderContext {
+        let mut context = RenderContext::default();
+        context.person.insert("name".into(), json!("Ann"));
+        context.system.unsubscribe_url = UNSUBSCRIBE.into();
+        context.system.preferences_url = "https://u.example/p/1".into();
+        context
+    }
+
+    fn render(doc: &TemplateDocument) -> Result<Rendered, RenderError> {
+        render_email(doc, &context(), &Hooks::untracked())
+    }
+
+    fn check(name: &str, actual: &str) {
+        let path = fixtures().join(format!("{name}.html"));
+        if std::env::var_os("ZIRV_FLOW_BLESS").is_some() {
+            fs::write(&path, actual).unwrap();
+        }
+        let expected = fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing {}; bless with ZIRV_FLOW_BLESS=1", path.display()));
+        assert_eq!(expected.replace("\r\n", "\n"), actual, "{name}");
+    }
+
+    fn catalog() -> FieldCatalog {
+        FieldCatalog {
+            person: std::collections::BTreeMap::from([("name".to_owned(), TraitType::String)]),
+            ..FieldCatalog::default()
+        }
+    }
+
+    fn corpus_html(name: &str, category: Category) -> String {
+        render(&mjml_doc(category, &source(name))).unwrap().html
+    }
+
+    #[test]
+    fn the_golden_corpus_renders_to_its_expected_bytes_twice() {
+        for (name, category) in CORPUS {
+            let first = corpus_html(name, category);
+            check(name, &first);
+            assert_eq!(first, corpus_html(name, category), "{name} is not stable");
+        }
+    }
+
+    #[test]
+    fn every_corpus_document_validates_without_a_blocking_issue() {
+        for (name, category) in CORPUS {
+            let issues = validate(&mjml_doc(category, &source(name)), &catalog());
+            let blocking: Vec<_> = issues.iter().filter(|issue| issue.is_blocking()).collect();
+            assert!(blocking.is_empty(), "{name}: {blocking:?}");
+        }
+    }
+
+    #[test]
+    fn the_output_is_table_layout_with_inline_styles_mso_comments_and_a_mobile_query() {
+        for (name, category) in CORPUS {
+            let html = corpus_html(name, category);
+            assert!(html.starts_with("<!doctype html>"), "{name}");
+            assert!(html.contains("<table"), "{name}: table-based layout");
+            assert!(html.contains(" style=\""), "{name}: inline styles");
+            assert!(html.contains("<!--[if mso"), "{name}: conditional comments");
+            assert!(html.contains("<![endif]-->"), "{name}");
+            assert!(
+                html.contains("@media only screen and (min-width:480px)"),
+                "{name}: mobile media query"
+            );
+            assert!(html.contains("max-width:600px"), "{name}: content width");
+            assert!(html.contains("lang=\"en\""), "{name}");
+        }
+    }
+
+    #[test]
+    fn columns_split_the_content_width() {
+        assert!(corpus_html("one_column", Category::Transactional).contains("mj-column-per-100"));
+        let two = corpus_html("two_columns", Category::Transactional);
+        assert!(two.contains("mj-column-per-50"));
+        let three = corpus_html("three_columns", Category::Transactional);
+        assert!(three.contains("mj-column-per-33"));
+    }
+
+    #[test]
+    fn a_hero_image_and_a_button_keep_their_urls() {
+        let hero = corpus_html("hero_image", Category::Transactional);
+        assert!(hero.contains("https://img.example/hero.png"));
+        assert!(hero.contains("https://img.example/banner.png"));
+        let button = corpus_html("button", Category::Transactional);
+        assert!(button.contains("href=\"https://shop.example/offer\""));
+    }
+
+    #[test]
+    fn an_include_is_refused_and_nothing_is_read() {
+        let path = fixtures().join("one_column.mjml");
+        let include = format!(
+            "<mjml lang=\"en\"><mj-body><mj-include path=\"{}\" /></mj-body></mjml>",
+            path.display().to_string().replace('\\', "/")
+        );
+        let doc = mjml_doc(Category::Transactional, &include);
+        assert_eq!(render(&doc), Err(RenderError::MjmlInclude));
+        let issues = validate(&doc, &catalog());
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == code::MJML_INCLUDE && issue.is_blocking()),
+            "{issues:?}"
+        );
+        // The refusal comes before `mrml` sees the text, so even a loader that would find the
+        // file never runs: the error is ours, not the loader's.
+        assert_eq!(compile(&include), Err(MjmlError::Include));
+        // An include in a branch that does not run is still refused when validating.
+        let hidden = "{% if false %}<mj-include path=\"x\" />{% endif %}<mjml lang=\"en\"><mj-body /></mjml>";
+        let hidden_doc = mjml_doc(Category::Transactional, hidden);
+        assert_eq!(render(&hidden_doc), Err(RenderError::MjmlInclude));
+    }
+
+    #[test]
+    fn a_merge_value_with_markup_is_escaped_and_adds_no_element() {
+        let mut context = context();
+        context.person.insert(
+            "name".into(),
+            json!(
+                r#"</mj-text><mj-include path="x"/><mj-text onclick="x"><script>alert(1)</script>"#
+            ),
+        );
+        let doc = mjml_doc(Category::Transactional, &source("one_column"));
+        let rendered = render_email(&doc, &context, &Hooks::untracked()).unwrap();
+        assert!(!rendered.html.contains("<script"), "{}", rendered.html);
+        assert!(!rendered.html.contains("<mj-"), "{}", rendered.html);
+        assert!(rendered.html.contains("&lt;script&gt;"));
+        assert!(!rendered.html.contains("onclick=\"x\">"));
+        // The same document rendered with a plain name has the same structure.
+        let plain = render(&doc).unwrap().html;
+        assert_eq!(
+            plain.matches("<table").count(),
+            rendered.html.matches("<table").count()
+        );
+    }
+
+    fn issues_of(source: &str) -> Vec<Issue> {
+        validate(&mjml_doc(Category::Transactional, source), &catalog())
+    }
+
+    #[test]
+    fn an_mrml_parse_error_is_blocking_and_names_its_position() {
+        let issues = issues_of("<mjml lang=\"en\">\n<mj-body>\n<mj-text>\n</mj-body></mjml>");
+        let found = issues
+            .iter()
+            .find(|issue| issue.code == code::MJML_PARSE_ERROR)
+            .expect("a parse error");
+        assert_eq!(found.severity, Severity::Blocking);
+        assert_eq!(found.at, "/email/html");
+        assert!(
+            found
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("line 4")),
+            "{found:?}"
+        );
+        let doc = mjml_doc(Category::Transactional, "<mjml><mj-body>");
+        assert_eq!(render(&doc), Err(RenderError::Mjml));
+    }
+
+    #[test]
+    fn a_marketing_template_without_an_unsubscribe_link_is_refused() {
+        let doc = mjml_doc(Category::Marketing, &source("one_column"));
+        assert_eq!(render(&doc), Err(RenderError::MissingUnsubscribe));
+        let issues = validate(&doc, &catalog());
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == code::MISSING_UNSUBSCRIBE && issue.is_blocking()),
+            "{issues:?}"
+        );
+        // The link in the footer fixture satisfies it, in the HTML `mrml` made.
+        let ok = mjml_doc(Category::Marketing, &source("footer_unsubscribe"));
+        assert!(
+            !validate(&ok, &catalog())
+                .iter()
+                .any(|issue| issue.code == code::MISSING_UNSUBSCRIBE)
+        );
+    }
+
+    #[test]
+    fn a_link_that_only_the_source_names_does_not_count_as_unsubscribe() {
+        // The URL is in a comment and an attribute that is not a link, so no anchor reaches it.
+        let source = "<mjml lang=\"en\"><mj-body><mj-section><mj-column><mj-text>\
+            <!-- {{ system.unsubscribe_url }} --></mj-text></mj-column></mj-section></mj-body></mjml>";
+        let doc = mjml_doc(Category::Marketing, source);
+        assert_eq!(render(&doc), Err(RenderError::MissingUnsubscribe));
+    }
+
+    fn tok(index: usize, _url: &str) -> String {
+        format!("tok{index}")
+    }
+
+    #[test]
+    fn link_rewrite_and_list_unsubscribe_apply_to_the_mrml_output() {
+        let doc = mjml_doc(Category::Marketing, &source("footer_unsubscribe"));
+        let live = Hooks {
+            tracking: Tracking::Rewrite {
+                base_url: "https://t.example/c",
+                token: &tok,
+            },
+        };
+        let direct = render_email(&doc, &context(), &live).unwrap();
+        assert_eq!(direct.headers.len(), 2);
+        assert!(direct.headers[0].0.eq_ignore_ascii_case("List-Unsubscribe"));
+        assert!(direct.headers[0].1.contains(UNSUBSCRIBE));
+        // The message's own links are left alone.
+        assert!(!direct.html.contains("t.example"), "{}", direct.html);
+        assert!(crate::links::links_to(&direct.html, UNSUBSCRIBE));
+
+        let button = mjml_doc(Category::Transactional, &source("button"));
+        let tracked = render_email(&button, &context(), &live).unwrap();
+        assert!(
+            tracked.html.contains("https://t.example/c"),
+            "{}",
+            tracked.html
+        );
+        assert!(!tracked.html.contains("href=\"https://shop.example/offer\""));
+
+        // Split the way the isolated host does: untracked render, then the caller's rewrite.
+        let untracked = render(&button).unwrap();
+        let finished = apply_tracking(untracked, &context(), &live).unwrap();
+        assert_eq!(finished, tracked);
+    }
+
+    #[test]
+    fn a_missing_lang_an_insecure_link_and_a_large_output_are_warnings() {
+        let no_lang = "<mjml><mj-body><mj-section><mj-column>\
+            <mj-button href=\"http://shop.example/x\">Go</mj-button>\
+            </mj-column></mj-section></mj-body></mjml>";
+        let issues = issues_of(no_lang);
+        for wanted in [code::MISSING_LANG, code::INSECURE_LINK] {
+            let found = issues.iter().find(|issue| issue.code == wanted);
+            assert_eq!(
+                found.map(|issue| issue.severity),
+                Some(Severity::Warning),
+                "{wanted}"
+            );
+        }
+        assert!(
+            issues.iter().all(|issue| !issue.is_blocking()),
+            "{issues:?}"
+        );
+
+        // Rendered HTML near the clip size: a long text makes the sample output large.
+        let big = format!(
+            "<mjml lang=\"en\"><mj-body><mj-section><mj-column><mj-text>{}</mj-text></mj-column></mj-section></mj-body></mjml>",
+            "word ".repeat(20_000)
+        );
+        let issues = issues_of(&big);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == code::HTML_NEAR_CLIP)
+        );
+        assert!(
+            issues.iter().all(|issue| !issue.is_blocking()),
+            "{issues:?}"
+        );
+        // A clean document has neither.
+        let clean = issues_of(&source("one_column"));
+        assert!(
+            !clean
+                .iter()
+                .any(|issue| issue.code == code::MISSING_LANG || issue.code == code::INSECURE_LINK)
+        );
+    }
+
+    #[test]
+    fn html_documents_are_unchanged_by_the_syntax_field() {
+        let stored = r#"{"schema":1,"channel":"email","mode":"code","email":{"subject":"Hi","html":"<p>x</p>"}}"#;
+        let doc: TemplateDocument = serde_json::from_str(stored).unwrap();
+        assert_eq!(doc.email.as_ref().map(|e| e.syntax), Some(Syntax::Html));
+        assert!(!serde_json::to_string(&doc).unwrap().contains("syntax"));
+        let mjml = mjml_doc(Category::Transactional, "<mjml />");
+        let json = serde_json::to_string(&mjml).unwrap();
+        assert!(json.contains(r#""syntax":"mjml""#));
+        assert_eq!(
+            serde_json::from_str::<TemplateDocument>(&json).unwrap(),
+            mjml
+        );
+    }
+
+    /// The per-message cost of the MJML stage: renders the corpus many times and prints the
+    /// median and the 95th percentile of one render. Run on demand:
+    /// `cargo nextest run -p zirv-flow-templates --run-ignored only --no-capture per_render_cost`.
+    #[test]
+    #[ignore = "timing; run on demand"]
+    fn per_render_cost_of_the_representative_set() {
+        const ROUNDS: usize = 200;
+        let docs: Vec<TemplateDocument> = CORPUS
+            .iter()
+            .map(|(name, category)| mjml_doc(*category, &source(name)))
+            .collect();
+        let context = context();
+        let hooks = Hooks::untracked();
+        let mut micros = Vec::with_capacity(ROUNDS * docs.len());
+        for _ in 0..ROUNDS {
+            for doc in &docs {
+                let started = Instant::now();
+                let rendered = render_email(doc, &context, &hooks);
+                micros.push(started.elapsed().as_micros());
+                assert!(rendered.is_ok());
+            }
+        }
+        micros.sort_unstable();
+        let at = |fraction: usize| micros[micros.len() * fraction / 100 - 1];
+        println!(
+            "mjml render, {} renders over {} documents: p50 {} us, p95 {} us",
+            micros.len(),
+            docs.len(),
+            at(50),
+            at(95)
+        );
+    }
 }

@@ -1,0 +1,15 @@
+<mjml lang="en">
+  <mj-head>
+    <mj-title>Hero image</mj-title>
+  </mj-head>
+  <mj-body width="600px">
+    <mj-hero mode="fixed-height" height="200px" background-url="https://img.example/hero.png" background-color="#2a3448" padding="20px">
+      <mj-text align="center" color="#ffffff" font-size="24px">Welcome, {{ person.name }}</mj-text>
+    </mj-hero>
+    <mj-section>
+      <mj-column>
+        <mj-image src="https://img.example/banner.png" alt="Banner" />
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

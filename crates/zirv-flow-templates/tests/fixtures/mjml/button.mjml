@@ -1,0 +1,12 @@
+<mjml lang="en">
+  <mj-head>
+    <mj-title>Button</mj-title>
+  </mj-head>
+  <mj-body width="600px">
+    <mj-section>
+      <mj-column>
+        <mj-button href="https://shop.example/offer" background-color="#1a73e8">See the offer</mj-button>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>
