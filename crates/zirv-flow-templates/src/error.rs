@@ -30,6 +30,12 @@ pub enum RenderError {
     TemplateInKey,
     /// The rendered webhook body is over [`crate::MAX_WEBHOOK_BODY_BYTES`].
     BodyTooLarge,
+    /// A webhook header name is not an RFC 9110 token.
+    InvalidHeaderName,
+    /// More than [`crate::MAX_HEADER_COUNT`] webhook headers.
+    TooManyHeaders,
+    /// Header names and values together are over [`crate::MAX_HEADERS_BYTES`].
+    HeadersTooLarge,
     /// A marketing email's HTML has no link to the message's unsubscribe URL.
     MissingUnsubscribe,
     /// The message's unsubscribe URL is not an `https` URL (RFC 8058).
@@ -52,6 +58,9 @@ impl RenderError {
             Self::InvalidBody => "invalid_json_body",
             Self::TemplateInKey => "template_in_key",
             Self::BodyTooLarge => "body_too_large",
+            Self::InvalidHeaderName => "invalid_header_name",
+            Self::TooManyHeaders => "too_many_headers",
+            Self::HeadersTooLarge => "headers_too_large",
             Self::MissingUnsubscribe => "missing_unsubscribe",
             Self::InvalidUnsubscribeUrl => "invalid_unsubscribe_url",
         }

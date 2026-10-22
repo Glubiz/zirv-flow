@@ -10,8 +10,9 @@ use crate::document::{
 use crate::error::RenderError;
 use crate::links::{Hooks, links_to, rewrite_links, unsubscribe_headers};
 use crate::sandbox::{
-    MAX_HEADER_VALUE_BYTES, MAX_HTML_BYTES, MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES,
-    MAX_WEBHOOK_BODY_BYTES, environment, map_error, render_string,
+    MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES, MAX_SOURCE_BYTES,
+    MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment, is_header_name,
+    map_error, render_string,
 };
 
 /// A rendered email.
@@ -116,6 +117,10 @@ pub fn render_email(
         system.preferences_url.as_str(),
     ];
     let html = rewrite_links(&html, &hooks.tracking, &keep);
+    // Rewriting lengthens each link, so the cap that held for the render is checked again.
+    if html.len() > MAX_HTML_BYTES {
+        return Err(RenderError::OutputTooLarge { field: "html" });
+    }
     Ok(Rendered {
         subject,
         html,
@@ -143,6 +148,13 @@ pub fn render_webhook(
     let env = environment();
     let values = Value::from_serialize(context);
 
+    if webhook.headers.len() > MAX_HEADER_COUNT {
+        return Err(RenderError::TooManyHeaders);
+    }
+    if webhook.headers.keys().any(|name| !is_header_name(name)) {
+        return Err(RenderError::InvalidHeaderName);
+    }
+    let mut header_bytes = 0usize;
     let mut headers = Vec::with_capacity(webhook.headers.len());
     for (name, source) in &webhook.headers {
         let value = render_string(
@@ -153,7 +165,12 @@ pub fn render_webhook(
             &values,
             MAX_HEADER_VALUE_BYTES,
         )?;
-        headers.push((name.clone(), one_line(&value)));
+        let value = one_line(&value);
+        header_bytes = header_bytes.saturating_add(name.len() + value.len());
+        if header_bytes > MAX_HEADERS_BYTES {
+            return Err(RenderError::HeadersTooLarge);
+        }
+        headers.push((name.clone(), value));
     }
 
     let mut body = BodyRenderer {
@@ -549,6 +566,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn link_rewriting_cannot_push_the_html_past_its_cap() {
+        // Each bare link is 8 bytes and becomes 27: under the cap as rendered, over it after.
+        let html = format!(
+            "{{% for i in range(20000) %}}<a href=http://a>{{% endfor %}}{}",
+            "x".repeat(100)
+        );
+        let doc = email(Category::Transactional, &html);
+        let untracked = render_email(&doc, &context(), &Hooks::untracked()).unwrap();
+        assert!(untracked.html.len() <= MAX_HTML_BYTES);
+        assert_eq!(
+            render_email(&doc, &context(), &live()),
+            Err(RenderError::OutputTooLarge { field: "html" })
+        );
+    }
+
     // ----- webhook -------------------------------------------------------------------------
 
     #[test]
@@ -575,6 +608,37 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&out.body).unwrap();
         assert_eq!(parsed["a"], json!("Hi \"}, \"admin\": true, {\"x\":\""));
         assert_eq!(parsed.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn webhook_header_names_must_be_tokens() {
+        for name in ["X-A\r\nX-Evil: 1", "X:A", "X A", ""] {
+            let doc = webhook(&[(name, "1")], "{}");
+            assert_eq!(
+                render_webhook(&doc, &context()),
+                Err(RenderError::InvalidHeaderName),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_header_count_and_size_are_capped() {
+        let names: Vec<String> = (0..=MAX_HEADER_COUNT).map(|n| format!("X-{n}")).collect();
+        let headers: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "1")).collect();
+        assert_eq!(
+            render_webhook(&webhook(&headers, "{}"), &context()),
+            Err(RenderError::TooManyHeaders)
+        );
+        // Each value is within its own limit, but together they pass the aggregate cap.
+        let value = "v".repeat(MAX_HEADER_VALUE_BYTES);
+        let names: Vec<String> = (0..5).map(|n| format!("X-{n}")).collect();
+        let headers: Vec<(&str, &str)> =
+            names.iter().map(|n| (n.as_str(), value.as_str())).collect();
+        assert_eq!(
+            render_webhook(&webhook(&headers, "{}"), &context()),
+            Err(RenderError::HeadersTooLarge)
+        );
     }
 
     #[test]

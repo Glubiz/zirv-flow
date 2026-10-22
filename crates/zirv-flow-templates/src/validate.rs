@@ -1,23 +1,30 @@
 //! Publish validation (architecture 11.6): everything that can be checked without a person.
 
-use minijinja::Environment;
+use minijinja::{Environment, ErrorKind, Value};
 use zirv_flow_core::segment::pointer_push;
 
-use crate::context::{MESSAGE_FIELDS, SYSTEM_FIELDS};
+use crate::context::{MESSAGE_FIELDS, RenderContext, SYSTEM_FIELDS};
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
 };
 use crate::issue::{FieldCatalog, Issue, code};
-use crate::links::link_urls;
+use crate::links::{link_urls, links_to};
 use crate::render::has_template_syntax;
-use crate::sandbox::{GLOBAL_FUNCTIONS, MAX_SOURCE_BYTES, environment};
+use crate::sandbox::{
+    GLOBAL_FUNCTIONS, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
+    MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment,
+    is_header_name, render_raw,
+};
+use zirv_flow_core::people::TraitType;
 
 /// The HTML size, in bytes, from which a warning says mail clients may clip the message. Gmail
 /// clips at about 102 KB; this leaves room for the tracking rewrite and the footer.
 pub(crate) const HTML_WARN_BYTES: usize = 90_000;
 
-/// The merge path an unsubscribe link must use.
-const UNSUBSCRIBE_PATH: &str = "system.unsubscribe_url";
+/// The unsubscribe URL of the sample render: a marketing email must link to exactly this.
+const SAMPLE_UNSUBSCRIBE_URL: &str = "https://unsubscribe.sample.invalid/u";
+/// The preference-centre URL of the sample render.
+const SAMPLE_PREFERENCES_URL: &str = "https://preferences.sample.invalid/p";
 
 /// Validate a document against the merge fields the workspace knows.
 ///
@@ -41,23 +48,88 @@ pub fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
         return issues;
     }
     let env = environment();
+    let sample = sample_context(catalog);
     match doc.channel {
         Channel::Email => match &doc.email {
-            Some(email) => validate_email(&env, email, catalog, &mut issues),
+            Some(email) => validate_email(&env, email, catalog, &sample, &mut issues),
             None => issues.push(Issue::new(code::MISSING_CONTENT, "/email")),
         },
         _ => match &doc.webhook {
-            Some(webhook) => validate_webhook(&env, webhook, catalog, &mut issues),
+            Some(webhook) => validate_webhook(&env, webhook, catalog, &sample, &mut issues),
             None => issues.push(Issue::new(code::MISSING_CONTENT, "/webhook")),
         },
     }
     issues
 }
 
+/// The outcome of checking one template field.
+struct Checked {
+    /// Whether the field added no issue.
+    clean: bool,
+    /// The field rendered against the sample context; `None` when the render failed.
+    sample: Option<String>,
+}
+
+/// What a field is rendered as in the sample render, and the output limit that applies to it.
+#[derive(Clone, Copy)]
+struct FieldKind {
+    /// The template name; `*.html` is autoescaped.
+    name: &'static str,
+    limit: usize,
+}
+
+const SUBJECT: FieldKind = FieldKind {
+    name: "subject.txt",
+    limit: MAX_SUBJECT_BYTES,
+};
+const HTML: FieldKind = FieldKind {
+    name: "html.html",
+    limit: MAX_HTML_BYTES,
+};
+const TEXT: FieldKind = FieldKind {
+    name: "text.txt",
+    limit: MAX_TEXT_BYTES,
+};
+const HEADER: FieldKind = FieldKind {
+    name: "header.txt",
+    limit: MAX_HEADER_VALUE_BYTES,
+};
+const BODY: FieldKind = FieldKind {
+    name: "body.txt",
+    limit: MAX_WEBHOOK_BODY_BYTES,
+};
+
+/// The context of the sample render: a deterministic value for every field in the catalog, by
+/// type, and sentinel system URLs.
+fn sample_context(catalog: &FieldCatalog) -> Value {
+    let mut context = RenderContext::default();
+    for (key, kind) in &catalog.person {
+        let value = match kind {
+            TraitType::String => serde_json::json!("sample"),
+            TraitType::Number => serde_json::json!(1),
+            TraitType::Boolean => serde_json::json!(true),
+            TraitType::Timestamp => serde_json::json!("2026-01-01T00:00:00Z"),
+            TraitType::Date => serde_json::json!("2026-01-01"),
+            TraitType::StringList => serde_json::json!(["sample"]),
+        };
+        context.person.insert(key.clone(), value);
+    }
+    for key in &catalog.event {
+        context
+            .event
+            .insert(key.clone(), serde_json::json!("sample"));
+    }
+    context.message.id = "msg_sample".to_owned();
+    context.system.unsubscribe_url = SAMPLE_UNSUBSCRIBE_URL.to_owned();
+    context.system.preferences_url = SAMPLE_PREFERENCES_URL.to_owned();
+    Value::from_serialize(&context)
+}
+
 fn validate_email(
     env: &Environment<'static>,
     email: &EmailContent,
     catalog: &FieldCatalog,
+    sample: &Value,
     issues: &mut Vec<Issue>,
 ) {
     if email
@@ -74,12 +146,43 @@ fn validate_email(
     {
         issues.push(Issue::new(code::MISSING_LANG, "/email/lang"));
     }
-    check_template(env, catalog, "/email/subject", &email.subject, issues);
-    let html_fields = check_template(env, catalog, "/email/html", &email.html, issues);
-    check_template(env, catalog, "/email/text", &email.text, issues);
+    check_template(
+        env,
+        catalog,
+        sample,
+        "/email/subject",
+        &email.subject,
+        SUBJECT,
+        issues,
+    );
+    let html = check_template(
+        env,
+        catalog,
+        sample,
+        "/email/html",
+        &email.html,
+        HTML,
+        issues,
+    );
+    check_template(
+        env,
+        catalog,
+        sample,
+        "/email/text",
+        &email.text,
+        TEXT,
+        issues,
+    );
 
+    // The link must survive the render: a bare URL in text, or an anchor in a branch that never
+    // runs, does not count. A field that already has an issue is reported by that issue; one
+    // that rendered nothing cannot show a link, so it is refused too.
     if email.category == Category::Marketing
-        && !html_fields.iter().any(|path| path == UNSUBSCRIBE_PATH)
+        && html.clean
+        && !html
+            .sample
+            .as_deref()
+            .is_some_and(|rendered| links_to(rendered, SAMPLE_UNSUBSCRIBE_URL))
     {
         issues.push(Issue::new(code::MISSING_UNSUBSCRIBE, "/email/html"));
     }
@@ -98,18 +201,31 @@ fn validate_webhook(
     env: &Environment<'static>,
     webhook: &WebhookContent,
     catalog: &FieldCatalog,
+    sample: &Value,
     issues: &mut Vec<Issue>,
 ) {
+    if webhook.headers.len() > MAX_HEADER_COUNT {
+        issues.push(Issue::new(code::TOO_MANY_HEADERS, "/webhook/headers"));
+    }
+    let mut header_bytes = 0usize;
     for (name, source) in &webhook.headers {
         let at = pointer_push("/webhook/headers", name);
-        check_template(env, catalog, &at, source, issues);
+        if !is_header_name(name) {
+            issues.push(Issue::new(code::INVALID_HEADER_NAME, at.clone()));
+        }
+        let checked = check_template(env, catalog, sample, &at, source, HEADER, issues);
+        let value_bytes = checked.sample.as_deref().map_or(0, str::len);
+        header_bytes = header_bytes.saturating_add(name.len() + value_bytes);
+    }
+    if header_bytes > MAX_HEADERS_BYTES {
+        issues.push(Issue::new(code::HEADERS_TOO_LARGE, "/webhook/headers"));
     }
     if webhook.body.len() > MAX_SOURCE_BYTES {
         issues.push(Issue::new(code::CONTENT_TOO_LARGE, "/webhook/body"));
         return;
     }
     match serde_json::from_str::<serde_json::Value>(&webhook.body) {
-        Ok(body) => walk_body(env, catalog, "/webhook/body", &body, issues),
+        Ok(body) => walk_body(env, catalog, sample, "/webhook/body", &body, issues),
         Err(_) => issues.push(Issue::new(code::INVALID_JSON_BODY, "/webhook/body")),
     }
 }
@@ -117,17 +233,18 @@ fn validate_webhook(
 fn walk_body(
     env: &Environment<'static>,
     catalog: &FieldCatalog,
+    sample: &Value,
     at: &str,
     value: &serde_json::Value,
     issues: &mut Vec<Issue>,
 ) {
     match value {
         serde_json::Value::String(text) => {
-            check_template(env, catalog, at, text, issues);
+            check_template(env, catalog, sample, at, text, BODY, issues);
         }
         serde_json::Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                walk_body(env, catalog, &format!("{at}/{index}"), item, issues);
+                walk_body(env, catalog, sample, &format!("{at}/{index}"), item, issues);
             }
         }
         serde_json::Value::Object(map) => {
@@ -136,54 +253,111 @@ fn walk_body(
                 if has_template_syntax(key) {
                     issues.push(Issue::new(code::TEMPLATE_IN_KEY, child.clone()));
                 }
-                walk_body(env, catalog, &child, item, issues);
+                walk_body(env, catalog, sample, &child, item, issues);
             }
         }
         _ => {}
     }
 }
 
-/// Parse one template and check the merge fields it reads. Returns those field paths, sorted.
+/// Parse one template, check the merge fields it reads, and render it against the sample
+/// context. A filter, test or function the sandbox does not have only fails at render time, so
+/// the sample render is what finds it.
 fn check_template(
     env: &Environment<'static>,
     catalog: &FieldCatalog,
+    sample: &Value,
     at: &str,
     source: &str,
+    kind: FieldKind,
     issues: &mut Vec<Issue>,
-) -> Vec<String> {
+) -> Checked {
+    let before = issues.len();
     if source.len() > MAX_SOURCE_BYTES {
         issues.push(Issue::new(code::CONTENT_TOO_LARGE, at));
-        return Vec::new();
+        return Checked {
+            clean: false,
+            sample: None,
+        };
     }
     let template = match env.template_from_named_str("check.txt", source) {
         Ok(template) => template,
         Err(_) => {
             issues.push(Issue::new(code::SYNTAX_ERROR, at));
-            return Vec::new();
+            return Checked {
+                clean: false,
+                sample: None,
+            };
         }
     };
     let mut paths: Vec<String> = template.undeclared_variables(true).into_iter().collect();
     paths.sort();
     for path in &paths {
-        if !is_known(catalog, path) {
-            issues.push(Issue::new(code::UNKNOWN_MERGE_FIELD, at).with_field(path.clone()));
+        match lookup(catalog, path) {
+            Lookup::Known => {}
+            Lookup::Unknown => {
+                issues.push(Issue::new(code::UNKNOWN_MERGE_FIELD, at).with_field(path.clone()));
+            }
+            Lookup::Dynamic => {
+                issues.push(Issue::new(code::DYNAMIC_MERGE_FIELD, at).with_field(path.clone()));
+            }
         }
     }
-    paths
+    let rendered = match render_raw(env, kind.name, source, sample, kind.limit) {
+        Ok(rendered) => rendered,
+        Err((error, _)) => {
+            let unknown_callable = matches!(
+                error.kind(),
+                ErrorKind::UnknownFilter
+                    | ErrorKind::UnknownTest
+                    | ErrorKind::UnknownFunction
+                    | ErrorKind::UnknownMethod
+            );
+            // Other failures (a missing field, a sample value that does not fit an operation) are
+            // either already reported above or depend on real data, so they are not issues.
+            if unknown_callable && issues.len() == before {
+                issues.push(Issue::new(code::SYNTAX_ERROR, at));
+            }
+            None
+        }
+    };
+    Checked {
+        clean: issues.len() == before,
+        sample: rendered,
+    }
 }
 
-/// Whether a merge path (`person.first_name`) names something the template may read.
-fn is_known(catalog: &FieldCatalog, path: &str) -> bool {
-    let mut parts = path.split('.');
-    let root = parts.next().unwrap_or_default();
-    let second = parts.next();
-    match (root, second) {
-        ("person", Some(key)) => catalog.person.contains_key(key),
-        ("event", Some(key)) => catalog.event.contains(key),
-        ("message", Some(key)) => MESSAGE_FIELDS.contains(&key),
-        ("system", Some(key)) => SYSTEM_FIELDS.contains(&key),
-        ("person" | "event" | "message" | "system", None) => true,
-        (name, _) => GLOBAL_FUNCTIONS.contains(&name),
+/// How a merge path relates to the catalog.
+enum Lookup {
+    Known,
+    Unknown,
+    /// A bare `person` or `event`: the whole object, a dynamic subscript or a filter over it.
+    Dynamic,
+}
+
+/// Classify a merge path (`person.first_name`). The whole path must be in the catalog: a path
+/// below an entry is unknown, because no catalog type is an object or JSON value.
+fn lookup(catalog: &FieldCatalog, path: &str) -> Lookup {
+    let (root, key) = match path.split_once('.') {
+        Some((root, key)) => (root, Some(key)),
+        None => (path, None),
+    };
+    let known = |found: bool| {
+        if found {
+            Lookup::Known
+        } else {
+            Lookup::Unknown
+        }
+    };
+    match (root, key) {
+        ("person" | "event", None) => Lookup::Dynamic,
+        ("person", Some(key)) => known(catalog.person.contains_key(key)),
+        ("event", Some(key)) => known(catalog.event.contains(key)),
+        ("message", Some(key)) => known(MESSAGE_FIELDS.contains(&key)),
+        ("system", Some(key)) => known(SYSTEM_FIELDS.contains(&key)),
+        ("message" | "system", None) => Lookup::Known,
+        (name, None) => known(GLOBAL_FUNCTIONS.contains(&name)),
+        (_, Some(_)) => Lookup::Unknown,
     }
 }
 
@@ -194,7 +368,7 @@ mod tests {
     use zirv_flow_core::people::TraitType;
 
     use super::*;
-    use crate::issue::Severity;
+    use crate::issue::{Severity, severity_of};
 
     fn catalog() -> FieldCatalog {
         FieldCatalog {
@@ -340,6 +514,111 @@ mod tests {
     }
 
     #[test]
+    fn the_unsubscribe_url_must_be_a_rendered_link() {
+        for html in [
+            "<p>{{ system.unsubscribe_url }}</p>",
+            r#"{% if false %}<a href="{{ system.unsubscribe_url }}">u</a>{% endif %}"#,
+            r#"<a href="https://shop.example/u">{{ system.unsubscribe_url }}</a>"#,
+        ] {
+            let issues = email_issues(|email| email.html = html.into());
+            assert_eq!(codes(&issues), [code::MISSING_UNSUBSCRIBE], "{html}");
+        }
+        // A link in a branch that runs is fine.
+        let issues = email_issues(|email| {
+            email.html = r#"{% if person.first_name %}<a href="{{ system.unsubscribe_url }}">u</a>{% endif %}"#.into();
+        });
+        assert_eq!(issues, Vec::new());
+    }
+
+    #[test]
+    fn merge_paths_must_match_the_catalog_exactly() {
+        let unknown = |text: &str| {
+            let issues = email_issues(|email| email.text = text.into());
+            issues
+                .iter()
+                .map(|issue| (issue.code, issue.field.clone().unwrap_or_default()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            unknown("{{ person.first_name.deeper }}"),
+            [(
+                code::UNKNOWN_MERGE_FIELD,
+                "person.first_name.deeper".to_owned()
+            )]
+        );
+        assert_eq!(
+            unknown("{{ person.known.deeper }}"),
+            [(code::UNKNOWN_MERGE_FIELD, "person.known.deeper".to_owned())]
+        );
+        for text in [
+            r#"{{ person["no_such_trait"] }}"#,
+            "{{ person[message.id] }}",
+            "{{ person | items }}",
+            "{{ event }}",
+        ] {
+            let found = unknown(text);
+            assert!(
+                found
+                    .iter()
+                    .any(|(code, _)| *code == code::DYNAMIC_MERGE_FIELD),
+                "{text}: {found:?}"
+            );
+            assert_eq!(severity_of(code::DYNAMIC_MERGE_FIELD), Severity::Blocking);
+        }
+        assert_eq!(unknown("{{ person.first_name }} {{ event.order_id }}"), []);
+    }
+
+    #[test]
+    fn unknown_filters_tests_and_functions_are_syntax_issues() {
+        for source in [
+            "{{ person.first_name | titlecase2 }}",
+            "{% if person.age is nosuchtest %}x{% endif %}",
+        ] {
+            let issues = email_issues(|email| email.subject = source.into());
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.code == code::SYNTAX_ERROR && issue.at == "/email/subject"),
+                "{source}: {issues:?}"
+            );
+        }
+        // The webhook strings are rendered too.
+        let issues = webhook_issues(
+            &[("X-A", "{{ person.age | nosuchfilter }}")],
+            r#"{"a":"{{ person.age | nosuchfilter }}"}"#,
+        );
+        assert_eq!(codes(&issues), [code::SYNTAX_ERROR, code::SYNTAX_ERROR]);
+    }
+
+    #[test]
+    fn webhook_header_names_must_be_tokens() {
+        for name in ["X-A\r\nX-Evil: 1", "X:A", "X A", "X/B", ""] {
+            let issues = webhook_issues(&[(name, "1")], "{}");
+            assert_eq!(codes(&issues), [code::INVALID_HEADER_NAME], "{name:?}");
+        }
+        let issues = webhook_issues(&[("X/B", "1")], "{}");
+        assert_eq!(issues[0].at, "/webhook/headers/X~1B");
+    }
+
+    #[test]
+    fn webhook_header_count_and_size_are_capped() {
+        let names: Vec<String> = (0..=MAX_HEADER_COUNT).map(|n| format!("X-{n}")).collect();
+        let headers: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "1")).collect();
+        assert_eq!(
+            codes(&webhook_issues(&headers, "{}")),
+            [code::TOO_MANY_HEADERS]
+        );
+        let value = "v".repeat(MAX_HEADER_VALUE_BYTES);
+        let names: Vec<String> = (0..5).map(|n| format!("X-{n}")).collect();
+        let headers: Vec<(&str, &str)> =
+            names.iter().map(|n| (n.as_str(), value.as_str())).collect();
+        assert_eq!(
+            codes(&webhook_issues(&headers, "{}")),
+            [code::HEADERS_TOO_LARGE]
+        );
+    }
+
+    #[test]
     fn missing_sender() {
         assert_eq!(
             codes(&email_issues(|email| email.sender = None)),
@@ -399,7 +678,7 @@ mod tests {
     #[test]
     fn webhook_fields_are_checked_in_headers_and_body() {
         let issues = webhook_issues(
-            &[("X-A", "{{ person.nope }}"), ("X/B", "{% if %}")],
+            &[("X-A", "{{ person.nope }}"), ("X-B", "{% if %}")],
             r#"{"list":["{{ event.order_id }}","{{ event.nope }}"],"n":1}"#,
         );
         assert_eq!(
@@ -409,7 +688,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 (code::UNKNOWN_MERGE_FIELD, "/webhook/headers/X-A"),
-                (code::SYNTAX_ERROR, "/webhook/headers/X~1B"),
+                (code::SYNTAX_ERROR, "/webhook/headers/X-B"),
                 (code::UNKNOWN_MERGE_FIELD, "/webhook/body/list/1"),
             ]
         );
@@ -434,6 +713,6 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 14);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 18);
     }
 }

@@ -23,13 +23,17 @@ pub mod code {
     pub const MISSING_SENDER: &str = "missing_sender";
     pub const INVALID_JSON_BODY: &str = "invalid_json_body";
     pub const TEMPLATE_IN_KEY: &str = "template_in_key";
+    pub const DYNAMIC_MERGE_FIELD: &str = "dynamic_merge_field";
+    pub const INVALID_HEADER_NAME: &str = "invalid_header_name";
+    pub const TOO_MANY_HEADERS: &str = "too_many_headers";
+    pub const HEADERS_TOO_LARGE: &str = "headers_too_large";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
     pub const HTML_NEAR_CLIP: &str = "html_near_clip";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 11] = [
+    pub const BLOCKING: [&str; 15] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -41,6 +45,10 @@ pub mod code {
         MISSING_SENDER,
         INVALID_JSON_BODY,
         TEMPLATE_IN_KEY,
+        DYNAMIC_MERGE_FIELD,
+        INVALID_HEADER_NAME,
+        TOO_MANY_HEADERS,
+        HEADERS_TOO_LARGE,
     ];
 
     /// Every code that only warns.

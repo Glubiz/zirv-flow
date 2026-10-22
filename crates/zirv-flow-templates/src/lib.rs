@@ -29,7 +29,7 @@ pub use issue::{FieldCatalog, Issue, Severity, code, severity_of};
 pub use links::{Hooks, INERT_TOKEN, Tracking, rewrite_links, unsubscribe_headers};
 pub use render::{Rendered, RenderedWebhook, render_email, render_webhook};
 pub use sandbox::{
-    FUEL, MAX_HEADER_VALUE_BYTES, MAX_HTML_BYTES, MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES,
-    MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, RECURSION_LIMIT,
+    FUEL, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
+    MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, RECURSION_LIMIT,
 };
 pub use validate::validate;
