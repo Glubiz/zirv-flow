@@ -224,10 +224,11 @@ fn ident(token: Option<&Token>) -> Option<&str> {
 }
 
 fn analyse(tokens: &[Token], block: bool, out: &mut Vec<(Kind, String)>) {
-    if block && ident(tokens.first()) == Some("filter") {
-        if let Some(name) = ident(tokens.get(1)) {
-            out.push((Kind::Filter, name.to_owned()));
-        }
+    if block
+        && ident(tokens.first()) == Some("filter")
+        && let Some(name) = ident(tokens.get(1))
+    {
+        out.push((Kind::Filter, name.to_owned()));
     }
     for (i, token) in tokens.iter().enumerate() {
         let after_dot = i > 0 && tokens[i - 1] == Token::Dot;
