@@ -29,6 +29,8 @@ pub mod code {
     pub const TOO_MANY_HEADERS: &str = "too_many_headers";
     pub const HEADERS_TOO_LARGE: &str = "headers_too_large";
     pub const BODY_TOO_LARGE: &str = "body_too_large";
+    pub const MJML_PARSE_ERROR: &str = "mjml_parse_error";
+    pub const MJML_INCLUDE: &str = "mjml_include";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
@@ -36,7 +38,7 @@ pub mod code {
     pub const SAMPLE_RENDER_FAILED: &str = "sample_render_failed";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 16] = [
+    pub const BLOCKING: [&str; 18] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -53,6 +55,8 @@ pub mod code {
         TOO_MANY_HEADERS,
         HEADERS_TOO_LARGE,
         BODY_TOO_LARGE,
+        MJML_PARSE_ERROR,
+        MJML_INCLUDE,
     ];
 
     /// Every code that only warns.

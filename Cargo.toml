@@ -30,6 +30,10 @@ http-body-util = "0.1.5"
 ipnet = "2.12.2"
 metrics = "0.24.6"
 minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "macros", "multi_template", "serde", "fuel"] }
+# MJML to HTML (#237). Parse and render only: no `json`, `print`, `async`, no `local-loader`, no
+# `http-loader*` (so an `mj-include` can read nothing), no `css-inline`. Pinned: 6.0.1 was published
+# 2026-04-25.
+mrml = { version = "=6.0.1", default-features = false, features = ["parse", "render"] }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }

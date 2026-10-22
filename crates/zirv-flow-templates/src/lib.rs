@@ -32,7 +32,7 @@ pub use context::{
     MessageContext, RenderContext, SAMPLE_PREFERENCES_URL, SAMPLE_UNSUBSCRIBE_URL, SystemValues,
 };
 pub use document::{
-    Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
+    Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
 };
 pub use error::RenderError;
 pub use issue::{FieldCatalog, Issue, Severity, code, severity_of};

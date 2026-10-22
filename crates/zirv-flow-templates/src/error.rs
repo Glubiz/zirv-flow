@@ -40,6 +40,10 @@ pub enum RenderError {
     MissingUnsubscribe,
     /// The message's unsubscribe URL is not an `https` URL (RFC 8058).
     InvalidUnsubscribeUrl,
+    /// The MJML source holds an `mj-include` element, which is never loaded.
+    MjmlInclude,
+    /// `mrml` could not parse or render the MJML.
+    Mjml,
 }
 
 impl RenderError {
@@ -63,6 +67,8 @@ impl RenderError {
             Self::HeadersTooLarge => "headers_too_large",
             Self::MissingUnsubscribe => "missing_unsubscribe",
             Self::InvalidUnsubscribeUrl => "invalid_unsubscribe_url",
+            Self::MjmlInclude => "mjml_include",
+            Self::Mjml => "mjml_error",
         }
     }
 
@@ -95,6 +101,8 @@ impl RenderError {
             "headers_too_large" => Self::HeadersTooLarge,
             "missing_unsubscribe" => Self::MissingUnsubscribe,
             "invalid_unsubscribe_url" => Self::InvalidUnsubscribeUrl,
+            "mjml_include" => Self::MjmlInclude,
+            "mjml_error" => Self::Mjml,
             _ => return None,
         })
     }
@@ -159,6 +167,8 @@ mod tests {
             RenderError::HeadersTooLarge,
             RenderError::MissingUnsubscribe,
             RenderError::InvalidUnsubscribeUrl,
+            RenderError::MjmlInclude,
+            RenderError::Mjml,
         ];
         for error in all {
             assert_eq!(

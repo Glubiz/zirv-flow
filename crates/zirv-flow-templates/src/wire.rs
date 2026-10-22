@@ -147,6 +147,7 @@ mod tests {
             sender: None,
             lang: None,
             category: Category::Transactional,
+            syntax: Default::default(),
             html: html.into(),
             text: "t".into(),
         })

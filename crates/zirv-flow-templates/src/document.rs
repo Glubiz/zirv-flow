@@ -46,6 +46,23 @@ pub enum Category {
     Transactional,
 }
 
+/// How the `html` field of an email is written.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Syntax {
+    /// Raw HTML. The default, so every document written before `syntax` existed is unchanged.
+    #[default]
+    Html,
+    /// MJML: MiniJinja renders the source, then `mrml` turns the result into responsive HTML.
+    Mjml,
+}
+
+impl Syntax {
+    pub(crate) fn is_html(&self) -> bool {
+        *self == Self::Html
+    }
+}
+
 /// Code-mode email content. Every text field is a MiniJinja template.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EmailContent {
@@ -57,6 +74,9 @@ pub struct EmailContent {
     pub lang: Option<String>,
     #[serde(default)]
     pub category: Category,
+    /// How `html` is written. Left out of the stored document when it is `html`.
+    #[serde(default, skip_serializing_if = "Syntax::is_html")]
+    pub syntax: Syntax,
     pub html: String,
     #[serde(default)]
     pub text: String,
