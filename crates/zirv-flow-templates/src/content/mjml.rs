@@ -109,68 +109,60 @@ pub(crate) fn has_include(source: &str) -> bool {
         })
 }
 
-/// An upper bound of how deeply the elements of `text` nest, in one pass and with no stack of
-/// names: an open tag is +1, a closing tag -1 (never below 0), and a self-closing or void element
-/// 0. It may count more than the truth, never less, because it is only used to refuse.
+/// `mrml` 6.0.1's `is_void_element` (private there), mirrored exactly: the names are matched
+/// case-sensitively, so `<BR>` is not void and `mrml` recurses into it.
+fn is_void_element(tag: &str) -> bool {
+    matches!(
+        tag,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+/// The deepest element nesting in `text`, counted over the tokens `mrml` itself reads (the same
+/// `htmlparser` tokenizer, so conditional comments and every other construct are tokenized as
+/// `mrml` tokenizes them): an open tag is +1 unless its local name is void, a closing tag is -1
+/// (never below 0), and a self-closing tag and every other token is 0. The tokenizer is
+/// iterative, so this is one linear pass with no recursion and no allocation per tag. At a
+/// tokenizer error it stops and returns the depth so far, because `mrml` fails at the same point.
 pub(crate) fn nesting_depth(text: &str) -> usize {
-    const VOID: [&str; 14] = [
-        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-        "source", "track", "wbr",
-    ];
-    let bytes = text.as_bytes();
-    let (mut depth, mut deepest, mut at) = (0usize, 0usize, 0usize);
-    while let Some(found) = bytes[at..].iter().position(|b| *b == b'<') {
-        at += found;
-        let rest = &bytes[at..];
-        if rest.starts_with(b"<!--") {
-            at += 4 + find(&rest[4..], b"-->").map_or(rest.len() - 4, |end| end + 3);
-            continue;
-        }
-        if rest.starts_with(b"<![CDATA[") {
-            at += 9 + find(&rest[9..], b"]]>").map_or(rest.len() - 9, |end| end + 3);
-            continue;
-        }
-        // The end of the tag: the first `>` outside a quoted attribute value.
-        let mut quote = None;
-        let mut close = None;
-        for (index, byte) in rest.iter().enumerate().skip(1) {
-            match (quote, *byte) {
-                (None, b'"' | b'\'') => quote = Some(*byte),
-                (Some(open), b) if b == open => quote = None,
-                (None, b'>') => {
-                    close = Some(index);
-                    break;
+    use htmlparser::{ElementEnd, Token, Tokenizer};
+
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let mut void = false;
+    for token in Tokenizer::from(text) {
+        match token {
+            Ok(Token::ElementStart { local, .. }) => void = is_void_element(local.as_str()),
+            Ok(Token::ElementEnd {
+                end: ElementEnd::Open,
+                ..
+            }) => {
+                if !void {
+                    depth += 1;
+                    deepest = deepest.max(depth);
                 }
-                _ => {}
             }
-        }
-        let Some(close) = close else { break };
-        let tag = &rest[1..close];
-        at += close + 1;
-        match tag.first() {
-            Some(b'/') => depth = depth.saturating_sub(1),
-            Some(b'!' | b'?') | None => {}
-            Some(_) => {
-                let name_end = tag
-                    .iter()
-                    .position(|b| b.is_ascii_whitespace() || *b == b'/')
-                    .unwrap_or(tag.len());
-                let name = String::from_utf8_lossy(&tag[..name_end]).to_ascii_lowercase();
-                if tag.ends_with(b"/") || VOID.contains(&name.as_str()) {
-                    continue;
-                }
-                depth += 1;
-                deepest = deepest.max(depth);
-            }
+            Ok(Token::ElementEnd {
+                end: ElementEnd::Close(..),
+                ..
+            }) => depth = depth.saturating_sub(1),
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
     deepest
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 /// The pinned `mrml` render options. Spelled out so a change of the crate's defaults cannot
@@ -388,13 +380,66 @@ mod tests {
     #[test]
     fn the_depth_scan_counts_open_close_and_self_closing_tags() {
         assert_eq!(nesting_depth("<a><b></b><c/><br></a>"), 2);
-        assert_eq!(nesting_depth("</a></b><a>"), 1);
+        assert_eq!(nesting_depth("<r></a></b><a>"), 1);
         assert_eq!(
             nesting_depth("<!-- <a><a><a> --><a x=\">\"><![CDATA[<b><b>]]></a>"),
             1
         );
         assert_eq!(nesting_depth("<a><b"), 1);
         assert_eq!(nesting_depth(""), 0);
+    }
+
+    fn deep_inside(opening: &str, repeated: &str) -> String {
+        format!(
+            "<mjml><mj-body><mj-raw>{opening}{}</mj-raw></mj-body></mjml>",
+            repeated.repeat(35_000)
+        )
+    }
+
+    #[test]
+    fn conditional_comment_tokens_do_not_hide_nesting_from_the_guard() {
+        for opening in [
+            "<!--[if mso]>",
+            "<![if mso]>",
+            "<![endif]>",
+            "<!--<![endif]-->",
+            "<!--[if mso]><![endif]-->",
+            // Closed or not, the tokens after it are what `mrml` reads.
+            "<!--[if mso]>x<![endif]-->",
+        ] {
+            let deep = deep_inside(opening, "<a>");
+            assert!(nesting_depth(&deep) > MAX_DEPTH, "{opening}");
+            let before = parser_calls();
+            assert_eq!(compile(&deep), Err(MjmlError::TooDeep), "{opening}");
+            assert_eq!(parser_calls(), before, "{opening}: mrml must not see it");
+        }
+    }
+
+    #[test]
+    fn void_names_are_matched_the_way_mrml_matches_them() {
+        for tag in ["<BR>", "<IMG>", "<HR>", "<Br>"] {
+            let deep = deep_inside("", tag);
+            assert!(
+                nesting_depth(&deep) > MAX_DEPTH,
+                "{tag} is not void for mrml"
+            );
+            assert_eq!(compile(&deep), Err(MjmlError::TooDeep), "{tag}");
+        }
+        for tag in ["<br>", "<img src=\"a\">", "<hr/>", "<x:br>"] {
+            let flat = deep_inside("", tag);
+            assert!(nesting_depth(&flat) <= 4, "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_real_conditional_comment_block_still_passes() {
+        let source = "<mjml lang=\"en\"><mj-body><mj-section><mj-column><mj-raw>\
+            <!--[if mso | IE]><table role=\"presentation\"><tr><td><![endif]-->\
+            <div><p>Hi<br></p></div>\
+            <!--[if mso | IE]></td></tr></table><![endif]-->\
+            </mj-raw></mj-column></mj-section></mj-body></mjml>";
+        assert!(nesting_depth(source) < 16);
+        assert!(compile(source).is_ok());
     }
 
     #[test]

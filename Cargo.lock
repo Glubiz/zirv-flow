@@ -5552,6 +5552,7 @@ dependencies = [
 name = "zirv-flow-templates"
 version = "0.79.0"
 dependencies = [
+ "htmlparser",
  "minijinja",
  "mrml",
  "proptest",

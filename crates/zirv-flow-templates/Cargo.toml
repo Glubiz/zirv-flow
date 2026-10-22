@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 minijinja.workspace = true
+htmlparser = "=0.2.1"
 mrml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
