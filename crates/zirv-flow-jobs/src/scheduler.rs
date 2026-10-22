@@ -11,16 +11,17 @@ use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
-    database_now, delete_expired_import_data, dirty_backlog, dirty_heads, disable_schedule,
-    due_schedules, enqueue, enqueue_drain, enqueue_reevaluate, ensure_decision_partitions,
-    ensure_event_partitions, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
-    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
-    reconcile_segment_schedules, stream_freshness, try_lead,
+    database_now, delete_expired_import_data, destination_report, dirty_backlog, dirty_heads,
+    disable_schedule, due_schedules, enqueue, enqueue_drain, enqueue_reevaluate,
+    ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
+    expire_exports, fail_orphaned_runs, inbox_heads, prune_debugger_feed, queue_depths,
+    reap_expired, reconcile_flow_schedules, reconcile_segment_schedules, stream_freshness,
+    try_lead,
 };
 
 use crate::metrics::{
-    FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_dirty_age, set_dirty_backlog,
-    set_inbox_age,
+    DestinationGauges, FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_dirty_age,
+    set_dirty_backlog, set_inbox_age,
 };
 
 /// Schedules handled per tick; more than this carry over to the next tick.
@@ -39,6 +40,8 @@ const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the stream freshness gauges are refreshed. Thresholds are hours, so half a minute of
 /// lag is immaterial.
 const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the destination gauges and counters are refreshed.
+const DESTINATION_INTERVAL: Duration = Duration::from_secs(15);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
@@ -105,6 +108,10 @@ pub struct Scheduler {
     freshness: FreshnessGauges,
     /// When the freshness gauges were last refreshed; none until this instance leads.
     freshness_checked: Option<Instant>,
+    /// The destination queue gauges and attempt counters.
+    destinations: DestinationGauges,
+    /// When the destination gauges were last refreshed; none until this instance leads.
+    destinations_checked: Option<Instant>,
 }
 
 impl Scheduler {
@@ -120,6 +127,8 @@ impl Scheduler {
             sync_reconciled: None,
             freshness: FreshnessGauges::default(),
             freshness_checked: None,
+            destinations: DestinationGauges::default(),
+            destinations_checked: None,
         }
     }
 
@@ -147,6 +156,7 @@ impl Scheduler {
             .expect("the gauge lock is never held across a panic")
             .zero_all();
         self.freshness.zero_all();
+        self.destinations.zero_all();
     }
 
     /// One pass: take or keep the lock, and if this instance leads, do the leader's work
@@ -161,6 +171,7 @@ impl Scheduler {
         self.keep_debugger_feed().await;
         self.keep_sync_runs().await;
         self.keep_freshness(now).await;
+        self.keep_destinations().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -176,6 +187,7 @@ impl Scheduler {
         self.keep_debugger_feed().await;
         self.keep_sync_runs().await;
         self.keep_freshness(now).await;
+        self.keep_destinations().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -302,6 +314,22 @@ impl Scheduler {
         }
     }
 
+    /// Refreshes the destination gauges and counters: on gaining leadership, then at most every
+    /// [`DESTINATION_INTERVAL`]. A failure is logged and retried at the next check.
+    async fn keep_destinations(&mut self) {
+        let due = self
+            .destinations_checked
+            .is_none_or(|checked| checked.elapsed() >= DESTINATION_INTERVAL);
+        if !due {
+            return;
+        }
+        self.destinations_checked = Some(Instant::now());
+        match destination_report(&self.pool).await {
+            Ok(report) => self.destinations.update(&report),
+            Err(error) => warn!("could not refresh the destination gauges: {error}"),
+        }
+    }
+
     /// Whether this instance leads after the call. A lock connection that died has lost
     /// the lock, so a leader steps down before it works.
     async fn lead(&mut self) -> Result<bool, StoreError> {
@@ -317,6 +345,8 @@ impl Scheduler {
             self.sync_reconciled = None;
             self.freshness_checked = None;
             self.freshness.zero_all();
+            self.destinations_checked = None;
+            self.destinations.zero_all();
             self.gauges
                 .get_mut()
                 .expect("the gauge lock is never held across a panic")
@@ -1507,6 +1537,109 @@ mod tests {
         }
         assert!(!output.contains("secret-crm-name"));
         assert!(!output.contains("0 * * * *"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_publishes_the_destination_metrics_and_zeroes_an_archived_destination(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        use zirv_flow_store::{
+            AttemptOutcome, NewDeliveryAttempt, NewDestination, StatusClass, SubjectKind,
+            archive_destination, create_destination, create_workspace, record_delivery_attempt,
+        };
+
+        migrated(&pool).await;
+        let ws = create_workspace(
+            &pool,
+            &WorkspaceName::parse("ours").unwrap(),
+            &Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let config = json!({});
+        let destination = create_destination(
+            &pool,
+            ws,
+            &NewDestination {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "secret-mail-name",
+                config: &config,
+                credential_secret_id: None,
+                credential_fields: &[],
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        for attempt in 1..=2 {
+            record_delivery_attempt(
+                &pool,
+                ws,
+                &NewDeliveryAttempt {
+                    destination_id: destination.id,
+                    subject_kind: SubjectKind::Message,
+                    subject_id: Uuid::now_v7(),
+                    attempt,
+                    outcome: AttemptOutcome::Delivered,
+                    status_class: StatusClass::Success,
+                    duration_ms: 3,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap();
+
+        leader.tick_at(now).await.unwrap();
+        let first = handle.render();
+        archive_destination(&pool, ws, destination.id)
+            .await
+            .unwrap();
+        leader.destinations_checked = None;
+        leader.tick_at(now).await.unwrap();
+        let second = handle.render();
+
+        let labels = format!(
+            "workspace=\"{}\",destination=\"{}\"",
+            ws.as_uuid(),
+            destination.id
+        );
+        for output in [&first, &second] {
+            assert!(!output.contains("secret-mail-name"), "{output}");
+        }
+        assert!(
+            first.contains(&format!("zirv_flow_destination_queue_depth{{{labels}}} 0")),
+            "{first}"
+        );
+        assert!(
+            first.contains(&format!(
+                "zirv_flow_destination_attempts_total{{{labels}}} 2"
+            )),
+            "{first}"
+        );
+        assert!(
+            first.contains(&format!(
+                "zirv_flow_destination_outcomes_total{{{labels},outcome=\"delivered\"}} 2"
+            )),
+            "{first}"
+        );
+        // Archived: the gauges are zeroed, not left at their last value.
+        assert!(
+            second.contains(&format!(
+                "zirv_flow_destination_queue_oldest_seconds{{{labels}}} 0"
+            )),
+            "{second}"
+        );
     }
 
     #[sqlx::test]

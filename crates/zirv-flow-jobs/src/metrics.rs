@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 use zirv_flow_core::Freshness;
-use zirv_flow_store::{DrainOutcome, QueueDepth, StreamFreshness};
+use zirv_flow_store::{DestinationStat, DrainOutcome, QueueDepth, StreamFreshness};
 
 /// How a job attempt ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -318,6 +318,83 @@ fn count_gauge(workspace: Uuid, state: Freshness, count: f64) {
         "state" => state.as_str(),
     )
     .set(count);
+}
+
+/// The destination gauges and counters (architecture 10.1, 15), labelled `workspace` and
+/// `destination` ids only, never a name, a host or an address:
+/// - `zirv_flow_destination_queue_depth{workspace,destination}`, items waiting for delivery;
+/// - `zirv_flow_destination_queue_oldest_seconds{workspace,destination}`, the age of the oldest;
+/// - `zirv_flow_destination_attempts_total{workspace,destination}`, delivery attempts so far;
+/// - `zirv_flow_destination_outcomes_total{workspace,destination,outcome}`, the same by outcome.
+///
+/// The counters are set from the totals in `delivery_attempts`, so every instance reports the
+/// same numbers and a restart loses nothing. The gauges are set to 0 for a destination that
+/// dropped out of the report (archived, deleted) or when this instance stops leading; a counter
+/// keeps its last value, as counters do.
+#[derive(Default)]
+pub(crate) struct DestinationGauges {
+    published: BTreeSet<(Uuid, Uuid)>,
+}
+
+impl DestinationGauges {
+    pub(crate) fn update(&mut self, report: &[DestinationStat]) {
+        let current: BTreeSet<(Uuid, Uuid)> = report
+            .iter()
+            .map(|stat| (stat.workspace_id, stat.destination_id))
+            .collect();
+        for (workspace, destination) in self.published.difference(&current) {
+            destination_gauges(*workspace, *destination, 0.0, 0.0);
+        }
+        for stat in report {
+            destination_gauges(
+                stat.workspace_id,
+                stat.destination_id,
+                stat.queue_depth as f64,
+                stat.oldest_age_seconds as f64,
+            );
+            let workspace = stat.workspace_id.to_string();
+            let destination = stat.destination_id.to_string();
+            let mut attempts = 0u64;
+            for (outcome, count) in &stat.outcomes {
+                let count = u64::try_from(*count).unwrap_or(0);
+                attempts += count;
+                metrics::counter!(
+                    "zirv_flow_destination_outcomes_total",
+                    "workspace" => workspace.clone(),
+                    "destination" => destination.clone(),
+                    "outcome" => outcome.clone(),
+                )
+                .absolute(count);
+            }
+            metrics::counter!(
+                "zirv_flow_destination_attempts_total",
+                "workspace" => workspace,
+                "destination" => destination,
+            )
+            .absolute(attempts);
+        }
+        self.published = current;
+    }
+
+    /// Sets everything this instance has published to 0, for an instance that stops leading.
+    pub(crate) fn zero_all(&mut self) {
+        self.update(&[]);
+    }
+}
+
+fn destination_gauges(workspace: Uuid, destination: Uuid, depth: f64, oldest_seconds: f64) {
+    metrics::gauge!(
+        "zirv_flow_destination_queue_depth",
+        "workspace" => workspace.to_string(),
+        "destination" => destination.to_string(),
+    )
+    .set(depth);
+    metrics::gauge!(
+        "zirv_flow_destination_queue_oldest_seconds",
+        "workspace" => workspace.to_string(),
+        "destination" => destination.to_string(),
+    )
+    .set(oldest_seconds);
 }
 
 #[cfg(test)]
@@ -767,5 +844,123 @@ mod tests {
             !output.contains("source") && !output.contains("workspace") && !output.contains("name"),
             "{output}"
         );
+    }
+
+    fn stat(
+        workspace: Uuid,
+        destination: Uuid,
+        depth: i64,
+        outcomes: &[(&str, i64)],
+    ) -> DestinationStat {
+        DestinationStat {
+            workspace_id: workspace,
+            destination_id: destination,
+            queue_depth: depth,
+            oldest_age_seconds: depth * 2,
+            outcomes: outcomes
+                .iter()
+                .map(|(outcome, count)| ((*outcome).to_owned(), *count))
+                .collect(),
+        }
+    }
+
+    fn sample(output: &str, metric: &str, destination: Uuid) -> Option<f64> {
+        output
+            .lines()
+            .find(|line| {
+                line.starts_with(metric) && line.contains(&format!("destination=\"{destination}\""))
+            })
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse().ok())
+    }
+
+    #[test]
+    fn the_destination_gauges_follow_the_report_and_zero_a_destination_that_disappears() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = DestinationGauges::default();
+        let ws = Uuid::from_u128(1);
+        let (kept, gone) = (Uuid::from_u128(10), Uuid::from_u128(11));
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[
+                stat(ws, kept, 3, &[("delivered", 5), ("retryable", 2)]),
+                stat(ws, gone, 7, &[]),
+            ]);
+        });
+        let first = handle.render();
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[stat(ws, kept, 1, &[("delivered", 6), ("retryable", 2)])]);
+        });
+        let second = handle.render();
+
+        let depth = "zirv_flow_destination_queue_depth";
+        let oldest = "zirv_flow_destination_queue_oldest_seconds";
+        let attempts = "zirv_flow_destination_attempts_total";
+        assert_eq!(sample(&first, depth, kept), Some(3.0), "{first}");
+        assert_eq!(sample(&first, oldest, kept), Some(6.0), "{first}");
+        assert_eq!(sample(&first, depth, gone), Some(7.0), "{first}");
+        assert_eq!(sample(&second, depth, kept), Some(1.0), "{second}");
+        assert_eq!(sample(&second, depth, gone), Some(0.0), "{second}");
+        assert_eq!(sample(&second, oldest, gone), Some(0.0), "{second}");
+        // The totals are set from the database: 7 attempts, then 8 after one more delivery.
+        assert_eq!(sample(&first, attempts, kept), Some(7.0), "{first}");
+        assert_eq!(sample(&second, attempts, kept), Some(8.0), "{second}");
+        assert!(
+            second.contains(&format!(
+                "zirv_flow_destination_outcomes_total{{workspace=\"{ws}\",destination=\"{kept}\",outcome=\"delivered\"}} 6"
+            )),
+            "{second}"
+        );
+    }
+
+    #[test]
+    fn stepping_down_zeroes_the_destination_gauges() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = DestinationGauges::default();
+        let destination = Uuid::from_u128(10);
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update(&[stat(Uuid::from_u128(1), destination, 4, &[])]);
+            gauges.zero_all();
+        });
+        let output = handle.render();
+
+        assert_eq!(
+            sample(&output, "zirv_flow_destination_queue_depth", destination),
+            Some(0.0),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn the_destination_labels_are_ids_only() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let (ws, destination) = (Uuid::from_u128(1), Uuid::from_u128(10));
+
+        metrics::with_local_recorder(&recorder, || {
+            DestinationGauges::default().update(&[stat(ws, destination, 1, &[("terminal", 1)])]);
+        });
+        let output = handle.render();
+
+        let lines: Vec<&str> = output
+            .lines()
+            .filter(|line| line.starts_with("zirv_flow_destination_"))
+            .collect();
+        assert_eq!(lines.len(), 4, "{output}");
+        for line in lines {
+            let labels = &line[line.find('{').unwrap() + 1..line.find('}').unwrap()];
+            let keys: Vec<&str> = labels
+                .split(',')
+                .map(|pair| pair.split('=').next().unwrap())
+                .collect();
+            assert!(
+                keys == ["workspace", "destination"]
+                    || keys == ["workspace", "destination", "outcome"],
+                "{line}"
+            );
+        }
     }
 }
