@@ -2,7 +2,8 @@
 //! `verified` exactly when its DKIM, SPF and DMARC records are all `ok`, and a change in either
 //! direction appends a `sending_domain.verify` decision.
 
-use sqlx::PgConnection;
+use serde_json::json;
+use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 use zirv_flow_core::sending::{RecordKind, RecordStatus};
 use zirv_flow_core::{TraceContext, WorkspaceId};
@@ -10,7 +11,25 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 use super::domains::{
     DomainRecord, SendingDomain, UNVERIFIED, VERIFIED, domain_columns, list_domain_records,
 };
-use crate::{NewDecision, StoreError, append_decision};
+use crate::{NewDecision, NewJob, StoreError, append_decision, enqueue};
+
+/// The job kind that checks a domain's DNS records.
+pub const SENDING_DOMAIN_VERIFY_KIND: &str = "sending_domain.verify";
+
+/// Queues a check of the domain's DNS records under `trace`. At most one check per domain is
+/// ready or running at a time: a second request while one waits is a no-op, and returns false.
+pub async fn enqueue_domain_verify<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    domain: Uuid,
+    trace: TraceContext,
+) -> Result<bool, StoreError> {
+    let mut job = NewJob::new(SENDING_DOMAIN_VERIFY_KIND, trace);
+    job.workspace_id = Some(workspace);
+    job.payload = json!({"workspace_id": workspace.to_string(), "domain_id": domain.to_string()});
+    job.unique_key = Some(format!("{SENDING_DOMAIN_VERIFY_KIND}:{domain}"));
+    enqueue(executor, &job).await
+}
 
 /// How many observed TXT records, and how many characters of each, a record keeps.
 const MAX_OBSERVED: usize = 8;
@@ -323,6 +342,28 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(domain.status, "unverified");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn one_check_per_domain_waits_in_the_queue_at_a_time(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let id = plant_domain(&pool, ws, "example.com").await.unwrap();
+        let trace = TraceContext::root(Cause::manual(zirv_flow_core::UserId::new()));
+
+        let first = enqueue_domain_verify(&pool, ws, id, trace.clone())
+            .await
+            .unwrap();
+        let second = enqueue_domain_verify(&pool, ws, id, trace).await.unwrap();
+
+        assert!(first && !second);
+        let (kind, payload): (String, serde_json::Value) =
+            sqlx::query_as("SELECT kind, payload FROM jobs")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kind, SENDING_DOMAIN_VERIFY_KIND);
+        assert_eq!(payload["domain_id"], id.to_string());
     }
 
     #[sqlx::test]

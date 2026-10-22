@@ -44,7 +44,7 @@ impl std::error::Error for DnsError {}
 pub type Lookup<'a> = Pin<Box<dyn Future<Output = Result<Vec<String>, DnsError>> + Send + 'a>>;
 
 /// Looks up TXT records.
-pub trait DnsResolver: Send + Sync {
+pub trait DnsResolver: Send + Sync + std::fmt::Debug {
     /// The TXT records at `name`, one string per record with its character strings joined. An
     /// empty list when the name or its TXT records do not exist.
     fn lookup_txt<'a>(&'a self, name: &'a str) -> Lookup<'a>;

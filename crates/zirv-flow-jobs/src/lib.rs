@@ -14,5 +14,7 @@ mod worker;
 pub use context::JobContext;
 pub use error::JobError;
 pub use registry::{ErasedKind, JobKind, Registry};
-pub use scheduler::{LeaderReport, Scheduler, SchedulerConfig, Tick};
+pub use scheduler::{
+    DEFAULT_SENDING_DOMAIN_RECHECK, LeaderReport, Scheduler, SchedulerConfig, Tick,
+};
 pub use worker::{Worker, WorkerConfig};

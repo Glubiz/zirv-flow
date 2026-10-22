@@ -19,6 +19,12 @@ pub struct SystemResolver {
     resolver: TokioResolver,
 }
 
+impl std::fmt::Debug for SystemResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SystemResolver")
+    }
+}
+
 impl SystemResolver {
     /// Reads the system configuration. Fails when the system names no usable name server.
     pub fn new() -> Result<Self, DnsError> {

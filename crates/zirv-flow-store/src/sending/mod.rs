@@ -28,7 +28,10 @@ pub use identities::{
     list_sender_identities, update_sender_identity,
 };
 pub use sender::{SenderError, VerifiedSender, require_verified_sender};
-pub use verify::{DomainCheck, RecordFinding, record_domain_check};
+pub use verify::{
+    DomainCheck, RecordFinding, SENDING_DOMAIN_VERIFY_KIND, enqueue_domain_verify,
+    record_domain_check,
+};
 
 /// Fixtures for the tests of this module and, behind `test-support`, of the crates above it.
 #[cfg(any(test, feature = "test-support"))]

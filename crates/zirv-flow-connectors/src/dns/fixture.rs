@@ -24,6 +24,12 @@ fn key(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+impl std::fmt::Debug for FixtureResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("FixtureResolver")
+    }
+}
+
 impl FixtureResolver {
     pub fn new() -> Self {
         Self::default()

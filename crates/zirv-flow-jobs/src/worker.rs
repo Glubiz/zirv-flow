@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{Instrument, Span, info, info_span, warn};
+use zirv_flow_connectors::dns::DnsResolver;
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
@@ -61,6 +62,9 @@ pub struct WorkerConfig {
     pub clock: Clock,
     /// The isolated renderer that send handlers render through; none leaves them without one.
     pub render_pool: Option<RenderPool>,
+    /// The resolver `sending_domain.verify` reads DNS through; without one that kind fails until
+    /// one is configured.
+    pub dns: Option<Arc<dyn DnsResolver>>,
 }
 
 impl WorkerConfig {
@@ -82,6 +86,7 @@ impl WorkerConfig {
             rate_limits: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
+            dns: None,
         }
     }
 }
@@ -387,6 +392,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_clock(shared.config.clock.clone())
             .with_render_pool(shared.config.render_pool.clone())
+            .with_dns(shared.config.dns.clone())
             .with_outbound(
                 shared.config.keyring.clone(),
                 Arc::clone(&shared.config.egress),
@@ -645,6 +651,7 @@ mod tests {
             rate_limits: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
+            dns: None,
         }
     }
 
