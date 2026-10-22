@@ -1728,4 +1728,293 @@ mod tests {
         assert_eq!(env.mock.hits().len(), 1, "the flow ended after the node");
         assert_eq!(env.events("webhook.succeeded").await.len(), 1);
     }
+
+    // Templated payloads (#216). The render host is this test binary run again, filtered to
+    // `render_host_child`, which does nothing unless the pool started it.
+
+    use zirv_flow_render::{ChildCommand, PoolConfig, RenderPool};
+    use zirv_flow_store::{NewTemplate, create_template, lock_template, publish_template};
+
+    #[test]
+    fn render_host_child() {
+        if std::env::var("ZIRV_FLOW_TEST_WEBHOOK_RENDER_HOST").is_err() {
+            return;
+        }
+        std::process::exit(i32::from(zirv_flow_render::host::run(None)));
+    }
+
+    async fn start_pool() -> RenderPool {
+        let command = ChildCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "kinds::webhook_call::tests::render_host_child",
+                "--nocapture",
+                "--test-threads",
+                "1",
+                "-q",
+            ])
+            .env("ZIRV_FLOW_TEST_WEBHOOK_RENDER_HOST", "1")
+            .skip_stdout_until("running 1 test\n");
+        let config = PoolConfig {
+            size: 1,
+            deadline: Duration::from_secs(60),
+        };
+        RenderPool::start(command, config).await.unwrap()
+    }
+
+    impl Env {
+        async fn define_number_trait(&self, key: &str) {
+            zirv_flow_store::create_trait_definition(
+                &self.pool,
+                self.ws,
+                &NewTraitDefinition {
+                    key: key.into(),
+                    trait_type: TraitType::Number,
+                    precedence: Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii: false,
+                    channel_address: false,
+                    inferred: false,
+                    description: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        /// A template of `channel` with `document` as its draft, published when `publish`.
+        async fn template(&self, channel: &str, document: Value, publish: bool) -> Uuid {
+            let id = Uuid::now_v7();
+            let mut connection = self.pool.acquire().await.unwrap();
+            create_template(
+                &mut connection,
+                self.ws,
+                &NewTemplate {
+                    id,
+                    name: format!("T {id}"),
+                    channel: channel.into(),
+                    category: "transactional".into(),
+                    sender_identity_id: None,
+                    document,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            if publish {
+                let locked = lock_template(&mut connection, self.ws, id).await.unwrap();
+                publish_template(
+                    &mut connection,
+                    self.ws,
+                    &locked,
+                    &json!([]),
+                    None,
+                    &TraceContext::root(Cause::api("publish")),
+                )
+                .await
+                .unwrap();
+            }
+            id
+        }
+
+        /// Queues the job `flow.step` would for a node that names `template`.
+        async fn queue_templated(&self, enrolled: &Enrolled, person: Uuid, template: Uuid) {
+            let key = format!("{}:hook:webhook", enrolled.enrollment);
+            let mut job = NewJob::new(WEBHOOK_JOB_KIND, enrolled.trace.clone());
+            job.workspace_id = Some(self.ws);
+            job.unique_key = Some(key.clone());
+            job.max_attempts = 5;
+            job.payload = json!({
+                "workspace_id": self.ws,
+                "flow_id": Uuid::from_u128(9),
+                "version": 1,
+                "node_id": "hook",
+                "enrollment_id": enrolled.enrollment,
+                "person_id": person,
+                "trace_id": enrolled.trace.trace_id,
+                "idempotency_key": key,
+                "occurred_at": "2031-05-06T07:08:09Z",
+                "url": self.url(),
+                "trait_keys": ["plan"],
+                "template": template,
+            });
+            zirv_flow_store::enqueue(&self.pool, &job).await.unwrap();
+        }
+
+        /// Runs one attempt of the claimed job with `render_pool` given to the worker.
+        async fn attempt_rendering(&self, render_pool: Option<RenderPool>) {
+            let claimed = self.claim().await.expect("a webhook.call job is ready");
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            {
+                let mut ctx = JobContext::new(&mut tx, &claimed)
+                    .with_clock(Clock::Manual(self.clock.clone()))
+                    .with_render_pool(render_pool)
+                    .with_outbound(
+                        self.worker_keyring.clone(),
+                        self.egress.clone(),
+                        Arc::default(),
+                    );
+                WebhookCall
+                    .run(&mut ctx, claimed.payload.clone())
+                    .await
+                    .unwrap();
+            }
+            zirv_flow_store::complete_job(&mut *tx, claimed.id, claimed.lease_token)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        }
+    }
+
+    fn webhook_document(headers: Value, body: &str) -> Value {
+        json!({"schema": 1, "channel": "webhook", "mode": "code",
+            "webhook": {"headers": headers, "body": body}})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_templated_node_sends_the_rendered_headers_and_body_and_signs_the_exact_bytes(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        env.define_number_trait("age").await;
+        let person = env
+            .person("ada@example.com", json!({"plan": "pro", "age": 41}))
+            .await;
+        let enrolled = env
+            .enroll(hook_graph(&env.url(), json!(["plan"])), person)
+            .await;
+        let template = env
+            .template(
+                "webhook",
+                webhook_document(
+                    json!({"X-Plan": "{{ person.plan }}"}),
+                    r#"{"age": "{{ person.age }}", "label": "Plan {{ person.plan }}", "to": "{{ person.email }}"}"#,
+                ),
+                true,
+            )
+            .await;
+        env.queue_templated(&enrolled, person, template).await;
+
+        env.attempt_rendering(Some(start_pool().await)).await;
+
+        let hits = env.mock.hits();
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        assert_eq!(hit.header("x-plan"), Some("pro"));
+        assert_eq!(hit.header("content-type"), Some("application/json"));
+        let body: Value = serde_json::from_slice(&hit.body).unwrap();
+        assert_eq!(
+            body,
+            json!({"age": 41, "label": "Plan pro", "to": "ada@example.com"})
+        );
+        assert!(
+            body["age"].is_number(),
+            "a single tag keeps its number type"
+        );
+        assert!(
+            hit.verifies_with(&env.secrets[0], now_seconds(&env)),
+            "the signature covers the bytes received"
+        );
+        assert!(!hit.verifies_with("zfwh_other", now_seconds(&env)));
+        assert_eq!(env.events("webhook.succeeded").await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_that_is_unpublished_or_of_another_channel_is_a_terminal_failure_with_no_call(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let email = json!({"schema": 1, "channel": "email", "mode": "code",
+            "email": {"subject": "s", "html": "<p>x</p>"}});
+        let unusable = [
+            env.template("webhook", webhook_document(json!({}), "{}"), false)
+                .await,
+            env.template("email", email, true).await,
+            Uuid::now_v7(),
+        ];
+        let render_host = start_pool().await;
+
+        for template in unusable {
+            let (person, enrolled) = env.enrolled().await;
+            env.queue_templated(&enrolled, person, template).await;
+
+            env.attempt_rendering(Some(render_host.clone())).await;
+
+            assert_eq!(
+                env.decisions(&enrolled.trace).await,
+                [("failed".to_owned(), Some("template_unavailable".to_owned()))]
+            );
+        }
+        assert!(env.mock.hits().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_render_failure_is_a_terminal_render_error_for_that_call_and_sends_nothing(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let template = env
+            .template(
+                "webhook",
+                webhook_document(json!({}), r#"{"x": "{{ person.nothing_here }}"}"#),
+                true,
+            )
+            .await;
+        let render_host = start_pool().await;
+
+        for pool in [Some(render_host), None] {
+            let (person, enrolled) = env.enrolled().await;
+            env.queue_templated(&enrolled, person, template).await;
+
+            env.attempt_rendering(pool).await;
+
+            assert_eq!(
+                env.decisions(&enrolled.trace).await,
+                [("failed".to_owned(), Some("render_error".to_owned()))]
+            );
+            assert_eq!(env.jobs_left().await, 0, "the job ended; it did not crash");
+        }
+        assert!(env.mock.hits().is_empty());
+        assert_eq!(env.events("webhook.failed").await.len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_node_without_a_template_sends_the_old_envelope_byte_for_byte_and_records_no_attempt(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool).await;
+        env.sign_with_a_secret().await;
+        let (person, enrolled) = env.enrolled().await;
+        env.queue(&enrolled, person, 5).await;
+
+        env.attempt().await.unwrap();
+
+        let key = format!("{}:hook:webhook", enrolled.enrollment);
+        let expected = format!(
+            concat!(
+                r#"{{"flow_id":"{flow}","version":1,"node_id":"hook","enrollment_id":"{enrollment}","#,
+                r#""person_id":"{person}","trace_id":"{trace}","idempotency_key":"{key}","#,
+                r#""occurred_at":"2031-05-06T07:08:09Z","traits":{{"age":null,"plan":"pro"}}}}"#
+            ),
+            flow = Uuid::from_u128(9),
+            enrollment = enrolled.enrollment,
+            person = person,
+            trace = enrolled.trace.trace_id,
+            key = key,
+        );
+        let hits = env.mock.hits();
+        assert_eq!(String::from_utf8(hits[0].body.clone()).unwrap(), expected);
+        assert_eq!(
+            env.count("SELECT count(*) FROM delivery_attempts").await,
+            0,
+            "a raw URL has no destination row to record an attempt against"
+        );
+    }
 }

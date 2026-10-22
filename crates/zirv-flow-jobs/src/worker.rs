@@ -461,6 +461,8 @@ pub(crate) fn random_unit() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use uuid::Uuid;
@@ -570,6 +572,25 @@ mod tests {
         }
     }
 
+    /// Registers an after-commit action, then fails its first attempt.
+    struct AfterCommit;
+
+    static AFTER_COMMIT_RUNS: AtomicUsize = AtomicUsize::new(0);
+
+    impl JobKind for AfterCommit {
+        const KIND: &'static str = "test.after_commit";
+
+        async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
+            ctx.after_commit(|| {
+                AFTER_COMMIT_RUNS.fetch_add(1, Ordering::SeqCst);
+            });
+            if ctx.attempts() == 1 {
+                return Err(JobError::new("planned failure"));
+            }
+            Ok(())
+        }
+    }
+
     /// Writes an effect, takes a transaction-scoped advisory lock to say so, and never ends.
     struct Hangs;
 
@@ -631,6 +652,7 @@ mod tests {
             .with(&Hangs)
             .with(&Gated)
             .with(&RecordsThenFails)
+            .with(&AfterCommit)
     }
 
     fn test_config(concurrency: usize) -> WorkerConfig {
@@ -1034,6 +1056,25 @@ mod tests {
         assert_eq!(line["span"]["kind"], "maintenance.noop");
         assert_eq!(line["span"]["cause_kind"], "api");
         assert!(line["fields"]["duration_ms"].is_u64());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_after_commit_action_runs_once_for_the_attempt_that_committed(pool: PgPool) {
+        migrated(&pool).await;
+        let mut job = new_job("test.after_commit");
+        job.max_attempts = 3;
+        enqueue(&pool, &job).await.unwrap();
+        let (stop, handle) = start(&pool, test_config(1));
+
+        wait_for(&pool, |counts| counts.ready == 0 && counts.running == 0).await;
+        stop_and_join(stop, handle).await;
+
+        assert_eq!(
+            AFTER_COMMIT_RUNS.load(Ordering::SeqCst),
+            1,
+            "the failed first attempt registered an action too, and it never ran"
+        );
     }
 
     #[sqlx::test]
