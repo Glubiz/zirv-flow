@@ -29,6 +29,7 @@ hmac = "0.13.0"
 http-body-util = "0.1.5"
 ipnet = "2.12.2"
 metrics = "0.24.6"
+minijinja = { version = "2.24.0", default-features = false, features = ["builtins", "macros", "multi_template", "serde", "fuel"] }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"] }
@@ -77,6 +78,7 @@ zirv-flow-identity = { path = "crates/zirv-flow-identity" }
 zirv-flow-jobs = { path = "crates/zirv-flow-jobs" }
 zirv-flow-segments = { path = "crates/zirv-flow-segments" }
 zirv-flow-store = { path = "crates/zirv-flow-store" }
+zirv-flow-templates = { path = "crates/zirv-flow-templates" }
 
 # No `panic = "abort"`: this will be a long-running server, where a panic in
 # one task must not take the whole process down.
