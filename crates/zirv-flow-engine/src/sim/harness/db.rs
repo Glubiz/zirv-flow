@@ -244,8 +244,12 @@ impl Db {
         defect: Option<Defect>,
         journal: &mut Vec<Undo>,
     ) {
-        let (EffectKind::Webhook { url, trait_keys }, Some(key)) =
-            (&effect.kind, &effect.effect_key)
+        let (
+            EffectKind::Webhook {
+                url, trait_keys, ..
+            },
+            Some(key),
+        ) = (&effect.kind, &effect.effect_key)
         else {
             self.applied.push(effect.step_key.clone());
             journal.push(Undo::Applied);
@@ -354,6 +358,7 @@ mod tests {
             kind: EffectKind::Webhook {
                 url: "https://example.com".into(),
                 trait_keys: Vec::new(),
+                template: None,
             },
         };
         let visits = ["a", "b", "c"]

@@ -649,6 +649,112 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_template_must_be_a_published_webhook_template_of_the_workspace(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        sqlx::query(
+            "INSERT INTO encrypted_secrets \
+                (id, workspace_id, purpose, key_id, wrapped_key, nonce, ciphertext) \
+             VALUES ($1, $2, 'webhook_signing', 'k', '\\x00', decode(repeat('00', 24), 'hex'), \
+                '\\x00')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let webhook = json!({"schema": 1, "channel": "webhook", "mode": "code",
+            "webhook": {"headers": {}, "body": "{}"}});
+        let email = json!({"schema": 1, "channel": "email", "mode": "code",
+            "email": {"subject": "s", "html": "<p>x</p>"}});
+        let mut templates = Vec::new();
+        for (channel, document, publish) in [
+            ("webhook", webhook.clone(), true),
+            ("webhook", webhook.clone(), false),
+            ("email", email, true),
+        ] {
+            let id = Uuid::now_v7();
+            let mut connection = pool.acquire().await.unwrap();
+            zirv_flow_store::create_template(
+                &mut connection,
+                f.ws,
+                &zirv_flow_store::NewTemplate {
+                    id,
+                    name: format!("T {id}"),
+                    channel: channel.to_owned(),
+                    category: "transactional".to_owned(),
+                    sender_identity_id: None,
+                    document,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            if publish {
+                let locked = zirv_flow_store::lock_template(&mut connection, f.ws, id)
+                    .await
+                    .unwrap();
+                zirv_flow_store::publish_template(
+                    &mut connection,
+                    f.ws,
+                    &locked,
+                    &json!([]),
+                    None,
+                    &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+                )
+                .await
+                .unwrap();
+            }
+            templates.push(id);
+        }
+        let [published, draft, other_channel] = templates[..] else {
+            unreachable!("three templates")
+        };
+        let node = |id: &str, template: Option<Uuid>| {
+            let mut node = json!({"id": id, "type": "action.webhook",
+                "url": "https://hooks.example.com/hook"});
+            if let Some(template) = template {
+                node["template"] = json!(template);
+            }
+            node
+        };
+        let graph = json!({"v": 1, "nodes": [
+            node("plain", None),
+            node("ok", Some(published)),
+            node("draft", Some(draft)),
+            node("email", Some(other_channel)),
+            node("ghost", Some(Uuid::now_v7())),
+            {"id": "end", "type": "exit"}
+        ], "edges": [
+            {"id": "e1", "from": "plain", "port": "next", "to": "ok"},
+            {"id": "e2", "from": "ok", "port": "next", "to": "draft"},
+            {"id": "e3", "from": "draft", "port": "next", "to": "email"},
+            {"id": "e4", "from": "email", "port": "next", "to": "ghost"},
+            {"id": "e5", "from": "ghost", "port": "next", "to": "end"}
+        ]});
+        let id = f.create("Templated", graph, manual()).await;
+
+        let validated = f.lead("POST", &format!("/{id}/validate"), None).await;
+
+        assert_eq!(validated.status, StatusCode::OK);
+        assert_eq!(validated.body["valid"], false);
+        let mut expected: Vec<(String, String, String)> = ["draft", "email", "ghost"]
+            .into_iter()
+            .map(|node| {
+                (
+                    "webhook_template_unusable".to_owned(),
+                    node.to_owned(),
+                    "/template".to_owned(),
+                )
+            })
+            .collect();
+        expected.sort();
+        assert_eq!(issue_tuples(&validated.body["issues"]), expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_dry_run_reports_the_impact_and_writes_nothing(pool: PgPool) {
         let f = fixture(&pool).await;
         // A segment with members, and a failing source that feeds the trait a branch reads.

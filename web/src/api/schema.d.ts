@@ -4694,10 +4694,12 @@ export interface components {
             /** @enum {string} */
             type: "action.update_trait";
         };
-        /** @description Calls a URL with a signed, fixed envelope plus the listed trait keys. Port `next`. */
+        /** @description Calls a URL with a signed JSON body: the fixed envelope plus the listed trait keys, or, with a `template`, the headers and body that published webhook template renders. Port `next`. */
         FlowActionWebhookNode: {
             /** @description A stable id, unique in the graph. */
             id: string;
+            /** Format: uuid */
+            template?: string;
             trait_keys?: string[];
             /** @enum {string} */
             type: "action.webhook";
@@ -4836,7 +4838,7 @@ export interface components {
             /** @description A JSON pointer into the node, the edge or the settings object. Inside a condition or a filter it continues with the segment pointer. */
             at?: string;
             /** @enum {string} */
-            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing";
+            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing" | "webhook_template_unusable";
             /** @description The id of the edge it concerns, when it does. */
             edge?: string;
             /** @description The id of the node it concerns, when it does. */

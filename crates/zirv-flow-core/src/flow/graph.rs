@@ -104,12 +104,16 @@ pub enum NodeKind {
     /// Sends a person down one arm by weight; ports `arm_0`, `arm_1`, ...
     #[serde(rename = "split.random")]
     SplitRandom { arms: Vec<Arm> },
-    /// Calls a URL with the fixed envelope plus the listed trait keys.
+    /// Calls a URL with the fixed envelope plus the listed trait keys, or, with a `template`,
+    /// with the headers and body that published webhook template renders.
     #[serde(rename = "action.webhook")]
     ActionWebhook {
         url: String,
         #[serde(default)]
         trait_keys: Vec<String>,
+        /// The id of a published template of the `webhook` channel. Absent: the fixed envelope.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        template: Option<Uuid>,
     },
     #[serde(rename = "action.update_trait")]
     ActionUpdateTrait { key: String, change: TraitChange },
@@ -332,6 +336,7 @@ mod tests {
             NodeKind::ActionWebhook {
                 url: "https://example.com/hook".into(),
                 trait_keys: vec!["plan".into()],
+                template: None,
             },
             NodeKind::ActionUpdateTrait {
                 key: "plan".into(),

@@ -507,7 +507,11 @@ impl Walker<'_> {
                 ));
             }
             EffectKind::GoalConversion => self.internal.push(body("goal", json!({}))),
-            EffectKind::Webhook { url, trait_keys } => {
+            EffectKind::Webhook {
+                url,
+                trait_keys,
+                template,
+            } => {
                 let traits: Map<String, Value> = trait_keys
                     .iter()
                     .map(|key| {
@@ -533,8 +537,13 @@ impl Walker<'_> {
                     "occurred_at": at.format(&Rfc3339).unwrap_or_default(),
                     "traits": traits,
                 });
-                self.external
-                    .push(body("webhook", json!({"url": url, "envelope": envelope})));
+                let mut captured = json!({"url": url, "envelope": envelope});
+                if let (Some(template), Some(captured)) = (template, captured.as_object_mut()) {
+                    // A walk renders nothing and sends nothing; it names the template that a
+                    // real call would render instead of the envelope.
+                    captured.insert("template".to_owned(), json!(template));
+                }
+                self.external.push(body("webhook", captured));
             }
         }
     }

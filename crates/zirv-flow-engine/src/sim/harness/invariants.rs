@@ -128,7 +128,10 @@ pub(super) fn external_effects_once(world: &World<'_>, out: &mut Vec<Violation>)
         let Some((id, node_id, node)) = world.node_of(key) else {
             continue;
         };
-        let NodeKind::ActionWebhook { url, trait_keys } = &node.kind else {
+        let NodeKind::ActionWebhook {
+            url, trait_keys, ..
+        } = &node.kind
+        else {
             continue;
         };
         let stable = effect_key(id, node_id, "webhook");

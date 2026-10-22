@@ -4,6 +4,8 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -12,7 +14,7 @@ use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
 use zirv_flow_core::ValidationError;
-use zirv_flow_core::flow::{FlowGraph, FlowSettings};
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
 use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow};
 
 use super::schema::{GRAPH, ISSUE, SETTINGS};
@@ -220,14 +222,45 @@ pub(crate) async fn check_document(
         catalog_of(zirv_flow_store::segment_catalog(connection, workspace).await?);
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let signing_secret = zirv_flow_store::has_webhook_signing_secret(connection, workspace).await?;
+    let webhook_templates = usable_webhook_templates(connection, workspace, graph).await?;
     let environment = Environment {
         catalog: &catalog,
         storage: &storage,
         now,
         egress: state.egress_policy(),
         signing_secret,
+        webhook_templates: &webhook_templates,
     };
     Ok((check(graph, settings, &environment), now))
+}
+
+/// The templates `graph` names that a webhook node may send: of the workspace, not archived, of the
+/// `webhook` channel and with a published version.
+async fn usable_webhook_templates(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    graph: &FlowGraph,
+) -> Result<BTreeSet<Uuid>, ApiError> {
+    let mut usable = BTreeSet::new();
+    let named: BTreeSet<Uuid> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            NodeKind::ActionWebhook { template, .. } => *template,
+            _ => None,
+        })
+        .collect();
+    for id in named {
+        let found = zirv_flow_store::find_template(&mut *connection, workspace, id).await?;
+        if found.is_some_and(|template| {
+            template.channel == "webhook"
+                && template.archived_at.is_none()
+                && template.current_version.is_some()
+        }) {
+            usable.insert(id);
+        }
+    }
+    Ok(usable)
 }
 
 /// [`check_document`] in a read-only transaction of its own that is dropped, for a caller that

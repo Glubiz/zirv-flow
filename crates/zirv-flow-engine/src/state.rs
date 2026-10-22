@@ -124,10 +124,12 @@ pub enum EffectKind {
     List { list_id: Uuid, change: ListChange },
     /// Internal: a conversion.
     GoalConversion,
-    /// External: the fixed envelope plus `trait_keys`, to `url`.
+    /// External: the fixed envelope plus `trait_keys`, to `url`; with a `template`, the headers
+    /// and body that published webhook template renders instead of the envelope.
     Webhook {
         url: String,
         trait_keys: Vec<String>,
+        template: Option<Uuid>,
     },
 }
 
