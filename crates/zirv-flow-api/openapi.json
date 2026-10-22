@@ -22389,7 +22389,7 @@
       },
       "FlowActionWebhookNode": {
         "type": "object",
-        "description": "Calls a URL with a signed, fixed envelope plus the listed trait keys. Port `next`.",
+        "description": "Calls a URL with a signed JSON body: the fixed envelope plus the listed trait keys, or, with a `template`, the headers and body that published webhook template renders. Port `next`.",
         "required": [
           "type",
           "id",
@@ -22401,6 +22401,10 @@
             "description": "A stable id, unique in the graph.",
             "maxLength": 64,
             "minLength": 1
+          },
+          "template": {
+            "type": "string",
+            "format": "uuid"
           },
           "trait_keys": {
             "type": "array",
@@ -22909,7 +22913,8 @@
               "unknown_property",
               "unknown_topic",
               "webhook_url_refused",
-              "webhook_secret_missing"
+              "webhook_secret_missing",
+              "webhook_template_unusable"
             ]
           },
           "edge": {

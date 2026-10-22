@@ -46,6 +46,8 @@ const MESSAGES: Record<FlowIssue["code"], string> = {
   unknown_topic: "This refers to a topic that does not exist.",
   webhook_url_refused: "This address is not allowed. Webhooks cannot call private or local addresses.",
   webhook_secret_missing: "The workspace has no webhook signing secret. An admin can create one in the workspace settings.",
+  webhook_template_unusable:
+    "The template must be a published webhook template. Choose one that is published and made for webhooks.",
 };
 
 /** The text for an issue, with the output it concerns named when it is about one. */
