@@ -13,7 +13,7 @@ mod crud;
 
 pub use attempts::{
     AttemptOutcome, DeliveryAttempt, DestinationStat, NewDeliveryAttempt, StatusClass, SubjectKind,
-    destination_report, list_delivery_attempts, record_delivery_attempt,
+    count_delivery_attempt, destination_report, list_delivery_attempts, record_delivery_attempt,
 };
 pub use bucket::{
     Admission, BucketState, DEFAULT_RETRY_AFTER, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, RateGate,

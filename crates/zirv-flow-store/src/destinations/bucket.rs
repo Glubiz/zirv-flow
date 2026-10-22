@@ -8,6 +8,8 @@
 //!   workers never double-grant. The grant is `floor(min(k, level))`: only what the row holds.
 //!   The row is locked first and the instant is read after the lock is held, so a take that
 //!   waited for the lock does not carry an earlier instant than the take it waited for.
+//!   An archived destination has no bucket (the archive deletes the row, and every take and
+//!   throttle also requires the destination to be live), so its gates are `Gone`.
 //!   A live destination whose row is missing gets it back (from the destination's rate and
 //!   burst, `ON CONFLICT DO NOTHING`) on the next take or throttle.
 //! - **Refill.** `level = min(burst, tokens + rate * max(0, now - refilled_at))`, with `rate` the
@@ -108,7 +110,7 @@ async fn take_once(
                    b.tokens, b.refilled_at, b.penalty_until \
             FROM destination_rate_buckets b \
             JOIN destinations d ON d.workspace_id = b.workspace_id AND d.id = b.destination_id \
-            WHERE b.destination_id = $1 \
+            WHERE b.destination_id = $1 AND d.archived_at IS NULL \
             FOR UPDATE OF b), \
          cur AS ( \
             SELECT locked.*, COALESCE($2::timestamptz, clock_timestamp()) AS ts FROM locked), \
@@ -147,7 +149,10 @@ async fn take_once(
 }
 
 /// Recreates the bucket row of a live destination from the destination's rate and burst, full.
-/// Racing callers are safe (`ON CONFLICT DO NOTHING`). Whether the destination is live.
+/// Racing callers are safe (`ON CONFLICT DO NOTHING`), and the destination row is share-locked
+/// while the row is made, so a concurrent PATCH or archive waits and cannot slip in between the
+/// read and the insert. An archived destination has no bucket and gets none. Whether the
+/// destination is live.
 async fn ensure_bucket(
     pool: &PgPool,
     destination: Uuid,
@@ -160,6 +165,7 @@ async fn ensure_bucket(
             SELECT d.id, d.workspace_id, d.rate, d.burst, d.burst, \
                    COALESCE($2::timestamptz, clock_timestamp()) \
             FROM destinations d WHERE d.id = $1 AND d.archived_at IS NULL \
+            FOR SHARE OF d \
             ON CONFLICT (destination_id) DO NOTHING) \
          SELECT EXISTS (SELECT 1 FROM destinations WHERE id = $1 AND archived_at IS NULL)",
     )
@@ -205,7 +211,7 @@ async fn throttle_once(
             SELECT b.destination_id, d.rate::float8 AS cap, b.rate AS stored, b.penalty_until \
             FROM destination_rate_buckets b \
             JOIN destinations d ON d.workspace_id = b.workspace_id AND d.id = b.destination_id \
-            WHERE b.destination_id = $1 \
+            WHERE b.destination_id = $1 AND d.archived_at IS NULL \
             FOR UPDATE OF b), \
          cur AS ( \
             SELECT locked.*, COALESCE($2::timestamptz, clock_timestamp()) AS ts FROM locked) \
@@ -712,6 +718,71 @@ mod tests {
             .unwrap();
 
         assert_eq!(admitted, Admission::Gone);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn archiving_removes_the_bucket_so_a_new_gate_is_gone_and_nothing_recreates_it(
+        pool: PgPool,
+    ) {
+        let id = destination(&pool, 100, 100).await;
+        let ws: Uuid = sqlx::query_scalar("SELECT workspace_id FROM destinations WHERE id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let clock = at(&ManualClock::new(T0));
+        assert_eq!(
+            RateGate::new(id).admit(&pool, &clock).await.unwrap(),
+            Admission::Granted
+        );
+
+        // The row is not deleted by hand: the archive does it.
+        crate::archive_destination(&pool, WorkspaceId::from_uuid(ws), id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(bucket_state(&pool, id).await.unwrap().is_none());
+        assert_eq!(
+            RateGate::new(id).admit(&pool, &clock).await.unwrap(),
+            Admission::Gone
+        );
+        assert!(
+            throttle_bucket(&pool, id, None, &clock)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(bucket_state(&pool, id).await.unwrap().is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_leftover_bucket_row_of_an_archived_destination_grants_and_throttles_nothing(
+        pool: PgPool,
+    ) {
+        // A row that survived an archive (an old database, a restore) is still refused.
+        let id = destination(&pool, 100, 100).await;
+        sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let clock = at(&ManualClock::new(T0));
+
+        assert_eq!(
+            RateGate::new(id).admit(&pool, &clock).await.unwrap(),
+            Admission::Gone
+        );
+        assert!(
+            throttle_bucket(&pool, id, None, &clock)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let state = bucket_state(&pool, id).await.unwrap().unwrap();
+        assert_eq!((state.tokens, state.penalty_until), (100.0, None));
     }
 
     #[sqlx::test]

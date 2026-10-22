@@ -116,6 +116,10 @@ pub struct DeliveryAttempt {
 }
 
 /// Records one attempt. The same item, destination and attempt number twice is a conflict.
+///
+/// This does not count the attempt in the metrics: the caller may still roll back or retry the
+/// transaction. After the transaction that holds this row commits, call
+/// [`count_delivery_attempt`] once.
 pub async fn record_delivery_attempt<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -140,16 +144,18 @@ pub async fn record_delivery_attempt<'e>(
     .fetch_one(executor)
     .await
     .map_err(StoreError::query)
-    .inspect(|_| count_attempt(workspace, new))
 }
 
 /// Counts a recorded attempt in this process:
 /// `zirv_flow_destination_attempts_total{workspace,destination}` and
 /// `zirv_flow_destination_outcomes_total{workspace,destination,outcome}`. Ids only, never a name,
-/// a host or an address. The counters live where the attempt is recorded, so the send path (#220)
-/// counts by calling [`record_delivery_attempt`], and the leader never scans the table. A
-/// transaction that rolls back after this call has still been counted, as with any counter.
-fn count_attempt(workspace: WorkspaceId, attempt: &NewDeliveryAttempt) {
+/// a host or an address.
+///
+/// Call it once per attempt, **after** the transaction that holds the row from
+/// [`record_delivery_attempt`] has committed, so a rolled-back insert is never counted and a
+/// committed retry of the transaction is counted once. The send path (#220) calls it; the leader
+/// never scans the table.
+pub fn count_delivery_attempt(workspace: WorkspaceId, attempt: &NewDeliveryAttempt) {
     let workspace = workspace.as_uuid().to_string();
     let destination = attempt.destination_id.to_string();
     metrics::counter!(
@@ -387,7 +393,9 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn recording_an_attempt_counts_it_by_destination_and_outcome_with_ids_only(pool: PgPool) {
+    async fn counting_a_committed_attempt_counts_it_by_destination_and_outcome_with_ids_only(
+        pool: PgPool,
+    ) {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _installed = ::metrics::set_default_local_recorder(&recorder);
@@ -399,11 +407,11 @@ mod tests {
             (2, AttemptOutcome::Retryable),
             (3, AttemptOutcome::Delivered),
         ] {
-            record_delivery_attempt(&pool, ws, &attempt(id, Uuid::nil(), number, outcome))
-                .await
-                .unwrap();
+            let new = attempt(id, Uuid::nil(), number, outcome);
+            record_delivery_attempt(&pool, ws, &new).await.unwrap();
+            count_delivery_attempt(ws, &new);
         }
-        // A refused (conflicting) record is not counted.
+        // A refused (conflicting) record is never counted: the caller has nothing to count.
         record_delivery_attempt(
             &pool,
             ws,
@@ -430,6 +438,40 @@ mod tests {
         }
         assert!(!output.contains("terminal"), "{output}");
         assert!(!output.contains("secret-mail-name"), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn recording_an_attempt_alone_counts_nothing(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let ws = workspace(&pool, "one").await;
+        let id = destination(&pool, ws, "Mail").await;
+
+        // Recorded, then rolled back: nothing was delivered as far as the database knows.
+        let mut tx = crate::begin(&pool).await.unwrap();
+        record_delivery_attempt(
+            &mut *tx,
+            ws,
+            &attempt(id, Uuid::nil(), 1, AttemptOutcome::Delivered),
+        )
+        .await
+        .unwrap();
+        drop(tx);
+        record_delivery_attempt(
+            &pool,
+            ws,
+            &attempt(id, Uuid::nil(), 1, AttemptOutcome::Delivered),
+        )
+        .await
+        .unwrap();
+
+        let output = handle.render();
+        assert!(
+            !output.contains("zirv_flow_destination_attempts_total"),
+            "{output}"
+        );
     }
 
     #[sqlx::test]

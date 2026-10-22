@@ -197,16 +197,22 @@ pub async fn update_destination<'e>(
 }
 
 /// Archives a live destination and returns it. `None` when there is no such live destination. Its
-/// rows stay: attempts keep their history, and the name is free again.
+/// rate bucket is deleted in the same statement, so nothing more can be taken for it; attempts keep
+/// their history, and the name is free again.
 pub async fn archive_destination<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Option<Destination>, StoreError> {
     sqlx::query_as(concat!(
-        "UPDATE destinations SET archived_at = now(), updated_at = now() \
-         WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL RETURNING ",
-        destination_columns!()
+        "WITH d AS ( \
+            UPDATE destinations SET archived_at = now(), updated_at = now() \
+            WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL RETURNING *), \
+         gone AS ( \
+            DELETE FROM destination_rate_buckets b USING d WHERE b.destination_id = d.id) \
+         SELECT ",
+        destination_columns!(),
+        " FROM d"
     ))
     .bind(workspace.as_uuid())
     .bind(id)
