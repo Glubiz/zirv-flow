@@ -8,7 +8,7 @@ use std::io;
 use axum::Json;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
@@ -34,8 +34,6 @@ use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
 const MAX_NOTE_CHARS: usize = 500;
-/// The largest CSV an import takes.
-pub(super) const MAX_IMPORT_BYTES: usize = 10 * 1024 * 1024;
 /// The most data rows an import takes.
 const MAX_IMPORT_ROWS: usize = 100_000;
 /// Hashes written, or looked up, per statement during an import.
@@ -637,28 +635,14 @@ pub(crate) async fn import_handler(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let key = identifier_key(&state)?;
     let dry_run = bool_param(query.as_deref().unwrap_or_default(), "dry_run")?;
-    let is_csv = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("text/csv"));
-    if !is_csv {
-        return Err(ApiError::new(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "expected a CSV body (content-type: text/csv)",
-        ));
-    }
-    let bytes = axum::body::to_bytes(body, MAX_IMPORT_BYTES)
-        .await
-        .map_err(|_| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "the CSV is over 10 MiB"))?;
-    let text =
-        std::str::from_utf8(&bytes).map_err(|_| ApiError::bad_request("the CSV must be UTF-8"))?;
+    let text = csv::read_body(&headers, body).await?;
     let (_, created_by) = origin(&principal);
     let result = import(
         &state.pool,
         key,
         &principal.context(),
         workspace.id,
-        text,
+        &text,
         dry_run,
         created_by,
     )
@@ -749,17 +733,7 @@ pub(crate) async fn export(
             }
         }
     });
-    let mut response = Response::new(Body::from_stream(body));
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "text/csv; charset=utf-8".parse().unwrap(),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        "attachment; filename=\"suppressions.csv\"".parse().unwrap(),
-    );
-    Ok(response)
+    Ok(csv::download(Body::from_stream(body), "suppressions.csv"))
 }
 
 #[cfg(test)]

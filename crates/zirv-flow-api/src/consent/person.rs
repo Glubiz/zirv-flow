@@ -16,7 +16,7 @@ use zirv_flow_core::consent::{
 };
 use zirv_flow_store::{
     ConsentChange, ConsentEntry, ConsentHistoryEntry, ConsentOutcome, PgPool, ReadOutcome,
-    StoreError,
+    StoreError, dimensions_of,
 };
 
 use super::{invalid, origin};
@@ -58,7 +58,7 @@ impl From<ConsentEntry> for ConsentStateBody {
             channel: entry.channel,
             topic_key: entry.topic_key,
             topic_name: entry.topic_name,
-            dimensions: dimensions_body(&entry.dimensions),
+            dimensions: dimensions_of(&entry.dimensions),
             status: entry.status,
             explicit: entry.explicit,
             changed_at: entry.changed_at,
@@ -144,7 +144,7 @@ impl HistoryEntryBody {
             id: entry.id,
             channel: entry.channel,
             topic_key: entry.topic_key,
-            dimensions: dimensions_body(&entry.dimensions),
+            dimensions: dimensions_of(&entry.dimensions),
             from_status: entry.from_status,
             to_status: entry.to_status,
             source: entry.source,
@@ -162,15 +162,6 @@ pub(crate) struct HistoryBody {
     entries: Vec<HistoryEntryBody>,
     /// Pass as `before` for the next page; null when there is none.
     next_before: Option<String>,
-}
-
-fn dimensions_body(stored: &Value) -> BTreeMap<String, String> {
-    stored
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
-        .collect()
 }
 
 /// A request dimension values, with every key and value checked for form. Whether they name
@@ -269,6 +260,19 @@ async fn states_of(
     }))
 }
 
+/// The id of the topic `key` names, if any key is given.
+async fn topic_id(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    key: Option<&str>,
+) -> Result<Option<Uuid>, AdminError> {
+    let Some(key) = key else { return Ok(None) };
+    zirv_flow_store::find_topic_by_key(pool, workspace, key)
+        .await?
+        .map(|topic| Some(topic.id))
+        .ok_or_else(|| invalid("topic_key", "is not a topic of this workspace"))
+}
+
 /// Answers whether a send is permitted for the message the query names.
 async fn read_of(
     pool: &PgPool,
@@ -276,15 +280,7 @@ async fn read_of(
     person: Uuid,
     message: &MessageQuery,
 ) -> Result<ReadBody, AdminError> {
-    let topic = match &message.topic_key {
-        Some(key) => Some(
-            zirv_flow_store::find_topic_by_key(pool, workspace, key)
-                .await?
-                .ok_or_else(|| invalid("topic_key", "is not a topic of this workspace"))?
-                .id,
-        ),
-        None => None,
-    };
+    let topic = topic_id(pool, workspace, message.topic_key.as_deref()).await?;
     match zirv_flow_store::consent_read(
         pool,
         workspace,
@@ -323,15 +319,7 @@ pub(crate) async fn set_person_consent(
     let status = writable_status(&request.status)?;
     let evidence = check_evidence(request.evidence.as_ref())?;
     let dimensions = check_dimensions(&request.dimensions)?;
-    let topic = match &request.topic_key {
-        Some(key) => Some(
-            zirv_flow_store::find_topic_by_key(pool, workspace, key)
-                .await?
-                .ok_or_else(|| invalid("topic_key", "is not a topic of this workspace"))?
-                .id,
-        ),
-        None => None,
-    };
+    let topic = topic_id(pool, workspace, request.topic_key.as_deref()).await?;
 
     let mut tx = zirv_flow_store::begin(pool).await?;
     let outcome = zirv_flow_store::set_consent(
@@ -608,10 +596,10 @@ mod tests {
         let stored = json!({"vertical": "retail", "odd": 3});
 
         assert_eq!(
-            dimensions_body(&stored).into_iter().collect::<Vec<_>>(),
+            dimensions_of(&stored).into_iter().collect::<Vec<_>>(),
             [("vertical".to_owned(), "retail".to_owned())]
         );
-        assert!(dimensions_body(&json!([])).is_empty());
+        assert!(dimensions_of(&json!([])).is_empty());
     }
 
     #[test]

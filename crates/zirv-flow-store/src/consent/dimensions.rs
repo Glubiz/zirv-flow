@@ -3,6 +3,7 @@
 //! can be scoped to. The built-in `topic` dimension is resolved from the `topics` rows and is
 //! never stored here.
 
+use hashbrown::HashMap;
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
@@ -127,16 +128,19 @@ pub async fn list_dimensions(
     .fetch_all(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    for row in rows {
-        let mine = values
-            .iter()
-            .filter(|value| value.dimension_id == row.id)
-            .map(|value| DimensionValue {
-                key: value.key.clone(),
-                name: value.name.clone(),
+    let mut by_dimension: HashMap<Uuid, Vec<DimensionValue>> = HashMap::new();
+    for value in values {
+        by_dimension
+            .entry(value.dimension_id)
+            .or_default()
+            .push(DimensionValue {
+                key: value.key,
+                name: value.name,
                 archived_at: value.archived_at,
-            })
-            .collect();
+            });
+    }
+    for row in rows {
+        let mine = by_dimension.remove(&row.id).unwrap_or_default();
         all.push(row.into_dimension(mine));
     }
     Ok(all)

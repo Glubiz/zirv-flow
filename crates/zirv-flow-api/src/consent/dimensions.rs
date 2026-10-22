@@ -218,7 +218,7 @@ pub(crate) async fn update_dimension(
     let (update, fields) = update_of(request)?;
 
     let mut tx = zirv_flow_store::begin(pool).await?;
-    let before = declared(&mut tx, workspace, key).await?;
+    declared(&mut tx, workspace, key).await?;
     zirv_flow_store::update_dimension(&mut *tx, workspace, key, &update).await?;
     let dimension = declared(&mut tx, workspace, key).await?;
     admin::audit(
@@ -226,7 +226,7 @@ pub(crate) async fn update_dimension(
         context,
         Some(workspace),
         "consent_dimension.updated",
-        Some(("consent_dimension", before.id.unwrap_or_else(Uuid::nil))),
+        Some(("consent_dimension", dimension.id.unwrap_or_else(Uuid::nil))),
         json!({ "key": key, "fields": fields }),
     )
     .await?;

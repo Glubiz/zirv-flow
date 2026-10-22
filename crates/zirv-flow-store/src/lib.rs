@@ -64,8 +64,8 @@ pub use consent::{
     ConsentChange, ConsentEntry, ConsentExportCursor, ConsentExportRow, ConsentHistoryEntry,
     ConsentOutcome, Dimension, DimensionUpdate, DimensionValue, NewDimension, NewTopic,
     ReadOutcome, Topic, TopicUpdate, consent_export_page, consent_for, consent_history,
-    consent_read, create_dimension, create_dimension_value, create_topic, find_dimension,
-    find_topic, find_topic_by_key, list_dimensions, list_topics, set_consent,
+    consent_read, create_dimension, create_dimension_value, create_topic, dimensions_of,
+    find_dimension, find_topic, find_topic_by_key, list_dimensions, list_topics, set_consent,
     unknown_dimension_entry, update_dimension, update_dimension_value, update_topic,
 };
 pub use contacts::{

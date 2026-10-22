@@ -1,7 +1,14 @@
 //! The little CSV the suppression import and export need: RFC 4180 records with quoted
 //! fields, `""` as an escaped quote, and LF or CRLF line ends.
 
+use crate::problem::ApiError;
+use axum::body::Body;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::Response;
 use zirv_flow_core::csv_file::write_field;
+
+/// The largest CSV an import takes.
+const MAX_IMPORT_BYTES: usize = 10 * 1024 * 1024;
 
 /// One record and the line of the file it starts on, the first line being 1.
 #[derive(Debug, Eq, PartialEq)]
@@ -80,6 +87,41 @@ pub(crate) fn field(value: &str) -> String {
     let mut out = String::new();
     write_field(&mut out, value, ',');
     out
+}
+
+/// The text of a `text/csv` request body of at most 10 MiB.
+pub(super) async fn read_body(headers: &HeaderMap, body: Body) -> Result<String, ApiError> {
+    let is_csv = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().to_ascii_lowercase().starts_with("text/csv"));
+    if !is_csv {
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "expected a CSV body (content-type: text/csv)",
+        ));
+    }
+    let bytes = axum::body::to_bytes(body, MAX_IMPORT_BYTES)
+        .await
+        .map_err(|_| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "the CSV is over 10 MiB"))?;
+    String::from_utf8(bytes.into()).map_err(|_| ApiError::bad_request("the CSV must be UTF-8"))
+}
+
+/// A streamed CSV download named `filename`.
+pub(super) fn download(body: Body, filename: &str) -> Response {
+    let mut response = Response::new(body);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/csv; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{filename}\"")
+            .parse()
+            .unwrap(),
+    );
+    response
 }
 
 #[cfg(test)]

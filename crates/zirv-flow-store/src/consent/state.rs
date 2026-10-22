@@ -172,7 +172,7 @@ pub(super) fn dimensions_json(dimensions: &Dimensions) -> Value {
 
 /// The dimension map a stored JSON object holds. Anything that is not a string value is
 /// dropped; the column's writers only store strings.
-pub(super) fn dimensions_of(stored: &Value) -> Dimensions {
+pub fn dimensions_of(stored: &Value) -> Dimensions {
     stored
         .as_object()
         .into_iter()
@@ -488,9 +488,9 @@ pub async fn consent_read(
 
 /// A page of a person's history, newest first by `(occurred_at, id)`, at most `limit`, after
 /// the `before` cursor. Only changes scoped to at least the `within` dimension values are
-/// listed, so an empty map lists them all. The flag is true when more existed. The person is followed through
-/// `merged_into`; the history of a merged person moved to the survivor. `None` when the
-/// workspace has no such person.
+/// listed, so an empty map lists them all. The flag is true when more existed. The person is
+/// followed through `merged_into`; the history of a merged person moved to the survivor.
+/// `None` when the workspace has no such person.
 pub async fn consent_history(
     pool: &PgPool,
     workspace: WorkspaceId,

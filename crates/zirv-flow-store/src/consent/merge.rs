@@ -47,9 +47,9 @@ impl StateRow {
 
 /// Moves what `loser` holds to `survivor`, in the caller's transaction, which holds the locks
 /// of both people. For each channel, topic and dimension scope the loser has a state for, the
-/// survivor ends up with the rule's winner (`merge_records`). A change of status is recorded in the history with source
-/// `merge` and the merged person's id as evidence. The loser's states are deleted and its
-/// history is re-pointed to the survivor.
+/// survivor ends up with the rule's winner (`merge_records`). A change of status is recorded
+/// in the history with source `merge` and the merged person's id as evidence. The loser's
+/// states are deleted and its history is re-pointed to the survivor.
 pub(crate) async fn move_on_merge(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
