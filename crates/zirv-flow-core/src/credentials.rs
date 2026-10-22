@@ -41,6 +41,7 @@ pub enum FieldType {
 
 /// One field of a credential schema.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CredentialField {
     pub key: String,
     pub label: String,

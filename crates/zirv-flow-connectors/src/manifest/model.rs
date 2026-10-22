@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 use url::Url;
+use zirv_flow_core::credentials::{CredentialKind, CredentialSchema};
 use zirv_flow_core::mapping::Mapping;
 
 use crate::runtime::ClientAuth;
@@ -13,6 +14,8 @@ use crate::sources::FieldType;
 pub struct Manifest {
     pub base_url: Url,
     pub auth: Auth,
+    /// The shape of the credential the API needs, when the manifest declares one (`auth.credential`).
+    pub credential: Option<CredentialSpec>,
     pub rate_limit: Option<RateLimitSpec>,
     /// Static headers sent with every request.
     pub headers: Vec<(String, String)>,
@@ -41,6 +44,23 @@ pub enum Auth {
         scopes: Vec<String>,
         client_auth: ClientAuth,
     },
+}
+
+/// The credential schema a manifest names: a built-in kind by name, or its own fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CredentialSpec {
+    Kind(CredentialKind),
+    Schema(CredentialSchema),
+}
+
+impl CredentialSpec {
+    /// The schema the credential form is rendered from.
+    pub fn schema(&self) -> CredentialSchema {
+        match self {
+            Self::Kind(kind) => kind.schema(),
+            Self::Schema(schema) => schema.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
