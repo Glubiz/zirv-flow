@@ -111,6 +111,7 @@ pub(crate) async fn move_on_merge(
                     evidence: &evidence,
                     occurred_at: OffsetDateTime::now_utc(),
                     actor: None,
+                    only_if_newer: false,
                 },
                 trace,
             )

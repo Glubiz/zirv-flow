@@ -286,6 +286,23 @@ pub async fn unknown_dimension_entry(
     Ok(None)
 }
 
+/// Whether the workspace has a live (not archived) declared dimension `key`.
+pub(super) async fn live_dimension(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &str,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM consent_dimensions \
+         WHERE workspace_id = $1 AND key = $2 AND archived_at IS NULL)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(key)
+    .fetch_one(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -447,6 +464,34 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_value_key_is_unique_per_dimension_through_a_workspace_leading_index(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        create_dimension(&pool, ws, &new("vertical")).await.unwrap();
+
+        let leading: Vec<String> = sqlx::query_scalar(
+            "SELECT pg_get_indexdef(indexrelid) FROM pg_index \
+             WHERE indrelid = 'consent_dimension_values'::regclass AND indisunique \
+               AND NOT indisprimary",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        create_dimension_value(&pool, ws, "vertical", "retail", "Retail")
+            .await
+            .unwrap();
+        let again = create_dimension_value(&pool, ws, "vertical", "retail", "Again").await;
+
+        assert!(
+            leading
+                .iter()
+                .any(|def| def.contains("(workspace_id, dimension_id, key)")),
+            "{leading:?}"
+        );
+        assert!(again.unwrap_err().is_conflict());
     }
 
     #[sqlx::test]

@@ -32,7 +32,9 @@ CREATE TABLE consent_dimension_values (
     archived_at  timestamptz,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (dimension_id, key),
+    -- Workspace-leading, per migration 0006. The dimension fixes the workspace, so this is as
+    -- unique as (dimension_id, key) would be.
+    UNIQUE (workspace_id, dimension_id, key),
     FOREIGN KEY (workspace_id, dimension_id)
         REFERENCES consent_dimensions (workspace_id, id) ON DELETE CASCADE
 );
@@ -48,13 +50,27 @@ $$
     FROM jsonb_each_text(map) AS e
 $$;
 
+-- Whether a dimension map is one the canonical text can tell apart from every other: a JSON
+-- object whose keys and values are all strings of the key form the API enforces. Without this a
+-- null value, or a value holding `;` or `=`, would collide with another map.
+CREATE FUNCTION consent_dimensions_valid(map jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE AS
+$$
+    SELECT jsonb_typeof(map) = 'object' AND NOT EXISTS (
+        SELECT 1 FROM jsonb_each(map) AS e
+        WHERE e.key !~ '^[a-z0-9_-]{1,64}$'
+           OR jsonb_typeof(e.value) <> 'string'
+           OR (e.value #>> '{}') !~ '^[a-z0-9_-]{1,64}$'
+    )
+$$;
+
 ALTER TABLE consent_changes
     ADD COLUMN dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(dimensions) = 'object');
+        CHECK (consent_dimensions_valid(dimensions));
 
 ALTER TABLE consent
     ADD COLUMN dimensions jsonb NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(dimensions) = 'object'),
+        CHECK (consent_dimensions_valid(dimensions)),
     ADD COLUMN dimensions_key text GENERATED ALWAYS AS (consent_dimensions_canonical(dimensions))
         STORED;
 
