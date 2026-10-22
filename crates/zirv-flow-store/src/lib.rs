@@ -261,6 +261,8 @@ pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,
     find_for_receive, find_webhook, list_webhooks, replace_webhook_secret, update_webhook,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use workspace_credentials::import_secret_as_credential;
 pub use workspace_credentials::{
     ArchiveOutcome, CredentialUpdate, CredentialUser, NewWorkspaceCredential, OpenedCredential,
     WorkspaceCredential, archive_credential, create_credential, credential_use_counts,

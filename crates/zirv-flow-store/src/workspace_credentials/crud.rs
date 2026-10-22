@@ -259,6 +259,41 @@ pub async fn record_credential_test<'e>(
     Ok(result.rows_affected() == 1)
 }
 
+/// Links an already sealed secret as an `imported` credential named `name`, the way migration 0047
+/// did for the credentials sources and destinations had sealed themselves: nothing is re-sealed,
+/// every field is secret and fully masked. For tests that plant a sealed secret first.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn import_secret_as_credential<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    name: &str,
+    secret_id: SecretId,
+    field_names: &[&str],
+) -> Result<WorkspaceCredential, StoreError> {
+    let hints: serde_json::Map<String, Value> = field_names
+        .iter()
+        .map(|field| ((*field).to_owned(), Value::String(String::new())))
+        .collect();
+    let id = Uuid::now_v7();
+    create_credential(
+        executor,
+        workspace,
+        &NewWorkspaceCredential {
+            id,
+            key: &format!("imported-{}", id.simple()),
+            name,
+            kind: zirv_flow_core::credentials::IMPORTED_KIND,
+            schema: None,
+            fields: &Value::Object(serde_json::Map::new()),
+            secret_id,
+            hints: &Value::Object(hints),
+            fingerprint: None,
+            created_by: None,
+        },
+    )
+    .await
+}
+
 /// What archiving a credential did.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ArchiveOutcome {

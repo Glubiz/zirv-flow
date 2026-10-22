@@ -22,5 +22,7 @@ pub use crud::{
     list_credentials, lock_credential_for_use, record_credential_test, swap_credential_secret,
     update_credential,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use crud::import_secret_as_credential;
 pub use open::{OpenedCredential, open_credential};
 pub use usage::{CredentialUser, credential_use_counts, credential_users};
