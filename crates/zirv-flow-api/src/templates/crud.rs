@@ -658,6 +658,41 @@ mod tests {
     }
 
     #[test]
+    fn a_block_document_keeps_its_templates_category() {
+        let template = |category: &str| Template {
+            id: Uuid::nil(),
+            name: "T".into(),
+            channel: "email".into(),
+            category: category.into(),
+            sender_identity_id: None,
+            current_version: None,
+            archived_at: None,
+            created_by: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let blocks = |category: &str| {
+            json!({"schema": 1, "channel": "email", "mode": "blocks",
+                   "blocks": {"subject": "Hi", "category": category}})
+        };
+
+        assert!(check_draft(&template("marketing"), &blocks("marketing")).is_ok());
+        assert!(check_draft(&template("transactional"), &blocks("transactional")).is_ok());
+        assert_eq!(
+            check_draft(&template("marketing"), &blocks("transactional"))
+                .unwrap_err()
+                .code(),
+            Some("template_mismatch")
+        );
+        assert_eq!(
+            check_draft(&template("transactional"), &blocks("marketing"))
+                .unwrap_err()
+                .code(),
+            Some("template_mismatch")
+        );
+    }
+
+    #[test]
     fn a_draft_of_another_channel_or_an_unsupported_mode_is_refused() {
         let template = |channel: &str| Template {
             id: Uuid::nil(),

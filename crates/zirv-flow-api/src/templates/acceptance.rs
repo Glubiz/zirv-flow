@@ -948,6 +948,112 @@ mod tests {
         );
     }
 
+    /// A valid marketing block email: a sender, a language and the unsubscribe link.
+    fn blocks_doc(subject: &str, footer: &str) -> Value {
+        json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
+        "subject": subject, "sender": "snd_1", "lang": "en", "category": "marketing",
+        "sections": [
+            {"id": "intro", "columns": [[
+                {"type": "heading", "id": "title", "level": 1, "text": "Hello {{ person.plan }}"},
+                {"type": "button", "id": "cta", "label": "Open", "url": "https://shop.example/a?b=1&c=2"}
+            ]]},
+            {"id": "foot", "columns": [[
+                {"type": "text", "id": "legal", "content": footer}
+            ]]}
+        ]}})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_blocks_template_drafts_publishes_and_previews_like_an_html_one(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let document = blocks_doc("Welcome", footer);
+        let id = f.create("Newsletter", document.clone()).await;
+
+        let draft = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(draft.status, StatusCode::OK, "{:?}", draft.body);
+        assert_eq!(draft.body["draft"]["content_type"], "blocks");
+        assert_eq!(draft.body["draft"]["document"], document);
+
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(published.body["version"]["version"], 1);
+        assert_eq!(published.body["template"]["current_version"], 1);
+
+        let mut connection = f.pool.acquire().await.unwrap();
+        let catalog = field_catalog(
+            zirv_flow_store::read_template_field_catalog(&mut connection, f.ws)
+                .await
+                .unwrap(),
+        );
+        drop(connection);
+        let context = preview::sample_context(&catalog);
+        let preview = f
+            .lead("POST", &format!("/{id}/preview"), Some(json!({})))
+            .await;
+        let doc: TemplateDocument = serde_json::from_value(document).unwrap();
+        let hooks = Hooks {
+            tracking: Tracking::Inert {
+                base_url: "https://preview.sample.invalid/t",
+            },
+        };
+        let expected = render_email(&doc, &context, &hooks).unwrap();
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["rendered"], true);
+        assert_eq!(preview.body["content_type"], "blocks");
+        assert_eq!(preview.body["html"], expected.html.as_str());
+        assert_eq!(preview.body["text"], expected.text.as_str());
+        assert!(expected.html.contains("<!--[if mso"), "{}", expected.html);
+        assert!(
+            expected
+                .text
+                .contains("Open: https://shop.example/a?b=1&c=2")
+        );
+
+        // Without the unsubscribe link the publish is refused with the same code as for HTML.
+        let bad = f
+            .create("No footer", blocks_doc("Welcome", "<p>no link</p>"))
+            .await;
+        let refused = f.lead("POST", &format!("/{bad}/publish"), None).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "template_invalid");
+        assert!(
+            refused.body["template_issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == "missing_unsubscribe" && issue["at"] == "/blocks"),
+            "{:?}",
+            refused.body
+        );
+
+        // A block the editor does not know is a malformed draft, and the category is the
+        // template's own.
+        let mut unknown = blocks_doc("Welcome", footer);
+        unknown["blocks"]["sections"][0]["columns"][0][0]["type"] = json!("carousel");
+        assert_eq!(
+            f.put_draft(&id, unknown).await.body["code"],
+            "template_malformed"
+        );
+        let mut transactional = blocks_doc("Welcome", footer);
+        transactional["blocks"]["category"] = json!("transactional");
+        assert_eq!(
+            f.put_draft(&id, transactional).await.body["code"],
+            "template_mismatch"
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_with_an_unknown_syntax_is_a_422_template_malformed(pool: PgPool) {

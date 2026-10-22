@@ -123,12 +123,17 @@ pub(crate) fn check_matches(template: &Template, doc: &TemplateDocument) -> Resu
             template.channel, template.channel
         )));
     }
-    if let Some(email) = &doc.email
-        && category_name(email.category) != template.category
+    let category = doc
+        .email
+        .as_ref()
+        .map(|email| email.category)
+        .or_else(|| doc.blocks.as_ref().map(|blocks| blocks.category));
+    if let Some(category) = category
+        && category_name(category) != template.category
     {
         return Err(ApiError::template_mismatch(format!(
             "the document is {} but the template is {}",
-            category_name(email.category),
+            category_name(category),
             template.category
         )));
     }
