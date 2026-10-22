@@ -7,6 +7,7 @@ use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
+use zirv_flow_render::RenderPool;
 use zirv_flow_store::{Clock, EventRetention, PgPool, SchemaState, StoreError};
 
 use crate::assistant::{AiConfig, runtime::AiRuntime};
@@ -61,6 +62,8 @@ pub struct AppState {
     rate_limits: Arc<RateLimits>,
     /// The deployment's model allowlist and the guarded client for model calls.
     pub(crate) ai: AiRuntime,
+    /// The isolated renderer preview calls; absent until the process starts one.
+    render_pool: Option<RenderPool>,
     /// Where browsers reach the server (`server.public_url`), without a trailing slash. Absent
     /// when the operator did not set it; an OAuth2 consent needs it for the redirect URI.
     public_url: Option<String>,
@@ -102,6 +105,7 @@ impl AppState {
             egress: Arc::default(),
             rate_limits: Arc::default(),
             ai: AiRuntime::default(),
+            render_pool: None,
             public_url: None,
         }
     }
@@ -153,6 +157,17 @@ impl AppState {
     /// The request-rate buckets of this process's sources.
     pub fn rate_limits(&self) -> &Arc<RateLimits> {
         &self.rate_limits
+    }
+
+    /// The pool of render-host children that preview renders through (architecture 11.9).
+    pub fn with_render_pool(mut self, pool: RenderPool) -> Self {
+        self.render_pool = Some(pool);
+        self
+    }
+
+    /// The isolated renderer; none when this state was built without one.
+    pub fn render_pool(&self) -> Option<&RenderPool> {
+        self.render_pool.as_ref()
     }
 
     /// The egress policy outbound connections are checked against.
@@ -266,6 +281,19 @@ mod tests {
     async fn cookies_are_secure_unless_turned_off() {
         assert!(state().cookie_secure);
         assert!(!state().with_cookie_secure(false).cookie_secure);
+    }
+
+    #[tokio::test]
+    async fn the_render_pool_is_absent_until_one_is_given() {
+        assert!(state().render_pool().is_none());
+        // The program is never asked to render, so the pool only has to start.
+        let command =
+            zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap()).arg("--list");
+        let pool =
+            zirv_flow_render::RenderPool::start(command, zirv_flow_render::PoolConfig::default())
+                .await
+                .unwrap();
+        assert!(state().with_render_pool(pool).render_pool().is_some());
     }
 
     #[tokio::test]

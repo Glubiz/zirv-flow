@@ -33,10 +33,23 @@ const JOB_BUCKETS: [f64; 13] = [
     0.005, 0.025, 0.1, 0.5, 1.0, 2.5, 5.0, 15.0, 30.0, 60.0, 300.0, 900.0, 3600.0,
 ];
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    ExitCode::from(
+    // The render host is synchronous and single-threaded: it starts no async runtime at all.
+    if let Some(Command::RenderHost { memory_limit_bytes }) = &cli.command {
+        return ExitCode::from(run_render_host(*memory_limit_bytes));
+    }
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: could not start the async runtime: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    ExitCode::from(runtime.block_on(async {
         run(
             cli,
             std::env::vars_os(),
@@ -44,8 +57,19 @@ async fn main() -> ExitCode {
             &mut io::stdout(),
             &mut io::stderr(),
         )
-        .await,
-    )
+        .await
+    }))
+}
+
+/// The hidden `render-host` command: logs go to standard error, because standard output carries
+/// the response frames and nothing else.
+fn run_render_host(memory_limit_bytes: Option<u64>) -> u8 {
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_ansi(false)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    zirv_flow_render::host::run(memory_limit_bytes)
 }
 
 async fn run(
@@ -350,6 +374,14 @@ async fn run_roles_reporting(
         .map(|secrets| Arc::clone(&secrets.hmac_root));
     let ops_bind = ops_bind(roles, config);
     // A bad server configuration or a taken ops address stops the process before any role starts.
+    let render_pool = if roles.serve || roles.worker {
+        match start_render_pool(config).await {
+            Ok(pool) => Some(pool),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
     let render = if roles.serve || ops_bind.is_some() {
         match install_recorder() {
             Ok(render) => Some(render),
@@ -361,7 +393,10 @@ async fn run_roles_reporting(
     let state = match (roles.serve, &render) {
         (true, Some(render)) => {
             match http_state(config, pool.clone(), Arc::clone(render), secrets.as_ref()) {
-                Ok(state) => Some(state),
+                Ok(state) => Some(match &render_pool {
+                    Some(render_pool) => state.with_render_pool(render_pool.clone()),
+                    None => state,
+                }),
                 Err(code) => return code,
             }
         }
@@ -423,6 +458,7 @@ async fn run_roles_reporting(
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
         worker_config.egress = config.egress_policy();
+        worker_config.render_pool = render_pool.clone();
         share_rate_limits(state.as_ref(), &mut worker_config);
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
@@ -462,10 +498,34 @@ async fn run_roles_reporting(
     };
 
     drain(background, deadline.start()).await;
+    if let Some(render_pool) = &render_pool {
+        render_pool.shutdown().await;
+    }
     if let Some(ops) = ops {
         ops.stop().await;
     }
     code
+}
+
+/// Starts the render-host children this process renders through: copies of this executable
+/// running the hidden `render-host` command. On failure it reports the problem and returns the
+/// exit code.
+async fn start_render_pool(config: &Config) -> Result<zirv_flow_render::RenderPool, u8> {
+    let program = std::env::current_exe().map_err(|error| {
+        error!(%error, "could not find this executable to start the render host");
+        1_u8
+    })?;
+    let (pool_config, memory_limit_bytes) = config.render_pool();
+    let command = zirv_flow_render::ChildCommand::render_host(program, memory_limit_bytes);
+    let size = pool_config.size;
+    let pool = zirv_flow_render::RenderPool::start(command, pool_config)
+        .await
+        .map_err(|error| {
+            error!(%error, "could not start the render host");
+            1_u8
+        })?;
+    info!(children = size, memory_limit_bytes, "render host started");
+    Ok(pool)
 }
 
 /// The address of the ops listener, when this process should run one: only without the

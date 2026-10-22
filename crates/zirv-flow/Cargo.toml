@@ -29,6 +29,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 zirv-flow-api.workspace = true
 zirv-flow-jobs.workspace = true
+zirv-flow-render.workspace = true
 zirv-flow-store.workspace = true
 
 [dev-dependencies]

@@ -34,6 +34,14 @@ pub(crate) enum Command {
     /// Validate configuration and print it with secrets redacted.
     #[command(subcommand)]
     Config(ConfigCommand),
+    /// Internal: the render host. Serves length-prefixed JSON render requests on standard input
+    /// and output until the input closes. Started by the render pool, never by an operator.
+    #[command(hide = true)]
+    RenderHost {
+        /// Address space to limit this process to, in bytes (Linux only).
+        #[arg(long, value_name = "BYTES")]
+        memory_limit_bytes: Option<u64>,
+    },
 }
 
 impl Command {
@@ -47,6 +55,7 @@ impl Command {
             Self::Healthcheck => "healthcheck",
             Self::Admin(_) => "admin",
             Self::Config(_) => "config",
+            Self::RenderHost { .. } => "render-host",
         }
     }
 }
@@ -118,6 +127,21 @@ mod tests {
     #[test]
     fn the_cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn the_render_host_is_a_subcommand_that_help_does_not_list() {
+        let parsed =
+            Cli::try_parse_from(["zirv-flow", "render-host", "--memory-limit-bytes", "7"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::RenderHost {
+                memory_limit_bytes: Some(7)
+            })
+        ));
+        let help = Cli::command().render_help().to_string();
+        assert!(!help.contains("render-host"), "{help}");
+        assert!(help.contains("serve"), "{help}");
     }
 
     #[test]

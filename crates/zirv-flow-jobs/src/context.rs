@@ -7,6 +7,7 @@ use uuid::Uuid;
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{TraceContext, WorkspaceId};
+use zirv_flow_render::RenderPool;
 
 use zirv_flow_store::{
     ClaimedJob, Clock, EventRetention, HmacKey, Keyring, NewDecision, NewJob, PgConnection, PgPool,
@@ -40,6 +41,7 @@ pub struct JobContext<'a> {
     egress: Arc<EgressPolicy>,
     rate_limits: Arc<RateLimits>,
     clock: Clock,
+    render_pool: Option<RenderPool>,
 }
 
 impl<'a> JobContext<'a> {
@@ -54,7 +56,19 @@ impl<'a> JobContext<'a> {
             egress: Arc::default(),
             rate_limits: Arc::default(),
             clock: Clock::default(),
+            render_pool: None,
         }
+    }
+
+    /// Gives the handler the isolated renderer.
+    pub(crate) fn with_render_pool(mut self, pool: Option<RenderPool>) -> Self {
+        self.render_pool = pool;
+        self
+    }
+
+    /// The isolated renderer (architecture 11.9); none when the worker was given no pool.
+    pub fn render_pool(&self) -> Option<&RenderPool> {
+        self.render_pool.as_ref()
     }
 
     /// Gives the handler the clock segment paths read.

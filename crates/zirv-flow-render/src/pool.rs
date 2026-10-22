@@ -3,6 +3,7 @@
 
 use std::borrow::Cow;
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
@@ -294,6 +295,16 @@ struct Inner {
 #[derive(Clone)]
 pub struct RenderPool {
     inner: Arc<Inner>,
+}
+
+impl fmt::Debug for RenderPool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RenderPool")
+            .field("deadline", &self.inner.deadline)
+            .field("free", &self.inner.slots.available_permits())
+            .finish_non_exhaustive()
+    }
 }
 
 impl RenderPool {

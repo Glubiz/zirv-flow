@@ -5269,6 +5269,7 @@ dependencies = [
  "url",
  "zirv-flow-api",
  "zirv-flow-jobs",
+ "zirv-flow-render",
  "zirv-flow-store",
 ]
 
@@ -5324,6 +5325,7 @@ dependencies = [
  "zirv-flow-core",
  "zirv-flow-engine",
  "zirv-flow-identity",
+ "zirv-flow-render",
  "zirv-flow-segments",
  "zirv-flow-store",
 ]
@@ -5443,6 +5445,7 @@ dependencies = [
  "zirv-flow-connectors",
  "zirv-flow-core",
  "zirv-flow-engine",
+ "zirv-flow-render",
  "zirv-flow-segments",
  "zirv-flow-store",
 ]
