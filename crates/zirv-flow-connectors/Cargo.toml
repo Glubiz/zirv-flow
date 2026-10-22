@@ -12,6 +12,7 @@ bytes.workspace = true
 chrono.workspace = true
 futures-util = { workspace = true, features = ["alloc"] }
 hashbrown.workspace = true
+hickory-resolver.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
 rand.workspace = true
