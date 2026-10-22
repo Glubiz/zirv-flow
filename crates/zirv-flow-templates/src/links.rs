@@ -54,7 +54,51 @@ struct Href {
     outer: Range<usize>,
 }
 
-/// Every `href` of every `<a>` tag, in document order.
+/// The elements whose content is text, not markup: an `<a>` inside is not a link.
+const RAW_TEXT_ELEMENTS: [&str; 4] = ["script", "style", "textarea", "title"];
+
+/// The position of `needle` (lower-case ASCII) in `html` from `from`, ignoring ASCII case.
+fn find_ignore_case(html: &str, needle: &str, from: usize) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let needle = needle.as_bytes();
+    (from..bytes.len().saturating_sub(needle.len().saturating_sub(1)))
+        .find(|&i| bytes[i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+/// If a comment or raw-text element starts at `start` (a `<`), the position after it.
+fn skip_non_markup(html: &str, start: usize) -> Option<usize> {
+    let rest = &html[start..];
+    if rest.starts_with("<!--") {
+        // `<!-->` and `<!--->` end the comment at once; `--!>` also closes one.
+        let from = start + 2;
+        let close = [
+            html[from..].find("-->").map(|n| (from + n, 3)),
+            html[from..].find("--!>").map(|n| (from + n, 4)),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        return Some(close.map_or(html.len(), |(at, len)| at + len));
+    }
+    let bytes = html.as_bytes();
+    for name in RAW_TEXT_ELEMENTS {
+        let after = start + 1 + name.len();
+        let named = bytes
+            .get(start + 1..after)
+            .is_some_and(|b| b.eq_ignore_ascii_case(name.as_bytes()));
+        let ends_name = bytes
+            .get(after)
+            .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'>' | b'/' | 0));
+        if named && ends_name {
+            let closer = format!("</{name}");
+            return Some(find_ignore_case(html, &closer, after).unwrap_or(html.len()));
+        }
+    }
+    None
+}
+
+/// The first `href` of every `<a>` tag, in document order. Comments and the content of raw-text
+/// elements hold no links.
 fn hrefs(html: &str) -> Vec<Href> {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
@@ -62,6 +106,10 @@ fn hrefs(html: &str) -> Vec<Href> {
     while let Some(offset) = html[at..].find('<') {
         let start = at + offset;
         at = start + 1;
+        if let Some(end) = skip_non_markup(html, start) {
+            at = end.max(at);
+            continue;
+        }
         let is_anchor = bytes
             .get(start + 1)
             .is_some_and(|b| b.eq_ignore_ascii_case(&b'a'))
@@ -80,6 +128,8 @@ fn hrefs(html: &str) -> Vec<Href> {
 fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
     let bytes = html.as_bytes();
     let mut at = from;
+    // Browsers use the first `href` of a tag and ignore the rest.
+    let mut seen_href = false;
     loop {
         while bytes
             .get(at)
@@ -132,7 +182,8 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
             }
             None => return at,
         };
-        if name.eq_ignore_ascii_case("href") {
+        if name.eq_ignore_ascii_case("href") && !seen_href {
+            seen_href = true;
             found.push(Href { value, outer });
         }
     }
@@ -203,6 +254,12 @@ pub(crate) fn link_urls(html: &str) -> Vec<String> {
 /// Whether `html` has an `<a>` whose `href` is exactly `url`.
 pub(crate) fn links_to(html: &str, url: &str) -> bool {
     !url.is_empty() && link_urls(html).iter().any(|found| found == url)
+}
+
+/// Whether an `<a>` `href` of `html` contains `text`. Used on template source, where the href is
+/// not rendered yet.
+pub(crate) fn href_mentions(html: &str, text: &str) -> bool {
+    link_urls(html).iter().any(|found| found.contains(text))
 }
 
 /// Rewrite the `http` and `https` links of `html` for click tracking.
@@ -349,6 +406,42 @@ mod tests {
         assert_eq!(
             rewrite_links(html, &live(), &[]),
             "<a/href=\"https://t.example/c/t0-19\">1</a><a\0href=\"https://t.example/c/t1-19\">2</a>"
+        );
+    }
+
+    #[test]
+    fn comments_and_raw_text_elements_hold_no_links() {
+        let html = concat!(
+            r#"<!-- <a href="https://a.example/1">x</a> -->"#,
+            r#"<SCRIPT>var s = "<a href='https://a.example/2'>";</SCRIPT>"#,
+            r#"<style>a::after { content: "<a href=https://a.example/3>" }</style>"#,
+            r#"<textarea><a href="https://a.example/4"></textarea>"#,
+            r#"<title><a href="https://a.example/5"></title>"#,
+            r#"<!--> <a href="https://a.example/6">six</a>"#,
+            r#"<p><a href="https://a.example/7">seven</a>"#,
+        );
+        assert_eq!(
+            link_urls(html),
+            ["https://a.example/6", "https://a.example/7"]
+        );
+        assert!(!links_to(
+            r#"<!-- <a href="https://u.example">u</a> -->"#,
+            "https://u.example"
+        ));
+        let out = rewrite_links(html, &live(), &[]);
+        assert!(out.contains(r#"<a href="https://a.example/1">"#));
+        assert!(out.contains(r#"href="https://t.example/c/t0-19""#));
+        assert!(out.contains(r#"href="https://t.example/c/t1-19""#));
+    }
+
+    #[test]
+    fn only_the_first_href_of_a_tag_counts() {
+        let html = r#"<a href="https://a.example/first" href="https://a.example/second">x</a>"#;
+        assert_eq!(link_urls(html), ["https://a.example/first"]);
+        assert!(!links_to(html, "https://a.example/second"));
+        assert_eq!(
+            rewrite_links(html, &live(), &[]),
+            r#"<a href="https://t.example/c/t0-23" href="https://a.example/second">x</a>"#
         );
     }
 

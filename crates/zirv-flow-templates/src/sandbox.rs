@@ -276,7 +276,7 @@ mod tests {
             "X-A
 X-Evil: 1",
             "X/B",
-            "X{e9}",
+            "X\u{e9}",
             "X-A
 ",
         ] {
