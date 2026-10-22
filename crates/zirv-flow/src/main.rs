@@ -507,6 +507,29 @@ async fn run_roles_reporting(
     code
 }
 
+/// What each pool child runs: the hidden `render-host` command of this executable.
+#[cfg(not(test))]
+fn render_host_command(
+    program: std::path::PathBuf,
+    memory_limit_bytes: u64,
+) -> zirv_flow_render::ChildCommand {
+    zirv_flow_render::ChildCommand::render_host(program, memory_limit_bytes)
+}
+
+/// Under test the executable is the test binary, which has no `render-host` command, so a child
+/// is the test binary re-run on `tests::render_host_child`, which serves as the host does.
+#[cfg(test)]
+fn render_host_command(
+    program: std::path::PathBuf,
+    _memory_limit_bytes: u64,
+) -> zirv_flow_render::ChildCommand {
+    zirv_flow_render::ChildCommand::new(program)
+        .args(["--exact", "tests::render_host_child", "--nocapture"])
+        .args(["--test-threads", "1", "-q"])
+        .env("ZIRV_FLOW_TEST_RENDER_HOST", "1")
+        .skip_stdout_until("running 1 test\n")
+}
+
 /// Starts the render-host children this process renders through: copies of this executable
 /// running the hidden `render-host` command. On failure it reports the problem and returns the
 /// exit code.
@@ -516,7 +539,7 @@ async fn start_render_pool(config: &Config) -> Result<zirv_flow_render::RenderPo
         1_u8
     })?;
     let (pool_config, memory_limit_bytes) = config.render_pool();
-    let command = zirv_flow_render::ChildCommand::render_host(program, memory_limit_bytes);
+    let command = render_host_command(program, memory_limit_bytes);
     let size = pool_config.size;
     let pool = zirv_flow_render::RenderPool::start(command, pool_config)
         .await
@@ -1996,6 +2019,14 @@ endpoint = \"http://collector:4318/\""
                 .unwrap()
                 .starts_with("127.0.0.1:")
         );
+    }
+
+    /// The child of the pool under test: a no-op unless the pool started it.
+    #[test]
+    fn render_host_child() {
+        if std::env::var_os("ZIRV_FLOW_TEST_RENDER_HOST").is_some() {
+            std::process::exit(i32::from(zirv_flow_render::host::run(None)));
+        }
     }
 
     #[tokio::test]

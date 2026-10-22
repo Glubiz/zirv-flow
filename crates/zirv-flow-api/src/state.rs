@@ -283,12 +283,23 @@ mod tests {
         assert!(!state().with_cookie_secure(false).cookie_secure);
     }
 
+    /// The child of the pool under test: a no-op unless the pool started it.
+    #[test]
+    fn render_host_child() {
+        if std::env::var_os("ZIRV_FLOW_TEST_RENDER_HOST").is_some() {
+            std::process::exit(i32::from(zirv_flow_render::host::run(None)));
+        }
+    }
+
     #[tokio::test]
     async fn the_render_pool_is_absent_until_one_is_given() {
         assert!(state().render_pool().is_none());
         // The program is never asked to render, so the pool only has to start.
-        let command =
-            zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap()).arg("--list");
+        let command = zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::tests::render_host_child", "--nocapture"])
+            .args(["--test-threads", "1", "-q"])
+            .env("ZIRV_FLOW_TEST_RENDER_HOST", "1")
+            .skip_stdout_until("running 1 test\n");
         let pool =
             zirv_flow_render::RenderPool::start(command, zirv_flow_render::PoolConfig::default())
                 .await
