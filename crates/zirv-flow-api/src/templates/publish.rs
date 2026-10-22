@@ -76,9 +76,13 @@ pub(crate) struct TemplatePublishedBody {
     version: TemplateVersionBody,
 }
 
-/// Validates the draft under the template's lock and publishes it as the next version, or changes
-/// nothing. Audited as `template.published`; records a `template.publish` decision caused by a
-/// definition change.
+/// Validates the draft and publishes it as the next version, or changes nothing. Audited as
+/// `template.published`; records a `template.publish` decision caused by a definition change.
+///
+/// The draft is read and validated with no lock and no connection held, because validation waits
+/// on the render host for as long as its deadline. Only then does the publish lock the template,
+/// and it publishes only if the draft is still the revision that was validated: a draft saved in
+/// the meantime is a 409 `template_draft_changed`, and nothing is written.
 pub(crate) async fn publish_template(
     pool: &PgPool,
     render: &RenderPool,
@@ -87,13 +91,23 @@ pub(crate) async fn publish_template(
     id: Uuid,
     published_by: Option<UserId>,
 ) -> Result<(Template, TemplateVersion), ApiError> {
-    let mut tx = zirv_flow_store::begin(pool).await?;
-    let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
-        .await
-        .map_err(template_error)?;
-    let doc = stored_document(&locked.draft().document)?;
-    let catalog =
-        field_catalog(zirv_flow_store::read_template_field_catalog(&mut tx, workspace).await?);
+    let (draft, catalog) = {
+        let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
+        let template = zirv_flow_store::find_template(&mut *connection, workspace, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if template.archived_at.is_some() {
+            return Err(ApiError::template_archived());
+        }
+        let draft = zirv_flow_store::find_template_draft(&mut *connection, workspace, id)
+            .await?
+            .ok_or_else(ApiError::internal)?;
+        let catalog = field_catalog(
+            zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
+        );
+        (draft, catalog)
+    };
+    let doc = stored_document(&draft.document)?;
     content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
     // A template's sample render allocates like any render, so it runs in the render host, never
     // in this process.
@@ -102,7 +116,6 @@ pub(crate) async fn publish_template(
         .await
         .map_err(|failure| ApiError::render_failed(&failure))?;
     if issues.iter().any(Issue::is_blocking) {
-        // Dropping the transaction writes nothing.
         return Err(ApiError::template_invalid(issue_problems(&issues)));
     }
     let validation = serde_json::to_value(&issues).map_err(|_| ApiError::internal())?;
@@ -110,6 +123,14 @@ pub(crate) async fn publish_template(
         trace_id: request_trace().trace_id,
         cause: Cause::definition_change(id),
     };
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
+        .await
+        .map_err(template_error)?;
+    if locked.draft().revision != draft.revision {
+        // Dropping the transaction writes nothing.
+        return Err(ApiError::template_draft_changed());
+    }
     let (template, version) = zirv_flow_store::publish_template(
         &mut tx,
         workspace,
@@ -152,7 +173,7 @@ pub(crate) async fn publish_template(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The template is archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

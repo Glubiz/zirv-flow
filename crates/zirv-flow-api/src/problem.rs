@@ -736,6 +736,17 @@ impl ApiError {
         }
     }
 
+    /// A publish whose draft was saved again while it was being validated.
+    pub(crate) fn template_draft_changed() -> Self {
+        Self {
+            code: Some("template_draft_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
     /// A write to an archived template.
     pub(crate) fn template_archived() -> Self {
         Self {

@@ -67,7 +67,7 @@ mod tests {
         let Ok(mode) = std::env::var("ZIRV_FLOW_TEST_TEMPLATE_HOST") else {
             return;
         };
-        if mode == "hang_first" {
+        if mode == "hang_first" || mode == "slow_first" {
             let marker = std::env::var("ZIRV_FLOW_TEST_TEMPLATE_MARKER").unwrap_or_default();
             if !std::path::Path::new(&marker).exists() {
                 std::fs::write(&marker, b"x").expect("the marker can be written");
@@ -77,6 +77,16 @@ mod tests {
                     .unwrap();
                 out.write_all(ready).unwrap();
                 out.flush().unwrap();
+                drop(out);
+                if mode == "slow_first" {
+                    // Serves, but only after a pause: a slow render, not a stuck one.
+                    std::thread::sleep(Duration::from_millis(10_000));
+                    let served = zirv_flow_render::host::serve(
+                        std::io::stdin().lock(),
+                        std::io::stdout().lock(),
+                    );
+                    std::process::exit(i32::from(served.is_err()));
+                }
                 loop {
                     std::thread::sleep(Duration::from_secs(3600));
                 }
@@ -1001,6 +1011,64 @@ mod tests {
         assert_eq!(versions_after_stall, 0);
         assert_eq!(next.status, StatusCode::CREATED, "{:?}", next.body);
         assert_eq!(f.versions_written().await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_saved_while_a_publish_validates_is_a_409_and_writes_no_version(pool: PgPool) {
+        let render_pool = start_pool("slow_first", Duration::from_secs(30)).await;
+        let f = fixture_with(&pool, Some(render_pool)).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+
+        let publish_tail = format!("/{id}/publish");
+        let publish = f.lead("POST", &publish_tail, None);
+        let edit = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            f.put_draft(&id, email_doc("Changed", "y")).await
+        };
+        let (published, edited) = tokio::join!(publish, edit);
+
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+        assert_eq!(
+            published.status,
+            StatusCode::CONFLICT,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(published.body["code"], "template_draft_changed");
+        assert_eq!(f.versions_written().await, 0);
+        // Publishing again validates the new draft and succeeds.
+        let again = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(again.status, StatusCode::CREATED, "{:?}", again.body);
+        assert_eq!(again.body["version"]["document"], email_doc("Changed", "y"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_is_not_blocked_while_a_publish_waits_on_a_slow_validate(pool: PgPool) {
+        let render_pool = start_pool("hang_first", Duration::from_secs(4)).await;
+        let f = fixture_with(&pool, Some(render_pool)).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+
+        let publish_tail = format!("/{id}/publish");
+        let publish = f.lead("POST", &publish_tail, None);
+        let edit = async {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let started = std::time::Instant::now();
+            let reply = f.put_draft(&id, email_doc("Edited", "y")).await;
+            (reply, started.elapsed())
+        };
+        let (published, (edited, took)) = tokio::join!(publish, edit);
+
+        assert_eq!(
+            published.body["code"], "render_deadline",
+            "{:?}",
+            published.body
+        );
+        assert_eq!(edited.status, StatusCode::OK, "{:?}", edited.body);
+        // The publish was still waiting on the stuck child (4 s deadline) when the save went
+        // through, so the save held no lock behind it.
+        assert!(took < Duration::from_secs(2), "the save waited {took:?}");
     }
 
     #[sqlx::test]
