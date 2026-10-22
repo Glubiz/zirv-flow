@@ -20844,12 +20844,19 @@
           "ok"
         ],
         "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,\n`egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or\n`failed`. Null when the check passed."
+          },
           "error": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Why they do not. Never holds a credential, an address or a URL."
+            "description": "Why they do not, in a fixed sentence per `code`. Never holds a credential, a host, an\naddress or a URL."
           },
           "ok": {
             "type": "boolean",

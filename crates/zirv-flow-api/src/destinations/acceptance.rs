@@ -47,6 +47,7 @@ mod tests {
         pool: PgPool,
         router: Router,
         ws: WorkspaceId,
+        other: WorkspaceId,
         read: String,
         admin: String,
         /// An admin key of another workspace.
@@ -157,6 +158,7 @@ mod tests {
             pool: pool.clone(),
             router,
             ws,
+            other,
             read,
             admin: admin_key,
             stranger,
@@ -281,6 +283,77 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_admin_of_one_workspace_cannot_reach_a_destination_of_another(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        // Workspace B's destination, made by B's own admin.
+        let created = call(
+            &fx.router,
+            "POST",
+            &format!("/api/v1/workspaces/{}/destinations", fx.other.as_uuid()),
+            Some(json!({"kind": "fake", "name": "Theirs", "config": {},
+                        "credential": {"token": "ok"}})),
+            Auth::Key(&fx.stranger),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let theirs = created.body["id"].as_str().unwrap().to_owned();
+        let snapshot = || async {
+            let row: String = sqlx::query_scalar(
+                "SELECT d::text || coalesce((SELECT b::text FROM destination_rate_buckets b \
+                                              WHERE b.destination_id = d.id), '') \
+                 FROM destinations d WHERE d.id = $1::uuid",
+            )
+            .bind(&theirs)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let secrets: i64 = sqlx::query_scalar("SELECT count(*) FROM encrypted_secrets")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            (row, secrets)
+        };
+        let before = snapshot().await;
+
+        // A (ours) names B's id on every endpoint that takes one.
+        let attempts = [
+            ("GET", format!("/destinations/{theirs}"), None),
+            (
+                "PATCH",
+                format!("/destinations/{theirs}"),
+                Some(json!({"name": "Taken", "rate": 1, "burst": 1,
+                            "credential": {"token": "stolen"}})),
+            ),
+            ("POST", format!("/destinations/{theirs}/check"), None),
+            ("DELETE", format!("/destinations/{theirs}"), None),
+        ];
+        for (method, tail, body) in attempts {
+            let reply = fx.as_admin(method, &tail, body).await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {tail}");
+        }
+        // The list shows none of B's, and creating under A never touches B.
+        let listed = fx.as_admin("GET", "/destinations", None).await;
+        assert_eq!(listed.body, json!([]));
+
+        assert_eq!(snapshot().await, before, "B's destination is unchanged");
+        // B's own admin still reads it untouched.
+        let own = call(
+            &fx.router,
+            "GET",
+            &format!(
+                "/api/v1/workspaces/{}/destinations/{theirs}",
+                fx.other.as_uuid()
+            ),
+            None,
+            Auth::Key(&fx.stranger),
+        )
+        .await;
+        assert_eq!(own.body["name"], "Theirs");
+        assert_eq!(own.body["archived"], false);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_admin_creates_reads_lists_updates_checks_and_archives(pool: PgPool) {
         let fx = fixture(&pool).await;
 
@@ -309,7 +382,10 @@ mod tests {
             .as_admin("POST", &format!("/destinations/{id}/check"), None)
             .await;
         assert_eq!(passing.status, StatusCode::OK);
-        assert_eq!(passing.body, json!({"ok": true, "error": null}));
+        assert_eq!(
+            passing.body,
+            json!({"ok": true, "error": null, "code": null})
+        );
 
         let changed = fx
             .as_admin(
@@ -334,7 +410,8 @@ mod tests {
         assert_eq!(failing.status, StatusCode::OK);
         assert_eq!(
             failing.body,
-            json!({"ok": false, "error": "the destination refused the credential"})
+            json!({"ok": false, "error": "the destination refused the credential",
+                   "code": "credential_refused"})
         );
 
         let archived = fx
@@ -540,9 +617,10 @@ mod tests {
 
         assert_eq!(checked.status, StatusCode::OK, "{:?}", checked.body);
         assert_eq!(checked.body["ok"], false);
-        let error = checked.body["error"].as_str().unwrap();
-        assert!(error.starts_with("egress denied"), "{error}");
-        assert!(!error.contains("ok"), "no credential in the reason");
+        assert_eq!(checked.body["code"], "egress_denied");
+        let text = checked.body.to_string();
+        assert!(!text.contains("10.0.0.5"), "the host is not named: {text}");
+        assert!(!text.contains("http"), "no URL: {text}");
     }
 
     #[sqlx::test]

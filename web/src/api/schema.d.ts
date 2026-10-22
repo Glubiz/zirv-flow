@@ -4045,7 +4045,16 @@ export interface components {
             updated_at: string;
         };
         DestinationCheckBody: {
-            /** @description Why they do not. Never holds a credential, an address or a URL. */
+            /**
+             * @description A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,
+             *     `egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or
+             *     `failed`. Null when the check passed.
+             */
+            code?: string | null;
+            /**
+             * @description Why they do not, in a fixed sentence per `code`. Never holds a credential, a host, an
+             *     address or a URL.
+             */
             error?: string | null;
             /** @description Whether the settings and the credential work. */
             ok: boolean;

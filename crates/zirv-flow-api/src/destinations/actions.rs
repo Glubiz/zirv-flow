@@ -11,8 +11,8 @@ use serde::Serialize;
 use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::DestinationContext;
-use zirv_flow_connectors::http::HttpLimits;
+use zirv_flow_connectors::destinations::{DestinationContext, DestinationError};
+use zirv_flow_connectors::http::{HttpError, HttpLimits};
 use zirv_flow_core::WorkspaceId;
 
 use super::{archived, credential, kind_unavailable, registry};
@@ -28,8 +28,43 @@ pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct DestinationCheckBody {
     /// Whether the settings and the credential work.
     ok: bool,
-    /// Why they do not. Never holds a credential, an address or a URL.
+    /// Why they do not, in a fixed sentence per `code`. Never holds a credential, a host, an
+    /// address or a URL.
     error: Option<String>,
+    /// A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,
+    /// `egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or
+    /// `failed`. Null when the check passed.
+    code: Option<String>,
+}
+
+/// The code and the fixed sentence for a failed check. The connector's own text can name a host
+/// (an egress denial does), so it is never passed on.
+fn describe(error: &DestinationError) -> (&'static str, &'static str) {
+    match error {
+        DestinationError::Config { .. } => {
+            ("config_invalid", "a setting of the destination is unusable")
+        }
+        DestinationError::Auth => (
+            "credential_refused",
+            "the destination refused the credential",
+        ),
+        DestinationError::Unreachable => ("unreachable", "the destination could not be reached"),
+        DestinationError::Egress(HttpError::EgressDenied { .. }) => (
+            "egress_denied",
+            "the destination's address is not allowed by the egress policy",
+        ),
+        DestinationError::Egress(_) => ("network_error", "the request to the destination failed"),
+        DestinationError::Upstream(_) => {
+            ("upstream_error", "the destination answered with an error")
+        }
+        DestinationError::RateLimited { .. } => {
+            ("rate_limited", "the destination asked for a slower rate")
+        }
+        DestinationError::Unsupported => {
+            ("unsupported", "the destination type does not support this")
+        }
+        DestinationError::Other(_) => ("failed", "the check failed"),
+    }
 }
 
 /// Runs the destination's check and audits `destination.checked` with the outcome.
@@ -67,9 +102,11 @@ pub(crate) async fn check_destination(
             "the destination did not answer in time",
         )
     })?;
+    let failure = result.err().map(|error| describe(&error));
     let body = DestinationCheckBody {
-        ok: result.is_ok(),
-        error: result.err().map(|error| error.to_string()),
+        ok: failure.is_none(),
+        error: failure.map(|(_, message)| message.to_owned()),
+        code: failure.map(|(code, _)| code.to_owned()),
     };
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     admin::audit(
@@ -123,22 +160,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_check_body_carries_the_outcome_and_the_reason_only() {
+    fn a_check_body_carries_the_outcome_a_fixed_reason_and_a_code_only() {
         let failed = serde_json::to_value(DestinationCheckBody {
             ok: false,
             error: Some("the destination refused the credential".into()),
+            code: Some("credential_refused".into()),
         })
         .unwrap();
         let passed = serde_json::to_value(DestinationCheckBody {
             ok: true,
             error: None,
+            code: None,
         })
         .unwrap();
 
         assert_eq!(
             failed,
-            json!({"ok": false, "error": "the destination refused the credential"})
+            json!({"ok": false, "error": "the destination refused the credential",
+                   "code": "credential_refused"})
         );
-        assert_eq!(passed, json!({"ok": true, "error": null}));
+        assert_eq!(passed, json!({"ok": true, "error": null, "code": null}));
+    }
+
+    #[test]
+    fn every_error_has_a_fixed_sentence_and_code_that_name_no_value() {
+        use zirv_flow_core::egress::AddressClass;
+
+        let errors = [
+            DestinationError::Config {
+                field: "host".into(),
+                reason: "mail.internal.example is wrong".into(),
+            },
+            DestinationError::Auth,
+            DestinationError::Unreachable,
+            DestinationError::Egress(HttpError::EgressDenied {
+                host: "mail.internal.example".into(),
+                class: AddressClass::Private,
+            }),
+            DestinationError::Egress(HttpError::Transport(
+                "https://mail.internal.example/x".into(),
+            )),
+            DestinationError::Upstream(503),
+            DestinationError::RateLimited { retry_after: None },
+            DestinationError::Unsupported,
+            DestinationError::Other("https://mail.internal.example failed".into()),
+        ];
+        let mut codes = hashbrown::HashSet::new();
+
+        for error in &errors {
+            let (code, message) = describe(error);
+
+            assert!(codes.insert(code), "{code} is used twice");
+            for text in [code, message] {
+                assert!(!text.contains("internal"), "{text}");
+                assert!(!text.contains("http"), "{text}");
+                assert!(!text.contains("503"), "{text}");
+            }
+        }
     }
 }
