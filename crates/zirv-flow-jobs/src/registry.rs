@@ -128,7 +128,8 @@ mod tests {
                 "flow.enroll",
                 "flow.settle",
                 "flow.lifecycle",
-                "webhook.call"
+                "webhook.call",
+                "sending_domain.verify"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -177,6 +178,7 @@ mod tests {
                 "flow.settle",
                 "flow.lifecycle",
                 "webhook.call",
+                "sending_domain.verify",
                 "test.first",
                 "test.second"
             ]
