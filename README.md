@@ -2111,6 +2111,25 @@ page size set, only the 100,000-page cap ends such a stream.
 fixed values only: never a URL, a host or a source id. No error or log line holds a secret, a URL,
 a header or a response body.
 
+## Sending domains
+
+An email template publishes only with a sender identity on a verified sending domain (a publish
+with any other sender is a 422 `sender_unverified`). Workspace admins manage both:
+
+- `POST /api/v1/workspaces/{ws}/sending-domains` with `{"domain": "example.com"}` (optional
+  `selector`, default `zirv`, and `spf_mechanism`, such as `include:spf.relay.example`) generates
+  an RSA-2048 DKIM key, seals the private half (it is never returned) and answers with the three
+  DNS TXT records to publish: DKIM at `<selector>._domainkey.<domain>`, SPF at the domain and DMARC
+  at `_dmarc.<domain>`. The SPF value is a recommendation: a name holds one `v=spf1` record, so
+  merge it with the one you have.
+- A background job reads those records. The domain is `verified` only while all three are `ok`:
+  DKIM when the published `p=` key matches, SPF when exactly one `v=spf1` record contains the
+  configured mechanism, DMARC when any `v=DMARC1` record has a valid `p=`. It falls back to
+  `unverified` when a check finds one missing or wrong; a name server that does not answer changes
+  nothing and the check is retried. `POST .../sending-domains/{id}/verify` queues a check now;
+  otherwise the scheduler re-checks every `sending.recheck_hours` (default 6).
+- `POST /api/v1/workspaces/{ws}/sender-identities` binds a from name and an address on the domain.
+
 ## Render host
 
 Templates render in child processes, never inside the API or a worker, so a template

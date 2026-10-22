@@ -12970,6 +12970,907 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/sender-identities": {
+      "get": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "The workspace's live sender identities by address; archived ones with `archived=true`, and\nonly those of one domain with `domain_id`. Workspace admins only.",
+        "operationId": "list_sender_identities",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived identities; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "domain_id",
+            "in": "query",
+            "description": "Only identities on this sending domain",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sender identities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SenderIdentityBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false, or domain_id is not an id",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Creates a sender identity on a sending domain of the workspace. The from address must be on\nthe domain. Workspace admins only. Audited as `sender_identity.created`.",
+        "operationId": "create_sender_identity",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSenderIdentityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SenderIdentityBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live identity already has that address",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name or address, an unknown domain, or an address off the domain",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sender-identities/{id}": {
+      "get": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "One sender identity, archived or not. Workspace admins only.",
+        "operationId": "get_sender_identity",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sender identity id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SenderIdentityBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or identity, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Archives a sender identity: it is no longer listed, changed or accepted at publish, and its\naddress is free again. Workspace admins only. Audited as `sender_identity.archived`.",
+        "operationId": "archive_sender_identity",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sender identity id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Archived"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or identity, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The identity is already archived (`code` is `sender_identity_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Changes a live sender identity: name, from address (on the same domain) or reply-to. Workspace\nadmins only. Audited as `sender_identity.updated`.",
+        "operationId": "update_sender_identity",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sender identity id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSenderIdentityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated identity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SenderIdentityBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or identity, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another live identity has that address, or the identity is archived (`code` is `sender_identity_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, an address off the domain, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sending-domains": {
+      "get": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "The workspace's sending domains, each with its records. Workspace admins only.",
+        "operationId": "list_sending_domains",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The sending domains by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SendingDomainBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Registers a sending domain and returns the DNS records to publish. Zirv Flow generates the\nDKIM key; only its public half appears, in the DKIM record text. A DNS check is queued at once.\nWorkspace admins only. Audited as `sending_domain.created`.",
+        "operationId": "create_sending_domain",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSendingDomainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new domain with its records to publish",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendingDomainBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The workspace already has the domain, or the master key is outdated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid domain, selector or SPF mechanism",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the DKIM key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sending-domains/{id}": {
+      "get": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "One sending domain with the status of each record. Workspace admins only.",
+        "operationId": "get_sending_domain",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sending domain id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The domain and its records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendingDomainBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or domain, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Deletes a sending domain, its records, its archived sender identities and its DKIM key. It is\nrefused while a live sender identity exists on it, or a template names one of its identities.\nWorkspace admins only. Audited as `sending_domain.deleted`.",
+        "operationId": "delete_sending_domain",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sending domain id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or domain, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The domain still has sender identities in use (`code` is `sending_domain_in_use`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/sending-domains/{id}/verify": {
+      "post": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Asks for a DNS check of the domain now. The check runs in the background, so the response\nshows the state before it; read the domain again for the result. A check already waiting\nserves this request too. Workspace admins only. Audited as\n`sending_domain.verification_requested`.",
+        "operationId": "verify_sending_domain",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Sending domain id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The check is queued; the domain as it is now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendingDomainBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or domain, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
       "post": {
         "tags": [
@@ -16115,7 +17016,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. Audited as\n`template.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAudited as `template.published`.",
         "operationId": "publish_template",
         "parameters": [
           {
@@ -16191,7 +17092,7 @@
             }
           },
           "422": {
-            "description": "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`)",
+            "description": "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -19920,6 +20821,65 @@
           }
         }
       },
+      "CreateSenderIdentityRequest": {
+        "type": "object",
+        "required": [
+          "domain_id",
+          "from_name",
+          "from_address"
+        ],
+        "properties": {
+          "domain_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A sending domain of this workspace."
+          },
+          "from_address": {
+            "type": "string",
+            "description": "An address on the sending domain.",
+            "example": "news@example.com"
+          },
+          "from_name": {
+            "type": "string",
+            "description": "The display name, 1 to 128 characters.",
+            "example": "Example News"
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where replies go, if not to the from address. May be on any domain."
+          }
+        }
+      },
+      "CreateSendingDomainRequest": {
+        "type": "object",
+        "required": [
+          "domain"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string",
+            "description": "The domain to send from, such as `example.com`: letters, digits and hyphens in at least two\nlabels. Give an internationalized name in punycode.",
+            "example": "example.com"
+          },
+          "selector": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The DKIM selector, 1 to 63 letters, digits or hyphens. Default `zirv`."
+          },
+          "spf_mechanism": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One SPF mechanism the domain's SPF record must contain, such as `include:spf.relay.example`,\n`ip4:203.0.113.7`, `a` or `mx`. Without one, any `v=spf1` record satisfies the check."
+          }
+        }
+      },
       "CreateSourceRequest": {
         "type": "object",
         "required": [
@@ -20884,6 +21844,51 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "DomainRecordBody": {
+        "type": "object",
+        "description": "One DNS record a domain must publish, and what the last check found.",
+        "required": [
+          "kind",
+          "host",
+          "expected_text",
+          "status",
+          "observed_text"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "expected_text": {
+            "type": "string",
+            "description": "The TXT value to publish. The SPF value is a recommendation: a name holds one `v=spf1`\nrecord, so merge it with the one the domain already has."
+          },
+          "host": {
+            "type": "string",
+            "description": "The DNS name to publish the TXT record at.",
+            "example": "zirv._domainkey.example.com"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`dkim`, `spf` or `dmarc`.",
+            "example": "dkim"
+          },
+          "observed_text": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The TXT records the last check read at `host`, bounded in number and length."
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending` (not checked yet), `ok`, `mismatch` (a record is there but does not satisfy the\nrule) or `missing`."
           }
         }
       },
@@ -27738,6 +28743,127 @@
         ],
         "description": "Which events count; with no window, all retained events."
       },
+      "SenderIdentityBody": {
+        "type": "object",
+        "description": "A sender identity.",
+        "required": [
+          "id",
+          "domain_id",
+          "from_name",
+          "from_address",
+          "archived",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "An archived identity is read-only history and cannot send."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "domain_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The sending domain the address is on."
+          },
+          "from_address": {
+            "type": "string",
+            "example": "news@example.com"
+          },
+          "from_name": {
+            "type": "string",
+            "example": "Example News"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SendingDomainBody": {
+        "type": "object",
+        "description": "A sending domain. It never carries the private key or the id of its secret.",
+        "required": [
+          "id",
+          "domain",
+          "selector",
+          "status",
+          "records",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "domain": {
+            "type": "string",
+            "example": "example.com"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DomainRecordBody"
+            },
+            "description": "The three records, in the order DKIM, SPF, DMARC."
+          },
+          "selector": {
+            "type": "string",
+            "description": "The DKIM selector: the record is published at `<selector>._domainkey.<domain>`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`verified` only while the DKIM, SPF and DMARC records are all `ok`; otherwise\n`unverified`, and no email template naming a sender on it can be published."
+          },
+          "verified_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      },
       "SessionBody": {
         "type": "object",
         "required": [
@@ -29840,6 +30966,31 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpdateSenderIdentityRequest": {
+        "type": "object",
+        "properties": {
+          "from_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An address on the identity's domain."
+          },
+          "from_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reply_to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A new reply-to address; `null` clears it."
           }
         }
       },
