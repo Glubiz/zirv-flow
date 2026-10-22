@@ -327,6 +327,16 @@ pub async fn consent_for(
     Ok(Some(entries))
 }
 
+/// One state row, as the read rule needs it.
+#[derive(FromRow)]
+struct RecordRow {
+    topic_key: Option<String>,
+    dimensions: Value,
+    status: String,
+    changed_at: OffsetDateTime,
+    last_change_id: Option<Uuid>,
+}
+
 /// What [`consent_read`] found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadOutcome {
@@ -376,8 +386,8 @@ pub async fn consent_read(
     let Some(person) = current_person(&mut *connection, workspace, person).await? else {
         return Ok(ReadOutcome::NoSuchPerson);
     };
-    let rows: Vec<(Option<String>, Value, String, OffsetDateTime, Option<Uuid>)> = sqlx::query_as(
-        "SELECT t.key, c.dimensions, c.status, c.changed_at, c.last_change_id \
+    let rows: Vec<RecordRow> = sqlx::query_as(
+        "SELECT t.key AS topic_key, c.dimensions, c.status, c.changed_at, c.last_change_id \
              FROM consent c \
              LEFT JOIN topics t ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
              WHERE c.workspace_id = $1 AND c.person_id = $2 AND c.channel = $3",
@@ -389,18 +399,22 @@ pub async fn consent_read(
     .await
     .map_err(StoreError::query)?;
     let mut records = Vec::with_capacity(rows.len());
-    for (topic_key, stored, status, changed_at, change_id) in rows {
-        let mut scope = dimensions_of(&stored);
-        if let Some(key) = topic_key {
+    for row in rows {
+        let mut scope = dimensions_of(&row.dimensions);
+        if let Some(key) = row.topic_key {
             scope.insert(TOPIC_DIMENSION.to_owned(), key);
         }
-        let status: ConsentStatus = status
+        let status: ConsentStatus = row
+            .status
             .parse()
             .map_err(|_| StoreError::query(sqlx::Error::Decode("unknown consent status".into())))?;
         records.push(Record {
             scope,
-            state: State { status, changed_at },
-            change_id: change_id.unwrap_or_else(Uuid::nil),
+            state: State {
+                status,
+                changed_at: row.changed_at,
+            },
+            change_id: row.last_change_id.unwrap_or_else(Uuid::nil),
         });
     }
     Ok(ReadOutcome::Read {
