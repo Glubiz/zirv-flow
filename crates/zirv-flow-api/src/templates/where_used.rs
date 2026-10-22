@@ -49,7 +49,7 @@ impl From<&TemplateUse> for TemplateUseBody {
         ("id" = Uuid, Path, description = "Template id")
     ),
     responses(
-        (status = 200, description = "The flow versions that name the template", body = Vec<TemplateUseBody>),
+        (status = 200, description = "The flows with a version that names the template, one entry per flow", body = Vec<TemplateUseBody>),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json")

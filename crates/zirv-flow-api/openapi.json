@@ -15841,7 +15841,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The flow versions that name the template",
+            "description": "The flows with a version that names the template, one entry per flow",
             "content": {
               "application/json": {
                 "schema": {

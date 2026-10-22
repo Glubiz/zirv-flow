@@ -18142,7 +18142,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The flow versions that name the template */
+            /** @description The flows with a version that names the template, one entry per flow */
             200: {
                 headers: {
                     [name: string]: unknown;
