@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "text",
+              "id": "t1",
+              "content": "<p>Hello <b>{{ person.name }}</b>, <i>welcome</i> and <u>enjoy</u>.<br>Second line with a <a href=\"https://shop.example/a?x=1&amp;y=2\">link</a>.</p><ul><li>One</li><li>Two {{ person.plan }}</li></ul><ol><li>First</li><li>Second</li></ol>",
+              "align": "left"
+            },
+            {
+              "type": "text",
+              "id": "t2",
+              "content": "<p>Centered and <a href=\"mailto:help@example.com\">mail us</a></p>",
+              "align": "center"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

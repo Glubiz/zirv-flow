@@ -1,0 +1,60 @@
+Spring collection: https://shop.example/spring
+
+Hello Ann <b>O'Neil</b>
+
+Our spring collection is here. Take a look at what is new this season.
+
+Fresh
+
+New arrivals every week.
+
+Fair
+
+Prices that stay put.
+
+See the collection: https://shop.example/spring
+
+----------
+
+You get this because you signed up. Unsubscribe: https://u.example/u/1?s=a&t=b or change your preferences: https://u.example/p/1.
+
+Welcome, Ann <b>O'Neil</b>
+
+Tom & Jerry's "news"
+
+Plan: PRO
+
+Hello Ann <b>O'Neil</b>, welcome and enjoy.
+Second line with a link: https://shop.example/a?x=1&y=2.
+
+- One
+- Two pro
+
+1. First
+2. Second
+
+Centered and mail us: mailto:help@example.com
+
+A hero
+
+Logo for Ann <b>O'Neil</b>: https://example.com/pro
+
+Shop now, Ann <b>O'Neil</b>: https://shop.example/offer?a=1&b=2
+
+Write to us: mailto:help@example.com
+
+Account: https://u.example/p/1
+
+Above
+
+----------
+
+Between
+
+----------
+
+Below
+
+Above
+
+Below

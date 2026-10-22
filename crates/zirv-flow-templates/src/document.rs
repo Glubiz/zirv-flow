@@ -1,12 +1,14 @@
 //! The template document: a versioned, channel-aware envelope (architecture 11.1).
 //!
-//! M6 renders `mode: code` for the `email` and `webhook` channels. `blocks` mode and the
-//! reserved channels are part of the schema so documents keep their shape, but they are
-//! validated as unsupported and never rendered here.
+//! M6 renders `mode: code` for the `email` and `webhook` channels, and `mode: blocks` for `email`
+//! (the block document v1, in `content::blocks`). The reserved channels are part of the schema so
+//! documents keep their shape, but they are validated as unsupported and never rendered here.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+pub use crate::content::blocks::BlocksContent;
 
 /// The document schema this crate reads. A newer schema is refused; older ones are migrated in
 /// M7 (architecture 11.8).
@@ -30,7 +32,7 @@ pub enum Channel {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
-    /// The block builder (M7).
+    /// The block document: sections of blocks, rendered to MJML.
     Blocks,
     /// Raw HTML and text, or headers and a JSON body, with MiniJinja.
     Code,
@@ -103,6 +105,10 @@ pub struct TemplateDocument {
     pub email: Option<EmailContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook: Option<WebhookContent>,
+    /// The content of a `mode: blocks` email. It sits beside the code content so a code document
+    /// reads and writes exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<BlocksContent>,
 }
 
 impl TemplateDocument {
@@ -114,6 +120,19 @@ impl TemplateDocument {
             mode: Mode::Code,
             email: Some(content),
             webhook: None,
+            blocks: None,
+        }
+    }
+
+    /// A block-mode email document at the current schema.
+    pub fn email_blocks(content: BlocksContent) -> Self {
+        Self {
+            schema: SCHEMA_VERSION,
+            channel: Channel::Email,
+            mode: Mode::Blocks,
+            email: None,
+            webhook: None,
+            blocks: Some(content),
         }
     }
 
@@ -125,6 +144,7 @@ impl TemplateDocument {
             mode: Mode::Code,
             email: None,
             webhook: Some(content),
+            blocks: None,
         }
     }
 }

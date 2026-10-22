@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "button",
+              "id": "b1",
+              "label": "Shop now, {{ person.name }}",
+              "url": "https://shop.example/offer?a=1&b=2"
+            },
+            {
+              "type": "button",
+              "id": "b2",
+              "label": "Write to us",
+              "url": "mailto:help@example.com",
+              "align": "left"
+            },
+            {
+              "type": "button",
+              "id": "b3",
+              "label": "Account",
+              "url": "{{ system.preferences_url }}",
+              "align": "right"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

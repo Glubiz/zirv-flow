@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "h1",
+              "level": 1,
+              "text": "Welcome, {{ person.name }}"
+            },
+            {
+              "type": "heading",
+              "id": "h2",
+              "level": 2,
+              "text": "Tom & Jerry's \"news\"",
+              "align": "center"
+            },
+            {
+              "type": "heading",
+              "id": "h3",
+              "level": 3,
+              "text": "Plan: {{ person.plan | upper }}",
+              "align": "right"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

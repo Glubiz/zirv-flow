@@ -32,14 +32,24 @@ pub mod code {
     pub const MJML_PARSE_ERROR: &str = "mjml_parse_error";
     pub const MJML_INCLUDE: &str = "mjml_include";
     pub const MJML_TOO_DEEP: &str = "mjml_too_deep";
+    pub const BLOCKS_LIMIT: &str = "blocks_limit";
+    pub const DUPLICATE_BLOCK_ID: &str = "duplicate_block_id";
+    pub const INVALID_BLOCK_ID: &str = "invalid_block_id";
+    pub const INVALID_COLUMNS: &str = "invalid_columns";
+    pub const INVALID_SETTING: &str = "invalid_setting";
+    pub const INVALID_URL: &str = "invalid_url";
+    pub const SANITIZER_REJECTED: &str = "sanitizer_rejected";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
     pub const HTML_NEAR_CLIP: &str = "html_near_clip";
     pub const SAMPLE_RENDER_FAILED: &str = "sample_render_failed";
+    pub const IMAGE_WITHOUT_ALT: &str = "image_without_alt";
+    pub const SUBJECT_TOO_LONG: &str = "subject_too_long";
+    pub const PREHEADER_TOO_LONG: &str = "preheader_too_long";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 19] = [
+    pub const BLOCKING: [&str; 26] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -59,14 +69,24 @@ pub mod code {
         MJML_PARSE_ERROR,
         MJML_INCLUDE,
         MJML_TOO_DEEP,
+        BLOCKS_LIMIT,
+        DUPLICATE_BLOCK_ID,
+        INVALID_BLOCK_ID,
+        INVALID_COLUMNS,
+        INVALID_SETTING,
+        INVALID_URL,
+        SANITIZER_REJECTED,
     ];
 
     /// Every code that only warns.
-    pub const WARNING: [&str; 4] = [
+    pub const WARNING: [&str; 7] = [
         MISSING_LANG,
         INSECURE_LINK,
         HTML_NEAR_CLIP,
         SAMPLE_RENDER_FAILED,
+        IMAGE_WITHOUT_ALT,
+        SUBJECT_TOO_LONG,
+        PREHEADER_TOO_LONG,
     ];
 }
 

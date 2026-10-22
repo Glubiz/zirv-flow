@@ -8,6 +8,7 @@
 //! - [`render_email`] and [`render_webhook`] render a [`TemplateDocument`] against a
 //!   [`RenderContext`] inside a sandbox (strict undefined, fuel, recursion and output limits,
 //!   HTML autoescape in HTML fields only).
+//! - [`blocks_to_mjml`] turns a block document into MJML code, merge tags kept.
 //! - [`validate`] reports what is wrong with a document as [`Issue`]s with fixed codes.
 //! - [`RenderRequest`] and [`RenderResponse`] are the wire shape of an isolated render (11.9).
 //! - [`rewrite_links`] and [`unsubscribe_headers`] are the pure post-render steps.
@@ -24,6 +25,14 @@ mod sandbox;
 mod validate;
 mod wire;
 
+pub use content::blocks::{
+    Align, Block, BlocksContent, BlocksError, Button, ConvertError, Converted, Divider,
+    FONT_STACKS, Heading, Image, MAX_BLOCKS, MAX_COLUMNS, MAX_CONTENT_WIDTH, MAX_DOCUMENT_BYTES,
+    MAX_ID_BYTES, MAX_IMAGE_WIDTH, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES,
+    MAX_SECTIONS, MAX_SPACER_HEIGHT, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, MIN_CONTENT_WIDTH,
+    PREHEADER_DISPLAY_CHARS, RawHtml, RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Spacer,
+    blocks_to_mjml, parse_blocks_document,
+};
 pub use content::{
     ContentError, RenderKind, TemplateContent, content_type, content_type_ids, content_type_of,
     validate_document,

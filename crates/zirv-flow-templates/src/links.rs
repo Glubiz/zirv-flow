@@ -192,7 +192,7 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
 
 /// Decode the entities an attribute value is escaped with: the named `amp`, `lt`, `gt`, `quot`
 /// and `apos`, and numeric ones (the sandbox writes `/` as `&#x2f;` inside HTML fields).
-fn unescape(text: &str) -> String {
+pub(crate) fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('&') {
