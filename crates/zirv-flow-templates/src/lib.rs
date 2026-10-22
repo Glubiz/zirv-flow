@@ -9,6 +9,7 @@
 //!   [`RenderContext`] inside a sandbox (strict undefined, fuel, recursion and output limits,
 //!   HTML autoescape in HTML fields only).
 //! - [`validate`] reports what is wrong with a document as [`Issue`]s with fixed codes.
+//! - [`RenderRequest`] and [`RenderResponse`] are the wire shape of an isolated render (11.9).
 //! - [`rewrite_links`] and [`unsubscribe_headers`] are the pure post-render steps.
 
 mod callables;
@@ -20,6 +21,7 @@ mod links;
 mod render;
 mod sandbox;
 mod validate;
+mod wire;
 
 pub use context::{MessageContext, RenderContext, SystemValues};
 pub use document::{
@@ -28,9 +30,10 @@ pub use document::{
 pub use error::RenderError;
 pub use issue::{FieldCatalog, Issue, Severity, code, severity_of};
 pub use links::{Hooks, INERT_TOKEN, Tracking, rewrite_links, unsubscribe_headers};
-pub use render::{Rendered, RenderedWebhook, render_email, render_webhook};
+pub use render::{Rendered, RenderedWebhook, apply_tracking, render_email, render_webhook};
 pub use sandbox::{
     FUEL, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
     MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, RECURSION_LIMIT,
 };
 pub use validate::validate;
+pub use wire::{RenderRequest, RenderResponse};
