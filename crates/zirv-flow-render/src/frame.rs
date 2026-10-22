@@ -23,6 +23,8 @@ pub(crate) enum FrameError {
     Truncated,
     /// The length prefix is over the bound.
     TooLarge(usize),
+    /// A well-formed frame that is not the one the protocol calls for at this point.
+    Unexpected,
     /// The stream failed.
     Io(io::Error),
 }

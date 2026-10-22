@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use tracing::{error, warn};
 use zirv_flow_templates::{
@@ -252,7 +252,7 @@ impl Host {
         let mut byte = [0u8; 1];
         while !seen.ends_with(&marker) {
             if seen.len() > 64 * 1024 {
-                return Err(FrameError::TooLarge(seen.len()));
+                return Err(FrameError::Unexpected);
             }
             match self.stdout.read(&mut byte).await {
                 Ok(0) => return Err(FrameError::Closed),
@@ -266,11 +266,11 @@ impl Host {
     /// Wait for the ready frame the child writes once it has applied its limit.
     async fn await_ready(&mut self) -> Result<(), FrameError> {
         self.skip_banner().await?;
-        let frame = read_frame_async(&mut self.stdout, READY.len() * 4).await?;
+        let frame = read_frame_async(&mut self.stdout, 1024).await?;
         if frame == READY {
             Ok(())
         } else {
-            Err(FrameError::TooLarge(frame.len()))
+            Err(FrameError::Unexpected)
         }
     }
 
@@ -337,7 +337,7 @@ fn after_death(exit: &Exit) -> RenderFailure {
 
 async fn classify(mut host: Host, fault: FrameError) -> RenderFailure {
     match fault {
-        FrameError::TooLarge(_) => {
+        FrameError::TooLarge(_) | FrameError::Unexpected => {
             host.kill().await;
             RenderFailure::Protocol
         }
@@ -413,16 +413,25 @@ impl RenderPool {
     pub async fn start(command: ChildCommand, config: PoolConfig) -> io::Result<Self> {
         let size = config.size.max(1);
         limit::warn_unenforced(command.memory_limit_bytes);
-        let mut hosts = Vec::with_capacity(size);
+        // Children start together, so a pool of children that never become ready fails after one
+        // deadline, not one per child. The first failure ends the start: dropping the set aborts
+        // the children still starting, and dropping a host kills its process.
+        let mut starting = JoinSet::new();
         for _ in 0..size {
-            let host = start_host(&command, config.deadline)
-                .await
-                .map_err(|failure| {
-                    io::Error::other(format!(
-                        "a render host child did not become ready: {failure}"
-                    ))
-                })?;
-            hosts.push(host);
+            let command = command.clone();
+            let deadline = config.deadline;
+            starting.spawn(async move { start_host(&command, deadline).await });
+        }
+        let mut hosts = Vec::with_capacity(size);
+        while let Some(joined) = starting.join_next().await {
+            let started = joined.map_err(|error| {
+                io::Error::other(format!("a render host start failed: {error}"))
+            })?;
+            hosts.push(started.map_err(|failure| {
+                io::Error::other(format!(
+                    "a render host child did not become ready: {failure}"
+                ))
+            })?);
         }
         Ok(Self {
             inner: Arc::new(Inner {
@@ -470,6 +479,8 @@ impl RenderPool {
         };
         metrics::histogram!("zirv_flow_render_wait_seconds").record(waiting.elapsed());
 
+        // One deadline covers the whole render: a respawned child's start counts against it.
+        let started = Instant::now();
         let mut host = match self.take_idle() {
             Some(host) => host,
             None => {
@@ -478,8 +489,8 @@ impl RenderPool {
             }
         };
 
-        let started = Instant::now();
-        let outcome = timeout(self.inner.deadline, host.exchange(request)).await;
+        let remaining = self.inner.deadline.saturating_sub(started.elapsed());
+        let outcome = timeout(remaining, host.exchange(request)).await;
         metrics::histogram!("zirv_flow_render_duration_seconds", "channel" => channel)
             .record(started.elapsed());
         match outcome {
@@ -1048,5 +1059,70 @@ mod tests {
                 .unwrap_err(),
             RenderFailure::Protocol
         );
+    }
+
+    #[tokio::test]
+    async fn a_respawn_and_its_render_share_one_deadline() {
+        let marker = std::env::temp_dir().join(format!("zirv-render-share-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let command = child_with(
+            "slow_respawn",
+            [("ZIRV_RENDER_TEST_MARKER", marker.as_os_str())],
+        );
+        let pool = RenderPool::start(command, config(1, 800)).await.unwrap();
+        pool.kill_idle();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The new child takes about 500 ms to become ready, then hangs on the request.
+        let began = Instant::now();
+        let failure = pool
+            .render_email(&doc("x"), &context(), &Hooks::untracked())
+            .await
+            .unwrap_err();
+        let took = began.elapsed();
+        assert_eq!(failure, RenderFailure::Deadline);
+        assert!(took < Duration::from_millis(1250), "took {took:?}");
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[tokio::test]
+    async fn children_that_never_become_ready_fail_the_start_after_one_deadline() {
+        let beat = std::env::temp_dir().join(format!("zirv-render-ready-{}", std::process::id()));
+        let _ = fs::remove_file(&beat);
+        let command = child_with(
+            "slow_ready",
+            [("ZIRV_RENDER_TEST_HEARTBEAT", beat.as_os_str())],
+        );
+        let began = Instant::now();
+        let error = RenderPool::start(command, config(4, 700))
+            .await
+            .unwrap_err();
+        let took = began.elapsed();
+        assert!(error.to_string().contains("deadline"), "{error}");
+        assert!(
+            took < Duration::from_millis(2000),
+            "four in a row would take 4x: {took:?}"
+        );
+
+        // Every child was killed: the heartbeat they all share stops growing.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let first = fs::metadata(&beat).unwrap().len();
+        assert!(first > 0, "the children were working");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            fs::metadata(&beat).unwrap().len(),
+            first,
+            "a child is still running"
+        );
+        let _ = fs::remove_file(&beat);
+    }
+
+    #[tokio::test]
+    async fn a_response_shaped_first_frame_is_a_protocol_failure_at_start() {
+        let error = RenderPool::start(child("wrong_ready"), config(1, 20_000))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did not become ready: protocol"), "{error}");
     }
 }

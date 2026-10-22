@@ -136,6 +136,20 @@ mod test_support {
         i32::from(host::serve(io::stdin().lock(), io::stdout().lock()).is_err())
     }
 
+    /// Prove the process is alive by growing the heartbeat file one byte per tick, until killed.
+    fn beat_forever() -> ! {
+        let beat = std::env::var("ZIRV_RENDER_TEST_HEARTBEAT").unwrap_or_default();
+        loop {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&beat)
+                .expect("the heartbeat file opens");
+            file.write_all(b".").expect("the heartbeat is written");
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+
     fn take_request() {
         read_frame(&mut io::stdin().lock(), MAX_REQUEST_BYTES).expect("a request arrives");
     }
@@ -159,8 +173,30 @@ mod test_support {
         if mode == "exit_at_start" || (mode == "ready_once" && !first_run(&marker)) {
             std::process::exit(1);
         }
-        write_frame(&mut stdout, host::READY).expect("stdout");
+        if mode == "slow_ready" {
+            beat_forever();
+        }
+        let respawned = mode == "slow_respawn" && !first_run(&marker);
+        if respawned {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        if mode == "wrong_ready" {
+            let answer = RenderResponse::Webhook(RenderedWebhook {
+                headers: Vec::new(),
+                body: "{}".into(),
+            });
+            write_frame(&mut stdout, &serde_json::to_vec(&answer).expect("json")).expect("stdout");
+        } else {
+            write_frame(&mut stdout, host::READY).expect("stdout");
+        }
         let code = match mode.as_str() {
+            "slow_respawn" if respawned => {
+                take_request();
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
+            "slow_respawn" | "wrong_ready" => serve_stdio(),
             "serve" | "ready_once" => serve_stdio(),
             "exit_clean" => {
                 take_request();
@@ -169,17 +205,7 @@ mod test_support {
             "slow_first" => {
                 if first_run(&marker) {
                     take_request();
-                    // Prove it is alive by growing a file, one byte per tick, until killed.
-                    let beat = std::env::var("ZIRV_RENDER_TEST_HEARTBEAT").unwrap_or_default();
-                    loop {
-                        let mut file = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&beat)
-                            .expect("the heartbeat file opens");
-                        file.write_all(b".").expect("the heartbeat is written");
-                        std::thread::sleep(Duration::from_millis(30));
-                    }
+                    beat_forever();
                 }
                 serve_stdio()
             }

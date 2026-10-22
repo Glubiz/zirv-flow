@@ -53,6 +53,7 @@ pub fn serve(mut input: impl Read, mut output: impl Write) -> Result<(), HostErr
                     "{length} bytes is over the bound"
                 )));
             }
+            Err(FrameError::Unexpected) => return Err(HostError::BadRequest),
             Err(FrameError::Io(error)) => return Err(HostError::Frame(error.to_string())),
         };
         let request: RenderRequest<'_> =
