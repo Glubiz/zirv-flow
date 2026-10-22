@@ -645,6 +645,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/destinations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's live destinations, ordered by name. Workspace admins only. */
+        get: operations["list_destinations"];
+        put?: never;
+        /**
+         * Creates a destination and seals its credential. Workspace admins only. Audited as
+         *     `destination.created`.
+         */
+        post: operations["create_destination"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/destinations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One destination, archived or not. Workspace admins only. */
+        get: operations["get_destination"];
+        put?: never;
+        post?: never;
+        /**
+         * Archives a destination: it stops being listed, changed or checked, and keeps its delivery
+         *     history. Workspace admins only. Audited as `destination.archived`.
+         */
+        delete: operations["archive_destination"];
+        options?: never;
+        head?: never;
+        /**
+         * Changes a destination: name, settings, rate, burst, or the credential. Workspace admins only.
+         *     Audited as `destination.updated`.
+         */
+        patch: operations["update_destination"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/destinations/{id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Checks the destination's settings and stored credential without delivering anything. A failed
+         *     check is a 200 with `ok` false and the reason. Workspace admins only. Audited as
+         *     `destination.checked`.
+         */
+        post: operations["check_destination"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/event-policy": {
         parameters: {
             query?: never;
@@ -3496,6 +3563,37 @@ export interface components {
              */
             key: string;
         };
+        CreateDestinationRequest: {
+            /**
+             * Format: int32
+             * @description The most deliveries at once, 1 to 100000. Default: the rate.
+             */
+            burst?: number | null;
+            /** @description The plain settings, checked against the type's field specs. */
+            config: {
+                [key: string]: unknown;
+            };
+            /** @description The credential fields by name. Sealed on arrival and never returned. */
+            credential?: {
+                [key: string]: string;
+            };
+            /**
+             * @description A destination type this build ships.
+             * @example smtp
+             */
+            kind: string;
+            /**
+             * @description 1 to 128 characters after trimming; unique among the workspace's live destinations,
+             *     ignoring case.
+             * @example Transactional mail
+             */
+            name: string;
+            /**
+             * Format: int32
+             * @description Deliveries per second, 1 to 100000. Default 10.
+             */
+            rate?: number | null;
+        };
         CreateEventSchemaRequest: {
             description?: string;
             /** @description One of `allow`, `warn` (the default), `block`. */
@@ -3906,6 +4004,60 @@ export interface components {
             fields: components["schemas"]["FieldBody"][];
             /** @description The sync modes the stream supports: `full_refresh`, `incremental`, `stream`. */
             sync_modes: string[];
+        };
+        DestinationBody: {
+            /** @description An archived destination is read-only history. */
+            archived: boolean;
+            /**
+             * Format: int32
+             * @description The most deliveries it may take at once.
+             */
+            burst: number;
+            /** @description The plain settings. Never holds a credential. */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /** @description The names of the credential fields that are set. Their values are never returned. */
+            credential_fields_set: string[];
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description The destination type.
+             * @example smtp
+             */
+            kind: string;
+            /** @example Transactional mail */
+            name: string;
+            /**
+             * Format: int32
+             * @description Deliveries per second the destination tolerates; the rate bucket enforces it across
+             *     workers and processes.
+             */
+            rate: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        DestinationCheckBody: {
+            /**
+             * @description A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,
+             *     `egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or
+             *     `failed`. Null when the check passed.
+             */
+            code?: string | null;
+            /**
+             * @description Why they do not, in a fixed sentence per `code`. Never holds a credential, a host, an
+             *     address or a URL.
+             */
+            error?: string | null;
+            /** @description Whether the settings and the credential work. */
+            ok: boolean;
         };
         /**
          * @description An identifier shown for a person. The value is null when `masked`: only workspace admins,
@@ -7234,6 +7386,20 @@ export interface components {
              */
             row: number;
         };
+        UpdateDestinationRequest: {
+            /** Format: int32 */
+            burst?: number | null;
+            config?: {
+                [key: string]: unknown;
+            } | null;
+            /** @description Replaces the whole credential: every required credential field must be given. */
+            credential?: {
+                [key: string]: string;
+            } | null;
+            name?: string | null;
+            /** Format: int32 */
+            rate?: number | null;
+        };
         UpdateEventSchemaRequest: {
             description?: string | null;
             mode?: string | null;
@@ -9957,6 +10123,410 @@ export interface operations {
             };
             /** @description The workspace already has 20 streams open on this server; see `Retry-After` */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_destinations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The live destinations */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_destination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDestinationRequest"];
+            };
+        };
+        responses: {
+            /** @description The new destination */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live destination with that name exists, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, kind, setting, credential field, rate or burst */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_destination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Destination id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The destination */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or destination, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_destination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Destination id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Archived */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or destination, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The destination is already archived (`code` is `destination_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_destination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Destination id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateDestinationRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated destination */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or destination, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live destination has that name, the destination is archived (`code` is `destination_archived`), or its type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    check_destination: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Destination id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The outcome of the check */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationCheckBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or destination, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The destination is archived (`code` is `destination_archived`), or its type is not in this build (`destination_kind_unavailable`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The destination did not answer in time */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -527,6 +527,37 @@ mod tests {
         )
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_purpose_check_accepts_every_purpose_old_and_new_and_nothing_else(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let keys = keyring();
+        for purpose in [
+            SecretPurpose::ConnectorCredential,
+            SecretPurpose::OAuthToken,
+            SecretPurpose::AiProviderKey,
+            SecretPurpose::WebhookSecret,
+            SecretPurpose::WebhookSigning,
+            SecretPurpose::DestinationCredential,
+        ] {
+            let id = SecretId::new();
+            let sealed = seal(&keys, b"{}", &secret_aad(ws, id, purpose));
+
+            insert_unchecked(&pool, ws, purpose, id, &sealed)
+                .await
+                .unwrap_or_else(|error| panic!("{}: {error}", purpose.as_str()));
+        }
+
+        let refused = sqlx::query(
+            "INSERT INTO encrypted_secrets                 (id, workspace_id, purpose, key_id, wrapped_key, nonce, ciphertext)              VALUES ($1, $2, 'not_a_purpose', 'k', '\x01', '\x02', '\x03')",
+        )
+        .bind(uuid::Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await;
+        assert!(refused.is_err());
+    }
+
     #[test]
     fn a_stored_nonce_of_the_wrong_length_is_corrupt() {
         let row = SealedRow {
