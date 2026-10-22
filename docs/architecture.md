@@ -2321,7 +2321,6 @@ they were ruled as their capabilities were added to the plan.
 | OQ-22 | Dark-mode handling: themed dark variants, or rely on client inversion with contrast checks? | M7 |
 | OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
 | OQ-24 | Localization: multi-language variants per template selected by a person trait, in v1.0 or post-1.0? | M7 |
-| OQ-25 | Representative layout set and mail-client matrix used to validate `mrml` output | M6, before the v1 block set is frozen |
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
@@ -2448,6 +2447,19 @@ they were ruled as their capabilities were added to the plan.
   complaints and unsubscribes stay per workspace; the Owner manages organization-wide entries. Reason:
   a nonexistent address is nonexistent for every brand, but a complaint is about one brand. The gate
   checks both scopes and reuses `identifier_hash`. (10.1; supervisor ruling, unparsed reply).
+- **OQ-25:** Decided in M6 (ruling 6ae62d8f, #237). The representative layout set is six golden
+  documents under `crates/zirv-flow-templates/tests/fixtures/mjml/`: one, two and three columns, a hero
+  image, a button, and a footer with the unsubscribe link. Each is rendered through the sandbox and
+  `mrml` and compared byte for byte, twice, and the output is asserted to be table-based with inline
+  styles, conditional comments for the Word engine, a mobile media query and the content width. The
+  client matrix is named by rendering-engine class, not by product: a Word-engine desktop client (a
+  table-only layout engine with no modern CSS), WebKit desktop and mobile clients, and webmail with a
+  CSS sanitizer (which strips or rewrites style blocks and unknown attributes). A manual review of the
+  rendered set in real clients of those three classes, with the clients, their versions and the
+  results recorded, happens before the v1 block set (#238) is frozen; until then the automated checks
+  show that the output is stable and well-formed, not that every client draws it well. Reason: the
+  classes are what decide how a layout breaks, product lists age, and a gap found before the block set
+  is frozen costs a block change, not a migration. (11.5, 11.6.)
 - **OQ-32:** Consent dimensions are a per-workspace catalog with enumerated value keys, and topics become
   the built-in `topic` dimension. The policy is an ordered, versioned list of deny-only rules over the M4
   AST, with a built-in `recorded consent` rule and new `consent` and `messages` leaves. Reason: a catalog

@@ -4,9 +4,10 @@ use minijinja::{Environment, ErrorKind, Value};
 use zirv_flow_core::segment::pointer_push;
 
 use crate::callables::{Kind, unknown_callables};
+use crate::content::mjml::{MjmlError, compile, has_include};
 use crate::context::{MESSAGE_FIELDS, RenderContext, SAMPLE_UNSUBSCRIBE_URL, SYSTEM_FIELDS};
 use crate::document::{
-    Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
+    Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
 };
 use crate::issue::{FieldCatalog, Issue, code};
 use crate::links::{href_mentions, link_urls, links_to};
@@ -116,10 +117,12 @@ fn validate_email(
     {
         issues.push(Issue::new(code::MISSING_SENDER, "/email/sender"));
     }
-    if email
-        .lang
-        .as_deref()
-        .is_none_or(|lang| lang.trim().is_empty())
+    // An MJML message takes its language from the `<mjml>` element, which `check_mjml` reads.
+    if email.syntax == Syntax::Html
+        && email
+            .lang
+            .as_deref()
+            .is_none_or(|lang| lang.trim().is_empty())
     {
         issues.push(Issue::new(code::MISSING_LANG, "/email/lang"));
     }
@@ -132,7 +135,7 @@ fn validate_email(
         SUBJECT,
         issues,
     );
-    let html = check_template(
+    let mut html = check_template(
         env,
         catalog,
         sample,
@@ -141,6 +144,9 @@ fn validate_email(
         HTML,
         issues,
     );
+    if email.syntax == Syntax::Mjml {
+        check_mjml(email, &mut html, issues);
+    }
     check_template(
         env,
         catalog,
@@ -168,23 +174,86 @@ fn validate_email(
         (None, failure) if html.clean => {
             let reason = failure.as_deref().unwrap_or("the output is not UTF-8");
             issues.push(Issue::new(code::SAMPLE_RENDER_FAILED, "/email/html").with_message(reason));
-            if email.category == Category::Marketing
-                && !href_mentions(&email.html, "system.unsubscribe_url")
-            {
+            if email.category == Category::Marketing && !source_mentions_unsubscribe(email) {
                 issues.push(Issue::new(code::MISSING_UNSUBSCRIBE, "/email/html"));
             }
         }
         (None, _) => {}
     }
-    if link_urls(&email.html).iter().any(|url| {
+    // An MJML link lives in an `mj-button` or `mj-image` as often as in an anchor, so it is read
+    // from the HTML `mrml` made, and so is the size that counts.
+    let (linked, size) = match (email.syntax, &html.sample) {
+        (Syntax::Html, _) => (link_urls(&email.html), email.html.len()),
+        (Syntax::Mjml, Some(rendered)) => (link_urls(rendered), rendered.len()),
+        (Syntax::Mjml, None) => (Vec::new(), 0),
+    };
+    if linked.iter().any(|url| {
         url.get(..7)
             .is_some_and(|p| p.eq_ignore_ascii_case("http://"))
     }) {
         issues.push(Issue::new(code::INSECURE_LINK, "/email/html"));
     }
-    if email.html.len() >= HTML_WARN_BYTES {
+    if size >= HTML_WARN_BYTES {
         issues.push(Issue::new(code::HTML_NEAR_CLIP, "/email/html"));
     }
+}
+
+/// Whether the source can put the message's unsubscribe URL in a link: the fallback when the
+/// sample render failed and there is no HTML to read.
+fn source_mentions_unsubscribe(email: &EmailContent) -> bool {
+    match email.syntax {
+        Syntax::Html => href_mentions(&email.html, "system.unsubscribe_url"),
+        Syntax::Mjml => email.html.contains("system.unsubscribe_url"),
+    }
+}
+
+/// The MJML stage of the checks: refuse an `mj-include`, then run `mrml` over the sample render
+/// and put its HTML in place of the MiniJinja output, so the checks that follow read what would
+/// be sent. A problem leaves no sample, and the issue says why.
+fn check_mjml(email: &EmailContent, html: &mut Checked, issues: &mut Vec<Issue>) {
+    const AT: &str = "/email/html";
+    if has_include(&email.html) {
+        issues.push(Issue::new(code::MJML_INCLUDE, AT));
+        html.clean = false;
+        html.sample = None;
+        return;
+    }
+    let Some(rendered) = html.sample.take() else {
+        return;
+    };
+    let issue = match compile(&rendered) {
+        Ok(compiled) if compiled.html.len() > MAX_HTML_BYTES => {
+            Issue::new(code::CONTENT_TOO_LARGE, AT)
+        }
+        Ok(compiled) => {
+            if compiled.lang.is_none() {
+                issues.push(
+                    Issue::new(code::MISSING_LANG, AT)
+                        .with_message("set `lang` on the <mjml> element: the content's own `lang` field is not used for MJML"),
+                );
+            }
+            html.sample = Some(compiled.html);
+            return;
+        }
+        Err(MjmlError::Include) => Issue::new(code::MJML_INCLUDE, AT),
+        Err(MjmlError::TooDeep) => Issue::new(code::MJML_TOO_DEEP, AT).with_message(format!(
+            "elements nest deeper than {} levels",
+            crate::content::mjml::MAX_DEPTH
+        )),
+        Err(MjmlError::Parse {
+            line,
+            column,
+            reason,
+            excerpt,
+        }) => Issue::new(code::MJML_PARSE_ERROR, AT).with_message(format!(
+            "{reason} at line {line}, column {column} of the sample render (not of the source), near: {excerpt}"
+        )),
+        Err(MjmlError::Render) => {
+            Issue::new(code::MJML_PARSE_ERROR, AT).with_message("the MJML could not be rendered")
+        }
+    };
+    issues.push(issue);
+    html.clean = false;
 }
 
 fn validate_webhook(
@@ -424,6 +493,7 @@ mod tests {
             sender: Some("snd_1".into()),
             lang: Some("en".into()),
             category: Category::Marketing,
+            syntax: Default::default(),
             html: r#"<p>{{ event.order_id }}</p><a href="{{ system.unsubscribe_url }}">u</a>"#
                 .into(),
             text: "{{ person.age }} {{ message.id }} {{ system.preferences_url }}".into(),
@@ -865,6 +935,6 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 20);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 23);
     }
 }

@@ -669,6 +669,7 @@ mod tests {
             sender: None,
             lang: None,
             category: Category::Transactional,
+            syntax: Default::default(),
             html: html.into(),
             text: "Hi".into(),
         })
@@ -749,6 +750,54 @@ mod tests {
             pool.render_webhook(&doc, &context).await.unwrap(),
             render_webhook(&doc, &context).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn the_mjml_corpus_renders_and_validates_to_the_same_bytes_as_in_process() {
+        use zirv_flow_templates::{FieldCatalog, Syntax, validate};
+
+        let pool = RenderPool::start(child("serve"), config(1, 20_000))
+            .await
+            .unwrap();
+        let mut context = context();
+        context.system.unsubscribe_url = "https://u.example/u/1?s=a&t=b".into();
+        context.system.preferences_url = "https://u.example/p/1".into();
+        let hooks = Hooks {
+            tracking: Tracking::Rewrite {
+                base_url: "https://t.example/c",
+                token: &tok,
+            },
+        };
+        let catalog = FieldCatalog::default();
+        let dir = fixtures().join("mjml");
+        for name in [
+            "one_column",
+            "two_columns",
+            "three_columns",
+            "hero_image",
+            "button",
+            "footer_unsubscribe",
+        ] {
+            let source = fs::read_to_string(dir.join(format!("{name}.mjml")))
+                .unwrap()
+                .replace("\r\n", "\n");
+            let mut doc = doc(&source);
+            if let Some(email) = doc.email.as_mut() {
+                email.syntax = Syntax::Mjml;
+                email.sender = Some("snd_1".into());
+                if name == "footer_unsubscribe" {
+                    email.category = Category::Marketing;
+                }
+            }
+            let direct = render_email(&doc, &context, &hooks).unwrap();
+            let pooled = pool.render_email(&doc, &context, &hooks).await.unwrap();
+            assert_eq!(pooled, direct, "{name}");
+            assert_eq!(
+                pool.validate(&doc, &catalog).await.unwrap(),
+                validate(&doc, &catalog),
+                "{name} validate"
+            );
+        }
     }
 
     #[tokio::test]

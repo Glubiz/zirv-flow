@@ -1,7 +1,7 @@
 //! The `html` content type: code-mode email, raw HTML and text with MiniJinja.
 
 use super::{RenderKind, TemplateContent};
-use crate::document::{Channel, Mode, TemplateDocument};
+use crate::document::{Channel, Mode, Syntax, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
 pub(super) struct Html;
@@ -16,7 +16,12 @@ impl TemplateContent for Html {
     }
 
     fn handles(&self, doc: &TemplateDocument) -> bool {
-        doc.channel == Channel::Email && doc.mode == Mode::Code
+        doc.channel == Channel::Email
+            && doc.mode == Mode::Code
+            && doc
+                .email
+                .as_ref()
+                .is_none_or(|email| email.syntax == Syntax::Html)
     }
 
     fn validate(&self, doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {

@@ -3,11 +3,12 @@
 //!
 //! A content type is one module in this directory and one line in [`REGISTRY`]. Validation and
 //! the choice of render call dispatch through it, so the store and the API carry a document's
-//! content type opaquely and a new type changes neither. `mjml` (#237) and `blocks` (#238) are
+//! content type opaquely and a new type changes neither. `blocks` (#238) is
 //! not registered yet; a document of an unregistered type is refused with
 //! [`ContentError::UnsupportedDocument`], a name with [`ContentError::Unregistered`].
 
 mod html;
+pub(crate) mod mjml;
 mod webhook;
 
 use std::fmt;
@@ -42,7 +43,7 @@ pub trait TemplateContent: Sync {
 }
 
 /// Every registered content type. Adding one is a module and a line here.
-const REGISTRY: [&dyn TemplateContent; 2] = [&html::Html, &webhook::Webhook];
+const REGISTRY: [&dyn TemplateContent; 3] = [&html::Html, &mjml::Mjml, &webhook::Webhook];
 
 /// A document or a name that no registered content type owns.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,7 +144,8 @@ mod tests {
     fn the_check_that_runs_is_the_one_of_the_type_that_owns_the_document() {
         let mut blocks = TemplateDocument::email_code(EmailContent::default());
         blocks.mode = Mode::Blocks;
-        let registry: [&'static dyn TemplateContent; 3] = [&html::Html, &webhook::Webhook, &Marker];
+        let registry: [&'static dyn TemplateContent; 4] =
+            [&html::Html, &mjml::Mjml, &webhook::Webhook, &Marker];
 
         let issues = validate_in(&registry, &blocks, &FieldCatalog::default()).unwrap();
 
@@ -151,14 +153,14 @@ mod tests {
         assert_eq!(issues[0].at, "/marker");
         // Without that type registered, nothing owns the document.
         assert_eq!(
-            validate_in(&registry[..2], &blocks, &FieldCatalog::default()).err(),
+            validate_in(&registry[..3], &blocks, &FieldCatalog::default()).err(),
             Some(ContentError::UnsupportedDocument)
         );
     }
 
     #[test]
-    fn html_and_webhook_are_the_only_registered_types() {
-        assert_eq!(content_type_ids(), ["html", "webhook"]);
+    fn html_mjml_and_webhook_are_the_only_registered_types() {
+        assert_eq!(content_type_ids(), ["html", "mjml", "webhook"]);
         assert_eq!(content_type("html").unwrap().channel(), Channel::Email);
         assert_eq!(
             content_type("webhook").unwrap().render_kind(),
@@ -168,7 +170,7 @@ mod tests {
 
     #[test]
     fn an_unregistered_name_is_a_typed_error() {
-        for id in ["mjml", "blocks", "", "HTML"] {
+        for id in ["blocks", "", "HTML", "MJML"] {
             assert_eq!(
                 content_type(id).err(),
                 Some(ContentError::Unregistered(id.to_owned())),

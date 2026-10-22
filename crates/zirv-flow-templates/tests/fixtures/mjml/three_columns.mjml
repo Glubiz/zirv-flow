@@ -1,0 +1,18 @@
+<mjml lang="en">
+  <mj-head>
+    <mj-title>Three columns</mj-title>
+  </mj-head>
+  <mj-body width="600px">
+    <mj-section>
+      <mj-column>
+        <mj-text>First</mj-text>
+      </mj-column>
+      <mj-column>
+        <mj-text>Second, {{ person.name }}.</mj-text>
+      </mj-column>
+      <mj-column>
+        <mj-text>Third</mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

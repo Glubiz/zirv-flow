@@ -3,9 +3,10 @@
 use minijinja::{Environment, Value};
 use serde::{Deserialize, Serialize};
 
+use crate::content::mjml::{MjmlError, compile, has_include};
 use crate::context::RenderContext;
 use crate::document::{
-    Category, Channel, EmailContent, Mode, SCHEMA_VERSION, TemplateDocument, WebhookContent,
+    Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
 };
 use crate::error::RenderError;
 use crate::links::{Hooks, links_to, rewrite_links, unsubscribe_headers};
@@ -65,6 +66,20 @@ pub(crate) fn one_line(text: &str) -> String {
         .to_owned()
 }
 
+/// The MJML stage of an `mjml` email: `mrml` over the MiniJinja output. The result is held to the
+/// same cap as any rendered HTML.
+fn mjml_to_html(rendered: &str) -> Result<String, RenderError> {
+    let compiled = compile(rendered).map_err(|error| match error {
+        MjmlError::Include => RenderError::MjmlInclude,
+        MjmlError::TooDeep => RenderError::MjmlTooDeep,
+        MjmlError::Parse { .. } | MjmlError::Render => RenderError::Mjml,
+    })?;
+    if compiled.html.len() > MAX_HTML_BYTES {
+        return Err(RenderError::OutputTooLarge { field: "html" });
+    }
+    Ok(compiled.html)
+}
+
 /// Render a code-mode email: subject, HTML and text through the sandbox, then the post-render
 /// steps. Marketing mail must link to the message's unsubscribe URL and gets the
 /// `List-Unsubscribe` headers.
@@ -84,6 +99,9 @@ pub fn render_email(
         &values,
         MAX_SUBJECT_BYTES,
     )?);
+    if email.syntax == Syntax::Mjml && has_include(&email.html) {
+        return Err(RenderError::MjmlInclude);
+    }
     let html = render_string(
         &env,
         "html.html",
@@ -92,6 +110,10 @@ pub fn render_email(
         &values,
         MAX_HTML_BYTES,
     )?;
+    let html = match email.syntax {
+        Syntax::Html => html,
+        Syntax::Mjml => mjml_to_html(&html)?,
+    };
     let text = render_string(
         &env,
         "text.txt",
@@ -336,6 +358,7 @@ mod tests {
             sender: Some("snd_1".into()),
             lang: Some("en".into()),
             category,
+            syntax: Default::default(),
             html: html.into(),
             text: "Hello {{ person.name }}".into(),
         })

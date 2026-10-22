@@ -109,6 +109,7 @@ mod tests {
             sender: None,
             lang: None,
             category: Category::Transactional,
+            syntax: Default::default(),
             html: "<p>{{ person.name }}</p>".into(),
             text: "Hi".into(),
         })
