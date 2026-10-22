@@ -32,7 +32,7 @@ const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
 const SAMPLE_EMAIL: &str = "sample@example.invalid";
 
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct PreviewRequest {
+pub(crate) struct TemplatePreviewRequest {
     /// Preview as this person. Needs the workspace admin role, because the render shows their
     /// values. Absent: a sample person built from the field registry's types.
     person_id: Option<Uuid>,
@@ -42,14 +42,14 @@ pub(crate) struct PreviewRequest {
 
 /// A header of the rendered message or request.
 #[derive(Serialize, ToSchema)]
-pub(crate) struct HeaderBody {
+pub(crate) struct TemplateHeaderBody {
     name: String,
     value: String,
 }
 
 /// The rendered template and its validation results.
 #[derive(Serialize, ToSchema)]
-pub(crate) struct PreviewBody {
+pub(crate) struct TemplatePreviewBody {
     /// `draft` or `version`.
     source: &'static str,
     version: Option<i32>,
@@ -67,7 +67,7 @@ pub(crate) struct PreviewBody {
     /// An email's text part.
     text: Option<String>,
     /// An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers.
-    headers: Vec<HeaderBody>,
+    headers: Vec<TemplateHeaderBody>,
     /// A webhook's JSON body.
     body: Option<String>,
     /// The same checks a publish makes, against the workspace's fields now.
@@ -111,14 +111,14 @@ struct Rendered {
     subject: Option<String>,
     html: Option<String>,
     text: Option<String>,
-    headers: Vec<HeaderBody>,
+    headers: Vec<TemplateHeaderBody>,
     body: Option<String>,
 }
 
-fn headers_of(headers: Vec<(String, String)>) -> Vec<HeaderBody> {
+fn headers_of(headers: Vec<(String, String)>) -> Vec<TemplateHeaderBody> {
     headers
         .into_iter()
-        .map(|(name, value)| HeaderBody { name, value })
+        .map(|(name, value)| TemplateHeaderBody { name, value })
         .collect()
 }
 
@@ -178,9 +178,9 @@ async fn render(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Template id")
     ),
-    request_body = PreviewRequest,
+    request_body = TemplatePreviewRequest,
     responses(
-        (status = 200, description = "The rendered template and its validation results", body = PreviewBody),
+        (status = 200, description = "The rendered template and its validation results", body = TemplatePreviewBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, a missing CSRF token, or a real person asked for without the admin role (`code` is `template_preview_values_forbidden`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, template, version or person, or no access", body = Problem, content_type = "application/problem+json"),
@@ -194,8 +194,8 @@ pub(crate) async fn preview(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
-    ApiJson(body): ApiJson<PreviewRequest>,
-) -> Result<Json<PreviewBody>, ApiError> {
+    ApiJson(body): ApiJson<TemplatePreviewRequest>,
+) -> Result<Json<TemplatePreviewBody>, ApiError> {
     let ws = path_id(&ws)?;
     let workspace = if body.person_id.is_some() {
         // Until the `view_pii` grant exists, a real person's values are for admins.
@@ -283,7 +283,7 @@ pub(crate) async fn preview(
         ),
         None => (None, None, None, Vec::new(), None),
     };
-    Ok(Json(PreviewBody {
+    Ok(Json(TemplatePreviewBody {
         source,
         version: body.version,
         content_type: content.id(),

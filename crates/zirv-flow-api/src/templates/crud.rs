@@ -37,7 +37,7 @@ where
 /// The channel of a template. Only the two with a registered content type can be made.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ChannelRequest {
+pub(crate) enum TemplateChannelRequest {
     Email,
     Webhook,
 }
@@ -45,12 +45,12 @@ pub(crate) enum ChannelRequest {
 /// Whether a message needs the unsubscribe link and headers.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CategoryRequest {
+pub(crate) enum TemplateCategoryRequest {
     Marketing,
     Transactional,
 }
 
-impl ChannelRequest {
+impl TemplateChannelRequest {
     fn as_str(self) -> &'static str {
         match self {
             Self::Email => "email",
@@ -66,7 +66,7 @@ impl ChannelRequest {
     }
 }
 
-impl CategoryRequest {
+impl TemplateCategoryRequest {
     fn as_str(self) -> &'static str {
         match self {
             Self::Marketing => "marketing",
@@ -127,7 +127,7 @@ impl From<&Template> for TemplateBody {
 
 /// The one editable copy of a template's content.
 #[derive(Serialize, ToSchema)]
-pub(crate) struct DraftBody {
+pub(crate) struct TemplateDraftBody {
     /// The content document. It may be incomplete; only a publish validates it.
     #[schema(value_type = Object)]
     document: Value,
@@ -141,7 +141,7 @@ pub(crate) struct DraftBody {
     updated_at: OffsetDateTime,
 }
 
-impl From<&TemplateDraft> for DraftBody {
+impl From<&TemplateDraft> for TemplateDraftBody {
     fn from(draft: &TemplateDraft) -> Self {
         let content_type = stored_document(&draft.document)
             .ok()
@@ -162,14 +162,14 @@ impl From<&TemplateDraft> for DraftBody {
 pub(crate) struct TemplateDetailBody {
     #[serde(flatten)]
     template: TemplateBody,
-    draft: DraftBody,
+    draft: TemplateDraftBody,
 }
 
 impl TemplateDetailBody {
     fn new(template: &Template, draft: &TemplateDraft) -> Self {
         Self {
             template: TemplateBody::from(template),
-            draft: DraftBody::from(draft),
+            draft: TemplateDraftBody::from(draft),
         }
     }
 }
@@ -180,9 +180,9 @@ pub(crate) struct CreateTemplateRequest {
     /// case.
     #[schema(example = "Order shipped")]
     name: String,
-    channel: ChannelRequest,
+    channel: TemplateChannelRequest,
     /// Default `marketing` for email and `transactional` for a webhook.
-    category: Option<CategoryRequest>,
+    category: Option<TemplateCategoryRequest>,
     sender_identity_id: Option<Uuid>,
     /// The first draft. Its channel and category must be the template's. Absent: an empty
     /// code-mode document.
@@ -200,7 +200,7 @@ pub(crate) struct UpdateTemplateRequest {
 }
 
 #[derive(Deserialize, ToSchema)]
-pub(crate) struct SaveDraftRequest {
+pub(crate) struct SaveTemplateDraftRequest {
     /// The content document.
     #[schema(value_type = Object)]
     document: Value,
@@ -243,8 +243,8 @@ pub(crate) async fn create_template(
 ) -> Result<(Template, TemplateDraft), ApiError> {
     let name = check_name(&request.name)?.to_owned();
     let category = request.category.unwrap_or(match request.channel {
-        ChannelRequest::Email => CategoryRequest::Marketing,
-        ChannelRequest::Webhook => CategoryRequest::Transactional,
+        TemplateChannelRequest::Email => TemplateCategoryRequest::Marketing,
+        TemplateChannelRequest::Webhook => TemplateCategoryRequest::Transactional,
     });
     let document = match request.document {
         Some(document) => document,
@@ -345,7 +345,7 @@ pub(crate) async fn save_draft(
     workspace: WorkspaceId,
     id: Uuid,
     updated_by: Option<UserId>,
-    request: SaveDraftRequest,
+    request: SaveTemplateDraftRequest,
 ) -> Result<(Template, TemplateDraft), ApiError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
     let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
@@ -589,7 +589,7 @@ pub(crate) async fn archive(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Template id")
     ),
-    request_body = SaveDraftRequest,
+    request_body = SaveTemplateDraftRequest,
     responses(
         (status = 200, description = "The template with its saved draft", body = TemplateDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
@@ -604,7 +604,7 @@ pub(crate) async fn put_draft(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
-    ApiJson(body): ApiJson<SaveDraftRequest>,
+    ApiJson(body): ApiJson<SaveTemplateDraftRequest>,
 ) -> Result<Json<TemplateDetailBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
     let (template, draft) = save_draft(
@@ -637,7 +637,7 @@ mod tests {
         let request: CreateTemplateRequest =
             serde_json::from_str(r#"{"name":"A","channel":"email"}"#).unwrap();
 
-        assert_eq!(request.channel, ChannelRequest::Email);
+        assert_eq!(request.channel, TemplateChannelRequest::Email);
         assert!(request.category.is_none() && request.document.is_none());
         assert!(serde_json::from_str::<CreateTemplateRequest>(r#"{"name":"A"}"#).is_err());
         assert!(

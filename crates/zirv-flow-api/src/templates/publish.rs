@@ -70,7 +70,7 @@ fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
 
 /// The new version and the template after the publish.
 #[derive(Serialize, ToSchema)]
-pub(crate) struct PublishedBody {
+pub(crate) struct TemplatePublishedBody {
     template: TemplateBody,
     version: TemplateVersionBody,
 }
@@ -144,7 +144,7 @@ pub(crate) async fn publish_template(
         ("id" = Uuid, Path, description = "Template id")
     ),
     responses(
-        (status = 201, description = "The template and its new version", body = PublishedBody),
+        (status = 201, description = "The template and its new version", body = TemplatePublishedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
@@ -157,7 +157,7 @@ pub(crate) async fn publish(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
-) -> Result<(StatusCode, Json<PublishedBody>), ApiError> {
+) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let (template, version) = publish_template(
         &state.pool,
@@ -169,7 +169,7 @@ pub(crate) async fn publish(
     .await?;
     Ok((
         StatusCode::CREATED,
-        Json(PublishedBody {
+        Json(TemplatePublishedBody {
             template: TemplateBody::from(&template),
             version: TemplateVersionBody::from(&version),
         }),
