@@ -94,9 +94,9 @@ pub(crate) async fn publish_template(
     let doc = stored_document(&locked.draft().document)?;
     let catalog =
         field_catalog(zirv_flow_store::read_template_field_catalog(&mut tx, workspace).await?);
+    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
     // A template's sample render allocates like any render, so it runs in the render host, never
     // in this process.
-    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
     let issues: Vec<Issue> = render
         .validate(&doc, &catalog)
         .await

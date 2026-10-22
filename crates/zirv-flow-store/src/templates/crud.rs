@@ -210,19 +210,7 @@ pub(super) async fn lock_live_template(
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Template, TemplateError> {
-    let held = lock_template_row(connection, workspace, id).await?;
-    if held.archived_at.is_some() {
-        return Err(TemplateError::Archived);
-    }
-    Ok(held)
-}
-
-pub(super) async fn lock_template_row(
-    connection: &mut PgConnection,
-    workspace: WorkspaceId,
-    id: Uuid,
-) -> Result<Template, TemplateError> {
-    sqlx::query_as(concat!(
+    let held: Template = sqlx::query_as(concat!(
         "SELECT ",
         template_columns!(),
         " FROM templates WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
@@ -232,7 +220,11 @@ pub(super) async fn lock_template_row(
     .fetch_optional(connection)
     .await
     .map_err(StoreError::query)?
-    .ok_or(TemplateError::NotFound)
+    .ok_or(TemplateError::NotFound)?;
+    if held.archived_at.is_some() {
+        return Err(TemplateError::Archived);
+    }
+    Ok(held)
 }
 
 /// Changes the given settings of a template that is not archived.

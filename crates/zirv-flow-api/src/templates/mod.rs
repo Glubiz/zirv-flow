@@ -77,7 +77,7 @@ pub(crate) fn stored_document(value: &Value) -> Result<TemplateDocument, ApiErro
 }
 
 /// The name of a channel as the template row spells it.
-fn channel_name(channel: Channel) -> &'static str {
+pub(super) fn channel_name(channel: Channel) -> &'static str {
     match channel {
         Channel::Email => "email",
         Channel::Webhook => "webhook",
@@ -87,7 +87,8 @@ fn channel_name(channel: Channel) -> &'static str {
     }
 }
 
-fn category_name(category: Category) -> &'static str {
+/// The name of a category as the template row spells it.
+pub(super) fn category_name(category: Category) -> &'static str {
     match category {
         Category::Marketing => "marketing",
         Category::Transactional => "transactional",

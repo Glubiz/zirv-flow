@@ -15,7 +15,10 @@ use zirv_flow_store::{
 };
 use zirv_flow_templates::{Category, Channel, content_type_of};
 
-use super::{check_matches, name_taken, parse_document, skeleton, stored_document, template_error};
+use super::{
+    category_name, channel_name, check_matches, name_taken, parse_document, skeleton,
+    stored_document, template_error,
+};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -52,10 +55,7 @@ pub(crate) enum TemplateCategoryRequest {
 
 impl TemplateChannelRequest {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::Email => "email",
-            Self::Webhook => "webhook",
-        }
+        channel_name(self.channel())
     }
 
     fn channel(self) -> Channel {
@@ -68,10 +68,7 @@ impl TemplateChannelRequest {
 
 impl TemplateCategoryRequest {
     fn as_str(self) -> &'static str {
-        match self {
-            Self::Marketing => "marketing",
-            Self::Transactional => "transactional",
-        }
+        category_name(self.category())
     }
 
     fn category(self) -> Category {
