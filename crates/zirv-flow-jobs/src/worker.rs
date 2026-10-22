@@ -381,7 +381,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         job.clone(),
         lost,
     )));
-    let result = {
+    let (result, after_commit) = {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
@@ -399,11 +399,12 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
                 shards: shared.config.ingest_drain_shards,
             });
         let handler = kind.run(&mut ctx, job.payload.clone());
-        tokio::select! {
+        let result = tokio::select! {
             result = handler => Some(result),
             // Dropping the handler cancels it; its transaction rolls back below.
             Ok(()) = &mut lease_lost => None,
-        }
+        };
+        (result, ctx.take_after_commit())
     };
 
     match result {
@@ -411,7 +412,12 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
         Some(Err(error)) => Attempt::Failed(error.to_string(), error.retry_after()),
         Some(Ok(())) => match complete_job(&mut *tx, job.id, job.lease_token).await {
             Ok(true) => match tx.commit().await {
-                Ok(()) => Attempt::Completed,
+                Ok(()) => {
+                    for action in after_commit {
+                        action();
+                    }
+                    Attempt::Completed
+                }
                 Err(_) => Attempt::Failed("could not commit the job transaction".into(), None),
             },
             // Another worker owns the job now: roll back this attempt's writes.

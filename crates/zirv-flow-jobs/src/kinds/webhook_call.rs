@@ -1,10 +1,18 @@
-//! `webhook.call`: one signed HTTP call of an `action.webhook` node (architecture 9.1 and 9.3,
-//! rulings 9cb0bea9 and a37fbac4).
+//! `webhook.call`: one signed HTTP call of an `action.webhook` node (architecture 9.1, 9.3 and
+//! 10.1, rulings 9cb0bea9 and a37fbac4).
 //!
 //! `flow.step` enqueues the job in the step's transaction under the effect key, so the call is
 //! queued exactly when the step commits and at most once per step. The job reads the person's
-//! listed traits as they are when it runs, signs the exact body bytes and sends them through the
-//! guarded client, so the egress policy is enforced where the connection is made.
+//! listed traits as they are when it runs and delivers through the built-in `webhook`
+//! destination, which signs the exact body bytes and sends them through the guarded client, so
+//! the egress policy is enforced where the connection is made. The verdict of the answer comes
+//! from the delivery code every outbound job shares (`crate::delivery`).
+//!
+//! The body is the fixed envelope, byte for byte as before, or, when the node names a `template`,
+//! the headers and body a published webhook template renders for the person. A templated payload
+//! is rendered by the render host pool, never in this process; a template that is gone or
+//! unpublished (`template_unavailable`) or a render that fails (`render_error`) ends the call for
+//! good.
 //!
 //! An attempt ends in one of three ways:
 //!
@@ -13,45 +21,63 @@
 //!   backoff, or after the `Retry-After` the destination named when that is longer. The job's
 //!   last attempt records a failure instead of dying with the enrollment never told.
 //! - **Anything else fails at once:** any other 4xx (and any unexpected 1xx or 3xx; a redirect is
-//!   never followed), a destination
-//!   the egress policy refuses, and a workspace with no signing secret. Retrying cannot help.
+//!   never followed), a destination the egress policy refuses, a workspace with no signing
+//!   secret, and a template that cannot be rendered. Retrying cannot help.
 //!
 //! Succeeding and failing both end the job as done and write an outcome event
 //! (`webhook.succeeded` or `webhook.failed`) with a decision, so a flow can wait on either. The
-//! response body is never read, logged or stored; only the status code is.
+//! response body is never read, logged or stored; only the status code is. The rendered body is
+//! not stored either.
 //!
 //! The person is read without a lock before the call and locked `FOR KEY SHARE` only for the
 //! outcome write, which is skipped when the enrollment was erased in between. A signing secret the
 //! worker cannot open is retried like a transport error and recorded as `webhook.failed`
 //! (`signing_secret_unavailable`) on the last attempt.
 //!
+//! A raw URL has no destination row, so the attempt is judged but writes no `delivery_attempts`
+//! row and takes no rate-limit token (architecture 10.1).
+//!
 //! The call is at-least-once: a lease lost between the response and the commit sends it again
 //! with the same idempotency key, which is the receiver's cue to treat it as a repeat.
 
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc2822;
 use tracing::warn;
 use uuid::Uuid;
-use zirv_flow_connectors::http::{GuardedClient, HttpError, HttpLimits};
-use zirv_flow_core::flow::{
-    Envelope, IDEMPOTENCY_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER, signature_value,
-};
-use zirv_flow_core::{Keyring, SecretPurpose, TraceId, WorkspaceId};
+use zirv_flow_connectors::destinations::{DestinationContext, Outbound, Registry};
+use zirv_flow_connectors::http::HttpLimits;
+use zirv_flow_connectors::sources::Credential;
+use zirv_flow_core::flow::Envelope;
+use zirv_flow_core::{Keyring, SecretPurpose, SecretString, TraceId, WorkspaceId};
+use zirv_flow_render::{RenderContext, TemplateDocument};
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
     SigningKey, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
-    live_signing_keys, lock_webhook_person, read_webhook_subject, record_webhook_outcome, secrets,
+    find_template, find_template_version, list_identities, live_signing_keys, lock_webhook_person,
+    read_template_field_catalog, read_webhook_subject, record_webhook_outcome, secrets,
 };
 
+use crate::delivery::{self, Attempt, Verdict};
+
+// The unit tests judge statuses and read headers through the names this module had before the
+// delivery code was shared.
+#[cfg(test)]
+use crate::delivery::verdict::{judge, judge_error, parse_retry_after};
 use crate::{JobContext, JobError, JobKind};
+#[cfg(test)]
+use zirv_flow_connectors::http::HttpError;
+#[cfg(test)]
+use zirv_flow_core::flow::{SIGNATURE_HEADER, TIMESTAMP_HEADER};
 
 pub(crate) struct WebhookCall;
 
-/// The content type of the body.
-const CONTENT_TYPE: &str = "application/json";
+/// The destination type this job delivers through.
+const DESTINATION: &str = "webhook";
+
+/// The destination id of a call to a raw URL, which has no row: the label of the client.
+const INLINE: &str = "inline";
 
 /// The payload `flow.step` enqueues.
 struct Call {
@@ -65,12 +91,18 @@ struct Call {
     occurred_at: String,
     url: String,
     trait_keys: Vec<String>,
+    /// The published webhook template to render instead of the envelope.
+    template: Option<Uuid>,
 }
 
 impl Call {
     fn parse(payload: &Value) -> Option<Self> {
         let text = |key: &str| payload.get(key).and_then(Value::as_str);
         let id = |key: &str| text(key).and_then(|text| Uuid::parse_str(text).ok());
+        let template = match payload.get("template") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(Uuid::parse_str(value.as_str()?).ok()?),
+        };
         Some(Self {
             workspace: text("workspace_id")?.parse().ok()?,
             flow: id("flow_id")?,
@@ -87,88 +119,20 @@ impl Call {
                 .iter()
                 .map(|key| key.as_str().map(str::to_owned))
                 .collect::<Option<_>>()?,
+            template,
         })
     }
 }
 
-/// How an attempt went.
-#[derive(Debug, Eq, PartialEq)]
-enum Verdict {
-    /// A 2xx response.
-    Succeeded { status: u16 },
-    /// Retrying cannot help.
-    Terminal {
-        status: Option<u16>,
-        reason: &'static str,
+/// What goes on the wire, or why nothing can.
+enum Prepared {
+    /// The exact body text, and the extra headers a template rendered.
+    Ready {
+        body: String,
+        headers: Vec<(String, String)>,
     },
-    /// Worth another attempt, after at least `retry_after` when the destination named one.
-    Retry {
-        status: Option<u16>,
-        reason: &'static str,
-        message: &'static str,
-        retry_after: Option<Duration>,
-    },
-}
-
-/// What a response status means. `retry_after` is the destination's `Retry-After`, used only by
-/// a status that is retried.
-fn judge(status: u16, retry_after: Option<Duration>) -> Verdict {
-    let retry = |reason, message| Verdict::Retry {
-        status: Some(status),
-        reason,
-        message,
-        retry_after,
-    };
-    match status {
-        200..=299 => Verdict::Succeeded { status },
-        408 => retry("http_408", "the destination answered 408 request timeout"),
-        429 => retry("http_429", "the destination answered 429 too many requests"),
-        500..=599 => retry("http_5xx", "the destination answered with a server error"),
-        400..=499 => Verdict::Terminal {
-            status: Some(status),
-            reason: "http_4xx",
-        },
-        _ => Verdict::Terminal {
-            status: Some(status),
-            reason: "http_status",
-        },
-    }
-}
-
-/// What a failed send means.
-fn judge_error(error: &HttpError) -> Verdict {
-    match error {
-        HttpError::EgressDenied { .. } => Verdict::Terminal {
-            status: None,
-            reason: "egress_denied",
-        },
-        HttpError::Timeout => Verdict::Retry {
-            status: None,
-            reason: "timeout",
-            message: "the request to the destination timed out",
-            retry_after: None,
-        },
-        HttpError::BodyTooLarge | HttpError::Transport(_) => Verdict::Retry {
-            status: None,
-            reason: "transport",
-            message: "the request to the destination failed",
-            retry_after: None,
-        },
-    }
-}
-
-/// The wait a `Retry-After` header asks for: delta-seconds, or an HTTP date counted from `now`.
-/// A date in the past, or text that is neither, asks for nothing.
-fn parse_retry_after(value: &str, now: OffsetDateTime) -> Option<Duration> {
-    let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    let at = OffsetDateTime::parse(value, &Rfc2822).ok()?;
-    let wait = at - now;
-    u64::try_from(wait.whole_seconds())
-        .ok()
-        .map(Duration::from_secs)
+    /// The call ends here with this verdict.
+    Failed(Verdict),
 }
 
 impl JobKind for WebhookCall {
@@ -184,15 +148,25 @@ impl JobKind for WebhookCall {
         }
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
+        // A template reads the traits of the workspace's registry, so those are read too.
+        let catalog = match call.template {
+            Some(_) => Some(read_template_field_catalog(ctx.conn(), call.workspace).await?),
+            None => None,
+        };
+        let mut keys = call.trait_keys.clone();
+        if let Some(catalog) = &catalog {
+            keys.extend(
+                catalog
+                    .traits
+                    .keys()
+                    .filter(|key| !call.trait_keys.contains(key))
+                    .cloned(),
+            );
+        }
         // Read with no lock: the call below can take up to 30 s per hop, and nothing an ingest
         // batch or an erasure needs may be held for that long.
-        let Some(WebhookSubject { person, traits }) = read_webhook_subject(
-            ctx.conn(),
-            call.workspace,
-            call.enrollment,
-            &call.trait_keys,
-        )
-        .await?
+        let Some(WebhookSubject { person, traits }) =
+            read_webhook_subject(ctx.conn(), call.workspace, call.enrollment, &keys).await?
         else {
             // Erased with the person, exited (a goal, an operator, a merge) or merged away:
             // there is nobody to call about, and nothing to retry. The call is not sent for the
@@ -200,22 +174,43 @@ impl JobKind for WebhookCall {
             return Ok(());
         };
 
-        let envelope = Envelope {
-            flow_id: call.flow,
-            version: call.version,
-            node_id: &call.node,
-            enrollment_id: call.enrollment,
-            person_id: person,
-            trace_id: call.trace,
-            idempotency_key: &call.idempotency_key,
-            occurred_at: &call.occurred_at,
-            traits,
+        let prepared = match call.template {
+            None => {
+                let envelope = Envelope {
+                    flow_id: call.flow,
+                    version: call.version,
+                    node_id: &call.node,
+                    enrollment_id: call.enrollment,
+                    person_id: person,
+                    trace_id: call.trace,
+                    idempotency_key: &call.idempotency_key,
+                    occurred_at: &call.occurred_at,
+                    traits,
+                };
+                Prepared::Ready {
+                    body: String::from_utf8(envelope.body())
+                        .map_err(|_| JobError::new("the envelope is not text"))?,
+                    headers: Vec::new(),
+                }
+            }
+            Some(template) => {
+                let people = catalog.map(|catalog| catalog.traits).unwrap_or_default();
+                render(ctx, &call, template, person, &traits, people.keys()).await?
+            }
         };
-        let verdict = deliver(ctx, &call, &envelope.body(), now).await?;
+        let done = match prepared {
+            Prepared::Ready { body, headers } => deliver(ctx, &call, &body, headers, now).await?,
+            Prepared::Failed(verdict) => Attempt {
+                verdict,
+                elapsed: Duration::ZERO,
+            },
+        };
 
         let attempts = ctx.attempts();
+        // A raw URL has no destination row, so no attempt row is written for it.
+        delivery::settle(ctx, None, attempts, &done).await?;
         let last_attempt = attempts >= ctx.max_attempts();
-        let (result, status, reason) = match verdict {
+        let (result, status, reason) = match done.verdict {
             Verdict::Succeeded { status } => (WebhookResult::Succeeded, Some(status), None),
             Verdict::Terminal { status, reason } => (WebhookResult::Failed, status, Some(reason)),
             Verdict::Retry {
@@ -273,50 +268,120 @@ impl JobKind for WebhookCall {
     }
 }
 
-/// Signs `body` with every secret that signs now and sends it. An error is a failure of this
-/// worker or of the database, not of the destination; the destination's answer is a [`Verdict`].
+/// A call that cannot be rendered ends for good, with a fixed reason.
+fn render_failed(reason: &'static str) -> Prepared {
+    Prepared::Failed(Verdict::Terminal {
+        status: None,
+        reason,
+    })
+}
+
+/// Renders the node's template for the person in the render host pool. `registry_traits` are the
+/// keys of the workspace's registry traits, the ones a template may read; `traits` holds the
+/// person's value for each (null when they have none).
+async fn render(
+    ctx: &mut JobContext<'_>,
+    call: &Call,
+    template: Uuid,
+    person: Uuid,
+    traits: &Map<String, Value>,
+    registry_traits: impl Iterator<Item = &String>,
+) -> Result<Prepared, JobError> {
+    let unavailable = || render_failed("template_unavailable");
+    let Some(found) = find_template(ctx.conn(), call.workspace, template).await? else {
+        return Ok(unavailable());
+    };
+    let Some(current) = found.current_version else {
+        return Ok(unavailable());
+    };
+    if found.channel != "webhook" || found.archived_at.is_some() {
+        return Ok(unavailable());
+    }
+    let Some(version) =
+        find_template_version(ctx.conn(), call.workspace, template, current).await?
+    else {
+        return Ok(unavailable());
+    };
+    let Ok(doc) = serde_json::from_value::<TemplateDocument>(version.document) else {
+        return Ok(unavailable());
+    };
+
+    let mut context = RenderContext::default();
+    for key in registry_traits {
+        if let Some(value) = traits.get(key).filter(|value| !value.is_null()) {
+            context.person.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(email) = list_identities(ctx.conn(), call.workspace, person)
+        .await?
+        .into_iter()
+        .find(|identity| identity.kind == "email")
+    {
+        context
+            .person
+            .insert("email".to_owned(), Value::from(email.value));
+    }
+    context.message.id.clone_from(&call.idempotency_key);
+
+    let Some(pool) = ctx.render_pool().cloned() else {
+        warn!("webhook template not rendered: the worker has no render pool");
+        return Ok(render_failed("render_error"));
+    };
+    match pool.render_webhook(&doc, &context).await {
+        Ok(rendered) => Ok(Prepared::Ready {
+            body: rendered.body,
+            headers: rendered.headers,
+        }),
+        Err(failure) => {
+            warn!(reason = failure.reason(), "webhook template not rendered");
+            Ok(render_failed("render_error"))
+        }
+    }
+}
+
+/// Opens the signing secrets, hands the exact body to the `webhook` destination and judges its
+/// answer. An error is a failure of this worker or of the database, not of the destination; the
+/// destination's answer is a [`Verdict`].
 async fn deliver(
     ctx: &mut JobContext<'_>,
     call: &Call,
-    body: &[u8],
+    body: &str,
+    headers: Vec<(String, String)>,
     now: OffsetDateTime,
-) -> Result<Verdict, JobError> {
+) -> Result<Attempt, JobError> {
+    let early = |verdict| Attempt {
+        verdict,
+        elapsed: Duration::ZERO,
+    };
     let Some(keys) = live_signing_keys(ctx.conn(), call.workspace, now).await? else {
-        return Ok(Verdict::Terminal {
+        return Ok(early(Verdict::Terminal {
             status: None,
             reason: "no_signing_secret",
-        });
+        }));
     };
     let Some(keyring) = ctx.keyring().cloned() else {
-        return Ok(signing_secret_unavailable());
+        return Ok(early(signing_secret_unavailable()));
     };
-    let timestamp = now.unix_timestamp();
-    let mut signatures = Vec::with_capacity(2);
+    let mut credential = Credential::new();
     // The current secret must open; a previous one that does not is skipped, since the receiver
     // that still trusts it also trusts the current one the call is signed with.
-    for (index, key) in [Some(keys.current), keys.previous]
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
-        match open_signature(ctx, &keyring, call.workspace, key, timestamp, body).await? {
-            Some(signature) => signatures.push(signature),
-            None if index == 0 => return Ok(signing_secret_unavailable()),
+    let named = [
+        ("signing_secret", Some(keys.current)),
+        ("previous_signing_secret", keys.previous),
+    ];
+    for (index, (name, key)) in named.into_iter().enumerate() {
+        let Some(key) = key else { continue };
+        match open_secret(ctx, &keyring, call.workspace, key).await? {
+            Some(secret) => credential.insert(name, secret),
+            None if index == 0 => return Ok(early(signing_secret_unavailable())),
             None => {}
         }
     }
 
-    let timestamp = timestamp.to_string();
-    let mut headers: Vec<(&str, &str)> = vec![
-        ("Content-Type", CONTENT_TYPE),
-        (TIMESTAMP_HEADER, &timestamp),
-        (IDEMPOTENCY_HEADER, &call.idempotency_key),
-    ];
-    headers.extend(
-        signatures
-            .iter()
-            .map(|signature| (SIGNATURE_HEADER, signature.as_str())),
-    );
+    let registry = Registry::built_in();
+    let destination = registry
+        .get(DESTINATION)
+        .ok_or_else(|| JobError::new("the webhook destination is not registered"))?;
     // No redirects: a 301, 302 or 303 would turn the POST into a GET without the body, and the
     // call would be judged by the answer to something that was never the call. The 3xx itself is
     // judged, and is terminal.
@@ -324,20 +389,29 @@ async fn deliver(
         max_redirects: 0,
         ..HttpLimits::default()
     };
-    let client = GuardedClient::new(ctx.egress().clone(), limits)
-        .map_err(|_| JobError::new("the outbound client could not be built"))?;
-    match client.post(&call.url, &headers, body.to_vec()).await {
-        Ok(response) => {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| parse_retry_after(value, now));
-            // The body is dropped unread.
-            Ok(judge(response.status().as_u16(), retry_after))
-        }
-        Err(error) => Ok(judge_error(&error)),
-    }
+    let destination_context =
+        DestinationContext::new(ctx.egress().clone(), limits, DESTINATION, INLINE)
+            .map_err(|_| JobError::new("the outbound client could not be built"))?;
+    let payload = json!({
+        "body": body,
+        "timestamp": now.unix_timestamp(),
+        "headers": headers.into_iter().map(|(name, value)| (name, Value::String(value))).collect::<Map<String, Value>>(),
+    });
+    let message = Outbound {
+        idempotency_key: &call.idempotency_key,
+        channel: "webhook",
+        to: "",
+        payload: &payload,
+    };
+    Ok(delivery::send(
+        destination,
+        &destination_context,
+        &json!({ "url": call.url }),
+        &credential,
+        &message,
+        now,
+    )
+    .await)
 }
 
 /// The current signing secret cannot be opened (the worker has no keyring, or a wrong one). It is
@@ -352,16 +426,14 @@ fn signing_secret_unavailable() -> Verdict {
     }
 }
 
-/// Opens one signing secret and signs `body` with it. None when it does not open; only a
-/// database error is an error.
-async fn open_signature(
+/// Opens one signing secret as text. None when it does not open; only a database error is an
+/// error.
+async fn open_secret(
     ctx: &mut JobContext<'_>,
     keyring: &Keyring,
     workspace: WorkspaceId,
     key: SigningKey,
-    timestamp: i64,
-    body: &[u8],
-) -> Result<Option<String>, JobError> {
+) -> Result<Option<SecretString>, JobError> {
     match secrets::open_json(
         ctx.conn(),
         keyring,
@@ -371,7 +443,7 @@ async fn open_signature(
     )
     .await
     {
-        Ok(secret) => Ok(Some(signature_value(secret.expose(), timestamp, body))),
+        Ok(secret) => Ok(SecretString::try_from(secret).ok()),
         Err(OpenError::Store(error)) => Err(error.into()),
         Err(OpenError::NotFound | OpenError::Unopenable) => Ok(None),
     }
