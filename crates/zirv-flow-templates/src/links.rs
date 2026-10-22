@@ -231,11 +231,17 @@ pub(crate) fn unescape(text: &str) -> String {
     out
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Whether `text` starts with `prefix`, ignoring ASCII case.
+pub(crate) fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 }
 
 /// Whether a URL is an `http` or `https` link (the only ones that are tracked).

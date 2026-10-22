@@ -93,13 +93,11 @@ pub fn blocks_to_mjml(content: &BlocksContent) -> Result<Converted, ConvertError
     if !issues.is_empty() {
         return Err(ConvertError { issues });
     }
-    match emit::emit(content, &mut emit::Sources) {
-        Ok(emitted) => Ok(Converted {
-            mjml: emitted.mjml,
-            text: emitted.text,
-        }),
-        Err(never) => match never {},
-    }
+    let Ok(emitted) = emit::emit(content, &mut emit::Sources);
+    Ok(Converted {
+        mjml: emitted.mjml,
+        text: emitted.text,
+    })
 }
 
 #[cfg(test)]

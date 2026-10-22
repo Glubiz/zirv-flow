@@ -19,7 +19,7 @@ use crate::context::SAMPLE_UNSUBSCRIBE_URL;
 use crate::document::{Category, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
 use crate::issue::{FieldCatalog, Issue, code};
-use crate::links::{link_urls, links_to};
+use crate::links::{link_urls, links_to, starts_with_ignore_case};
 use crate::sandbox::{MAX_HTML_BYTES, environment};
 use crate::validate::{HTML, HTML_WARN_BYTES, SUBJECT, check_template, sample_context};
 
@@ -98,9 +98,7 @@ pub(crate) fn fields(content: &BlocksContent) -> Vec<Field<'_>> {
 }
 
 fn has_insecure_scheme(url: &str) -> bool {
-    url.trim_start()
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+    starts_with_ignore_case(url.trim_start(), "http://")
 }
 
 /// The checks that need no template engine: shape, limits, URL sources and the sanitizer. A
@@ -148,11 +146,7 @@ fn check_url(field: &Field<'_>, kind: UrlKind, issues: &mut Vec<Issue>) {
     let allowed = match kind {
         UrlKind::Link => link_allowed(source),
         UrlKind::ImageSource => {
-            starts_with_tag(source)
-                || source
-                    .trim_start()
-                    .get(..8)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+            starts_with_tag(source) || starts_with_ignore_case(source.trim_start(), "https://")
         }
     };
     if !allowed {

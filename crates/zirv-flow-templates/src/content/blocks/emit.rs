@@ -213,10 +213,10 @@ fn emit_block<F: Fields>(
                 "<mj-image src=\"{}\" alt=\"{}\"",
                 source.html, alt.html
             ));
-            let link = match href {
-                Some(href) => Some(fields.url(href, UrlKind::Link)?),
-                None => None,
-            };
+            let link = href
+                .as_deref()
+                .map(|href| fields.url(href, UrlKind::Link))
+                .transpose()?;
             if let Some(link) = &link {
                 mjml.push_str(&format!(" href=\"{}\"", link.html));
             }

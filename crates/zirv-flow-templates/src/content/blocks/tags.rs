@@ -6,6 +6,8 @@
 //! `{%`, `{#`), their closers and `{% raw %}` blocks, and nothing else. A string that holds a
 //! closer inside an expression (`{{ "}}" }}`) ends the tag early, and the rest is read as text.
 
+use crate::links::escape;
+
 /// A stretch of a template source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Segment<'a> {
@@ -91,29 +93,14 @@ pub(crate) fn split(source: &str) -> Vec<Segment<'_>> {
     segments
 }
 
-/// Escape the characters that markup or a double-quoted attribute cannot hold as they are.
-pub(crate) fn xml_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-/// `source` with the text outside its tags escaped (see [`xml_escape`]) and the tags as they
+/// `source` with the text outside its tags escaped (see [`escape`]) and the tags as they
 /// are. MiniJinja renders it with HTML autoescape, so a literal and a merged value both come out
 /// as text.
 pub(crate) fn escape_literals(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     for segment in split(source) {
         match segment {
-            Segment::Text(text) => out.push_str(&xml_escape(text)),
+            Segment::Text(text) => out.push_str(&escape(text)),
             Segment::Tag(tag) => out.push_str(tag),
         }
     }
@@ -268,7 +255,7 @@ mod tests {
             escape_literals("{% raw %}<i>{% endraw %}"),
             "{% raw %}&lt;i&gt;{% endraw %}"
         );
-        assert_eq!(xml_escape("a&b"), "a&amp;b");
+        assert_eq!(escape("a&b"), "a&amp;b");
     }
 
     #[test]

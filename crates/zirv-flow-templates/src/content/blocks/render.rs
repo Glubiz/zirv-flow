@@ -12,7 +12,7 @@ use crate::content::mjml::{MjmlError, compile};
 use crate::context::RenderContext;
 use crate::document::{Category, Channel, Mode, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
-use crate::links::unescape;
+use crate::links::{starts_with_ignore_case, unescape};
 use crate::render::{map_mjml_error, one_line};
 use crate::sandbox::{
     MAX_HTML_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, environment, render_string,
@@ -78,9 +78,7 @@ impl Fields for Rendered<'_> {
         let url = value.text.trim();
         let allowed = match kind {
             UrlKind::Link => scheme_allowed(url),
-            UrlKind::ImageSource => url
-                .get(..8)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://")),
+            UrlKind::ImageSource => starts_with_ignore_case(url, "https://"),
         };
         if self.check_urls && !allowed {
             return Err(RenderError::InvalidBlocks);
