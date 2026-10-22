@@ -3566,7 +3566,7 @@ export interface components {
             changed: number;
             dry_run: boolean;
             invalid: components["schemas"]["ConsentImportRowBody"][];
-            /** @description Rows that repeated the status already held. */
+            /** @description Rows that repeated the status already held, or were older than the state they scope. */
             unchanged: number;
         };
         ConsentImportRowBody: {

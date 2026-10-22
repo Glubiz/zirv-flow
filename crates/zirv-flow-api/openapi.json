@@ -20313,7 +20313,7 @@
           },
           "unchanged": {
             "type": "integer",
-            "description": "Rows that repeated the status already held.",
+            "description": "Rows that repeated the status already held, or were older than the state they scope.",
             "minimum": 0
           }
         }
