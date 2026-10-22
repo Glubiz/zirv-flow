@@ -24,7 +24,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 use crate::sources::credential::{keyring, to_plaintext};
-use crate::sources::crud::check_name;
+use crate::sources::crud::{check_name, field_names};
 use crate::sources::{field_problems, invalid};
 
 /// The rate a destination gets when the request names none, in deliveries per second.
@@ -130,10 +130,6 @@ fn name_taken(error: StoreError) -> ApiError {
     } else {
         error.into()
     }
-}
-
-fn field_names(values: &BTreeMap<String, SecretString>) -> Vec<String> {
-    values.keys().cloned().collect()
 }
 
 /// Creates a destination with its rate bucket, seals its credential and audits
@@ -580,16 +576,5 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert!(check_limit("burst", 100_001).is_err());
-    }
-
-    #[test]
-    fn field_names_are_the_keys_only() {
-        let mut values = BTreeMap::new();
-        values.insert(
-            "token".to_owned(),
-            SecretString::new("secret-value".to_owned()),
-        );
-
-        assert_eq!(field_names(&values), ["token"]);
     }
 }
