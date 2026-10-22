@@ -151,6 +151,7 @@ fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
             NodeKind::ActionWebhook {
                 url: format!("https://hooks.example.com/{}", rng.below(1000)),
                 trait_keys,
+                template: None,
             }
         }
         Shape::SetTrait => NodeKind::ActionUpdateTrait {
