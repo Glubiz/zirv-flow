@@ -1230,11 +1230,15 @@ process (11.9).
 
 ```json
 { "schema": 1, "channel": "email", "mode": "blocks",
-  "email": { "subject": "{{ person.first_name | default('Hi') }}, your order shipped",
-             "preheader": "Tracking inside", "sender": "snd_0192f4a1", "lang": "en",
-             "body": [ { "type": "section", "columns": [[ { "type": "heading", "level": 1, "text": "On its way" } ]] },
-                       { "type": "snippet", "ref": "snp_0192f4b7" } ] } }
+  "blocks": { "subject": "{{ person.first_name | default('Hi') }}, your order shipped",
+              "preheader": "Tracking inside", "sender": "snd_0192f4a1", "lang": "en",
+              "category": "marketing",
+              "settings": { "content_width": 600, "font_family": "arial" },
+              "sections": [ { "id": "intro",
+                              "columns": [[ { "type": "heading", "id": "title", "level": 1, "text": "On its way" } ]] } ] } }
 ```
+
+The block content sits in its own `blocks` object beside the code content (`email`), so a code document reads and writes exactly as before. Every section and block has a stable `id` (letters, digits, `_`, `-`; unique in the document) that validation issues and the editor address it by. Every object refuses a field it does not define and the block list refuses a `type` it does not know (typed errors `unknown_field` and `unknown_block`), so a document a newer editor wrote is an error and never silently loses content. A document holds at most 50 sections, 500 blocks and 400 000 bytes of text, with per-field bounds (a heading, label or alt text 1 000 bytes, a URL 2 048, rich text 50 000, raw HTML 100 000). Over a limit is a blocking issue.
 
 | Channel | Content type | v1.0 editor |
 |---------|--------------|-------------|
@@ -1253,13 +1257,15 @@ process (11.9).
 | Block | Content | Notes |
 |-------|---------|-------|
 | `section` | Row of 1 to 3 columns, each a list of blocks; background, padding | Columns stack on narrow screens; sections do not nest |
-| `heading` | Level 1 to 3, text | Theme font and colour |
-| `text` | Rich text: paragraphs, bold, italic, underline, links, lists, line breaks | Sanitized against an allowlist on save and on render |
-| `image` | Asset, alt text, optional link, width | From the asset library (11.3) |
+| `heading` | Level 1 to 3, text | Document settings (theme in M7) |
+| `text` | Rich text: paragraphs, bold, italic, underline, links, lists, line breaks | Sanitized against an allowlist (`ammonia`: `p b strong i em u a ul ol li br`; `href` only, `https`, `http`, `mailto` or a leading merge tag) at validation, and again on the MiniJinja output at render |
+| `image` | `https` URL (asset reference in M7), alt text, optional link, width | From the asset library (11.3) in M7 |
 | `button` | Label, URL, alignment | Theme colours |
 | `divider`, `spacer` | Style; height | |
 | `raw_html` | The marketer's own HTML | Passed through as `mj-raw`; never rendered unsandboxed in the app (16.1) |
 | `snippet` | Reference to a snippet | Resolved at render time to the snippet's current published version |
+
+Per-document `settings` stand in for the M7 brand theme: background, text, link and button colours (`#rgb` or `#rrggbb`), a content width of 480 to 800 pixels (default 600) and a font stack from a fixed web-safe list (`arial`, `helvetica`, `verdana`, `tahoma`, `trebuchet`, `georgia`, `times`, `courier`).
 
 Any block may carry a visibility condition (11.4). Styling is limited to theme
 tokens and a small set of spacing and alignment values. The set grows only
@@ -1289,14 +1295,15 @@ under the block-set growth policy (OQ-23).
 HTML code mode runs steps 4 (on the whole HTML and text) and 7. MJML code mode runs
 step 4 over the whole MJML source and the text part, then step 5 (`mrml` with its
 include loaders disabled; a parse error is a blocking validation issue), then 7.
-Webhook content renders as in 11.7. Every step runs inside the render host (11.9). Output is deterministic: no clock reads, random ids or
+Block mode runs step 4 per text field (the literal text of a plain field is escaped for MJML first, rich text is sanitized before and after the render, a rendered link URL must still be `https`, `http` or `mailto`), then step 5 over the MJML emitted from the tree and step 6 from the tree, then 7; `blocks_to_mjml` is the same emission with the merge tags kept, so its MJML rendered through the MJML code path gives the block render's HTML bytes. Webhook content renders as in 11.7. Every step runs inside the render host (11.9). Output is deterministic: no clock reads, random ids or
 map-order dependence, so equal inputs give equal bytes. Golden tests and the
 preview-equals-send test rely on this.
 
 ### 11.6 Validation
 
 - **Blocks publish:** a merge field unknown to the registry or event catalog; MiniJinja syntax errors; a `marketing` email without an unsubscribe link (own or from the theme footer); a missing sender identity; a broken reference (snippet, asset, theme, segment in a condition); a document failing its schema or the sanitizer; raw HTML that `mrml` cannot parse; a webhook body that is not valid JSON after a sample render.
-- **Warns:** images without alt text; HTML size near the clipping threshold of common mail clients (about 100 KB); missing `lang`; subject or preheader beyond typical display length; links not using `https`.
+- **Block paths:** an issue on a block document names the block, `/blocks/block/<id>` plus the field when one applies (`/blocks/block/cta/url`), and a field of the document itself as `/blocks/<field>` (`/blocks/subject`, `/blocks/settings/link_color`). A problem of the whole message, such as a missing unsubscribe link, is `/blocks`. Document shape, limit and URL problems are the blocking codes `blocks_limit`, `duplicate_block_id`, `invalid_block_id`, `invalid_columns`, `invalid_setting`, `invalid_url` and `sanitizer_rejected` (rich text the allowlist would change).
+- **Warns:** images without alt text (`image_without_alt`), a subject over 78 or a preheader over 110 characters (`subject_too_long`, `preheader_too_long`); HTML size near the clipping threshold of common mail clients (about 100 KB); missing `lang`; subject or preheader beyond typical display length; links not using `https`.
 
 ### 11.7 Versions, preview, test sends, webhook payloads
 
