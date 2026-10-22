@@ -540,6 +540,7 @@ mod tests {
             SecretPurpose::WebhookSigning,
             SecretPurpose::DestinationCredential,
             SecretPurpose::DkimKey,
+            SecretPurpose::WorkspaceCredential,
         ] {
             let id = SecretId::new();
             let sealed = seal(&keys, b"{}", &secret_aad(ws, id, purpose));
