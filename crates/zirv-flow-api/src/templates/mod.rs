@@ -17,7 +17,7 @@ pub(crate) mod where_used;
 use serde_json::Value;
 use zirv_flow_store::{Template, TemplateError, TemplateFieldCatalog};
 use zirv_flow_templates::{
-    Category, Channel, EmailContent, FieldCatalog, Issue, Severity, TemplateDocument,
+    Category, Channel, EmailContent, FieldCatalog, Issue, Mode, Severity, TemplateDocument,
     WebhookContent,
 };
 
@@ -103,6 +103,24 @@ pub(crate) fn check_matches(template: &Template, doc: &TemplateDocument) -> Resu
             "the document is for the {} channel but the template is {}",
             channel_name(doc.channel),
             template.channel
+        )));
+    }
+    // The draft carries its own channel's content and no other's: a webhook body on an email
+    // template would be stored, published and then ignored.
+    let (own, other) = match doc.channel {
+        Channel::Webhook => (doc.webhook.is_some(), doc.email.is_some()),
+        _ => (doc.email.is_some(), doc.webhook.is_some()),
+    };
+    if other {
+        return Err(ApiError::template_mismatch(format!(
+            "the document carries content for another channel than the template's {}",
+            template.channel
+        )));
+    }
+    if !own && doc.mode == Mode::Code {
+        return Err(ApiError::template_malformed(format!(
+            "a code-mode {} document needs its {} content",
+            template.channel, template.channel
         )));
     }
     if let Some(email) = &doc.email
@@ -207,6 +225,39 @@ mod tests {
             Some("template_mismatch")
         );
         assert_eq!(wrong_channel.unwrap_err().code(), Some("template_mismatch"));
+    }
+
+    #[test]
+    fn a_draft_carries_its_own_channels_content_and_no_other() {
+        let email_template = template("email", "marketing");
+        let webhook_template = template("webhook", "transactional");
+        let mut email_with_hook = skeleton(Channel::Email, Category::Marketing);
+        email_with_hook.webhook = skeleton(Channel::Webhook, Category::Marketing).webhook;
+        let mut hook_with_email = skeleton(Channel::Webhook, Category::Marketing);
+        hook_with_email.email = skeleton(Channel::Email, Category::Marketing).email;
+        let mut email_without_content = skeleton(Channel::Email, Category::Marketing);
+        email_without_content.email = None;
+        let mut hook_without_content = skeleton(Channel::Webhook, Category::Marketing);
+        hook_without_content.webhook = None;
+
+        let code = |result: Result<(), ApiError>| result.unwrap_err().code();
+
+        assert_eq!(
+            code(check_matches(&email_template, &email_with_hook)),
+            Some("template_mismatch")
+        );
+        assert_eq!(
+            code(check_matches(&webhook_template, &hook_with_email)),
+            Some("template_mismatch")
+        );
+        assert_eq!(
+            code(check_matches(&email_template, &email_without_content)),
+            Some("template_malformed")
+        );
+        assert_eq!(
+            code(check_matches(&webhook_template, &hook_without_content)),
+            Some("template_malformed")
+        );
     }
 
     #[test]

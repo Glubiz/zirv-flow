@@ -130,18 +130,36 @@ pub async fn publish_template(
     Ok((updated, version))
 }
 
-/// The versions of a template of the workspace, newest first.
+/// A published version without its document: what a history list shows.
+#[derive(Clone, Debug, FromRow, PartialEq)]
+pub struct TemplateVersionSummary {
+    pub version: i32,
+    pub published_at: OffsetDateTime,
+    pub published_by: Option<Uuid>,
+    /// The blocking issues stored with the version. A blocking issue refuses the publish, so this
+    /// is 0 for every version made today.
+    pub blocking: i64,
+    /// The warnings stored with the version.
+    pub warnings: i64,
+}
+
+/// The versions of a template of the workspace, newest first, without their documents.
 pub async fn list_template_versions<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     id: Uuid,
-) -> Result<Vec<TemplateVersion>, StoreError> {
-    sqlx::query_as(concat!(
-        "SELECT ",
-        version_columns!(),
-        " FROM template_versions WHERE workspace_id = $1 AND template_id = $2 \
-          ORDER BY version DESC"
-    ))
+) -> Result<Vec<TemplateVersionSummary>, StoreError> {
+    sqlx::query_as(
+        "SELECT version, published_at, published_by, \
+            (SELECT count(*) FROM jsonb_array_elements(CASE \
+                WHEN jsonb_typeof(validation) = 'array' THEN validation ELSE '[]'::jsonb END) i \
+                WHERE i ->> 'severity' = 'blocking') AS blocking, \
+            (SELECT count(*) FROM jsonb_array_elements(CASE \
+                WHEN jsonb_typeof(validation) = 'array' THEN validation ELSE '[]'::jsonb END) i \
+                WHERE i ->> 'severity' = 'warning') AS warnings \
+         FROM template_versions WHERE workspace_id = $1 AND template_id = $2 \
+         ORDER BY version DESC",
+    )
     .bind(workspace.as_uuid())
     .bind(id)
     .fetch_all(executor)
@@ -227,6 +245,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(draft.document, document("second"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_version_list_carries_counts_and_no_documents(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let template = create(&pool, ws, "Welcome").await;
+        let warnings = json!([
+            {"code": "missing_lang", "severity": "warning", "at": "/email/lang"},
+            {"code": "insecure_link", "severity": "warning", "at": "/email/html"}
+        ]);
+        for validation in [json!([]), warnings] {
+            let mut tx = begin(&pool).await.unwrap();
+            let locked = lock_template(&mut tx, ws, template.id).await.unwrap();
+            publish_template(&mut tx, ws, &locked, &validation, None, &trace())
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+        }
+
+        let list = list_template_versions(&pool, ws, template.id)
+            .await
+            .unwrap();
+
+        let counts: Vec<(i32, i64, i64)> = list
+            .iter()
+            .map(|v| (v.version, v.blocking, v.warnings))
+            .collect();
+        assert_eq!(counts, [(2, 0, 2), (1, 0, 0)]);
     }
 
     #[sqlx::test]

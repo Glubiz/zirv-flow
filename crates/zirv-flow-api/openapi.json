@@ -15605,7 +15605,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`)",
+            "description": "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15666,13 +15666,13 @@
         ],
         "responses": {
           "200": {
-            "description": "The versions",
+            "description": "The versions without their documents, newest first",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/TemplateVersionBody"
+                    "$ref": "#/components/schemas/TemplateVersionSummaryBody"
                   }
                 }
               }
@@ -15815,7 +15815,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "The flow versions whose graph has a node naming this template, by flow name, newest version\nfirst. The draft of a flow is not a version and is not listed.",
+        "summary": "The flows with a version whose graph has a node naming this template, by flow name, one entry\nper flow however many versions name it. The draft of a flow is not a version and is not listed.",
         "operationId": "template_where_used",
         "parameters": [
           {
@@ -28264,19 +28264,18 @@
       },
       "TemplateUseBody": {
         "type": "object",
-        "description": "One flow version that names the template.",
+        "description": "One flow with a version that names the template.",
         "required": [
           "flow_id",
           "flow_name",
           "flow_state",
-          "version",
-          "current",
-          "published_at"
+          "versions",
+          "active"
         ],
         "properties": {
-          "current": {
+          "active": {
             "type": "boolean",
-            "description": "Whether this is the version the flow runs now. An older version still runs for the\nenrollments pinned to it."
+            "description": "Whether the version the flow runs now is one of them."
           },
           "flow_id": {
             "type": "string",
@@ -28289,14 +28288,13 @@
             "type": "string",
             "description": "`draft`, `published`, `paused` or `archived`."
           },
-          "published_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "version": {
-            "type": "integer",
-            "format": "int32",
-            "description": "The flow version whose graph names the template."
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "The numbers of the flow's versions that name the template, newest first. An older version\nstill runs for the enrollments pinned to it."
           }
         }
       },
@@ -28335,6 +28333,43 @@
               "$ref": "#/components/schemas/TemplateIssueProblem"
             },
             "description": "The warnings found when it was published; a blocking issue refuses the publish."
+          }
+        }
+      },
+      "TemplateVersionSummaryBody": {
+        "type": "object",
+        "description": "One published version in the history list: no document, which `GET .../versions/{n}` returns.",
+        "required": [
+          "version",
+          "blocking",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The blocking issues stored with the version; always 0, because a blocking issue refuses the\npublish."
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The warnings stored with the version."
           }
         }
       },

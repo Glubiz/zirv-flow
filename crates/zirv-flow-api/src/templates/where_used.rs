@@ -1,9 +1,8 @@
-//! Where a template is used: the flow versions whose graph names it.
+//! Where a template is used: the flows with a version whose graph names it.
 
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::Serialize;
-use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_store::TemplateUse;
@@ -12,21 +11,18 @@ use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
 
-/// One flow version that names the template.
+/// One flow with a version that names the template.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct TemplateUseBody {
     flow_id: Uuid,
     flow_name: String,
     /// `draft`, `published`, `paused` or `archived`.
     flow_state: String,
-    /// The flow version whose graph names the template.
-    version: i32,
-    /// Whether this is the version the flow runs now. An older version still runs for the
-    /// enrollments pinned to it.
-    current: bool,
-    #[serde(with = "time::serde::rfc3339")]
-    #[schema(value_type = String, format = DateTime)]
-    published_at: OffsetDateTime,
+    /// The numbers of the flow's versions that name the template, newest first. An older version
+    /// still runs for the enrollments pinned to it.
+    versions: Vec<i32>,
+    /// Whether the version the flow runs now is one of them.
+    active: bool,
 }
 
 impl From<&TemplateUse> for TemplateUseBody {
@@ -35,15 +31,14 @@ impl From<&TemplateUse> for TemplateUseBody {
             flow_id: used.flow_id,
             flow_name: used.flow_name.clone(),
             flow_state: used.flow_state.clone(),
-            version: used.version,
-            current: used.current,
-            published_at: used.published_at,
+            versions: used.versions.clone(),
+            active: used.active,
         }
     }
 }
 
-/// The flow versions whose graph has a node naming this template, by flow name, newest version
-/// first. The draft of a flow is not a version and is not listed.
+/// The flows with a version whose graph has a node naming this template, by flow name, one entry
+/// per flow however many versions name it. The draft of a flow is not a version and is not listed.
 #[utoipa::path(
     get,
     operation_id = "template_where_used",
@@ -80,21 +75,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_use_keeps_its_flow_version_and_whether_it_is_current() {
+    fn a_use_keeps_the_versions_that_name_the_template_and_whether_the_active_one_does() {
         let used = TemplateUse {
             flow_id: Uuid::nil(),
             flow_name: "Welcome".into(),
             flow_state: "published".into(),
-            version: 3,
-            current: true,
-            published_at: OffsetDateTime::UNIX_EPOCH,
+            versions: vec![3, 1],
+            active: true,
         };
 
         let body = serde_json::to_value(TemplateUseBody::from(&used)).unwrap();
 
         assert_eq!(body["flow_name"], "Welcome");
-        assert_eq!(body["version"], 3);
-        assert_eq!(body["current"], true);
-        assert_eq!(body["published_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(body["versions"], serde_json::json!([3, 1]));
+        assert_eq!(body["active"], true);
+        assert!(body.get("version").is_none() && body.get("published_at").is_none());
     }
 }

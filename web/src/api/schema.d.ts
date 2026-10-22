@@ -2636,8 +2636,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * The flow versions whose graph has a node naming this template, by flow name, newest version
-         *     first. The draft of a flow is not a version and is not listed.
+         * The flows with a version whose graph has a node naming this template, by flow name, one entry
+         *     per flow however many versions name it. The draft of a flow is not a version and is not listed.
          */
         get: operations["template_where_used"];
         put?: never;
@@ -6987,25 +6987,20 @@ export interface components {
             template: components["schemas"]["TemplateBody"];
             version: components["schemas"]["TemplateVersionBody"];
         };
-        /** @description One flow version that names the template. */
+        /** @description One flow with a version that names the template. */
         TemplateUseBody: {
-            /**
-             * @description Whether this is the version the flow runs now. An older version still runs for the
-             *     enrollments pinned to it.
-             */
-            current: boolean;
+            /** @description Whether the version the flow runs now is one of them. */
+            active: boolean;
             /** Format: uuid */
             flow_id: string;
             flow_name: string;
             /** @description `draft`, `published`, `paused` or `archived`. */
             flow_state: string;
-            /** Format: date-time */
-            published_at: string;
             /**
-             * Format: int32
-             * @description The flow version whose graph names the template.
+             * @description The numbers of the flow's versions that name the template, newest first. An older version
+             *     still runs for the enrollments pinned to it.
              */
-            version: number;
+            versions: number[];
         };
         /** @description One immutable published version. */
         TemplateVersionBody: {
@@ -7019,6 +7014,26 @@ export interface components {
             version: number;
             /** @description The warnings found when it was published; a blocking issue refuses the publish. */
             warnings: components["schemas"]["TemplateIssueProblem"][];
+        };
+        /** @description One published version in the history list: no document, which `GET .../versions/{n}` returns. */
+        TemplateVersionSummaryBody: {
+            /**
+             * Format: int64
+             * @description The blocking issues stored with the version; always 0, because a blocking issue refuses the
+             *     publish.
+             */
+            blocking: number;
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
+            /**
+             * Format: int64
+             * @description The warnings stored with the version.
+             */
+            warnings: number;
         };
         TestBody: {
             /** @description Why it does not. Never holds a credential or a URL. */
@@ -17987,7 +18002,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is archived (`code` is `template_archived`) */
+            /** @description The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -18021,13 +18036,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description The versions */
+            /** @description The versions without their documents, newest first */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TemplateVersionBody"][];
+                    "application/json": components["schemas"]["TemplateVersionSummaryBody"][];
                 };
             };
             /** @description Not authenticated */

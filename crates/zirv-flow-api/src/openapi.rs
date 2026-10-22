@@ -434,6 +434,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         templates::crud::TemplateChannelRequest,
         templates::crud::TemplateCategoryRequest,
         templates::publish::TemplateVersionBody,
+        templates::publish::TemplateVersionSummaryBody,
         templates::publish::TemplatePublishedBody,
         templates::where_used::TemplateUseBody,
         templates::preview::TemplatePreviewRequest,

@@ -11,7 +11,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
-use zirv_flow_store::{PgPool, Template, TemplateVersion};
+use zirv_flow_store::{PgPool, Template, TemplateVersion, TemplateVersionSummary};
 use zirv_flow_templates::{Issue, content_type_of};
 
 use super::crud::TemplateBody;
@@ -45,6 +45,33 @@ impl From<&TemplateVersion> for TemplateVersionBody {
             warnings: stored_warnings(&version.validation),
             published_by: version.published_by,
             published_at: version.published_at,
+        }
+    }
+}
+
+/// One published version in the history list: no document, which `GET .../versions/{n}` returns.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateVersionSummaryBody {
+    version: i32,
+    /// The blocking issues stored with the version; always 0, because a blocking issue refuses the
+    /// publish.
+    blocking: i64,
+    /// The warnings stored with the version.
+    warnings: i64,
+    published_by: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    published_at: OffsetDateTime,
+}
+
+impl From<&TemplateVersionSummary> for TemplateVersionSummaryBody {
+    fn from(summary: &TemplateVersionSummary) -> Self {
+        Self {
+            version: summary.version,
+            blocking: summary.blocking,
+            warnings: summary.warnings,
+            published_by: summary.published_by,
+            published_at: summary.published_at,
         }
     }
 }
@@ -216,7 +243,7 @@ pub(crate) async fn publish(
         ("id" = Uuid, Path, description = "Template id")
     ),
     responses(
-        (status = 200, description = "The versions", body = Vec<TemplateVersionBody>),
+        (status = 200, description = "The versions without their documents, newest first", body = Vec<TemplateVersionSummaryBody>),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json")
@@ -227,7 +254,7 @@ pub(crate) async fn versions(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
-) -> Result<Json<Vec<TemplateVersionBody>>, ApiError> {
+) -> Result<Json<Vec<TemplateVersionSummaryBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let id = path_id(&id)?;
     zirv_flow_store::find_template(&state.pool, workspace.id, id)
@@ -235,7 +262,10 @@ pub(crate) async fn versions(
         .ok_or_else(ApiError::not_found)?;
     let versions = zirv_flow_store::list_template_versions(&state.pool, workspace.id, id).await?;
     Ok(Json(
-        versions.iter().map(TemplateVersionBody::from).collect(),
+        versions
+            .iter()
+            .map(TemplateVersionSummaryBody::from)
+            .collect(),
     ))
 }
 

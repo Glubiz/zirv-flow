@@ -9,7 +9,7 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_render::RenderPool;
@@ -21,6 +21,7 @@ use zirv_flow_templates::{
 
 use super::{field_catalog, issue_problems, stored_document};
 use crate::AppState;
+use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, TemplateIssueProblem};
@@ -254,7 +255,21 @@ pub(crate) async fn preview(
             (person_context(&catalog, &traits, email), Some(person.id))
         }
     };
-    drop(tx);
+    if let Some(person) = person_id {
+        // A real person's values were read for this preview: record who looked, never the values.
+        admin::audit(
+            &mut tx,
+            &principal.context(),
+            Some(workspace.id),
+            "template.previewed",
+            Some(("template", id)),
+            json!({ "person_id": person, "source": source, "version": body.version }),
+        )
+        .await?;
+        zirv_flow_store::commit(tx).await?;
+    } else {
+        drop(tx);
+    }
 
     let content = content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
     // Validation renders a sample, so it runs in the render host like the render itself.

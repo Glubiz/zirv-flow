@@ -230,10 +230,10 @@ pub use sync_runs::{
 };
 pub use templates::{
     LockedTemplate, NewTemplate, Template, TemplateDraft, TemplateError, TemplateFieldCatalog,
-    TemplatePatch, TemplateUse, TemplateVersion, archive_template, create_template, find_template,
-    find_template_draft, find_template_version, list_template_versions, list_templates,
-    lock_template, publish_template, read_template_field_catalog, save_template_draft,
-    template_where_used, update_template,
+    TemplatePatch, TemplateUse, TemplateVersion, TemplateVersionSummary, archive_template,
+    create_template, find_template, find_template_draft, find_template_version,
+    list_template_versions, list_templates, lock_template, publish_template,
+    read_template_field_catalog, save_template_draft, template_where_used, update_template,
 };
 pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,

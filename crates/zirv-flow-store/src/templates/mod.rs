@@ -21,8 +21,8 @@ pub use crud::{
     update_template,
 };
 pub use publish::{
-    LockedTemplate, TemplateVersion, find_template_version, list_template_versions, lock_template,
-    publish_template,
+    LockedTemplate, TemplateVersion, TemplateVersionSummary, find_template_version,
+    list_template_versions, lock_template, publish_template,
 };
 pub use where_used::{TemplateUse, template_where_used};
 

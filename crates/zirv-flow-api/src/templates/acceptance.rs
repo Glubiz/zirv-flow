@@ -308,6 +308,11 @@ mod tests {
                 .unwrap()
         }
 
+        async fn preview_audits(&self) -> i64 {
+            self.count("SELECT count(*) FROM audit_log WHERE action = 'template.previewed'")
+                .await
+        }
+
         async fn versions_written(&self) -> i64 {
             self.count("SELECT count(*) FROM template_versions").await
         }
@@ -494,6 +499,14 @@ mod tests {
             .map(|v| v["version"].as_i64().unwrap())
             .collect();
         assert_eq!(numbers, [2, 1]);
+        assert!(
+            versions.body[0].get("document").is_none(),
+            "the history carries no documents"
+        );
+        assert_eq!(
+            (&versions.body[0]["blocking"], &versions.body[0]["warnings"]),
+            (&json!(0), &json!(0))
+        );
         let first = f.lead("GET", &tail("/versions/1"), None).await;
         assert_eq!(first.body["document"], email_doc("First", "one"));
         let current = f.lead("GET", &tail("/versions/2"), None).await;
@@ -898,6 +911,56 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_real_person_preview_is_audited_with_the_ids_and_no_values(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f
+            .create(
+                "Welcome",
+                email_doc("Hi {{ person.plan }}", "{{ person.email }}"),
+            )
+            .await;
+        let person = f
+            .person(json!({"plan": "enterprise"}), Some("ann@example.com"))
+            .await;
+        let sample = f
+            .lead("POST", &format!("/{id}/preview"), Some(json!({})))
+            .await;
+        assert_eq!(sample.status, StatusCode::OK);
+        assert_eq!(
+            f.preview_audits().await,
+            0,
+            "a sample preview shows no one's values"
+        );
+
+        let real = f
+            .lead(
+                "POST",
+                &format!("/{id}/preview"),
+                Some(json!({"person_id": person})),
+            )
+            .await;
+
+        assert_eq!(real.status, StatusCode::OK, "{:?}", real.body);
+        assert_eq!(f.preview_audits().await, 1);
+        let row: (String, Option<Uuid>, String) = sqlx::query_as(
+            "SELECT object_kind, object_id, summary::text FROM audit_log \
+             WHERE action = 'template.previewed'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.0.as_str(), row.1),
+            ("template", Some(id.parse().unwrap()))
+        );
+        assert!(row.2.contains(&person.to_string()));
+        for value in ["enterprise", "ann@example.com"] {
+            assert!(!row.2.contains(value), "{}", row.2);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_reports_blocking_issues_and_renders_nothing(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f
@@ -1180,8 +1243,8 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["flow_id"], json!(flow));
         assert_eq!(rows[0]["flow_name"], "Welcome flow");
-        assert_eq!(rows[0]["version"], 1);
-        assert_eq!(rows[0]["current"], true);
+        assert_eq!(rows[0]["versions"], json!([1]));
+        assert_eq!(rows[0]["active"], true);
         assert!(unused.body.as_array().unwrap().is_empty());
         let _ = template;
     }
