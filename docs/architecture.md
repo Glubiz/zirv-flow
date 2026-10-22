@@ -2085,9 +2085,9 @@ upserts `erased` suppressions from the ledger hashes, calls `delete_person` for 
 people, and pending inbox rows by hash with the master key). Exports are `privacy_exports`:
 `privacy.export` builds the gzip JSON `zirv-flow.person-export/v1`, the download is
 admin-only, audited and answers 410 after 24 hours, and the leader's hourly upkeep drops expired
-content. A request whose job went dead reads as `failed`. Destination `erase` calls, message and
-enrollment tables and backup-copy handling of the ledger (OQ-13) are not built yet.
-M6 erases the `messages` rows and their message links, the test-send log
+content. A request whose job went dead reads as `failed`. Backup-copy handling of the ledger
+(OQ-13) is not built yet; enrollments joined the erasure in M5 (9.3).
+M6 adds the rest: it erases the `messages` rows and their message links, the test-send log
 entries and the pending and dead forwarding payloads of the person, and calls
 `erase` on each forwarding or delivery destination that declares it, recording
 the result per destination.
