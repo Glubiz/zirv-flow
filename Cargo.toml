@@ -11,8 +11,8 @@ repository = "https://github.com/Glubiz/zirv-flow"
 
 [workspace.dependencies]
 # Allowlist HTML sanitizer for the rich text of the block document (#238). Pure Rust, no features.
-# Pinned: 4.2.1 was published 2026-10-03, the newest release at least two weeks old on 2026-10-22.
-ammonia = { version = "=4.2.1", default-features = false }
+# Pinned: 4.2.4 (2026-10-17) for its sanitizer security fixes; ruling eea534b0 outranks the two-week age rule.
+ammonia = { version = "=4.2.4", default-features = false }
 argon2 = { version = "0.6.0", features = ["alloc", "password-hash"] }
 bytes = "1.12.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
