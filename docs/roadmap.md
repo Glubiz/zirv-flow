@@ -25,8 +25,8 @@ No dates or effort estimates: there is no throughput data yet.
 | M3 — Data sources v1 | Incremental pulls with visible freshness; provider foundation for optional authoring assistance | M2 |
 | M4 — Segmentation v1 | Segments marketers can build, draft, explain and trust; membership changes become traced events | M2, M3 |
 | M5 — Flow engine v1 | Durable, versioned, traced and assistant-draftable flows | M4 |
-| M6 — Channels and destinations v1 | Compliant delivery, profile sync, delivery feedback and event forwarding | M3, M5 |
-| M7 — Template builder | Email and webhook content built or assistant-drafted; preview rendered by the same code that sends | M6 |
+| M6 — Channels and destinations v1 | Compliant delivery, profile sync, delivery feedback and event forwarding; email built in a WYSIWYG block editor or written as HTML or MJML | M3, M5 |
+| M7 — Template builder | Themes, snippets, assets, visibility conditions, the webhook payload editor and assistant drafting on the M6 builder core | M6 |
 | M8 — Beta hardening and v1.0 | Trace, assistant security and production targets validated; v1.0 | M3, M4, M5, M6, M7 |
 | M9 — Post-1.0 themes | Hold post-1.0 themes until each is promoted to its own milestone | M8 |
 
@@ -279,7 +279,8 @@ systems, and feed delivery and engagement back as events.
 - **Destinations.** `Destination` trait on the M3 connector runtime, with capability flags (idempotency, batching, rate limits, erase).
 - **Email.** SMTP destination; email-provider HTTP API destinations (built in or manifest); sender identities (from name, from and reply-to addresses) bound to verified sending domains.
 - **Sender authentication.** Sending domains with verification: Zirv Flow generates the DKIM key and the SPF, DKIM and DMARC records to publish, checks them in DNS and shows their status; SMTP mail from a verified domain is DKIM-signed (key stored under the M3 secrets encryption); provider destinations show the provider's domain status where its API exposes it. Sends from an unverified domain are blocked. A guide covers DNS setup at common hosts.
-- **Templates (code mode).** The pure `zirv-flow-templates` renderer with MiniJinja HTML and text parts: sandbox, versions, preview with a real or sample person through the send renderer, test sends, required unsubscribe link for the marketing category. M7 builds the block builder on it.
+- **Templates.** The pure `zirv-flow-templates` renderer behind a template content-type registry (ruling 963d119f): HTML and MJML code modes (MiniJinja over the source, then `mrml` for MJML, then post-render), and the builder core, a versioned block document (`schema: 1`) with the v1 email block set (sections with 1 to 3 columns, heading, sanitized rich text, image by https URL, button, divider, spacer, raw HTML), per-document style settings in place of themes, MJML rendering through `mrml` and a generated text part. Blocks convert one way to MJML code. Sandbox, versions, preview with a real or sample person through the send renderer, test sends, required unsubscribe link for the marketing category.
+- **Isolated rendering** (ruling f5213fbb). Preview and send render in a child process (the hidden `render-host` subcommand of the `zirv-flow` binary) under an OS memory limit, with a per-render deadline and output caps, through the new `zirv-flow-render` pool client. A child that dies, overruns or exceeds its limit fails that render only, never the worker.
 - **Consent policies.** Workspace consent dimensions beyond the channel (topic, product vertical, purpose; one value per dimension or "all"), and versioned effective-consent rules built in the UI on the M4 condition AST over recorded consent, traits, events, lists and message history (for example cooldowns and account state). They are evaluated at the send gate, with the deciding rule recorded (architecture 10.1, OQ-32).
 - **Send pipeline.** Effective consent under the workspace consent policy, suppression, frequency caps, quiet hours, render, rate limit, deliver; a `messages` log with skip reasons.
 - **Tracking.** Open pixel, click redirect with recorded-link allowlist, unsubscribe page, RFC 8058 one-click, topic preference center.
@@ -288,12 +289,13 @@ systems, and feed delivery and engagement back as events.
 - **Event forwarding.** Destination filters and typed mappings; at-least-once delivery with stable idempotency keys, visible retries and dead letters, manual re-drive, per-destination lag metrics, and erase calls where declared. Forwarding replay never triggers flows.
 - **Flow nodes.** `action.send`, `action.sync`; the webhook action moves onto the destination runtime.
 - **Deletion and erasure.** Messages, test-send log entries, forwarding payloads and person-scoped decision records erased; delivery and forwarding destination `erase` called where declared; suppression hashes retained.
-- **UI.** Destination and forwarding setup, code template editor with preview, consent dimensions and the consent policy builder, frequency caps and quiet hours, per-person message log ("why was this not sent"), trace links, forwarding lag/dead letters and per-node delivery stats.
-- **Decisions.** OQ-9 (token blocks), OQ-10 (machine opens), OQ-11 (transactional API), OQ-12 (SMTP bounces), OQ-19 (suppression scope), OQ-32 (consent dimensions and policies).
+- **UI.** Destination and forwarding setup, template editor in a split view (HTML, MJML or the WYSIWYG block editor on the left, the live server-rendered preview on the right), consent dimensions and the consent policy builder, frequency caps and quiet hours, per-person message log ("why was this not sent"), trace links, forwarding lag/dead letters and per-node delivery stats.
+- **Decisions.** OQ-9 (token blocks), OQ-10 (machine opens), OQ-11 (transactional API), OQ-12 (SMTP bounces), OQ-19 (suppression scope), OQ-25 (layout set and client matrix; its M6 part is the representative-set check through `mrml`, run before the v1 block set is frozen), OQ-32 (consent dimensions and policies).
 
 **Out of scope.** SMS, push, ad audiences, running an MTA, deliverability tools
-(seed tests, warm-up), a transactional API unless OQ-11 decides otherwise, the
-block builder (M7).
+(seed tests, warm-up), a transactional API unless OQ-11 decides otherwise, themes, snippets,
+the asset store, visibility conditions, the assistant, the webhook payload editor and
+document migrations (M7).
 
 **Exit criteria.**
 - [ ] End to end: track call, then segment entry, then flow, then an email captured by a local SMTP sink with `List-Unsubscribe` headers. The tracked click records `email.clicked`; one-click unsubscribe updates consent, and the next send is skipped with `no_consent`.
@@ -306,38 +308,38 @@ block builder (M7).
 - [ ] A retried delivery job reuses its idempotency key; providers that honour keys show zero duplicates in fixture tests.
 - [ ] A trace from a track call shows event, segment entry, enrollment, steps, a message and delivery feedback, plus a later skipped send with its exact gate reason; the API tree and UI agree.
 - [ ] A forwarding fixture filters and maps the expected event, reuses its idempotency key across retries, exposes lag and a dead letter, re-drives successfully without triggering a flow, and receives its declared erase call.
+- [ ] A marketer builds an email from the v1 block set in the WYSIWYG editor, and preview and send give the same bytes through `mrml`; HTML and MJML code templates publish and preview the same way; a template that exceeds the render memory limit fails its render without stopping the worker.
+- [ ] The representative layout set (1, 2 and 3 columns, hero image, button, footer with unsubscribe) renders through `mrml` as golden tests and passes the client-matrix check before the v1 block set is frozen; results attached (OQ-25).
 - [ ] Send throughput benchmark attached against the section 19 target.
 
 **Dependencies.** M5 (flow actions) and M3 (connector runtime, manifests, secrets).
 
 ## M7 — Template builder
 
-**Goal.** Marketers build email and webhook content without code in a
-channel-aware block builder whose preview is rendered by the same Rust code
-that sends (architecture section 11, ADR-006).
+**Goal.** Complete the template builder that M6 started: brand themes, snippets,
+assets, visibility conditions, the webhook payload editor and assistant
+drafting, on the renderer that sends (architecture section 11, ADR-006).
 
 **Scope.**
-- **Validate `mrml` first.** Render the representative layout set through `mrml` and check it against the client matrix (OQ-25) before the v1 block set is frozen.
-- **Content model.** Versioned JSON document with explicit `schema` numbers; email and webhook content types; SMS, push and in-app types reserved in the schema; document migrations as pure functions with golden tests.
-- **Renderer.** Block documents in `zirv-flow-templates`: theme tokens, snippet resolution, MiniJinja per text field, MJML via `mrml`, generated text part, post-render tracking and unsubscribe binding, deterministic output. Code mode stays; blocks-to-code conversion is one-way.
-- **Block editor UI.** Email block set v1 (sections with 1 to 3 columns, heading, sanitized rich text, image, button, divider, spacer, raw HTML, snippet), reordering, per-block settings, inline validation.
+- **Content model.** The M6 block document grows: theme and snippet references, visibility conditions, reserved SMS, push and in-app types in the schema, and document migrations as pure functions with golden tests.
+- **Renderer.** Theme tokens (replacing M6's per-document style settings), snippet resolution and per-block visibility on the M6 block renderer, deterministic output.
+- **Block editor UI.** The snippet block, theme-aware settings and the visibility-condition editor on the M6 block editor.
 - **Themes and snippets.** Several themes per workspace (colours, fonts, logo, link and button styles, default footer), one of them the default; each template picks a theme or follows the default. Theme editor with preview; versioned snippets with where-used.
-- **Assets.** Image upload into Postgres with sniffed type, raster allowlist (no SVG), size and quota limits (OQ-21); content-addressed public serving from `/a/`; asset library.
+- **Assets.** Image upload into Postgres with sniffed type, raster allowlist (no SVG), size and quota limits (OQ-21); content-addressed public serving from `/a/`; asset library, replacing M6's image by https URL.
 - **Personalization.** Merge-tag picker fed by the field registry and event catalog; per-block visibility conditions on the segment AST, evaluated through the `ConditionEvaluator`.
 - **Assistant.** Draft email copy, subject-line variants, block layouts and translations through the typed template tool; template validation and bounded repair precede a rendered diff at desktop and mobile widths and explicit acceptance into a draft.
-- **Preview and test sends.** M6's preview and test sends extended to block documents: desktop and mobile widths, shown in a sandboxed iframe; test sends only to verified member addresses or a workspace allowlist.
+- **Preview and test sends.** M6's preview and test sends extended to themes, snippets and hidden blocks.
 - **Webhook payload editor.** JSON body template and headers with a sample-payload preview.
-- **Versions.** Publish validation (blocking errors and warnings), immutable versions, version history, where-used for templates and snippets, active flows shown on publish; message rows record template, snippet and theme versions.
+- **Versions.** Publish validation extended to theme, snippet, asset and condition references, where-used for snippets and themes, active flows shown on publish; message rows record template, snippet and theme versions.
 - **Erasure.** Saved preview-person references are covered.
-- **Decisions.** OQ-21 (asset limits), OQ-22 (dark mode), OQ-23 (block-set growth), OQ-24 (localization), OQ-25 (layout set and client matrix).
+- **Decisions.** OQ-21 (asset limits), OQ-22 (dark mode), OQ-23 (block-set growth), OQ-24 (localization).
 
 **Out of scope.** SMS, push and in-app builders and channels; AMP email; landing
-pages and forms; blocks beyond the v1 set.
+pages and forms; blocks beyond the v1 set plus the snippet block.
 
 **Exit criteria.**
-- [ ] The representative layout set renders through `mrml` and passes the client-matrix check before the block set is frozen; results attached.
-- [ ] A browser end-to-end test builds the reference newsletter layout without code and test-sends it to an SMTP sink; the captured HTML equals the preview render apart from tracking tokens.
-- [ ] Publishing an email with an unknown merge field, or a `marketing` email without an unsubscribe link, is rejected.
+- [ ] A browser end-to-end test builds the reference newsletter layout without code, using a theme, a snippet and an uploaded asset, and test-sends it to an SMTP sink; the captured HTML equals the preview render apart from tracking tokens.
+- [ ] Publishing an email with an unknown merge field, or a `marketing` email without an unsubscribe link, is rejected for block, MJML and HTML templates.
 - [ ] After a snippet update is published, later sends use it, and the message log records the template, snippet and theme versions each message used.
 - [ ] One template rendered under two themes differs only in theme tokens; changing the workspace default theme changes only templates that follow the default.
 - [ ] A document saved under schema v1 opens and renders byte-identically after migration to the current schema (golden test).
@@ -345,7 +347,7 @@ pages and forms; blocks beyond the v1 set.
 - [ ] The fake provider drafts copy, subject variants, a layout and a translation; invalid merge fields are repaired or returned as errors, the render diff is reviewable, and acceptance changes only the template draft.
 - [ ] Render benchmark attached against the section 19 target (p95 < 50 ms for a typical block email).
 
-**Dependencies.** M6 (renderer, send pipeline, destinations), and through it M5.
+**Dependencies.** M6 (renderer, block editor, send pipeline, destinations), and through it M5.
 
 ## M8 — Beta hardening and v1.0
 
