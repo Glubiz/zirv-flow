@@ -291,7 +291,8 @@ impl TokenBlock {
         true
     }
 
-    /// Tokens left that could still be spent at `now`.
+    /// Tokens left that could still be spent at `now`. Tests only: production code spends.
+    #[cfg(test)]
     fn remaining(&self, now: Instant) -> u32 {
         if now >= self.expires {
             0
