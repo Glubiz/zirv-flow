@@ -27,6 +27,9 @@ mod tests {
     use crate::{AppState, router};
 
     const PASSWORD: &str = "correct horse battery";
+    /// The id of the verified sender identity the fixture plants in workspace `ours`; the valid
+    /// documents name it.
+    const SENDER: &str = "0192b1a4-7c3e-7000-8000-00000000a001";
 
     struct Reply {
         status: StatusCode,
@@ -257,6 +260,14 @@ mod tests {
         let member = login_as(&router, "member@example.com").await;
         let lead = login_as(&router, "lead@example.com").await;
         add_trait(pool, ws, "plan").await;
+        zirv_flow_store::sending_fixtures::plant_verified_sender_as(
+            pool,
+            ws,
+            "example.com",
+            SENDER.parse().unwrap(),
+        )
+        .await
+        .unwrap();
         Fixture {
             pool: pool.clone(),
             router,
@@ -387,7 +398,7 @@ mod tests {
     /// A valid marketing email: a sender, a language and the unsubscribe link.
     fn email_doc(subject: &str, body: &str) -> Value {
         json!({"schema": 1, "channel": "email", "mode": "code", "email": {
-            "subject": subject, "sender": "snd_1", "lang": "en", "category": "marketing",
+            "subject": subject, "sender": SENDER, "lang": "en", "category": "marketing",
             "html": format!("<p>{body}</p><a href=\"{{{{ system.unsubscribe_url }}}}\">Unsubscribe</a>"),
             "text": format!("{body} {{{{ system.unsubscribe_url }}}}")
         }})
@@ -396,6 +407,191 @@ mod tests {
     fn webhook_doc(body: &str) -> Value {
         json!({"schema": 1, "channel": "webhook", "mode": "code",
                "webhook": {"headers": {"X-Plan": "{{ person.plan }}"}, "body": body}})
+    }
+
+    /// A valid email document that names `sender`.
+    fn email_doc_from(sender: &str) -> Value {
+        let mut doc = email_doc("Hi", "x");
+        doc["email"]["sender"] = json!(sender);
+        doc
+    }
+
+    async fn publish_names(f: &Fixture, sender: &str) -> Reply {
+        let id = f
+            .create(&format!("Sender {sender}"), email_doc_from(sender))
+            .await;
+        f.lead("POST", &format!("/{id}/publish"), None).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn publish_is_refused_with_sender_unverified_until_the_senders_domain_is_verified(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::sending_fixtures::{plant_domain, plant_identity, verify_domain};
+
+        let f = fixture(&pool).await;
+        let domain = plant_domain(&pool, f.ws, "pending.example.org")
+            .await
+            .unwrap();
+        let sender = plant_identity(&pool, f.ws, domain, "news@pending.example.org")
+            .await
+            .unwrap()
+            .to_string();
+
+        let refused = publish_names(&f, &sender).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "sender_unverified");
+        assert!(
+            refused.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("pending.example.org")
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM template_versions").await,
+            0,
+            "a refused publish writes no version"
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action = 'template.published'")
+                .await,
+            0
+        );
+
+        // The same template publishes once the domain verifies.
+        verify_domain(&pool, f.ws, domain).await.unwrap();
+        let id: String = sqlx::query_scalar("SELECT id::text FROM templates")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn publish_is_refused_for_an_unknown_archived_foreign_or_malformed_sender(pool: PgPool) {
+        use zirv_flow_store::sending_fixtures::plant_verified_sender;
+
+        let f = fixture(&pool).await;
+        let archived = plant_verified_sender(&pool, f.ws, "gone.example.org")
+            .await
+            .unwrap();
+        zirv_flow_store::archive_sender_identity(&pool, f.ws, archived)
+            .await
+            .unwrap();
+        let foreign = plant_verified_sender(&pool, f.other_ws, "theirs.example.org")
+            .await
+            .unwrap();
+
+        for sender in [
+            archived.to_string(),
+            foreign.to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            "snd_1".to_owned(),
+        ] {
+            let refused = publish_names(&f, &sender).await;
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{sender}: {:?}",
+                refused.body
+            );
+            assert_eq!(refused.body["code"], "sender_unverified", "{sender}");
+        }
+        assert_eq!(f.count("SELECT count(*) FROM template_versions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_webhook_template_needs_no_sender_and_the_senders_column_must_name_a_live_identity(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let webhook = f
+            .lead(
+                "POST",
+                "",
+                Some(json!({"name": "Hook", "channel": "webhook",
+                            "document": webhook_doc("{\"plan\": \"{{ person.plan }}\"}")})),
+            )
+            .await;
+        assert_eq!(webhook.status, StatusCode::CREATED, "{:?}", webhook.body);
+        let published = f
+            .lead(
+                "POST",
+                &format!("/{}/publish", webhook.body["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+
+        let unknown = f
+            .lead(
+                "POST",
+                "",
+                Some(
+                    json!({"name": "Mail", "channel": "email", "document": email_doc("Hi", "x"),
+                            "sender_identity_id": uuid::Uuid::now_v7()}),
+                ),
+            )
+            .await;
+        assert_eq!(
+            unknown.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            unknown.body
+        );
+        assert!(
+            unknown.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("sender_identity_id")
+        );
+        let id = f.create("Mail", email_doc("Hi", "x")).await;
+        let named = f
+            .lead(
+                "PUT",
+                &format!("/{id}"),
+                Some(json!({"sender_identity_id": SENDER})),
+            )
+            .await;
+        assert_eq!(named.status, StatusCode::OK, "{:?}", named.body);
+        assert_eq!(named.body["sender_identity_id"], SENDER);
+        let bad = f
+            .lead(
+                "PUT",
+                &format!("/{id}"),
+                Some(json!({"sender_identity_id": uuid::Uuid::now_v7()})),
+            )
+            .await;
+        assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let cleared = f
+            .lead(
+                "PUT",
+                &format!("/{id}"),
+                Some(json!({"sender_identity_id": null})),
+            )
+            .await;
+        assert_eq!(cleared.status, StatusCode::OK);
+        assert!(cleared.body["sender_identity_id"].is_null());
     }
 
     #[sqlx::test]
@@ -867,7 +1063,7 @@ mod tests {
 
     fn mjml_doc(body: &str, footer: &str) -> Value {
         json!({"schema": 1, "channel": "email", "mode": "code", "email": {
-            "subject": "Hello {{ person.plan }}", "sender": "snd_1", "category": "marketing",
+            "subject": "Hello {{ person.plan }}", "sender": SENDER, "category": "marketing",
             "syntax": "mjml",
             "html": format!(
                 "<mjml lang=\"en\"><mj-body><mj-section><mj-column>\

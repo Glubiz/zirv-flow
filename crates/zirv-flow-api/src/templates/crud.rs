@@ -11,7 +11,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{UserId, ValidationError, WorkspaceId};
 use zirv_flow_store::{
-    NewTemplate, PgPool, Template, TemplateDraft, TemplatePatch, create_template as store_create,
+    NewTemplate, PgConnection, PgPool, Template, TemplateDraft, TemplatePatch,
+    create_template as store_create,
 };
 use zirv_flow_templates::{Category, Channel, content_type_of};
 
@@ -207,6 +208,26 @@ fn invalid(field: &'static str, message: &'static str) -> ApiError {
     ValidationError::new(field, message).into()
 }
 
+/// A template may name only a live sender identity of its own workspace: the column is a foreign
+/// key, and an unknown id would otherwise surface as a database error.
+async fn check_sender(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    sender: Option<Uuid>,
+) -> Result<(), ApiError> {
+    let Some(sender) = sender else {
+        return Ok(());
+    };
+    let identity = zirv_flow_store::find_sender_identity(connection, workspace, sender).await?;
+    if identity.is_none_or(|identity| identity.archived_at.is_some()) {
+        return Err(invalid(
+            "sender_identity_id",
+            "is not a sender identity of this workspace",
+        ));
+    }
+    Ok(())
+}
+
 fn check_name(name: &str) -> Result<&str, ApiError> {
     let name = name.trim();
     let length = name.chars().count();
@@ -271,6 +292,7 @@ pub(crate) async fn create_template(
     };
     check_draft(&prospective, &new.document)?;
     let mut tx = zirv_flow_store::begin(pool).await?;
+    check_sender(&mut tx, workspace, new.sender_identity_id).await?;
     let (template, draft) = store_create(&mut tx, workspace, &new, created_by)
         .await
         .map_err(name_taken)?;
@@ -316,6 +338,7 @@ pub(crate) async fn update_template(
         sender_identity_id: request.sender_identity_id,
     };
     let mut tx = zirv_flow_store::begin(pool).await?;
+    check_sender(&mut tx, workspace, request.sender_identity_id.flatten()).await?;
     let template = zirv_flow_store::update_template(&mut tx, workspace, id, &patch)
         .await
         .map_err(template_error)?;

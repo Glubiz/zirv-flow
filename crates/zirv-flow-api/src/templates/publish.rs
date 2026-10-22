@@ -11,7 +11,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
-use zirv_flow_store::{PgPool, Template, TemplateVersion, TemplateVersionSummary};
+use zirv_flow_store::{
+    PgPool, SenderError, Template, TemplateVersion, TemplateVersionSummary, require_verified_sender,
+};
 use zirv_flow_templates::{Issue, content_type_of};
 
 use super::crud::TemplateBody;
@@ -20,6 +22,7 @@ use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem, TemplateIssueProblem};
+use crate::sending::sender_error;
 use crate::trace::request_trace;
 
 /// One immutable published version.
@@ -158,6 +161,21 @@ pub(crate) async fn publish_template(
         // Dropping the transaction writes nothing.
         return Err(ApiError::template_draft_changed());
     }
+    // The sender the document names must be a live identity on a verified domain. The check runs
+    // in the publishing transaction, after the draft is pinned, so the sender that is checked is
+    // the sender that is published.
+    if let Some(email) = &doc.email {
+        let sender = email
+            .sender
+            .as_deref()
+            .and_then(|sender| sender.trim().parse::<Uuid>().ok());
+        let Some(sender) = sender else {
+            return Err(sender_error(SenderError::Unknown));
+        };
+        require_verified_sender(&mut *tx, workspace, sender)
+            .await
+            .map_err(sender_error)?;
+    }
     let (template, version) = zirv_flow_store::publish_template(
         &mut tx,
         workspace,
@@ -184,8 +202,9 @@ pub(crate) async fn publish_template(
 /// Publishes the draft as the next immutable version. The draft is validated against the
 /// workspace's field registry and event catalog and the reserved `person.email`; a blocking issue
 /// is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
-/// successful publish are in the response and stored with the version. Audited as
-/// `template.published`.
+/// successful publish are in the response and stored with the version. The document's sender must
+/// be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
+/// Audited as `template.published`.
 #[utoipa::path(
     post,
     operation_id = "publish_template",
@@ -201,7 +220,7 @@ pub(crate) async fn publish_template(
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

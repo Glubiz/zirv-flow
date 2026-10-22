@@ -28,6 +28,7 @@ use crate::problem::{
     TemplateIssueProblem,
 };
 use crate::segments::{self, SegmentSchemas};
+use crate::sending;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::sources;
@@ -178,6 +179,16 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::update,
         destinations::crud::remove,
         destinations::actions::check,
+        sending::domains::list,
+        sending::domains::create,
+        sending::domains::get,
+        sending::domains::verify,
+        sending::domains::remove,
+        sending::identities::list,
+        sending::identities::create,
+        sending::identities::get,
+        sending::identities::update,
+        sending::identities::remove,
         sources::kinds::list,
         sources::crud::list,
         sources::crud::create,
@@ -467,6 +478,12 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::CreateDestinationRequest,
         destinations::crud::UpdateDestinationRequest,
         destinations::actions::DestinationCheckBody,
+        sending::domains::SendingDomainBody,
+        sending::domains::DomainRecordBody,
+        sending::domains::CreateSendingDomainRequest,
+        sending::identities::SenderIdentityBody,
+        sending::identities::CreateSenderIdentityRequest,
+        sending::identities::UpdateSenderIdentityRequest,
         sources::kinds::SourceKindBody,
         sources::kinds::FieldSpecBody,
         sources::kinds::CapabilitiesBody,

@@ -120,8 +120,18 @@ pub mod fixtures {
         domain: Uuid,
         address: &str,
     ) -> Result<Uuid, StoreError> {
+        plant_identity_as(pool, workspace, domain, Uuid::now_v7(), address).await
+    }
+
+    /// As [`plant_identity`], with the id given, so a test can name it in a document.
+    pub async fn plant_identity_as(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        domain: Uuid,
+        id: Uuid,
+        address: &str,
+    ) -> Result<Uuid, StoreError> {
         let address = Email::parse(address).map_err(|_| StoreError::poison())?;
-        let id = Uuid::now_v7();
         create_sender_identity(
             pool,
             workspace,
@@ -148,5 +158,17 @@ pub mod fixtures {
         let domain_id = plant_domain(pool, workspace, domain).await?;
         verify_domain(pool, workspace, domain_id).await?;
         plant_identity(pool, workspace, domain_id, &format!("news@{domain}")).await
+    }
+
+    /// Plants a verified domain and a sender identity with the id given on it.
+    pub async fn plant_verified_sender_as(
+        pool: &PgPool,
+        workspace: WorkspaceId,
+        domain: &str,
+        id: Uuid,
+    ) -> Result<Uuid, StoreError> {
+        let domain_id = plant_domain(pool, workspace, domain).await?;
+        verify_domain(pool, workspace, domain_id).await?;
+        plant_identity_as(pool, workspace, domain_id, id, &format!("news@{domain}")).await
     }
 }

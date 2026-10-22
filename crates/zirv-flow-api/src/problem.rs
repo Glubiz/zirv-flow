@@ -747,6 +747,27 @@ impl ApiError {
         }
     }
 
+    /// A publish (or, later, a send) whose sender identity may not send: it is unknown, archived,
+    /// or on a domain whose DKIM, SPF and DMARC records are not all verified.
+    pub(crate) fn sender_unverified(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("sender_unverified"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A sending domain that still has live sender identities, or identities that a template
+    /// names.
+    pub(crate) fn sending_domain_in_use() -> Self {
+        Self {
+            code: Some("sending_domain_in_use"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the sending domain still has sender identities in use; archive them, and remove them from templates, first",
+            )
+        }
+    }
+
     /// A write to an archived template.
     pub(crate) fn template_archived() -> Self {
         Self {
