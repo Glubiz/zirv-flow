@@ -12,6 +12,7 @@ mod error;
 #[cfg(feature = "test-support")]
 mod fake;
 mod registry;
+mod retry_after;
 mod spec;
 mod validate;
 
@@ -19,6 +20,7 @@ pub use context::DestinationContext;
 pub use destination::{BoxFuture, Delivered, Destination, ErasedDestination, Outbound};
 pub use error::{DestinationError, Disposition};
 pub use registry::Registry;
+pub use retry_after::{MAX_RETRY_AFTER, parse_retry_after};
 pub use spec::{Capabilities, DestinationSpec};
 pub use validate::{validate_config, validate_credential};
 

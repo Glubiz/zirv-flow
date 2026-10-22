@@ -88,6 +88,7 @@ mod tests {
             "error",
             "fake",
             "registry",
+            "retry_after",
             "spec",
             "validate",
         ] {
