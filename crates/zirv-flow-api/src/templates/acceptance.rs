@@ -950,6 +950,39 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_with_an_unknown_syntax_is_a_422_template_malformed(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Newsletter", email_doc("Hi", "x")).await;
+        let mut document = mjml_doc("Welcome", "footer");
+        document["email"]["syntax"] = json!("markdown");
+
+        let saved = f.put_draft(&id, document.clone()).await;
+        assert_eq!(
+            saved.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            saved.body
+        );
+        assert_eq!(saved.body["code"], "template_malformed");
+
+        let created = f
+            .lead(
+                "POST",
+                "",
+                Some(json!({"name": "Other", "channel": "email", "document": document})),
+            )
+            .await;
+        assert_eq!(
+            created.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            created.body
+        );
+        assert_eq!(created.body["code"], "template_malformed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_rewrites_web_links_to_inert_tokens(pool: PgPool) {
         let f = fixture(&pool).await;
         let mut document = email_doc("Hi", "x");

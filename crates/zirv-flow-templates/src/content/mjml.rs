@@ -52,11 +52,16 @@ impl TemplateContent for Mjml {
 pub(crate) enum MjmlError {
     /// The source holds an `mj-include` element.
     Include,
+    /// The elements nest deeper than [`MAX_DEPTH`].
+    TooDeep,
     /// `mrml` could not parse the text; where, and what kind of problem.
     Parse {
+        /// Line and column (1-based) in the text `mrml` read, which is the render of the source.
         line: usize,
         column: usize,
         reason: &'static str,
+        /// A short, printable piece of that line around the column.
+        excerpt: String,
     },
     /// `mrml` parsed the text but could not render it.
     Render,
@@ -70,14 +75,102 @@ pub(crate) struct Compiled {
     pub(crate) lang: Option<String>,
 }
 
-/// Whether `source` names an `mj-include` element anywhere, in any letter case. A comment that
+/// The deepest element nesting `mrml` is given. `mrml` 6.0.1 parses, renders and drops raw
+/// elements recursively with no bound, so a few tens of thousands of nested tags overflow the
+/// stack of the render host's child. Real MJML nests a dozen levels, and a table layout inside an
+/// `mj-raw` a few dozen; 128 leaves several times that, and is far below the depth at which the
+/// recursion gets near a default stack.
+pub(crate) const MAX_DEPTH: usize = 128;
+
+#[cfg(test)]
+thread_local! {
+    /// How many times `compile` reached `mrml`, so a test can show that a refusal came first.
+    static PARSER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `source` has an `mj-include` element, in any letter case and under any namespace
+/// prefix: `mrml` picks an element by its local name and ignores the prefix. A comment that
 /// mentions one is refused too: the check is a plain scan, not a parse.
 pub(crate) fn has_include(source: &str) -> bool {
-    const NEEDLE: &[u8] = b"<mj-include";
-    source
-        .as_bytes()
-        .windows(NEEDLE.len())
-        .any(|window| window.eq_ignore_ascii_case(NEEDLE))
+    let bytes = source.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'<')
+        .any(|(at, _)| {
+            let rest = &bytes[at + 1..];
+            let end = rest
+                .iter()
+                .position(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            let local = name.rsplit(|b| *b == b':').next().unwrap_or(name);
+            local.eq_ignore_ascii_case(b"mj-include")
+        })
+}
+
+/// An upper bound of how deeply the elements of `text` nest, in one pass and with no stack of
+/// names: an open tag is +1, a closing tag -1 (never below 0), and a self-closing or void element
+/// 0. It may count more than the truth, never less, because it is only used to refuse.
+pub(crate) fn nesting_depth(text: &str) -> usize {
+    const VOID: [&str; 14] = [
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+        "source", "track", "wbr",
+    ];
+    let bytes = text.as_bytes();
+    let (mut depth, mut deepest, mut at) = (0usize, 0usize, 0usize);
+    while let Some(found) = bytes[at..].iter().position(|b| *b == b'<') {
+        at += found;
+        let rest = &bytes[at..];
+        if rest.starts_with(b"<!--") {
+            at += 4 + find(&rest[4..], b"-->").map_or(rest.len() - 4, |end| end + 3);
+            continue;
+        }
+        if rest.starts_with(b"<![CDATA[") {
+            at += 9 + find(&rest[9..], b"]]>").map_or(rest.len() - 9, |end| end + 3);
+            continue;
+        }
+        // The end of the tag: the first `>` outside a quoted attribute value.
+        let mut quote = None;
+        let mut close = None;
+        for (index, byte) in rest.iter().enumerate().skip(1) {
+            match (quote, *byte) {
+                (None, b'"' | b'\'') => quote = Some(*byte),
+                (Some(open), b) if b == open => quote = None,
+                (None, b'>') => {
+                    close = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { break };
+        let tag = &rest[1..close];
+        at += close + 1;
+        match tag.first() {
+            Some(b'/') => depth = depth.saturating_sub(1),
+            Some(b'!' | b'?') | None => {}
+            Some(_) => {
+                let name_end = tag
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace() || *b == b'/')
+                    .unwrap_or(tag.len());
+                let name = String::from_utf8_lossy(&tag[..name_end]).to_ascii_lowercase();
+                if tag.ends_with(b"/") || VOID.contains(&name.as_str()) {
+                    continue;
+                }
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+        }
+    }
+    deepest
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 /// The pinned `mrml` render options. Spelled out so a change of the crate's defaults cannot
@@ -89,11 +182,17 @@ fn render_options() -> RenderOptions {
     }
 }
 
-/// Turn MJML (already rendered by MiniJinja) into HTML.
+/// Turn MJML (already rendered by MiniJinja) into HTML. Every caller of the `mrml` stage comes
+/// through here, so the refusals before `mrml` runs are in one place.
 pub(crate) fn compile(rendered: &str) -> Result<Compiled, MjmlError> {
     if has_include(rendered) {
         return Err(MjmlError::Include);
     }
+    if nesting_depth(rendered) > MAX_DEPTH {
+        return Err(MjmlError::TooDeep);
+    }
+    #[cfg(test)]
+    PARSER_CALLS.with(|calls| calls.set(calls.get() + 1));
     let options = ParserOptions {
         include_loader: Box::new(NoopIncludeLoader),
     };
@@ -116,15 +215,27 @@ pub(crate) fn compile(rendered: &str) -> Result<Compiled, MjmlError> {
 
 fn parse_error(text: &str, error: &ParseError) -> MjmlError {
     let (offset, reason) = match error {
+        // A backstop for the scan in `has_include`: the loader finds nothing, and that is a
+        // refused include, not a malformed document.
+        ParseError::IncludeLoaderError { .. } => return MjmlError::Include,
         ParseError::UnexpectedElement { position, .. } => (position.start, "unexpected element"),
         ParseError::UnexpectedToken { position, .. } => (position.start, "unexpected token"),
         ParseError::MissingAttribute { position, .. } => (position.start, "missing attribute"),
         ParseError::InvalidAttribute { position, .. } => (position.start, "invalid attribute"),
         ParseError::InvalidFormat { position, .. } => (position.start, "invalid format"),
-        ParseError::IncludeLoaderError { position, .. } => (position.start, "include refused"),
         ParseError::EndOfStream { .. } => (text.len(), "unexpected end"),
         ParseError::SizeLimit { .. } => (0, "text too large"),
-        ParseError::ParserError { .. } => (0, "malformed markup"),
+        // The tokenizer reports a 1-based row and column of its own.
+        ParseError::ParserError { source, .. } => {
+            let position = source.pos();
+            let (line, column) = (position.row as usize, position.col as usize);
+            return MjmlError::Parse {
+                line,
+                column,
+                reason: "malformed markup",
+                excerpt: excerpt(text, line, column),
+            };
+        }
         ParseError::NoRootNode => (0, "no <mjml> element"),
     };
     let (line, column) = line_and_column(text, offset);
@@ -132,7 +243,25 @@ fn parse_error(text: &str, error: &ParseError) -> MjmlError {
         line,
         column,
         reason,
+        excerpt: excerpt(text, line, column),
     }
+}
+
+/// At most 60 printable characters of line `line`, around `column`. Control characters are
+/// dropped, so the text can sit in a message without breaking its line.
+fn excerpt(text: &str, line: usize, column: usize) -> String {
+    let content: Vec<char> = text
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let start = column
+        .saturating_sub(1)
+        .saturating_sub(20)
+        .min(content.len());
+    content[start..].iter().take(60).collect()
 }
 
 /// The 1-based line and column (in characters) of a byte offset.
@@ -194,6 +323,114 @@ mod tests {
             assert_eq!(compile(source), Err(MjmlError::Include), "{source}");
         }
         assert!(!has_include(MINIMAL));
+    }
+
+    #[test]
+    fn an_include_is_found_by_its_local_name_and_a_tag_boundary() {
+        for source in [
+            r#"<mjml><mj-body><x:mj-include path="a"/></mj-body></mjml>"#,
+            r#"<mjml><mj-body><MJ-INCLUDE></MJ-INCLUDE></mj-body></mjml>"#,
+            "<mjml><mj-body><a:b:mj-include\npath=\"a\"/></mj-body></mjml>",
+        ] {
+            assert!(has_include(source), "{source}");
+            assert_eq!(compile(source), Err(MjmlError::Include), "{source}");
+        }
+        // A longer name is another element: the include check leaves it to `mrml`.
+        for source in ["<mj-includex/>", "<mj-include-all/>", "<x:mj-includes />"] {
+            assert!(!has_include(source), "{source}");
+        }
+    }
+
+    fn parser_calls() -> usize {
+        PARSER_CALLS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn nesting_too_deep_is_refused_before_mrml_runs() {
+        // Deep enough that `mrml` would recurse far past a thread's stack if it were called.
+        let deep = format!(
+            "<mjml><mj-body><mj-raw>{}</mj-raw></mj-body></mjml>",
+            "<a>".repeat(35_000)
+        );
+        assert!(nesting_depth(&deep) > MAX_DEPTH);
+        let before = parser_calls();
+        assert_eq!(compile(&deep), Err(MjmlError::TooDeep));
+        assert_eq!(parser_calls(), before, "mrml must not see it");
+        // The same through the render and the checks.
+        let doc = mjml_doc(Category::Transactional, &deep);
+        assert_eq!(render(&doc), Err(RenderError::MjmlTooDeep));
+        let issues = validate(&doc, &catalog());
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.code == code::MJML_TOO_DEEP && issue.is_blocking()),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn real_nesting_passes_the_depth_guard() {
+        for (name, _) in CORPUS {
+            assert!(nesting_depth(&source(name)) < 16, "{name}");
+        }
+        let table = "<table><tr><td>".repeat(40) + "x" + &"</td></tr></table>".repeat(40);
+        let layout = format!(
+            "<mjml lang=\"en\"><mj-body><mj-section><mj-column><mj-raw>{table}<br><img src=\"a\"></mj-raw></mj-column></mj-section></mj-body></mjml>"
+        );
+        let depth = nesting_depth(&layout);
+        assert!(depth > 100, "{depth}");
+        assert!(depth <= MAX_DEPTH, "{depth}");
+        let before = parser_calls();
+        assert!(compile(&layout).is_ok());
+        assert_eq!(parser_calls(), before + 1);
+    }
+
+    #[test]
+    fn the_depth_scan_counts_open_close_and_self_closing_tags() {
+        assert_eq!(nesting_depth("<a><b></b><c/><br></a>"), 2);
+        assert_eq!(nesting_depth("</a></b><a>"), 1);
+        assert_eq!(
+            nesting_depth("<!-- <a><a><a> --><a x=\">\"><![CDATA[<b><b>]]></a>"),
+            1
+        );
+        assert_eq!(nesting_depth("<a><b"), 1);
+        assert_eq!(nesting_depth(""), 0);
+    }
+
+    #[test]
+    fn a_parse_error_message_names_the_sample_render_and_a_clean_excerpt() {
+        let source = "<mjml lang=\"en\">\n<mj-body>\n  <mj-text>\n</mj-body>\u{7}</mjml>";
+        let issues = issues_of(source);
+        let message = issues
+            .iter()
+            .find(|issue| issue.code == code::MJML_PARSE_ERROR)
+            .and_then(|issue| issue.message.clone())
+            .expect("a parse error message");
+        assert!(message.contains("line 4, column "), "{message}");
+        assert!(message.contains("of the sample render"), "{message}");
+        assert!(message.contains("near: </mj-body>"), "{message}");
+        assert!(!message.chars().any(char::is_control), "{message}");
+
+        let long = format!("<mjml>{}<mj-text></mj-body></mjml>", "x".repeat(200));
+        match compile(&long) {
+            Err(MjmlError::Parse { excerpt, .. }) => assert!(excerpt.chars().count() <= 60),
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_missing_lang_warning_says_to_set_it_on_the_mjml_element() {
+        let issues = issues_of("<mjml><mj-body></mj-body></mjml>");
+        let warning = issues
+            .iter()
+            .find(|issue| issue.code == code::MISSING_LANG)
+            .expect("missing_lang");
+        let message = warning.message.as_deref().unwrap_or("");
+        assert!(
+            message.contains("`lang` on the <mjml> element"),
+            "{message}"
+        );
+        assert!(message.contains("not used for MJML"), "{message}");
     }
 
     #[test]

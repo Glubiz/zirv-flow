@@ -229,19 +229,24 @@ fn check_mjml(email: &EmailContent, html: &mut Checked, issues: &mut Vec<Issue>)
             if compiled.lang.is_none() {
                 issues.push(
                     Issue::new(code::MISSING_LANG, AT)
-                        .with_message("the <mjml> element has no lang"),
+                        .with_message("set `lang` on the <mjml> element: the content's own `lang` field is not used for MJML"),
                 );
             }
             html.sample = Some(compiled.html);
             return;
         }
         Err(MjmlError::Include) => Issue::new(code::MJML_INCLUDE, AT),
+        Err(MjmlError::TooDeep) => Issue::new(code::MJML_TOO_DEEP, AT).with_message(format!(
+            "elements nest deeper than {} levels",
+            crate::content::mjml::MAX_DEPTH
+        )),
         Err(MjmlError::Parse {
             line,
             column,
             reason,
+            excerpt,
         }) => Issue::new(code::MJML_PARSE_ERROR, AT).with_message(format!(
-            "{reason} at line {line}, column {column} of the sample render"
+            "{reason} at line {line}, column {column} of the sample render (not of the source), near: {excerpt}"
         )),
         Err(MjmlError::Render) => {
             Issue::new(code::MJML_PARSE_ERROR, AT).with_message("the MJML could not be rendered")
@@ -930,6 +935,6 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 22);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 23);
     }
 }

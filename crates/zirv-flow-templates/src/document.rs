@@ -148,6 +148,21 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_syntax_is_refused_with_a_serde_error() {
+        let error = serde_json::from_str::<TemplateDocument>(
+            r#"{"schema":1,"channel":"email","mode":"code",
+                "email":{"subject":"Hi","html":"x","syntax":"markdown"}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown variant `markdown`"), "{error}");
+        assert!(
+            error.contains("`html`") && error.contains("`mjml`"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn reserved_channels_parse() {
         let doc: TemplateDocument =
             serde_json::from_str(r#"{"schema":1,"channel":"in_app","mode":"blocks"}"#).unwrap();

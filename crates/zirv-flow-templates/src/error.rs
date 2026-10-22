@@ -44,6 +44,8 @@ pub enum RenderError {
     MjmlInclude,
     /// `mrml` could not parse or render the MJML.
     Mjml,
+    /// The MJML nests deeper than `mrml` is given.
+    MjmlTooDeep,
 }
 
 impl RenderError {
@@ -69,6 +71,7 @@ impl RenderError {
             Self::InvalidUnsubscribeUrl => "invalid_unsubscribe_url",
             Self::MjmlInclude => "mjml_include",
             Self::Mjml => "mjml_error",
+            Self::MjmlTooDeep => "mjml_too_deep",
         }
     }
 
@@ -103,6 +106,7 @@ impl RenderError {
             "invalid_unsubscribe_url" => Self::InvalidUnsubscribeUrl,
             "mjml_include" => Self::MjmlInclude,
             "mjml_error" => Self::Mjml,
+            "mjml_too_deep" => Self::MjmlTooDeep,
             _ => return None,
         })
     }
@@ -169,6 +173,7 @@ mod tests {
             RenderError::InvalidUnsubscribeUrl,
             RenderError::MjmlInclude,
             RenderError::Mjml,
+            RenderError::MjmlTooDeep,
         ];
         for error in all {
             assert_eq!(

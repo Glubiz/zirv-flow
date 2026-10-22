@@ -71,6 +71,7 @@ pub(crate) fn one_line(text: &str) -> String {
 fn mjml_to_html(rendered: &str) -> Result<String, RenderError> {
     let compiled = compile(rendered).map_err(|error| match error {
         MjmlError::Include => RenderError::MjmlInclude,
+        MjmlError::TooDeep => RenderError::MjmlTooDeep,
         MjmlError::Parse { .. } | MjmlError::Render => RenderError::Mjml,
     })?;
     if compiled.html.len() > MAX_HTML_BYTES {
