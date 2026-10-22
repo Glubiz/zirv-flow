@@ -2466,7 +2466,9 @@ they were ruled as their capabilities were added to the plan.
   results recorded, happens before the v1 block set (#238) is frozen; until then the automated checks
   show that the output is stable and well-formed, not that every client draws it well. Reason: the
   classes are what decide how a layout breaks, product lists age, and a gap found before the block set
-  is frozen costs a block change, not a migration. (11.5, 11.6.)
+  is frozen costs a block change, not a migration. (11.5, 11.6.) **Deferred by the operator
+  (2026-10-22):** the manual real-client review runs once the product is feature-complete and the
+  operator starts testing (#253); #238 merges on the automated golden tests alone.
 - **OQ-32:** Consent dimensions are a per-workspace catalog with enumerated value keys, and topics become
   the built-in `topic` dimension. The policy is an ordered, versioned list of deny-only rules over the M4
   AST, with a built-in `recorded consent` rule and new `consent` and `messages` leaves. Reason: a catalog
