@@ -114,6 +114,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `explorer.export_timeout_ms` | u64 | 60000 | at least 1; the same for each page query of a CSV export |
 | `explorer.interactive_row_limit` | u32 | 10000 | at least 1; the most buckets or rows an interactive explorer query returns (`truncated` is set when more matched) |
 | `explorer.export_row_limit` | u32 | 1000000 | at least 1; the most rows an export writes; a final `#` comment line says when it stopped there |
+| `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](#render-host) |
+| `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
+| `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
@@ -2106,6 +2109,26 @@ page size set, only the 100,000-page cap ends such a stream.
 `zirv_flow_source_rate_limit_wait_seconds_total{source_type}`. The labels are the source type and
 fixed values only: never a URL, a host or a source id. No error or log line holds a secret, a URL,
 a header or a response body.
+
+## Render host
+
+Templates render in child processes, never inside the API or a worker, so a template
+that allocates without bound fails its own render and nothing else. `serve` and `worker`
+(and so `all`) start `render.pool_size` children at boot, each a copy of this executable
+running the hidden `render-host` command, which an operator never runs by hand. A render
+takes a free child, and a child that overruns `render.deadline_ms`, dies, or runs out of
+memory is killed and replaced; only that render fails, with one of the reasons
+`memory_limit`, `deadline`, `child_exited` or `protocol`.
+
+On Linux each child limits its own address space to `render.memory_limit_mib` before it
+reads its first request. Raise it if a legitimate render fails with `memory_limit`; the
+loaded binary counts against it as well as the heap, so values under 64 are refused.
+Other operating systems have no such limit: the child logs one warning at startup and
+runs unlimited, which is for development only. Memory a child uses is outside the
+worker's heap, so size the container for `render.pool_size` extra processes per role.
+
+Metrics: `zirv_flow_render_duration_seconds{channel}`, `zirv_flow_render_wait_seconds`,
+`zirv_flow_render_restarts_total` and `zirv_flow_render_failures_total{reason}`.
 
 ## Web UI
 

@@ -131,7 +131,7 @@ fails, loops back off and ingestion returns `503`; v1 does not buffer locally.
 ## 5. Module and crate layout
 
 M0 is a single crate. The Cargo workspace arrives in M1: `crates/<name>` for
-each crate below (`zirv-flow-ai` joins in M3, `zirv-flow-identity` in M1 with OIDC sign-in and `zirv-flow-templates` in M6), plus `web/` (TypeScript +
+each crate below (`zirv-flow-ai` joins in M3, `zirv-flow-identity` in M1 with OIDC sign-in, `zirv-flow-templates` and `zirv-flow-render` in M6), plus `web/` (TypeScript +
 React SPA, Vite, React Flow canvas).
 
 | Crate | Contents | Independent reason to exist |
@@ -145,14 +145,16 @@ React SPA, Vite, React Flow canvas).
 | `zirv-flow-identity` | OIDC discovery, JWKS and the authorization-code exchange with ID-token verification (`openidconnect`, rustls) | Every outbound call to the operator-configured identity provider lives here, so `api` stays inbound-only. Depends on `core` only. The issuer is operator-configured, so the M3 egress policy does not apply to it. |
 | `zirv-flow-ai` | Provider trait and OpenAI-compatible and Anthropic adapters; structured tool-call orchestration, bounded repair, budgets, audit inputs and deterministic fake provider | Optional outbound protocols and HTTP dependencies change independently from the deterministic domain crates. The crate coordinates existing typed tools and validators but neither defines nor bypasses them. |
 | `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with code templates; M7 adds block documents. |
+| `zirv-flow-render` | The isolated-render pool client (child processes, per-render deadline, kill and respawn, typed failure, metrics) and the child-side serve loop with its OS memory limit | The one crate that spawns processes for rendering, so `templates` stays pure and a runaway template fails its own render instead of the API or a worker (11.9). Depends on `templates` (the wire types, the renderer) and `core` only. Used by `api` (preview) and `jobs` (send); the binary runs its serve loop as the hidden `render-host` command. |
 | `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving, assistant tools (`AiTool` implementations and their registry) | HTTP surface; neither `api` nor `jobs` depends on the other |
 | `zirv-flow-jobs` | Worker and scheduler loops, job registry, job handlers | Composition point for background work: handlers combine `store`, `segments`, `engine`, `templates`, `connectors`, which no other crate needs together |
 
 ```mermaid
 flowchart LR
-  bin[zirv-flow] --> api & jobs & store
-  api --> segments & engine & templates & connectors & ai & identity & store & core
-  jobs --> segments & engine & templates & connectors & ai & store & core
+  bin[zirv-flow] --> api & jobs & store & render
+  api --> segments & engine & templates & connectors & ai & identity & store & render & core
+  jobs --> segments & engine & templates & connectors & ai & store & render & core
+  render --> templates & core
   segments & engine & templates & connectors & ai & identity & store --> core
 ```
 
@@ -163,7 +165,7 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 
 | Crate | May depend directly on |
 |-------|-------------------------|
-| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs`, `zirv-flow-store` |
+| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs`, `zirv-flow-store`, `zirv-flow-render` |
 | `zirv-flow-core` | none |
 | `zirv-flow-store` | `zirv-flow-core` |
 | `zirv-flow-segments` | `zirv-flow-core` |
@@ -172,14 +174,15 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 | `zirv-flow-ai` | `zirv-flow-core` |
 | `zirv-flow-identity` | `zirv-flow-core` |
 | `zirv-flow-templates` | `zirv-flow-core` |
+| `zirv-flow-render` | `zirv-flow-core`, `zirv-flow-templates` |
 | `zirv-flow-loadgen` (tools/loadgen) | none |
-| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates` |
-| `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
+| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates`, `zirv-flow-render` |
+| `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates`, `zirv-flow-render` |
 
 `api` and `jobs` never depend on each other, and no crate depends on the binary.
 The pure crates (`core`, `segments`, `engine`, `templates`) never depend on an
 I/O crate, sqlx, an HTTP client or tokio networking. `store` owns sqlx;
-`connectors`, `ai` and `identity` are the outbound-I/O crates.
+`connectors`, `ai` and `identity` are the outbound-I/O crates, and `render` is the process-spawning one.
 
 `engine` depends on `core` only, so it never sees `segments`. The flow graph types
 and their structural publish validation (cycles, unreachable nodes, untyped edges)
@@ -1303,6 +1306,40 @@ Published versions are stored as saved and never rewritten; drafts are upgraded
 when saved. Each migration ships with golden tests: a schema-`N` fixture
 migrates to the expected document and renders byte-identically. The builder
 refuses a document whose schema is newer than the server's.
+
+### 11.9 Render isolation
+
+Fuel, the recursion limit and the output caps (11.5) bound a render's work and its
+result, not the memory a template allocates on the way there: a loop that doubles a
+string exhausts memory long before either trips. So a render never runs in the API
+or a worker process. `zirv-flow-render` keeps a small fixed pool of child processes,
+each a copy of the binary running the hidden `render-host` command, and a render is
+one request to a free child.
+
+- **Wire.** A request (the render call and its inputs) and a response (the result or
+  the renderer's typed error) are serde types in `templates`. The framing is a 4-byte
+  big-endian length followed by JSON, bounded in both directions (16 MiB); the parent
+  refuses an oversized response. Click tracking is applied by the caller on the
+  child's result (`apply_tracking`), because the token function cannot cross the
+  process boundary; the bytes equal an in-process render's.
+- **Memory.** On Linux the child sets `RLIMIT_AS` on itself, through the `rlimit`
+  crate, before it reads its first request (`render.memory_limit_mib`, default 512).
+  A failed allocation then aborts the child with the standard
+  `memory allocation of N bytes failed` line on standard error; the pool reads the
+  tail of the child's standard error to tell that from any other death. Other
+  operating systems run the child without the limit and log one warning at its
+  start (development only).
+- **Time.** The pool enforces `render.deadline_ms` per render; on overrun it kills the
+  child.
+- **Failure.** `memory_limit`, `deadline`, `child_exited` and `protocol` are distinct
+  from the renderer's own errors. The pool kills and replaces any child that fails,
+  and the failure costs that one render: a send maps it to `failed: render_error`,
+  preview returns problem+json, and the worker and the API carry on. A child killed by
+  something other than the limit (for example the kernel's OOM killer) is
+  `child_exited`.
+- **Metrics.** `zirv_flow_render_duration_seconds{channel}`,
+  `zirv_flow_render_wait_seconds` (waiting for a free child),
+  `zirv_flow_render_restarts_total` and `zirv_flow_render_failures_total{reason}`.
 
 ## 12. Event logging and traceability
 

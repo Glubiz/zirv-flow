@@ -105,6 +105,8 @@ run_gate() {
   violations=()
   for row in "${workspace_rows[@]}"; do
     IFS=$'\t' read -r crate dependencies <<<"$row"
+    # jq on Windows ends its lines with CRLF, which would hide the last dependency.
+    dependencies="${dependencies%$'\r'}"
     if [ -z "${table_crates[$crate]+present}" ]; then
       violations+=("workspace crate missing from section 5.1: $crate")
     fi
@@ -176,7 +178,7 @@ exclude = ["vendor/sqlx"]
 resolver = "3"
 EOF
 
-    for crate in zirv-flow zirv-flow-core zirv-flow-store zirv-flow-api zirv-flow-jobs; do
+    for crate in zirv-flow zirv-flow-core zirv-flow-store zirv-flow-api zirv-flow-jobs zirv-flow-render; do
       mkdir -p "$fixture/crates/$crate/src"
       if [ "$crate" = "zirv-flow" ]; then
         target='main.rs'
@@ -204,16 +206,24 @@ EOF
       done
     }
 
-    add_dependencies zirv-flow zirv-flow-api zirv-flow-jobs
+    add_dependencies zirv-flow zirv-flow-api zirv-flow-jobs zirv-flow-render
     add_dependencies zirv-flow-store zirv-flow-core
     add_dependencies zirv-flow-api zirv-flow-core zirv-flow-store
     add_dependencies zirv-flow-jobs zirv-flow-core zirv-flow-store
+    add_dependencies zirv-flow-render zirv-flow-core
 
     if [ "$mode" = "bad-edge" ]; then
       cat >>"$fixture/crates/zirv-flow-api/Cargo.toml" <<'EOF'
 zirv-flow-jobs = { path = "../zirv-flow-jobs" }
 EOF
     fi
+    case "$mode" in
+      render-to-store | render-to-api | render-to-jobs)
+        target="zirv-flow-${mode##*-to-}"
+        echo "$target = { path = \"../$target\" }" \
+          >>"$fixture/crates/zirv-flow-render/Cargo.toml"
+        ;;
+    esac
     if [ "$mode" = "bad-purity" ]; then
       cat >"$fixture/vendor/sqlx/Cargo.toml" <<'EOF'
 [package]
@@ -253,6 +263,9 @@ EOF
 
   check_fixture "real-table-valid-fixture" "valid" 0 ""
   check_fixture "api-to-jobs-is-rejected" "bad-edge" 1 "zirv-flow-api -> zirv-flow-jobs"
+  check_fixture "render-to-store-is-rejected" "render-to-store" 1 "zirv-flow-render -> zirv-flow-store"
+  check_fixture "render-to-api-is-rejected" "render-to-api" 1 "zirv-flow-render -> zirv-flow-api"
+  check_fixture "render-to-jobs-is-rejected" "render-to-jobs" 1 "zirv-flow-render -> zirv-flow-jobs"
   check_fixture "sqlx-in-pure-crate-is-rejected" "bad-purity" 1 "zirv-flow-core purity -> sqlx"
 
   if [ "$failures" -gt 0 ]; then
