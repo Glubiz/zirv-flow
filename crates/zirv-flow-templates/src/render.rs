@@ -41,7 +41,7 @@ fn email_of(doc: &TemplateDocument) -> Result<&EmailContent, RenderError> {
         return Err(RenderError::UnsupportedSchema);
     }
     match (&doc.email, doc.channel, doc.mode) {
-        (Some(email), Channel::Email, Mode::Code) => Ok(email),
+        (Some(email), Channel::Email, Mode::Code) if !doc.is_ambiguous() => Ok(email),
         _ => Err(RenderError::WrongDocument),
     }
 }
@@ -51,7 +51,7 @@ fn webhook_of(doc: &TemplateDocument) -> Result<&WebhookContent, RenderError> {
         return Err(RenderError::UnsupportedSchema);
     }
     match (&doc.webhook, doc.channel, doc.mode) {
-        (Some(webhook), Channel::Webhook, Mode::Code) => Ok(webhook),
+        (Some(webhook), Channel::Webhook, Mode::Code) if !doc.is_ambiguous() => Ok(webhook),
         _ => Err(RenderError::WrongDocument),
     }
 }

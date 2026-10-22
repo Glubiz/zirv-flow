@@ -719,6 +719,30 @@ impl ApiError {
         }
     }
 
+    /// A document whose `schema` is not the one this server reads.
+    pub(crate) fn template_unsupported_schema() -> Self {
+        Self {
+            code: Some("template_unsupported_schema"),
+            ..Self::unprocessable("the document schema is not supported by this server")
+        }
+    }
+
+    /// A block document with a block `type` that is not part of the v1 block set.
+    pub(crate) fn template_unknown_block() -> Self {
+        Self {
+            code: Some("template_unknown_block"),
+            ..Self::unprocessable("a block has a type that is not part of the v1 block set")
+        }
+    }
+
+    /// A document with a field the schema does not define.
+    pub(crate) fn template_unknown_field() -> Self {
+        Self {
+            code: Some("template_unknown_field"),
+            ..Self::unprocessable("an object has a field the document schema does not define")
+        }
+    }
+
     /// A document whose channel or category differs from the template's, which are fixed when the
     /// template is made.
     pub(crate) fn template_mismatch(detail: impl Into<String>) -> Self {

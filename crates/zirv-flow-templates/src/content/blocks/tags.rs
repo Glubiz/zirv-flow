@@ -4,7 +4,8 @@
 //! text that must be escaped before it goes into MJML, for rich text it is HTML. The tags
 //! themselves are left alone. The scan is not a full lexer: it knows the three openers (`{{`,
 //! `{%`, `{#`), their closers and `{% raw %}` blocks, and nothing else. A string that holds a
-//! closer inside an expression (`{{ "}}" }}`) ends the tag early, and the rest is read as text.
+//! closer inside a quoted string of an expression (`{{ "}}" }}`) does not end the tag: the scan
+//! skips single- and double-quoted strings, with backslash escapes, as MiniJinja reads them.
 
 use crate::links::escape;
 
@@ -34,12 +35,37 @@ fn statement(tag: &str) -> &str {
         })
 }
 
+/// The end (after the closer) of the tag whose body starts at `from`. In `{{ }}` and `{% %}` a
+/// closer inside a quoted string does not count; a comment has no strings.
+fn tag_end(source: &str, from: usize, opener: u8) -> Option<usize> {
+    let closer = closer(opener);
+    if opener == b'#' {
+        return source[from..].find(closer).map(|found| from + found + 2);
+    }
+    let bytes = source.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut at = from;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        match quote {
+            Some(_) if byte == b'\\' => at += 1,
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if source[at..].starts_with(closer) => return Some(at + 2),
+            None => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 /// The span of the `{% endraw %}` tag after `from`, if there is one.
 fn find_endraw(source: &str, from: usize) -> Option<(usize, usize)> {
     let mut at = from;
     while let Some(found) = source[at..].find("{%") {
         let start = at + found;
-        let end = source[start..].find("%}").map(|close| start + close + 2)?;
+        let end = tag_end(source, start + 2, b'%')?;
         if statement(&source[start..end]) == "endraw" {
             return Some((start, end));
         }
@@ -60,9 +86,7 @@ pub(crate) fn split(source: &str) -> Vec<Segment<'_>> {
             at += 1;
             continue;
         }
-        let end = source[at + 2..]
-            .find(closer(opener))
-            .map_or(source.len(), |found| at + 2 + found + 2);
+        let end = tag_end(source, at + 2, opener).unwrap_or(source.len());
         if text_start < at {
             segments.push(Segment::Text(&source[text_start..at]));
         }
@@ -113,6 +137,29 @@ pub(crate) fn starts_with_tag(url: &str) -> bool {
     url.trim_start().starts_with("{{")
 }
 
+/// A placeholder prefix (`z` and some `q`s) that the source does not hold, so a placeholder can
+/// only be one of ours: one more `q` than the longest run of them after any `z`, found in one
+/// pass (the runs do not overlap, so it is linear).
+fn free_prefix(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let (mut longest, mut at) = (0, 0);
+    while at < bytes.len() {
+        if bytes[at] == b'z' {
+            let run = bytes[at + 1..]
+                .iter()
+                .take_while(|byte| **byte == b'q')
+                .count();
+            longest = longest.max(run);
+            at += run;
+        }
+        at += 1;
+    }
+    format!(
+        "z{}",
+        "q".repeat(longest.max(1) + usize::from(longest >= 1))
+    )
+}
+
 /// A source with every tag replaced by a placeholder, so a sanitizer can read the rest as
 /// plain markup without touching the tags.
 pub(crate) struct Protected {
@@ -124,11 +171,7 @@ pub(crate) struct Protected {
 
 impl Protected {
     pub(crate) fn new(source: &str) -> Self {
-        // A prefix the source does not hold, so a placeholder can only be one of ours.
-        let mut prefix = String::from("zq");
-        while source.contains(&prefix) {
-            prefix.push('q');
-        }
+        let prefix = free_prefix(source);
         let mut tags = Vec::new();
         let mut text = String::with_capacity(source.len());
         for segment in split(source) {
@@ -277,6 +320,53 @@ mod tests {
         assert!(!protected.starts_with_placeholder("https://a"));
         // Text that merely looks like a placeholder is kept.
         assert_eq!(protected.restore("zq zq99x zqx"), "zq zq99x zqx");
+    }
+
+    #[test]
+    fn a_closer_inside_a_quoted_string_does_not_end_the_tag() {
+        assert_eq!(
+            split(r#"a {{ person.name | default("}}") }} b"#),
+            [
+                Text("a "),
+                Tag(r#"{{ person.name | default("}}") }}"#),
+                Text(" b")
+            ]
+        );
+        assert_eq!(
+            split(r"{{ 'it\'s }}' }}x"),
+            [Tag(r"{{ 'it\'s }}' }}"), Text("x")]
+        );
+        assert_eq!(
+            split(r#"{% if a == "%}" %}y{% endif %}"#),
+            [Tag(r#"{% if a == "%}" %}"#), Text("y"), Tag("{% endif %}")]
+        );
+        // A comment has no strings, and a quote in text is only text.
+        assert_eq!(split(r#"{# " #}"x"#), [Tag(r#"{# " #}"#), Text("\"x")]);
+        // An unterminated string runs to the end.
+        assert_eq!(split(r#"{{ "}} x"#), [Tag(r#"{{ "}} x"#)]);
+        assert_eq!(
+            escape_literals(r#"a & {{ "}}" }} & b"#),
+            r#"a &amp; {{ "}}" }} &amp; b"#
+        );
+    }
+
+    #[test]
+    fn a_long_run_before_the_q_run_picks_its_prefix_in_one_pass() {
+        let source = format!("{}{}", "z".repeat(50_000), "q".repeat(50_000));
+        let started = std::time::Instant::now();
+        let protected = Protected::new(&format!("{source}{{{{ a }}}}"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(protected.text.starts_with(&source));
+        assert!(!source.contains(&protected.prefix));
+        assert_eq!(
+            protected.restore(&protected.text),
+            format!("{source}{{{{ a }}}}")
+        );
+        for source in ["", "z", "zq", "zqq zq", "qzq", "zzqz"] {
+            let prefix = free_prefix(source);
+            assert!(!source.contains(&prefix), "{source}");
+            assert!(prefix.starts_with("zq"));
+        }
     }
 
     #[test]

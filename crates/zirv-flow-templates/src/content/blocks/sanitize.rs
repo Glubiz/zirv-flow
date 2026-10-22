@@ -185,6 +185,33 @@ fn check(html: &str, merge: impl Fn(&str) -> bool) -> Vec<String> {
     .unwrap_or_else(|| vec!["<".to_owned()])
 }
 
+/// Whether `html` holds an `mj-*` open or close tag, in any letter case and under any namespace
+/// prefix (`mrml` picks an element by its local name). `mj-include` is left to its own refusal.
+/// Raw HTML goes inside an `mj-raw`, and one such tag could close it, close the column and the
+/// section, and open structure of its own. The scan is by plain text, like the `mj-include`
+/// scan, not by tokens: a fragment with an unmatched closing tag is not readable on its own, and
+/// is exactly what must not pass. A comment that mentions a tag is refused too.
+pub(crate) fn has_mjml_tag(html: &str) -> bool {
+    let bytes = html.as_bytes();
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'<')
+        .any(|(at, _)| {
+            let rest = &bytes[at + 1..];
+            let rest = rest.strip_prefix(b"/").unwrap_or(rest);
+            let end = rest
+                .iter()
+                .position(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            let local = name.rsplit(|b| *b == b':').next().unwrap_or(name);
+            local.len() >= 3
+                && local[..3].eq_ignore_ascii_case(b"mj-")
+                && !local.eq_ignore_ascii_case(b"mj-include")
+        })
+}
+
 /// Whether a URL has a scheme a link may use.
 pub(crate) fn scheme_allowed(url: &str) -> bool {
     url_allowed(url, &|_| false)
@@ -492,6 +519,7 @@ mod tests {
             "Unsubscribe: {{ system.unsubscribe_url }}"
         );
         assert_eq!(text("<p>Tom &amp; Jerry &lt;3</p>"), "Tom & Jerry <3");
+        assert_eq!(text("<p>Hello&nbsp;world</p>"), "Hello world");
         assert_eq!(text("<p>  spaced \n  out  </p>"), "spaced out");
         assert_eq!(text(""), "");
         assert_eq!(

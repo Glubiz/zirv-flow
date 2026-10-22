@@ -31,7 +31,7 @@ pub use content::blocks::{
     MAX_ID_BYTES, MAX_IMAGE_WIDTH, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES,
     MAX_SECTIONS, MAX_SPACER_HEIGHT, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, MIN_CONTENT_WIDTH,
     PREHEADER_DISPLAY_CHARS, RawHtml, RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Spacer,
-    blocks_to_mjml, parse_blocks_document,
+    blocks_to_mjml, parse_template_document,
 };
 pub use content::{
     ContentError, RenderKind, TemplateContent, content_type, content_type_ids, content_type_of,

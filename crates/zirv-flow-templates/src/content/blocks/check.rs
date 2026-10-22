@@ -11,16 +11,16 @@ use super::model::{
     MAX_RICH_TEXT_BYTES, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, PREHEADER_DISPLAY_CHARS,
     SUBJECT_DISPLAY_CHARS, block_at, blocks_of, check_shape, doc_at,
 };
-use super::render::{BuildError, build};
-use super::sanitize::{link_allowed, sanitize_source, violations};
-use super::tags::starts_with_tag;
+use super::render::{BuildError, build, document_environment};
+use super::sanitize::{has_mjml_tag, link_allowed, sanitize_source, violations};
+use super::tags::{Protected, escape_literals, starts_with_tag};
 use crate::content::mjml::{MAX_DEPTH, MjmlError, compile, has_include};
 use crate::context::SAMPLE_UNSUBSCRIBE_URL;
 use crate::document::{Category, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
 use crate::issue::{FieldCatalog, Issue, code};
-use crate::links::{link_urls, links_to, starts_with_ignore_case};
-use crate::sandbox::{MAX_HTML_BYTES, environment};
+use crate::links::{link_urls, links_to, starts_with_ignore_case, unescape};
+use crate::sandbox::MAX_HTML_BYTES;
 use crate::validate::{HTML, HTML_WARN_BYTES, SUBJECT, check_template, sample_context};
 
 /// What a text field holds.
@@ -135,10 +135,31 @@ pub(crate) fn check_sources(content: &BlocksContent) -> Vec<Issue> {
         match field.kind {
             Kind::Url(kind) => check_url(field, kind, &mut issues),
             Kind::Rich => check_rich(field, &mut issues),
+            Kind::Raw if raw_has_mjml_tag(field.source) => issues.push(
+                Issue::new(code::MJML_IN_RAW_HTML, field.at.clone())
+                    .with_message("raw HTML holds no mj-* element: it sits inside an mj-raw"),
+            ),
             _ => {}
         }
     }
     issues
+}
+
+/// Whether the raw HTML source holds an `mj-*` tag. The MiniJinja tags are set aside first, so
+/// the scan reads the markup around them.
+fn raw_has_mjml_tag(source: &str) -> bool {
+    has_mjml_tag(&Protected::new(source).text)
+}
+
+/// Whether a URL source starts with a merge tag that is not one of the system's own signed URLs:
+/// its scheme is known only when a message is rendered.
+fn is_merge_led(url: &str) -> bool {
+    url.trim_start().strip_prefix("{{").is_some_and(|rest| {
+        !rest
+            .trim_start_matches(['-', '+'])
+            .trim_start()
+            .starts_with("system.")
+    })
 }
 
 fn check_url(field: &Field<'_>, kind: UrlKind, issues: &mut Vec<Issue>) {
@@ -155,6 +176,8 @@ fn check_url(field: &Field<'_>, kind: UrlKind, issues: &mut Vec<Issue>) {
             UrlKind::ImageSource => "an image source starts with https:// or a merge tag",
         };
         issues.push(Issue::new(code::INVALID_URL, field.at.clone()).with_message(message));
+    } else if is_merge_led(source) {
+        issues.push(Issue::new(code::URL_FROM_MERGE_FIELD, field.at.clone()));
     } else if has_insecure_scheme(source) {
         issues.push(Issue::new(code::INSECURE_LINK, field.at.clone()));
     }
@@ -168,11 +191,14 @@ fn check_rich(field: &Field<'_>, issues: &mut Vec<Issue>) {
             Issue::new(code::SANITIZER_REJECTED, field.at.clone())
                 .with_message(format!("not allowed in rich text: {}", shown.join(", "))),
         );
-    } else if link_urls(&sanitize_source(field.source).html)
-        .iter()
-        .any(|url| has_insecure_scheme(url))
-    {
-        issues.push(Issue::new(code::INSECURE_LINK, field.at.clone()));
+    } else {
+        let links = link_urls(&sanitize_source(field.source).html);
+        if links.iter().any(|url| is_merge_led(url)) {
+            issues.push(Issue::new(code::URL_FROM_MERGE_FIELD, field.at.clone()));
+        }
+        if links.iter().any(|url| has_insecure_scheme(url)) {
+            issues.push(Issue::new(code::INSECURE_LINK, field.at.clone()));
+        }
     }
 }
 
@@ -200,9 +226,18 @@ fn check_raw(field: &Field<'_>, rendered: Option<&str>, issues: &mut Vec<Issue>)
         issues.push(Issue::new(code::MJML_INCLUDE, field.at.clone()));
         return;
     }
+    // A tag in the source is reported by `check_sources`; one that only a value brings is
+    // found in the sample.
+    if raw_has_mjml_tag(field.source) {
+        return;
+    }
     let Some(rendered) = rendered else {
         return;
     };
+    if has_mjml_tag(rendered) {
+        issues.push(Issue::new(code::MJML_IN_RAW_HTML, field.at.clone()));
+        return;
+    }
     let probe = format!(
         "<mjml><mj-body><mj-section><mj-column><mj-raw>{rendered}</mj-raw></mj-column></mj-section></mj-body></mjml>"
     );
@@ -242,7 +277,7 @@ pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Is
         issues.push(Issue::new(code::MISSING_LANG, doc_at("lang")));
     }
 
-    let env = environment();
+    let env = document_environment(content);
     let sample = sample_context(catalog);
     for field in fields(content) {
         let kind = if field.kind == Kind::Subject {
@@ -250,25 +285,45 @@ pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Is
         } else {
             HTML
         };
+        // Check the text MiniJinja is given: the plain fields have their literal text escaped
+        // and the rich text is the sanitized one, so a syntax error that only they have is
+        // found here, with the block path.
+        let source = match field.kind {
+            Kind::Preheader | Kind::Plain | Kind::Url(_) => escape_literals(field.source),
+            Kind::Rich => sanitize_source(field.source).html,
+            Kind::Subject | Kind::Raw => field.source.to_owned(),
+        };
         let checked = check_template(
             &env,
             catalog,
             &sample,
             &field.at,
-            field.source,
+            &source,
             kind,
             &mut issues,
         );
+        if matches!(field.kind, Kind::Preheader | Kind::Plain | Kind::Url(_))
+            && checked
+                .sample
+                .as_deref()
+                .is_some_and(|text| text.contains(['<', '"']))
+        {
+            issues.push(
+                Issue::new(code::MARKUP_IN_PLAIN_FIELD, field.at.clone())
+                    .with_message("a value of this field is not escaped: |safe or autoescape off"),
+            );
+        }
+        let shown = checked.sample.as_deref().map(unescape);
         match field.kind {
             Kind::Subject => display_length(
-                &checked.sample,
+                &shown,
                 &field.at,
                 SUBJECT_DISPLAY_CHARS,
                 code::SUBJECT_TOO_LONG,
                 &mut issues,
             ),
             Kind::Preheader => display_length(
-                &checked.sample,
+                &shown,
                 &field.at,
                 PREHEADER_DISPLAY_CHARS,
                 code::PREHEADER_TOO_LONG,
@@ -333,6 +388,9 @@ fn check_sample_render(
             }
         }
         Err(BuildError::Mjml(error)) => issues.push(mjml_issue(error, AT)),
+        Err(BuildError::Render(RenderError::InvalidBlocks)) => {
+            issues.push(Issue::new(code::MARKUP_IN_PLAIN_FIELD, AT));
+        }
         Err(BuildError::Render(error)) => {
             if matches!(error, RenderError::OutputTooLarge { field: "html" }) {
                 issues.push(
@@ -365,6 +423,7 @@ mod tests {
     use super::super::model::{Image, MAX_BLOCKS, MAX_SECTIONS, RawHtml, Section};
     use super::*;
     use crate::content::{content_type_of, validate_document};
+    use crate::context::RenderContext;
     use crate::issue::{Severity, severity_of};
 
     fn newsletter() -> TemplateDocument {
@@ -555,7 +614,7 @@ mod tests {
         );
         assert_eq!(
             raw("</mj-raw></mj-column></mj-section></mj-body></mjml><p>x"),
-            [entry(code::MJML_PARSE_ERROR, "/blocks/block/raw1/html")]
+            [entry(code::MJML_IN_RAW_HTML, "/blocks/block/raw1/html")]
         );
         let deep = "<a>".repeat(200);
         assert_eq!(
@@ -669,7 +728,13 @@ mod tests {
                 }
             })
         };
-        assert_eq!(src("{{ person.name }}"), Vec::new());
+        assert_eq!(
+            src("{{ person.name }}"),
+            [entry(
+                code::URL_FROM_MERGE_FIELD,
+                "/blocks/block/hero_image/src"
+            )]
+        );
         for bad in [
             "http://a.example/i.png",
             "mailto:a@b.example",
@@ -810,5 +875,158 @@ mod tests {
             assert!(code::WARNING.contains(&warning), "{warning}");
         }
         assert_eq!(Kind::Plain.limit(), MAX_LABEL_BYTES);
+    }
+
+    #[test]
+    fn mjml_structure_in_raw_html_is_blocking_on_its_block() {
+        let inject = "</mj-raw></mj-column></mj-section><mj-section><mj-column><mj-text>injected</mj-text></mj-column></mj-section><mj-section><mj-column><mj-raw>";
+        let raw = |html: &str| {
+            let html = html.to_owned();
+            after(move |c| {
+                c.sections[1].columns[0].push(Block::RawHtml(RawHtml {
+                    id: "raw1".into(),
+                    html,
+                }));
+            })
+        };
+        let at = "/blocks/block/raw1/html";
+        assert_eq!(raw(inject), [entry(code::MJML_IN_RAW_HTML, at)]);
+        for html in [
+            "<mj-text>x</mj-text>",
+            "<MJ-SECTION></MJ-SECTION>",
+            "<x:mj-column></x:mj-column>",
+            "</mj-raw>",
+            "<p>a</p><mj-button>b</mj-button>",
+            "{% if true %}<mj-raw>{% endif %}",
+            "<!-- <mj-text> --><p>a</p>",
+        ] {
+            assert_eq!(raw(html), [entry(code::MJML_IN_RAW_HTML, at)], "{html}");
+        }
+        // Names that only look like it, and comments, are fine.
+        for html in ["<p>mj-text</p>", "<mjx>a</mjx>", "<p>&lt;mj-text&gt;</p>"] {
+            assert_eq!(raw(html), Vec::new(), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_value_cannot_bring_mjml_structure_either() {
+        // The source is clean; the rendered text of the field is what is checked at render.
+        let mut doc = newsletter();
+        doc.blocks.as_mut().unwrap().sections[1].columns[0].push(Block::RawHtml(RawHtml {
+            id: "raw1".into(),
+            html: "{{ person.name | safe }}".into(),
+        }));
+        let mut context = RenderContext::sample(&catalog());
+        context
+            .person
+            .insert("name".into(), "<mj-text>x</mj-text>".into());
+        assert_eq!(
+            crate::render_email(&doc, &context, &crate::Hooks::untracked()),
+            Err(RenderError::InvalidBlocks)
+        );
+    }
+
+    #[test]
+    fn a_closer_inside_a_string_is_not_a_syntax_error_and_a_real_one_is_blocking() {
+        let label = |text: &str| {
+            let text = text.to_owned();
+            after(move |c| {
+                if let Block::Button(button) = block(c, "cta_button") {
+                    button.label = text;
+                }
+            })
+        };
+        assert_eq!(
+            label(r#"{{ person.name | default("}}") }} and {{ "%}" }}"#),
+            Vec::new()
+        );
+        assert_eq!(
+            label(r#"{{ person.name | default("}}) }}"#),
+            [entry(code::SYNTAX_ERROR, "/blocks/block/cta_button/label")]
+        );
+        // The rich text that is sent is the sanitized one; its syntax errors are blocking too.
+        assert_eq!(
+            after(|c| {
+                if let Block::Text(rich) = block(c, "intro_text") {
+                    rich.content = "<p>{% if person.name %}</p>".into();
+                }
+            }),
+            [entry(
+                code::SYNTAX_ERROR,
+                "/blocks/block/intro_text/content"
+            )]
+        );
+    }
+
+    #[test]
+    fn markup_in_a_plain_field_is_blocking_when_the_sample_shows_it() {
+        for text in [
+            r#"{{ "<b>x</b>" | safe }}"#,
+            r#"{% autoescape false %}{{ "<i>" }}{% endautoescape %}"#,
+        ] {
+            assert_eq!(
+                after(|c| {
+                    if let Block::Heading(heading) = block(c, "intro_title") {
+                        heading.text = text.into();
+                    }
+                }),
+                [entry(
+                    code::MARKUP_IN_PLAIN_FIELD,
+                    "/blocks/block/intro_title/text"
+                )],
+                "{text}"
+            );
+        }
+        // Literal characters of the text are escaped before the render, so they are not markup.
+        assert_eq!(
+            after(|c| {
+                if let Block::Heading(heading) = block(c, "intro_title") {
+                    heading.text = "Fish <&> \"chips\"".into();
+                }
+            }),
+            Vec::new()
+        );
+        assert_eq!(
+            after(|c| c.preheader = r#"{{ "<b>" | safe }}"#.into()),
+            [entry(code::MARKUP_IN_PLAIN_FIELD, "/blocks/preheader")]
+        );
+        // A subject is a header, not markup.
+        assert_eq!(after(|c| c.subject = "5 < 6".into()), Vec::new());
+    }
+
+    #[test]
+    fn a_url_that_starts_with_a_merge_field_warns_that_its_scheme_is_unchecked() {
+        let warn = after(|c| {
+            if let Block::Button(button) = block(c, "cta_button") {
+                button.url = "{{ person.plan }}".into();
+            }
+            if let Block::Image(image) = block(c, "hero_image") {
+                image.href = Some("{{ person.plan }}/x".into());
+            }
+            if let Block::Text(rich) = block(c, "intro_text") {
+                rich.content = "<p><a href=\"{{ person.plan }}\">x</a></p>".into();
+            }
+        });
+        assert_eq!(
+            warn,
+            [
+                entry(code::URL_FROM_MERGE_FIELD, "/blocks/block/hero_image/href"),
+                entry(
+                    code::URL_FROM_MERGE_FIELD,
+                    "/blocks/block/intro_text/content"
+                ),
+                entry(code::URL_FROM_MERGE_FIELD, "/blocks/block/cta_button/url"),
+            ]
+        );
+        assert_eq!(severity_of(code::URL_FROM_MERGE_FIELD), Severity::Warning);
+        // The system's own signed URLs are not a risk.
+        assert_eq!(
+            after(|c| {
+                if let Block::Button(button) = block(c, "cta_button") {
+                    button.url = "{{ system.preferences_url }}".into();
+                }
+            }),
+            Vec::new()
+        );
     }
 }

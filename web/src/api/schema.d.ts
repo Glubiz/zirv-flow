@@ -17597,7 +17597,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description An invalid name, a document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
+            /** @description An invalid name, a document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -17858,7 +17858,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
+            /** @description A document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
             422: {
                 headers: {
                     [name: string]: unknown;

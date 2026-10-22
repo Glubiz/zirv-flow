@@ -95,8 +95,11 @@ pub struct WebhookContent {
     pub body: String,
 }
 
-/// A template document.
+/// A template document. It carries at most one content (`email`, `blocks` or `webhook`); a
+/// document with two is [`ambiguous`](Self::is_ambiguous) and no content type owns it, so no
+/// category, sender or other field can come from the wrong one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TemplateDocument {
     pub schema: u32,
     pub channel: Channel,
@@ -112,6 +115,18 @@ pub struct TemplateDocument {
 }
 
 impl TemplateDocument {
+    /// How many of `email`, `blocks` and `webhook` the document carries.
+    pub fn content_count(&self) -> usize {
+        usize::from(self.email.is_some())
+            + usize::from(self.blocks.is_some())
+            + usize::from(self.webhook.is_some())
+    }
+
+    /// Whether the document carries more than one content.
+    pub fn is_ambiguous(&self) -> bool {
+        self.content_count() > 1
+    }
+
     /// A code-mode email document at the current schema.
     pub fn email_code(content: EmailContent) -> Self {
         Self {

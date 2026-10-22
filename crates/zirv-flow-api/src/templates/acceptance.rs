@@ -1042,8 +1042,28 @@ mod tests {
         // template's own.
         let mut unknown = blocks_doc("Welcome", footer);
         unknown["blocks"]["sections"][0]["columns"][0][0]["type"] = json!("carousel");
+        let refused = f.put_draft(&id, unknown).await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "template_unknown_block");
+        let mut newer = blocks_doc("Welcome", footer);
+        newer["schema"] = json!(2);
         assert_eq!(
-            f.put_draft(&id, unknown).await.body["code"],
+            f.put_draft(&id, newer).await.body["code"],
+            "template_unsupported_schema"
+        );
+        let mut extra = blocks_doc("Welcome", footer);
+        extra["theme"] = json!("dark");
+        assert_eq!(
+            f.put_draft(&id, extra).await.body["code"],
+            "template_unknown_field"
+        );
+        // The dummy marketing `email` beside transactional blocks must not slip past the
+        // category check.
+        let mut both = blocks_doc("Welcome", footer);
+        both["blocks"]["category"] = json!("transactional");
+        both["email"] = json!({"subject": "x", "html": "", "category": "marketing"});
+        assert_eq!(
+            f.put_draft(&id, both).await.body["code"],
             "template_malformed"
         );
         let mut transactional = blocks_doc("Welcome", footer);

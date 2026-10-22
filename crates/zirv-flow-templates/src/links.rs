@@ -206,6 +206,8 @@ pub(crate) fn unescape(text: &str) -> String {
                 "gt" => Some('>'),
                 "quot" => Some('"'),
                 "apos" => Some('\''),
+                // The one named entity `ammonia` writes besides the five: a no-break space.
+                "nbsp" => Some(' '),
                 _ => name.strip_prefix('#').and_then(|number| {
                     let code = match number.strip_prefix(['x', 'X']) {
                         Some(hex) => u32::from_str_radix(hex, 16).ok(),

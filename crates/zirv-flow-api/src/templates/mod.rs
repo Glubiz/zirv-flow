@@ -17,8 +17,8 @@ pub(crate) mod where_used;
 use serde_json::Value;
 use zirv_flow_store::{Template, TemplateError, TemplateFieldCatalog};
 use zirv_flow_templates::{
-    Category, Channel, EmailContent, FieldCatalog, Issue, Mode, Severity, TemplateDocument,
-    WebhookContent,
+    BlocksError, Category, Channel, EmailContent, FieldCatalog, Issue, Mode, Severity,
+    TemplateDocument, WebhookContent, parse_template_document,
 };
 
 use crate::problem::{ApiError, TemplateIssueProblem};
@@ -65,8 +65,16 @@ pub(crate) fn field_catalog(read: TemplateFieldCatalog) -> FieldCatalog {
 /// draft may be incomplete; it cannot be a document the schema does not parse, so the editor, the
 /// preview and the publish read the same thing.
 pub(crate) fn parse_document(value: &Value) -> Result<TemplateDocument, ApiError> {
-    serde_json::from_value(value.clone()).map_err(|_| {
-        ApiError::template_malformed("the document is not a template document of a known shape")
+    parse_template_document(value).map_err(|error| match error {
+        BlocksError::UnsupportedSchema => ApiError::template_unsupported_schema(),
+        BlocksError::UnknownBlock => ApiError::template_unknown_block(),
+        BlocksError::UnknownField => ApiError::template_unknown_field(),
+        BlocksError::AmbiguousContent => ApiError::template_malformed(
+            "the document carries more than one of `email`, `blocks` and `webhook`",
+        ),
+        BlocksError::Malformed => {
+            ApiError::template_malformed("the document is not a template document of a known shape")
+        }
     })
 }
 

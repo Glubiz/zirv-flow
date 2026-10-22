@@ -33,6 +33,10 @@ pub fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
         issues.push(Issue::new(code::UNSUPPORTED_SCHEMA, "/schema"));
         return issues;
     }
+    if doc.is_ambiguous() {
+        issues.push(Issue::new(code::AMBIGUOUS_CONTENT, "/"));
+        return issues;
+    }
     match doc.channel {
         Channel::Email | Channel::Webhook => {}
         Channel::Sms | Channel::Push | Channel::InApp => {
@@ -938,6 +942,6 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 33);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 37);
     }
 }

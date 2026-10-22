@@ -25,7 +25,7 @@ pub use model::{
     MAX_BLOCKS, MAX_COLUMNS, MAX_CONTENT_WIDTH, MAX_DOCUMENT_BYTES, MAX_ID_BYTES, MAX_IMAGE_WIDTH,
     MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES, MAX_SECTIONS, MAX_SPACER_HEIGHT,
     MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, MIN_CONTENT_WIDTH, PREHEADER_DISPLAY_CHARS, RawHtml,
-    RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Spacer, parse_blocks_document,
+    RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Spacer, parse_template_document,
 };
 pub(crate) use render::render;
 
@@ -41,7 +41,10 @@ impl TemplateContent for Blocks {
     }
 
     fn handles(&self, doc: &TemplateDocument) -> bool {
-        doc.channel == Channel::Email && doc.mode == Mode::Blocks && doc.blocks.is_some()
+        !doc.is_ambiguous()
+            && doc.channel == Channel::Email
+            && doc.mode == Mode::Blocks
+            && doc.blocks.is_some()
     }
 
     fn validate(&self, doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
@@ -123,6 +126,77 @@ mod tests {
         webhook.channel = Channel::Webhook;
         assert!(!Blocks.handles(&webhook));
         assert!(!Blocks.handles(&TemplateDocument::email_code(EmailContent::default())));
+    }
+
+    /// A marketing code `email` beside block content that says transactional: the category check
+    /// of a caller that reads `email` first must not decide for a renderer that reads `blocks`.
+    fn two_contents() -> serde_json::Value {
+        serde_json::json!({
+            "schema": 1, "channel": "email", "mode": "blocks",
+            "email": {"subject": "x", "html": "", "category": "marketing"},
+            "blocks": {"subject": "Hi", "category": "transactional", "sender": "snd_1", "lang": "en"}
+        })
+    }
+
+    #[test]
+    fn a_document_with_two_contents_is_refused_by_every_entry_point() {
+        use crate::{FieldCatalog, RenderContext, RenderError, code, render_email, validate};
+
+        let value = two_contents();
+        assert_eq!(
+            parse_template_document(&value).unwrap_err(),
+            BlocksError::AmbiguousContent
+        );
+        // Built by serde alone, bypassing the typed parse, it is still not owned or rendered.
+        let doc: TemplateDocument = serde_json::from_value(value).unwrap();
+        assert!(doc.is_ambiguous());
+        assert_eq!(doc.content_count(), 2);
+        assert!(!Blocks.handles(&doc));
+        assert_eq!(
+            crate::content_type_of(&doc).err(),
+            Some(crate::ContentError::UnsupportedDocument)
+        );
+        assert_eq!(
+            render_email(&doc, &RenderContext::default(), &crate::Hooks::untracked()),
+            Err(RenderError::WrongDocument)
+        );
+        let issues = validate(&doc, &FieldCatalog::default());
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, code::AMBIGUOUS_CONTENT);
+        assert!(issues[0].is_blocking());
+        // The same for a code-mode pair.
+        let mut code_doc = doc.clone();
+        code_doc.mode = Mode::Code;
+        assert_eq!(
+            render_email(
+                &code_doc,
+                &RenderContext::default(),
+                &crate::Hooks::untracked()
+            ),
+            Err(RenderError::WrongDocument)
+        );
+    }
+
+    #[test]
+    fn an_unknown_root_field_is_a_typed_error() {
+        let mut value = serde_json::json!({"schema": 1, "channel": "email", "mode": "blocks",
+                                           "blocks": {"subject": "Hi"}});
+        assert!(parse_template_document(&value).is_ok());
+        value["theme"] = serde_json::json!("dark");
+        assert_eq!(
+            parse_template_document(&value).unwrap_err(),
+            BlocksError::UnknownField
+        );
+        // A bad enum value on the root is malformed, not an unknown block.
+        let bad = serde_json::json!({"schema": 1, "channel": "fax", "mode": "code"});
+        assert_eq!(
+            parse_template_document(&bad).unwrap_err(),
+            BlocksError::Malformed
+        );
+        assert_eq!(
+            parse_template_document(&serde_json::json!({"channel": "email"})).unwrap_err(),
+            BlocksError::Malformed
+        );
     }
 
     #[test]

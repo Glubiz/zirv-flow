@@ -4,18 +4,20 @@
 
 use minijinja::{Environment, Value};
 
-use super::check::check_sources;
+use super::check::{check_sources, fields};
 use super::emit::{Fields, Plain, UrlKind, emit};
-use super::sanitize::{Cleaned, enforce, html_to_text, sanitize_source, scheme_allowed};
+use super::sanitize::{
+    Cleaned, enforce, has_mjml_tag, html_to_text, sanitize_source, scheme_allowed,
+};
 use super::tags::escape_literals;
 use crate::content::mjml::{MjmlError, compile};
 use crate::context::RenderContext;
 use crate::document::{Category, Channel, Mode, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
 use crate::links::{starts_with_ignore_case, unescape};
-use crate::render::{map_mjml_error, one_line};
+use crate::render::{has_template_syntax, map_mjml_error, one_line};
 use crate::sandbox::{
-    MAX_HTML_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, environment, render_string,
+    FUEL, MAX_HTML_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, environment, render_string,
 };
 
 use super::model::BlocksContent;
@@ -45,6 +47,36 @@ pub(crate) struct Built {
     pub(crate) text: String,
 }
 
+/// The MiniJinja fuel of a whole block document: five times the fuel of one code template,
+/// because a document is many small templates. Each field that holds template syntax gets an
+/// equal share of it (at most [`FUEL`], the single-template budget), so the fields together can
+/// never cost more than this, however many there are.
+pub(crate) const DOCUMENT_FUEL: u64 = 5 * FUEL;
+
+/// The sandbox environment for one block document, with its share of the document fuel.
+pub(crate) fn document_environment(content: &BlocksContent) -> Environment<'static> {
+    let tagged = fields(content)
+        .iter()
+        .filter(|field| has_template_syntax(field.source))
+        .count()
+        .max(1);
+    let mut env = environment();
+    let share = DOCUMENT_FUEL / u64::try_from(tagged).unwrap_or(u64::MAX);
+    env.set_fuel(Some(share.min(FUEL)));
+    env
+}
+
+/// Drop the characters XML cannot hold (U+0000 to U+0008, U+000B, U+000C, U+000E to U+001F):
+/// `mrml` and the tokenizer behind the text part refuse them.
+pub(crate) fn strip_invalid(text: String) -> String {
+    let invalid = |c: char| matches!(c, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}');
+    if text.chars().any(invalid) {
+        text.chars().filter(|c| !invalid(*c)).collect()
+    } else {
+        text
+    }
+}
+
 /// Fields rendered by MiniJinja in the sandbox.
 struct Rendered<'a> {
     env: &'a Environment<'static>,
@@ -52,6 +84,18 @@ struct Rendered<'a> {
     /// Whether a rendered URL must be one a link may use. Validation renders a sample whose
     /// values are not URLs, so it does not check them.
     check_urls: bool,
+    /// Bytes the rendered fields have used of the `MAX_HTML_BYTES` they share.
+    spent: usize,
+}
+
+impl Rendered<'_> {
+    /// Render one field into what is left of the shared output budget.
+    fn render(&mut self, name: &'static str, source: &str) -> Result<String, RenderError> {
+        let left = MAX_HTML_BYTES.saturating_sub(self.spent);
+        let out = render_string(self.env, name, "html", source, self.values, left)?;
+        self.spent += out.len();
+        Ok(strip_invalid(out))
+    }
 }
 
 impl Fields for Rendered<'_> {
@@ -61,14 +105,12 @@ impl Fields for Rendered<'_> {
         // The literal text is escaped first and MiniJinja escapes what it merges, so the result
         // is text in both parts. Unescaping it gives the plain text, with the merged values as
         // they were.
-        let html = render_string(
-            self.env,
-            "field.html",
-            "html",
-            &escape_literals(source),
-            self.values,
-            MAX_HTML_BYTES,
-        )?;
+        let html = self.render("field.html", &escape_literals(source))?;
+        // Autoescape leaves no `<` or `"` in a rendered value; one here came through `|safe` or
+        // `{% autoescape false %}` and could add markup to the MJML or break out of an attribute.
+        if html.contains(['<', '"']) {
+            return Err(RenderError::InvalidBlocks);
+        }
         let text = unescape(&html);
         Ok(Plain { html, text })
     }
@@ -88,28 +130,18 @@ impl Fields for Rendered<'_> {
 
     fn rich(&mut self, source: &str) -> Result<Cleaned, RenderError> {
         let cleaned = sanitize_source(source);
-        let rendered = render_string(
-            self.env,
-            "rich.html",
-            "html",
-            &cleaned.html,
-            self.values,
-            MAX_HTML_BYTES,
-        )?;
+        let rendered = self.render("rich.html", &cleaned.html)?;
         let html = enforce(&rendered);
         let text = html_to_text(&html);
         Ok(Cleaned { html, text })
     }
 
     fn raw(&mut self, source: &str) -> Result<String, RenderError> {
-        render_string(
-            self.env,
-            "raw.html",
-            "html",
-            source,
-            self.values,
-            MAX_HTML_BYTES,
-        )
+        let html = self.render("raw.html", source)?;
+        if has_mjml_tag(&html) {
+            return Err(RenderError::InvalidBlocks);
+        }
+        Ok(html)
     }
 }
 
@@ -124,8 +156,14 @@ pub(crate) fn build(
         env,
         values,
         check_urls,
+        spent: 0,
     };
     let emitted = emit(content, &mut fields)?;
+    // The rendered fields hold at most `MAX_HTML_BYTES` together; the MJML around them and the
+    // text part are held to the same cap before `mrml` runs.
+    if emitted.mjml.len() + emitted.text.len() > MAX_HTML_BYTES {
+        return Err(RenderError::OutputTooLarge { field: "html" }.into());
+    }
     let compiled = compile(&emitted.mjml)?;
     if compiled.html.len() > MAX_HTML_BYTES {
         return Err(RenderError::OutputTooLarge { field: "html" }.into());
@@ -156,7 +194,7 @@ pub(crate) fn render(
         return Err(RenderError::UnsupportedSchema);
     }
     let content = match (&doc.blocks, doc.channel, doc.mode) {
-        (Some(content), Channel::Email, Mode::Blocks) => content,
+        (Some(content), Channel::Email, Mode::Blocks) if !doc.is_ambiguous() => content,
         _ => return Err(RenderError::WrongDocument),
     };
     if check_sources(content)
@@ -165,7 +203,7 @@ pub(crate) fn render(
     {
         return Err(RenderError::InvalidBlocks);
     }
-    let env = environment();
+    let env = document_environment(content);
     let values = Value::from_serialize(context);
     let subject = one_line(&render_string(
         &env,
@@ -518,5 +556,175 @@ mod tests {
         let rendered = render_doc(&doc("newsletter")).unwrap();
         assert_eq!(rendered.headers.len(), 2);
         assert_eq!(rendered.headers[0].0, "List-Unsubscribe");
+    }
+
+    fn doc_of(blocks: Vec<Block>) -> TemplateDocument {
+        let mut content = BlocksContent::new("Hi");
+        content.sender = Some("snd_1".into());
+        content.lang = Some("en".into());
+        content.category = Category::Transactional;
+        content.sections.push(super::super::Section {
+            id: "s".into(),
+            background_color: None,
+            padding: None,
+            columns: vec![blocks],
+        });
+        TemplateDocument::email_blocks(content)
+    }
+
+    fn heading(id: &str, text: &str) -> Block {
+        Block::Heading(super::super::Heading {
+            id: id.into(),
+            level: 2,
+            text: text.into(),
+            align: None,
+        })
+    }
+
+    fn raw(id: &str, html: &str) -> Block {
+        Block::RawHtml(super::super::RawHtml {
+            id: id.into(),
+            html: html.into(),
+        })
+    }
+
+    fn rich(id: &str, content: &str) -> Block {
+        Block::Text(super::super::RichText {
+            id: id.into(),
+            content: content.into(),
+            align: None,
+        })
+    }
+
+    #[test]
+    fn the_rendered_fields_share_one_output_budget_and_mrml_is_not_reached() {
+        use crate::content::mjml::parser_call_count;
+
+        let blocks = (0..4)
+            .map(|n| raw(&format!("r{n}"), "{{ person.big }}"))
+            .collect();
+        let mut context = context();
+        // Each field alone is far under the cap; four of them are not.
+        context
+            .person
+            .insert("big".into(), json!("x".repeat(250_000)));
+        let one = doc_of(vec![raw("r0", "{{ person.big }}")]);
+        assert!(render_email(&one, &context, &Hooks::untracked()).is_ok());
+
+        let before = parser_call_count();
+        let many = doc_of(blocks);
+        assert_eq!(
+            render_email(&many, &context, &Hooks::untracked()),
+            Err(RenderError::OutputTooLarge { field: "html" })
+        );
+        assert_eq!(parser_call_count(), before, "mrml must not see it");
+    }
+
+    #[test]
+    fn the_fuel_is_bounded_for_the_whole_document_not_for_each_field() {
+        let spin = "{% for i in range(30000) %}{% endfor %}x";
+        // One such field is within the single-template budget.
+        let one = doc_of(vec![heading("h0", spin)]);
+        assert!(render_doc(&one).is_ok());
+        // Forty of them are not, though each is.
+        let many = doc_of((0..40).map(|n| heading(&format!("h{n}"), spin)).collect());
+        assert_eq!(
+            render_doc(&many),
+            Err(RenderError::OutOfFuel { field: "html" })
+        );
+    }
+
+    #[test]
+    fn a_control_character_in_a_merge_value_is_dropped_from_html_and_text() {
+        let mut context = context();
+        context
+            .person
+            .insert("ctl".into(), json!("A\u{c}B\u{0}C\u{1f}D\tE"));
+        let block_doc = doc_of(vec![
+            heading("h", "{{ person.ctl }}"),
+            rich("t", "<p>{{ person.ctl }}</p>"),
+            raw("r", "<p>{{ person.ctl }}</p>"),
+        ]);
+        let rendered = render_email(&block_doc, &context, &Hooks::untracked()).unwrap();
+        assert!(rendered.html.contains("ABCD\tE"), "{}", rendered.html);
+        assert!(
+            !rendered
+                .html
+                .chars()
+                .any(|c| c.is_control() && !"\n\t\r".contains(c)),
+            "{}",
+            rendered.html
+        );
+        assert_eq!(
+            rendered.text.matches("ABCD").count(),
+            2,
+            "{:?}",
+            rendered.text
+        );
+        let short = doc_of(vec![heading("h", "{{ person.ctl }}")]);
+        context.person.insert("ctl".into(), json!("A\u{c}B"));
+        let rendered = render_email(&short, &context, &Hooks::untracked()).unwrap();
+        assert!(rendered.html.contains(">AB<"), "{}", rendered.html);
+        assert_eq!(rendered.text, "AB\n");
+    }
+
+    #[test]
+    fn a_plain_field_cannot_carry_markup_even_when_autoescape_is_bypassed() {
+        let mut context = context();
+        context.person.insert(
+            "bio".into(),
+            json!("</mj-text><mj-raw><img src=x onerror=1>"),
+        );
+        for text in [
+            "{{ person.bio | safe }}",
+            "{% autoescape false %}{{ person.bio }}{% endautoescape %}",
+            "{{ person.bio | safe | upper }}",
+        ] {
+            let block_doc = doc_of(vec![heading("h", text)]);
+            assert_eq!(
+                render_email(&block_doc, &context, &Hooks::untracked()),
+                Err(RenderError::InvalidBlocks),
+                "{text}"
+            );
+        }
+        // Every plain field kind is covered, and an attribute-breaking quote too.
+        context
+            .person
+            .insert("quote".into(), json!("x\" onload=\"y"));
+        let button = Block::Button(super::super::Button {
+            id: "b".into(),
+            label: "Go".into(),
+            url: "https://a.example/{{ person.quote | safe }}".into(),
+            align: Default::default(),
+        });
+        assert_eq!(
+            render_email(&doc_of(vec![button]), &context, &Hooks::untracked()),
+            Err(RenderError::InvalidBlocks)
+        );
+        // An escaped value is fine.
+        let escaped = doc_of(vec![heading("h", "{{ person.bio }}")]);
+        assert!(render_email(&escaped, &context, &Hooks::untracked()).is_ok());
+    }
+
+    #[test]
+    fn a_closer_inside_a_string_of_a_merge_tag_renders_as_written() {
+        let label = r#"a {{ person.plan | default("}}") }} b {{ "}}" }}"#;
+        let block_doc = doc_of(vec![Block::Button(super::super::Button {
+            id: "b".into(),
+            label: label.into(),
+            url: "https://a.example".into(),
+            align: Default::default(),
+        })]);
+        let rendered = render_doc(&block_doc).unwrap();
+        assert_eq!(rendered.text, "a pro b }}: https://a.example\n");
+        assert!(rendered.html.contains("a pro b }}"), "{}", rendered.html);
+    }
+
+    #[test]
+    fn a_non_breaking_space_in_rich_text_is_a_space_in_the_text_part() {
+        let block_doc = doc_of(vec![rich("t", "<p>Hello&nbsp;world</p>")]);
+        assert_eq!(render_doc(&block_doc).unwrap().text, "Hello world\n");
+        let converted = blocks_to_mjml(block_doc.blocks.as_ref().unwrap()).unwrap();
+        assert_eq!(converted.text, "Hello world\n");
     }
 }

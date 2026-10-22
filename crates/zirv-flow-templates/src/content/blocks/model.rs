@@ -3,7 +3,7 @@
 //!
 //! Every struct refuses a field it does not know (`deny_unknown_fields`), and the block enum
 //! refuses a type it does not know, so a document a newer editor wrote is an error here and never
-//! silently loses content. [`BlocksError::from_serde`] names which of the two it was.
+//! silently loses content. [`parse_template_document`] names which of the two it was.
 
 use std::fmt;
 
@@ -276,7 +276,9 @@ pub enum BlocksError {
     UnknownBlock,
     /// An object has a field that the v1 document does not define.
     UnknownField,
-    /// The value is not a block document in any other way.
+    /// The document carries more than one content (`email`, `blocks`, `webhook`).
+    AmbiguousContent,
+    /// The value is not a template document in any other way.
     Malformed,
 }
 
@@ -287,17 +289,17 @@ impl BlocksError {
             Self::UnsupportedSchema => "unsupported_schema",
             Self::UnknownBlock => "unknown_block",
             Self::UnknownField => "unknown_field",
+            Self::AmbiguousContent => "ambiguous_content",
             Self::Malformed => "malformed_document",
         }
     }
 
-    /// Classify the error of `serde_json` on a block document. The message texts are serde's
-    /// own (`unknown variant` for a block type, `unknown field` for a field); a test pins them.
+    /// Classify the error of `serde_json` on a template document. The message text is serde's
+    /// own (`unknown field`); a test pins it. An unknown block type is found before, by
+    /// `unknown_block_type`, because `unknown variant` is also what a bad `channel` says.
     pub fn from_serde(error: &serde_json::Error) -> Self {
         let text = error.to_string();
-        if text.contains("unknown variant") {
-            Self::UnknownBlock
-        } else if text.contains("unknown field") {
+        if text.contains("unknown field") {
             Self::UnknownField
         } else {
             Self::Malformed
@@ -310,25 +312,63 @@ impl fmt::Display for BlocksError {
         formatter.write_str(match self {
             Self::UnsupportedSchema => "the document schema is not supported",
             Self::UnknownBlock => "a block has a type that is not part of the v1 block set",
-            Self::UnknownField => "an object has a field the v1 block document does not define",
-            Self::Malformed => "the value is not a block document",
+            Self::UnknownField => "an object has a field the v1 document does not define",
+            Self::AmbiguousContent => "the document carries more than one content",
+            Self::Malformed => "the value is not a template document",
         })
     }
 }
 
 impl std::error::Error for BlocksError {}
 
-/// Read a template document that holds block content from JSON, with typed errors: a `schema`
-/// other than the one this crate reads is [`BlocksError::UnsupportedSchema`] before anything
-/// else is looked at.
-pub fn parse_blocks_document(
+/// The `type` values of the v1 block set.
+const BLOCK_TYPES: [&str; 7] = [
+    "heading", "text", "image", "button", "divider", "spacer", "raw_html",
+];
+
+/// Whether a block of a block document names a `type` that is not in the v1 set.
+fn unknown_block_type(value: &serde_json::Value) -> bool {
+    let sections = value
+        .pointer("/blocks/sections")
+        .and_then(serde_json::Value::as_array);
+    sections.into_iter().flatten().any(|section| {
+        let columns = section.get("columns").and_then(serde_json::Value::as_array);
+        columns.into_iter().flatten().any(|column| {
+            let blocks = column.as_array();
+            blocks.into_iter().flatten().any(|block| {
+                block
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| !BLOCK_TYPES.contains(&name))
+            })
+        })
+    })
+}
+
+/// Read a template document from JSON with typed refusals: a `schema` other than the one this
+/// crate reads is [`BlocksError::UnsupportedSchema`] before anything else is looked at, then an
+/// unknown block type, an unknown field, and a document with more than one content. A document
+/// without a `schema` is [`BlocksError::Malformed`].
+pub fn parse_template_document(
     value: &serde_json::Value,
 ) -> Result<crate::document::TemplateDocument, BlocksError> {
-    let schema = value.get("schema").and_then(serde_json::Value::as_u64);
-    if schema != Some(u64::from(crate::document::SCHEMA_VERSION)) {
-        return Err(BlocksError::UnsupportedSchema);
+    match value.get("schema") {
+        None => return Err(BlocksError::Malformed),
+        Some(schema) => {
+            if schema.as_u64() != Some(u64::from(crate::document::SCHEMA_VERSION)) {
+                return Err(BlocksError::UnsupportedSchema);
+            }
+        }
     }
-    serde_json::from_value(value.clone()).map_err(|error| BlocksError::from_serde(&error))
+    if unknown_block_type(value) {
+        return Err(BlocksError::UnknownBlock);
+    }
+    let doc: crate::document::TemplateDocument =
+        serde_json::from_value(value.clone()).map_err(|error| BlocksError::from_serde(&error))?;
+    if doc.is_ambiguous() {
+        return Err(BlocksError::AmbiguousContent);
+    }
+    Ok(doc)
 }
 
 /// `#rgb` or `#rrggbb`.
@@ -584,23 +624,23 @@ pub(crate) mod tests {
         };
         let unknown_block = doc(json!([{"type": "carousel", "id": "x"}]));
         assert_eq!(
-            parse_blocks_document(&unknown_block).unwrap_err(),
+            parse_template_document(&unknown_block).unwrap_err(),
             BlocksError::UnknownBlock
         );
         let unknown_field = doc(json!([{"type": "divider", "id": "x", "style": "dotted"}]));
         assert_eq!(
-            parse_blocks_document(&unknown_field).unwrap_err(),
+            parse_template_document(&unknown_field).unwrap_err(),
             BlocksError::UnknownField
         );
         let mut unknown_content_field = doc(json!([]));
         unknown_content_field["blocks"]["theme"] = json!("dark");
         assert_eq!(
-            parse_blocks_document(&unknown_content_field).unwrap_err(),
+            parse_template_document(&unknown_content_field).unwrap_err(),
             BlocksError::UnknownField
         );
         let missing_field = doc(json!([{"type": "heading", "id": "x"}]));
         assert_eq!(
-            parse_blocks_document(&missing_field).unwrap_err(),
+            parse_template_document(&missing_field).unwrap_err(),
             BlocksError::Malformed
         );
         for error in [
@@ -618,19 +658,19 @@ pub(crate) mod tests {
     fn schema_one_is_read_and_another_schema_is_refused_first() {
         let mut doc = json!({"schema": 1, "channel": "email", "mode": "blocks",
                              "blocks": {"subject": "Hi"}});
-        let read = parse_blocks_document(&doc).unwrap();
+        let read = parse_template_document(&doc).unwrap();
         assert_eq!(read.blocks, Some(BlocksContent::new("Hi")));
         for schema in [json!(2), json!(0), json!("1"), json!(null)] {
             doc["schema"] = schema;
             assert_eq!(
-                parse_blocks_document(&doc).unwrap_err(),
+                parse_template_document(&doc).unwrap_err(),
                 BlocksError::UnsupportedSchema
             );
         }
         // A newer schema may also have a shape this one cannot read: the schema still wins.
         let newer = json!({"schema": 2, "blocks": {"nope": true}});
         assert_eq!(
-            parse_blocks_document(&newer).unwrap_err(),
+            parse_template_document(&newer).unwrap_err(),
             BlocksError::UnsupportedSchema
         );
     }

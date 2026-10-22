@@ -16,7 +16,8 @@ impl TemplateContent for Html {
     }
 
     fn handles(&self, doc: &TemplateDocument) -> bool {
-        doc.channel == Channel::Email
+        !doc.is_ambiguous()
+            && doc.channel == Channel::Email
             && doc.mode == Mode::Code
             && doc
                 .email
