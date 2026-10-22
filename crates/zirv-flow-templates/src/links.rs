@@ -11,8 +11,9 @@ use crate::error::RenderError;
 /// The token every rewritten link carries in inert (preview) mode.
 pub const INERT_TOKEN: &str = "inert";
 
-/// The caller's token function: `(link_index, url) -> token`.
-type TokenFn<'a> = dyn Fn(usize, &str) -> String + 'a;
+/// The caller's token function: `(link_index, url) -> token`. It is `Sync` so a render call that
+/// holds the hooks across an await (the isolated render host's pool) is still `Send`.
+type TokenFn<'a> = dyn Fn(usize, &str) -> String + Sync + 'a;
 
 /// What to do with the links in the rendered HTML.
 #[derive(Clone, Copy)]
