@@ -24,6 +24,7 @@ mod pool;
 mod privacy;
 pub mod secrets;
 mod segments;
+mod sending;
 mod sessions;
 mod sources;
 mod stream_freshness;
@@ -197,6 +198,16 @@ pub use segments::{
     membership_trace, read_segment_catalog, reconcile_segment_schedules, reevaluation_order,
     run_person_batch, run_segment_preview, segment_catalog, segment_catalog_details, segment_cron,
     segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use sending::fixtures as sending_fixtures;
+pub use sending::{
+    DomainCheck, DomainDelete, DomainRecord, IdentityError, NewSenderIdentity, NewSendingDomain,
+    RecordFinding, SenderError, SenderIdentity, SenderIdentityPatch, SendingDomain, VerifiedSender,
+    archive_sender_identity, create_sender_identity, create_sender_identity_in,
+    create_sending_domain, delete_sending_domain, due_sending_domains, find_sender_identity,
+    find_sending_domain, list_domain_records, list_sender_identities, list_sending_domains,
+    record_domain_check, require_verified_sender, update_sender_identity,
 };
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,

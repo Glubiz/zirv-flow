@@ -390,7 +390,13 @@ mod tests {
     async fn a_patch_changes_only_the_given_settings(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         let template = create(&pool, ws, "Welcome").await;
-        let sender = Uuid::now_v7();
+        let domain = crate::sending::fixtures::plant_domain(&pool, ws, "example.com")
+            .await
+            .unwrap();
+        let sender =
+            crate::sending::fixtures::plant_identity(&pool, ws, domain, "news@example.com")
+                .await
+                .unwrap();
         let mut connection = pool.acquire().await.unwrap();
 
         let named = update_template(

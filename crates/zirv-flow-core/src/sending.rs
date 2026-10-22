@@ -164,6 +164,11 @@ pub fn parse_spf_mechanism(value: &str) -> Result<String, ValidationError> {
     if known { Ok(value) } else { Err(invalid()) }
 }
 
+/// The domain part of an address: what follows its last `@`.
+pub fn address_domain(address: &str) -> Option<&str> {
+    address.rsplit_once('@').map(|(_, domain)| domain)
+}
+
 /// The name a record is published at.
 pub fn record_host(kind: RecordKind, selector: &str, domain: &str) -> String {
     match kind {
@@ -455,6 +460,13 @@ mod tests {
             parse_spf_mechanism("INCLUDE:X.Example").unwrap(),
             "include:x.example"
         );
+    }
+
+    #[test]
+    fn the_domain_of_an_address_follows_its_last_at_sign() {
+        assert_eq!(address_domain("a@example.com"), Some("example.com"));
+        assert_eq!(address_domain("\"a@b\"@example.com"), Some("example.com"));
+        assert_eq!(address_domain("nodomain"), None);
     }
 
     #[test]
