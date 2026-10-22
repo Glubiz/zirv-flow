@@ -2,7 +2,7 @@
 //! DNS records are not all in place. Template publish and, later, the send path both call it, so
 //! the rule lives in one place.
 
-use sqlx::PgExecutor;
+use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -44,12 +44,10 @@ impl From<StoreError> for SenderError {
 struct Row {
     identity_id: Uuid,
     domain_id: Uuid,
-    domain: String,
     from_name: String,
     from_address: String,
     reply_to: Option<String>,
     archived: bool,
-    verified: bool,
 }
 
 /// The sender identity `identity` of the workspace when it is live and its domain is verified.
@@ -58,34 +56,59 @@ struct Row {
 /// archive of the identity or a check that unverifies the domain waits for that transaction to end,
 /// so a publish never commits a sender that stopped being valid under it. Outside a transaction
 /// the answer is only as of the read.
-pub async fn require_verified_sender<'e>(
-    executor: impl PgExecutor<'e>,
+///
+/// Lock order, here and on every path that holds both rows: the domain first, then the identity.
+/// The domain is found from the identity without a lock, locked, and the identity locked in a
+/// second statement, so the order does not depend on a join plan. Deleting a domain locks the
+/// domain and then cascades to its identities, which is the same order, so a check and a delete
+/// wait for one another instead of deadlocking.
+pub async fn require_verified_sender(
+    connection: &mut PgConnection,
     workspace: WorkspaceId,
     identity: Uuid,
 ) -> Result<VerifiedSender, SenderError> {
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT i.id AS identity_id, d.id AS domain_id, d.domain, i.from_name, i.from_address, \
-                i.reply_to, i.archived_at IS NOT NULL AS archived, d.status = 'verified' AS verified \
-         FROM sender_identities i \
-         JOIN sending_domains d ON d.workspace_id = i.workspace_id AND d.id = i.domain_id \
-         WHERE i.workspace_id = $1 AND i.id = $2 FOR SHARE OF i, d",
+    let domain_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT domain_id FROM sender_identities WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace.as_uuid())
     .bind(identity)
-    .fetch_optional(executor)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let domain_id = domain_id.ok_or(SenderError::Unknown)?;
+    // The domain, `FOR SHARE`. A domain deleted meanwhile takes its identities with it.
+    let domain: Option<(String, bool)> = sqlx::query_as(
+        "SELECT domain, status = 'verified' FROM sending_domains \
+         WHERE workspace_id = $1 AND id = $2 FOR SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(domain_id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let (domain, verified) = domain.ok_or(SenderError::Unknown)?;
+    // The identity, `FOR SHARE`, after the domain.
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT id AS identity_id, domain_id, from_name, from_address, reply_to, \
+                archived_at IS NOT NULL AS archived \
+         FROM sender_identities WHERE workspace_id = $1 AND id = $2 FOR SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(identity)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
     let row = row.ok_or(SenderError::Unknown)?;
     if row.archived {
         return Err(SenderError::Archived);
     }
-    if !row.verified {
-        return Err(SenderError::Unverified { domain: row.domain });
+    if !verified {
+        return Err(SenderError::Unverified { domain });
     }
     Ok(VerifiedSender {
         identity_id: row.identity_id,
         domain_id: row.domain_id,
-        domain: row.domain,
+        domain,
         from_name: row.from_name,
         from_address: row.from_address,
         reply_to: row.reply_to,
@@ -110,7 +133,7 @@ mod tests {
             .await
             .unwrap();
 
-        let sender = require_verified_sender(&pool, ws, identity).await.unwrap();
+        let sender = check(&pool, ws, identity).await.unwrap();
 
         assert_eq!(sender.identity_id, identity);
         assert_eq!(sender.from_address, "news@example.com");
@@ -126,13 +149,13 @@ mod tests {
             .await
             .unwrap();
 
-        let refused = require_verified_sender(&pool, ws, identity).await;
+        let refused = check(&pool, ws, identity).await;
         assert!(
             matches!(refused, Err(SenderError::Unverified { ref domain }) if domain == "example.com")
         );
         verify_domain(&pool, ws, domain).await.unwrap();
 
-        assert!(require_verified_sender(&pool, ws, identity).await.is_ok());
+        assert!(check(&pool, ws, identity).await.is_ok());
     }
 
     #[sqlx::test]
@@ -145,18 +168,18 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            require_verified_sender(&pool, one, Uuid::now_v7()).await,
+            check(&pool, one, Uuid::now_v7()).await,
             Err(SenderError::Unknown)
         ));
         assert!(matches!(
-            require_verified_sender(&pool, two, identity).await,
+            check(&pool, two, identity).await,
             Err(SenderError::Unknown)
         ));
         crate::archive_sender_identity(&pool, one, identity)
             .await
             .unwrap();
         assert!(matches!(
-            require_verified_sender(&pool, one, identity).await,
+            check(&pool, one, identity).await,
             Err(SenderError::Archived)
         ));
     }
@@ -191,7 +214,7 @@ mod tests {
         let unverify = "SELECT id FROM sending_domains WHERE id = $1 FOR UPDATE";
 
         let mut open = crate::begin(&pool).await.unwrap();
-        require_verified_sender(&mut *open, ws, identity)
+        require_verified_sender(&mut open, ws, identity)
             .await
             .unwrap();
         assert!(blocked(&pool, archive, identity).await, "the archive waits");
@@ -203,5 +226,72 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    async fn check(
+        pool: &PgPool,
+        ws: zirv_flow_core::WorkspaceId,
+        identity: Uuid,
+    ) -> Result<VerifiedSender, SenderError> {
+        let mut connection = pool.acquire().await.unwrap();
+        require_verified_sender(&mut connection, ws, identity).await
+    }
+
+    /// The SQLSTATE of a statement that failed.
+    fn state(error: &sqlx::Error) -> String {
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.to_string())
+            .unwrap_or_default()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_check_and_a_domain_delete_wait_for_one_another_in_either_order_and_never_deadlock(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let identity = plant_verified_sender(&pool, ws, "example.com")
+            .await
+            .unwrap();
+        let domain: Uuid = sqlx::query_scalar("SELECT domain_id FROM sender_identities")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let lock_timeout = "SET LOCAL lock_timeout = '300ms'";
+
+        // A checks, B deletes the domain: B waits (lock not available, 55P03), no deadlock.
+        let mut a = crate::begin(&pool).await.unwrap();
+        require_verified_sender(&mut a, ws, identity).await.unwrap();
+        let mut b = crate::begin(&pool).await.unwrap();
+        sqlx::query(lock_timeout).execute(&mut *b).await.unwrap();
+        let waited = sqlx::query("DELETE FROM sending_domains WHERE id = $1")
+            .bind(domain)
+            .execute(&mut *b)
+            .await
+            .unwrap_err();
+        assert_eq!(state(&waited), "55P03", "{waited}");
+        drop(b);
+        crate::commit(a).await.unwrap();
+
+        // B deletes first (domain locked, cascade into the identity), A checks: A waits.
+        let mut b = crate::begin(&pool).await.unwrap();
+        crate::delete_sending_domain(&mut b, ws, domain)
+            .await
+            .unwrap();
+        let mut a = crate::begin(&pool).await.unwrap();
+        sqlx::query(lock_timeout).execute(&mut *a).await.unwrap();
+        let waited = require_verified_sender(&mut a, ws, identity).await;
+        match waited {
+            Err(SenderError::Store(error)) => {
+                let source = std::error::Error::source(&error)
+                    .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                    .map(state)
+                    .unwrap_or_default();
+                assert_eq!(source, "55P03");
+            }
+            other => panic!("the check should wait for the delete: {other:?}"),
+        }
     }
 }

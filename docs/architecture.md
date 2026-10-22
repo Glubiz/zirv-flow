@@ -2099,11 +2099,14 @@ the name goes to its configured name servers). What a tenant could learn through
 is bounded instead by two rules. A domain name must be a public one: single labels, IP
 literals and the special-use or never-delegated suffixes (`localhost`, `local`,
 `internal`, `arpa`, `test`, `example`, `invalid`, `onion`, `alt`, `corp`, `home`, `mail`)
-are refused, so the check cannot be pointed at a private zone by name. And only TXT text
-of the expected type is stored or returned (`v=spf1` at the domain, `v=DMARC1` at
-`_dmarc`, a DKIM record at the selector name); any other string is reported as present,
-never echoed. A private zone reachable under a public-looking name stays the operator's
-to split-horizon.
+are refused, so the check cannot be pointed at a private zone by name. A CNAME in an answer's
+chain whose target fails the same rule voids the answer (it is read as empty), so a public name
+cannot be aliased into a private zone either. And only a TXT record that parses completely as
+the expected type is shown (`v=spf1` at the domain, `v=DMARC1` at `_dmarc`, a DKIM record at
+the selector name), rebuilt from its parsed fields (SPF mechanisms and modifiers, the DMARC
+tags, the DKIM key tags, each in its RFC grammar) and never copied; any other string, or a
+record with an unknown term, is reported as present with none of its text. A private zone
+reachable under a public-looking name stays the operator's to split-horizon.
 
 ### 16.3 Export, erasure and retention
 

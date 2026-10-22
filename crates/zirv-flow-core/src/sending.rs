@@ -147,6 +147,29 @@ pub fn parse_domain(value: &str) -> Result<String, ValidationError> {
     Ok(value.to_owned())
 }
 
+/// Whether a DNS name, such as the target of a CNAME, is a public one by the rule `parse_domain`
+/// applies: at least two labels, a non-numeric top label, and none of the special-use or internal
+/// suffixes. The labels themselves are only checked for being non-empty, because DNS targets
+/// legitimately carry underscores (`selector._domainkey.provider.example`). A name that is not
+/// public must not be followed, or a public name could be made to answer from a private zone.
+pub fn is_public_name(name: &str) -> bool {
+    let lowered = name.trim().to_ascii_lowercase();
+    let name = lowered.strip_suffix('.').unwrap_or(&lowered);
+    if name.is_empty() || name.len() > MAX_DOMAIN || !name.is_ascii() {
+        return false;
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    let Some(last) = labels.last() else {
+        return false;
+    };
+    labels.len() >= 2
+        && labels
+            .iter()
+            .all(|label| !label.is_empty() && label.len() <= MAX_LABEL)
+        && !last.chars().all(|c| c.is_ascii_digit())
+        && !NON_PUBLIC_SUFFIXES.contains(last)
+}
+
 /// A DKIM selector: 1 to 63 lower-case letters, digits and hyphens.
 pub fn parse_selector(value: &str) -> Result<String, ValidationError> {
     let value = value.trim().to_ascii_lowercase();
@@ -349,30 +372,235 @@ pub fn check_record(kind: RecordKind, expected: &str, observed: &[String]) -> Re
 /// What stands in for a TXT record that is not one of the expected types.
 pub const OTHER_TXT: &str = "(another TXT record, not shown)";
 
-/// The TXT records found at a record's name, as they may be stored and returned: only text of the
-/// expected type is kept (`v=spf1` at the domain, `v=DMARC1` at `_dmarc`, a DKIM record with
-/// `v=DKIM1` or a `p=` tag at the selector name). Any other string is reported as present, as
-/// [`OTHER_TXT`], and never echoed, so the check cannot be used to read arbitrary TXT content.
+/// The TXT records found at a record's name, as they may be stored and returned.
+///
+/// A record is shown only when it parses completely as the type expected at that name, and what
+/// is shown is rebuilt from the parsed fields, never copied from the original text:
+///
+/// - **SPF** (RFC 7208): `v=spf1`, then only the mechanisms `all`, `include`, `a`, `mx`, `ptr`,
+///   `ip4`, `ip6`, `exists` (with qualifiers) and the modifiers `redirect` and `exp`, with
+///   arguments in their grammar. One unknown term hides the whole record.
+/// - **DMARC** (RFC 7489): `v=DMARC1` first, then only the tags `p`, `sp`, `rua`, `ruf`, `adkim`,
+///   `aspf`, `pct`, `fo`, `rf` and `ri`, with values in their grammar.
+/// - **DKIM** (RFC 6376): only the key tags `v=DKIM1`, `k`, `p` (valid base64), `h`, `s` and `t`.
+///   The free-text `n` tag is dropped; any other tag hides the whole record.
+///
+/// Every other string, and every record that does not parse, is reported as present, as
+/// [`OTHER_TXT`], with none of its text, so the check cannot be used to read arbitrary TXT content.
 pub fn redact_observed(kind: RecordKind, observed: &[String]) -> Vec<String> {
     observed
         .iter()
         .map(|text| {
-            let expected = match kind {
-                RecordKind::Spf => is_spf(text),
-                RecordKind::Dmarc => is_dmarc_prefix(text),
-                RecordKind::Dkim => {
-                    let tags = tags(text);
-                    tag(&tags, "p").is_some()
-                        || tag(&tags, "v").is_some_and(|v| v.eq_ignore_ascii_case("DKIM1"))
-                }
+            let shown = match kind {
+                RecordKind::Spf => rebuild_spf(text),
+                RecordKind::Dmarc => rebuild_dmarc(text),
+                RecordKind::Dkim => rebuild_dkim(text),
             };
-            if expected {
-                text.clone()
-            } else {
-                OTHER_TXT.to_owned()
-            }
+            shown.unwrap_or_else(|| OTHER_TXT.to_owned())
         })
         .collect()
+}
+
+/// A domain-spec as the shown records allow it: letters, digits, dots, hyphens and underscores.
+fn is_domain_spec(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 253
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// An optional `/n` (and for `a` and `mx` an optional `//n`) dual CIDR length.
+fn is_dual_cidr(text: &str) -> bool {
+    let number = |part: &str, max: u8| part.parse::<u8>().is_ok_and(|n| n <= max);
+    match text.split_once("//") {
+        Some((v4, v6)) => {
+            (v4.is_empty() || v4.strip_prefix('/').is_some_and(|n| number(n, 32)))
+                && number(v6, 128)
+        }
+        None => text.is_empty() || text.strip_prefix('/').is_some_and(|n| number(n, 32)),
+    }
+}
+
+fn is_ip_with_prefix(text: &str, v6: bool) -> bool {
+    let (address, prefix) = match text.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix)),
+        None => (text, None),
+    };
+    let max = if v6 { 128 } else { 32 };
+    let address_ok = if v6 {
+        address.parse::<std::net::Ipv6Addr>().is_ok()
+    } else {
+        address.parse::<std::net::Ipv4Addr>().is_ok()
+    };
+    address_ok && prefix.is_none_or(|p| p.parse::<u8>().is_ok_and(|n| n <= max))
+}
+
+/// One SPF term in its lower-case form, if it is a valid mechanism or modifier.
+fn spf_term(term: &str) -> Option<String> {
+    let lower = term.to_ascii_lowercase();
+    if let Some((name, value)) = lower.split_once('=') {
+        return (matches!(name, "redirect" | "exp") && is_domain_spec(value)).then_some(lower);
+    }
+    let body = lower.strip_prefix(['+', '-', '~', '?']).unwrap_or(&lower);
+    let (name, argument) = match body.find([':', '/']) {
+        Some(at) => (&body[..at], Some(&body[at..])),
+        None => (body, None),
+    };
+    let domain_argument = |a: &str| a.strip_prefix(':').is_some_and(is_domain_spec);
+    let valid = match name {
+        "all" => argument.is_none(),
+        "include" | "exists" => argument.is_some_and(domain_argument),
+        "ptr" => argument.is_none_or(domain_argument),
+        "a" | "mx" => match argument {
+            None => true,
+            Some(a) => match a.strip_prefix(':') {
+                Some(rest) => match rest.find('/') {
+                    Some(at) => is_domain_spec(&rest[..at]) && is_dual_cidr(&rest[at..]),
+                    None => is_domain_spec(rest),
+                },
+                None => is_dual_cidr(a),
+            },
+        },
+        "ip4" => argument
+            .and_then(|a| a.strip_prefix(':'))
+            .is_some_and(|a| is_ip_with_prefix(a, false)),
+        "ip6" => argument
+            .and_then(|a| a.strip_prefix(':'))
+            .is_some_and(|a| is_ip_with_prefix(a, true)),
+        _ => false,
+    };
+    valid.then_some(lower)
+}
+
+fn rebuild_spf(text: &str) -> Option<String> {
+    let mut terms = text.split_whitespace();
+    terms
+        .next()
+        .filter(|version| version.eq_ignore_ascii_case("v=spf1"))?;
+    let mut shown = vec!["v=spf1".to_owned()];
+    for term in terms {
+        shown.push(spf_term(term)?);
+    }
+    Some(shown.join(" "))
+}
+
+fn is_mailto_list(value: &str) -> bool {
+    !value.is_empty()
+        && value.split(',').all(|item| {
+            let item = item.trim();
+            let (address, size) = match item.split_once('!') {
+                Some((address, size)) => (address, Some(size)),
+                None => (item, None),
+            };
+            let address_ok = address.strip_prefix("mailto:").is_some_and(|a| {
+                a.contains('@')
+                    && a.len() <= 254
+                    && a.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
+                    })
+            });
+            let size_ok = size.is_none_or(|s| {
+                let digits = s.trim_end_matches(['k', 'm', 'g', 't', 'K', 'M', 'G', 'T']);
+                !digits.is_empty()
+                    && s.len() - digits.len() <= 1
+                    && digits.chars().all(|c| c.is_ascii_digit())
+            });
+            address_ok && size_ok
+        })
+}
+
+fn rebuild_dmarc(text: &str) -> Option<String> {
+    let mut parts = text
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let (tag, version) = parts.next()?.split_once('=')?;
+    if !tag.trim().eq_ignore_ascii_case("v") || version.trim() != "DMARC1" {
+        return None;
+    }
+    let mut shown = vec!["v=DMARC1".to_owned()];
+    for part in parts {
+        let (tag, value) = part.split_once('=')?;
+        let tag = tag.trim().to_ascii_lowercase();
+        let value = value.trim();
+        let valid = match tag.as_str() {
+            "p" | "sp" => matches!(
+                value.to_ascii_lowercase().as_str(),
+                "none" | "quarantine" | "reject"
+            ),
+            "rua" | "ruf" => is_mailto_list(value),
+            "adkim" | "aspf" => matches!(value.to_ascii_lowercase().as_str(), "r" | "s"),
+            "pct" => value.parse::<u8>().is_ok_and(|n| n <= 100),
+            "fo" => {
+                !value.is_empty() && value.split(':').all(|o| matches!(o, "0" | "1" | "d" | "s"))
+            }
+            "rf" => !value.is_empty() && value.split(':').all(|f| f.eq_ignore_ascii_case("afrf")),
+            "ri" => value.parse::<u32>().is_ok(),
+            _ => false,
+        };
+        if !valid {
+            return None;
+        }
+        let value = if matches!(tag.as_str(), "p" | "sp" | "adkim" | "aspf") {
+            value.to_ascii_lowercase()
+        } else {
+            value.to_owned()
+        };
+        shown.push(format!("{tag}={value}"));
+    }
+    Some(shown.join("; "))
+}
+
+fn rebuild_dkim(text: &str) -> Option<String> {
+    let list_of = |value: &str, allowed: &[&str]| {
+        !value.is_empty()
+            && value
+                .split(':')
+                .all(|item| allowed.contains(&item.to_ascii_lowercase().as_str()))
+    };
+    let mut shown = Vec::new();
+    let mut has_key_or_version = false;
+    for (index, part) in text
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .enumerate()
+    {
+        let (tag, value) = part.split_once('=')?;
+        let tag = tag.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match tag.as_str() {
+            "v" if index == 0 && value.eq_ignore_ascii_case("DKIM1") => {
+                has_key_or_version = true;
+                shown.push("v=DKIM1".to_owned());
+            }
+            "k" if matches!(value.to_ascii_lowercase().as_str(), "rsa" | "ed25519") => {
+                shown.push(format!("k={}", value.to_ascii_lowercase()));
+            }
+            "p" => {
+                let key: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+                if !key.is_empty() && STANDARD.decode(&key).is_err() {
+                    return None;
+                }
+                has_key_or_version = true;
+                shown.push(format!("p={key}"));
+            }
+            "h" if list_of(value, &["sha1", "sha256"]) => {
+                shown.push(format!("h={}", value.to_ascii_lowercase()));
+            }
+            "s" if list_of(value, &["email", "*"]) => {
+                shown.push(format!("s={}", value.to_ascii_lowercase()));
+            }
+            "t" if list_of(value, &["y", "s"]) => {
+                shown.push(format!("t={}", value.to_ascii_lowercase()));
+            }
+            // Free text: acknowledged and dropped from what is shown.
+            "n" => {}
+            _ => return None,
+        }
+    }
+    has_key_or_version.then(|| shown.join("; "))
 }
 
 /// Why a DKIM key could not be made or read.
@@ -538,6 +766,100 @@ mod tests {
         // Redacting twice changes nothing more.
         let once = redact_observed(RecordKind::Spf, &found);
         assert_eq!(redact_observed(RecordKind::Spf, &once), once);
+    }
+
+    #[test]
+    fn a_record_that_does_not_parse_completely_is_present_with_no_text() {
+        // The fragments of one TXT record join into text that starts like SPF but carries a secret.
+        let joined = format!("{}{}", "v=spf1 ", "token=secret");
+        for (kind, text) in [
+            (RecordKind::Spf, joined.as_str()),
+            (
+                RecordKind::Spf,
+                "v=spf1 include:a.example.com secret-token -all",
+            ),
+            (RecordKind::Spf, "v=spf1 ip4:300.1.1.1"),
+            (RecordKind::Dkim, "pw=x; p=hunter2"),
+            (RecordKind::Dkim, "v=DKIM1; p=AAAA; extra=1"),
+            (RecordKind::Dmarc, "v=DMARC1; p=none; note=secret"),
+            (RecordKind::Dmarc, "v=DMARC1; p=none; rua=hunter2"),
+        ] {
+            assert_eq!(
+                redact_observed(kind, &[text.to_owned()]),
+                [OTHER_TXT],
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_records_are_shown_rebuilt_from_their_parsed_fields() {
+        let key = "TUlJQmlqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUE=";
+        let spf = "V=SPF1  +mx a:mail.example.com/24//64 IP4:203.0.113.0/24 ip6:2001:db8::/32 include:spf.relay.example \
+                   exists:probe.example.com ptr redirect=other.example.com ~ALL";
+        assert_eq!(
+            redact_observed(RecordKind::Spf, &[spf.to_owned()]),
+            [
+                "v=spf1 +mx a:mail.example.com/24//64 ip4:203.0.113.0/24 ip6:2001:db8::/32 include:spf.relay.example exists:probe.example.com ptr redirect=other.example.com ~all"
+            ]
+        );
+        let dmarc = "V=DMARC1 ; P=Reject; sp=none; rua=mailto:a@example.com!10m,mailto:b@example.com; \
+                     adkim=S; aspf=r; pct=50; fo=0:1:d:s; rf=afrf; ri=86400";
+        assert_eq!(
+            redact_observed(RecordKind::Dmarc, &[dmarc.to_owned()]),
+            [
+                "v=DMARC1; p=reject; sp=none; rua=mailto:a@example.com!10m,mailto:b@example.com; adkim=s; aspf=r; pct=50; fo=0:1:d:s; rf=afrf; ri=86400"
+            ]
+        );
+        let dkim = format!("v=DKIM1; k=RSA; p={key}; h=sha256; s=email; t=y:s; n=notes for humans");
+        assert_eq!(
+            redact_observed(RecordKind::Dkim, &[dkim]),
+            [format!("v=DKIM1; k=rsa; p={key}; h=sha256; s=email; t=y:s")]
+        );
+        // A revoked key (empty p=) is a record too.
+        assert_eq!(
+            redact_observed(RecordKind::Dkim, &["v=DKIM1; p=".to_owned()]),
+            ["v=DKIM1; p="]
+        );
+        // The recommended texts survive unchanged.
+        for (kind, text) in [
+            (
+                RecordKind::Spf,
+                spf_record_text(Some("include:spf.relay.example")),
+            ),
+            (RecordKind::Dmarc, dmarc_record_text()),
+            (RecordKind::Dkim, dkim_record_text(key)),
+        ] {
+            assert_eq!(redact_observed(kind, std::slice::from_ref(&text)), [text]);
+        }
+    }
+
+    #[test]
+    fn a_dns_target_is_public_by_the_rule_for_sending_domains_but_may_carry_underscores() {
+        for good in [
+            "selector._domainkey.provider.example.net.",
+            "_dmarc.Provider.COM",
+            "a.b.co",
+        ] {
+            assert!(is_public_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            ".",
+            "corp",
+            "x.corp",
+            "secret.internal.",
+            "printer.home.arpa",
+            "10.0.0.1",
+            "a..b.com",
+            "exämple.com",
+        ] {
+            assert!(!is_public_name(bad), "{bad}");
+        }
+        // The two rules agree on every refused suffix.
+        for suffix in NON_PUBLIC_SUFFIXES {
+            assert!(!is_public_name(&format!("a.{suffix}")));
+        }
     }
 
     #[test]

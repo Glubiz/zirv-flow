@@ -172,7 +172,7 @@ pub(crate) async fn publish_template(
         let Some(sender) = sender else {
             return Err(sender_error(SenderError::Unknown));
         };
-        require_verified_sender(&mut *tx, workspace, sender)
+        require_verified_sender(&mut tx, workspace, sender)
             .await
             .map_err(sender_error)?;
     }

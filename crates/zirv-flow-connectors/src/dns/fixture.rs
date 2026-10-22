@@ -5,11 +5,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hashbrown::{HashMap, HashSet};
 
-use super::{DnsError, DnsResolver, Lookup};
+use super::{DnsError, DnsResolver, Lookup, chain_is_public};
+
+/// The longest CNAME chain the fixture follows, as a real resolver stops after a few hops.
+const MAX_HOPS: usize = 8;
 
 #[derive(Default)]
 struct Zone {
     records: HashMap<String, Vec<String>>,
+    cnames: HashMap<String, String>,
     failing: HashSet<String>,
     queried: Vec<String>,
 }
@@ -50,6 +54,12 @@ impl FixtureResolver {
         );
     }
 
+    /// Makes `name` an alias of `target`: a lookup of `name` follows the chain and answers with
+    /// what `target` holds, unless a target in the chain is not a public name.
+    pub fn set_cname(&self, name: &str, target: &str) {
+        self.zone().cnames.insert(key(name), key(target));
+    }
+
     /// Removes every record at `name`, as if the name had none.
     pub fn remove(&self, name: &str) {
         self.zone().records.remove(&key(name));
@@ -72,10 +82,26 @@ impl DnsResolver for FixtureResolver {
             let key = key(name);
             let mut zone = self.zone();
             zone.queried.push(key.clone());
-            if zone.failing.contains(&key) {
+            let mut name = key;
+            let mut targets = Vec::new();
+            for _ in 0..MAX_HOPS {
+                match zone.cnames.get(&name) {
+                    Some(target) => {
+                        targets.push(target.clone());
+                        name = target.clone();
+                    }
+                    None => break,
+                }
+            }
+            // As the system resolver does: a chain that leaves the public namespace voids the
+            // answer.
+            if !chain_is_public(&targets) {
+                return Ok(Vec::new());
+            }
+            if zone.failing.contains(&name) {
                 return Err(DnsError::Unavailable);
             }
-            Ok(zone.records.get(&key).cloned().unwrap_or_default())
+            Ok(zone.records.get(&name).cloned().unwrap_or_default())
         })
     }
 }
@@ -138,5 +164,37 @@ mod tests {
         let _ = resolver.lookup_txt("A.example.com.").await;
 
         assert_eq!(clone.queried(), ["a.example.com"]);
+    }
+
+    #[tokio::test]
+    async fn an_alias_chain_that_stays_public_resolves_to_its_target() {
+        let resolver = FixtureResolver::new();
+        resolver.set_cname("_dmarc.attacker.example.com", "hop.provider.example.net");
+        resolver.set_cname("hop.provider.example.net", "dmarc.provider.example.org");
+        resolver.set("dmarc.provider.example.org", &["v=DMARC1; p=none"]);
+
+        let found = resolver
+            .lookup_txt("_dmarc.attacker.example.com")
+            .await
+            .unwrap();
+
+        assert_eq!(found, ["v=DMARC1; p=none"]);
+    }
+
+    #[tokio::test]
+    async fn an_alias_chain_into_a_private_zone_is_refused_and_returns_no_records() {
+        let resolver = FixtureResolver::new();
+        resolver.set_cname("_dmarc.attacker.example.com", "hop.provider.example.net");
+        resolver.set_cname("hop.provider.example.net", "secret.corp");
+        resolver.set("secret.corp", &["internal-token=hunter2"]);
+        resolver.set_cname("direct.example.com", "x.internal");
+        resolver.set("x.internal", &["v=spf1 -all"]);
+
+        for name in ["_dmarc.attacker.example.com", "direct.example.com"] {
+            assert!(
+                resolver.lookup_txt(name).await.unwrap().is_empty(),
+                "{name}"
+            );
+        }
     }
 }

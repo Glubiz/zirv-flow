@@ -184,9 +184,10 @@ pub async fn update_sender_identity(
     id: Uuid,
     patch: &SenderIdentityPatch<'_>,
 ) -> Result<SenderIdentity, IdentityError> {
+    // Lock order is the domain, then the identity (see `require_verified_sender`): the domain is
+    // found without a lock, locked `FOR SHARE`, and only then is the identity locked.
     let existing: Option<Uuid> = sqlx::query_scalar(
-        "SELECT domain_id FROM sender_identities \
-         WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL FOR UPDATE",
+        "SELECT domain_id FROM sender_identities WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace.as_uuid())
     .bind(id)
@@ -194,13 +195,23 @@ pub async fn update_sender_identity(
     .await
     .map_err(StoreError::query)?;
     let domain_id = existing.ok_or(IdentityError::NotFound)?;
-    if let Some(address) = patch.from_address {
-        let domain = domain_name(connection, workspace, domain_id)
-            .await?
-            .ok_or(IdentityError::NotFound)?;
-        if !on_domain(address, &domain) {
-            return Err(IdentityError::OffDomain);
-        }
+    let domain = domain_name(connection, workspace, domain_id)
+        .await?
+        .ok_or(IdentityError::NotFound)?;
+    let live: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM sender_identities \
+         WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    live.ok_or(IdentityError::NotFound)?;
+    if let Some(address) = patch.from_address
+        && !on_domain(address, &domain)
+    {
+        return Err(IdentityError::OffDomain);
     }
     Ok(sqlx::query_as(concat!(
         "UPDATE sender_identities SET from_name = COALESCE($3, from_name), \
