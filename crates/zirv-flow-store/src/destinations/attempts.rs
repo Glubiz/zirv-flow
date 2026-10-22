@@ -173,6 +173,18 @@ pub fn count_delivery_attempt(workspace: WorkspaceId, attempt: &NewDeliveryAttem
     .increment(1);
 }
 
+/// Counts an attempt that was made but could not be recorded:
+/// `zirv_flow_delivery_attempt_record_failures_total{workspace,destination}`. Ids only. The send
+/// is not repeated for it, so this counter is the only trace of the missing row.
+pub fn count_delivery_attempt_record_failure(workspace: WorkspaceId, destination: Uuid) {
+    metrics::counter!(
+        "zirv_flow_delivery_attempt_record_failures_total",
+        "workspace" => workspace.as_uuid().to_string(),
+        "destination" => destination.to_string(),
+    )
+    .increment(1);
+}
+
 /// The newest attempts of a destination, newest first, at most `limit`.
 pub async fn list_delivery_attempts<'e>(
     executor: impl PgExecutor<'e>,
@@ -389,6 +401,24 @@ mod tests {
                 oldest_age_seconds: 0,
             }]
         );
+    }
+
+    #[test]
+    fn a_failed_recording_is_counted_by_ids_only() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let ws = WorkspaceId::new();
+        let id = Uuid::from_u128(9);
+
+        count_delivery_attempt_record_failure(ws, id);
+
+        let output = handle.render();
+        let want = format!(
+            "zirv_flow_delivery_attempt_record_failures_total{{workspace=\"{}\",destination=\"{id}\"}} 1",
+            ws.as_uuid()
+        );
+        assert!(output.contains(&want), "{output}");
     }
 
     #[sqlx::test]

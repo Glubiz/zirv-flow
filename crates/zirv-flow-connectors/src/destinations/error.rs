@@ -20,6 +20,12 @@ pub enum DestinationError {
     Egress(HttpError),
     /// The remote system answered with an error status.
     Upstream(u16),
+    /// As [`Upstream`](Self::Upstream), with the raw `Retry-After` header the answer carried. The
+    /// pipeline reads it against its own clock, so a date is counted from the time it judges.
+    Answered {
+        status: u16,
+        retry_after: Option<String>,
+    },
     /// The remote system asked for fewer requests (HTTP 429), optionally for how long.
     RateLimited { retry_after: Option<Duration> },
     /// The type does not do this (an erase call on a type without the capability).
@@ -43,8 +49,9 @@ impl DestinationError {
     /// How the pipeline treats this failure.
     ///
     /// An egress denial, a bad setting, a refused credential and a missing capability are
-    /// terminal: waiting changes nothing. An unreachable host, a transport failure, a 5xx or an
-    /// unclassified failure retries. A 429 throttles. Any other 4xx is terminal.
+    /// terminal: waiting changes nothing. An unreachable host, a transport failure, a 408, a 5xx
+    /// or an unclassified failure retries. A 429 throttles. Any other 4xx is terminal, and so is a
+    /// status outside 200 to 599 that is not a success (a redirect is never followed).
     pub fn disposition(&self) -> Disposition {
         match self {
             Self::Config { .. }
@@ -55,9 +62,11 @@ impl DestinationError {
             Self::RateLimited { retry_after } => Disposition::Throttled {
                 retry_after: *retry_after,
             },
-            Self::Upstream(429) => Disposition::Throttled { retry_after: None },
-            Self::Upstream(status) if (400..500).contains(status) => Disposition::Terminal,
-            Self::Upstream(_) => Disposition::Retryable,
+            Self::Upstream(status) | Self::Answered { status, .. } => match status {
+                429 => Disposition::Throttled { retry_after: None },
+                408 | 500..=599 => Disposition::Retryable,
+                _ => Disposition::Terminal,
+            },
         }
     }
 }
@@ -69,7 +78,9 @@ impl fmt::Display for DestinationError {
             Self::Auth => f.write_str("the destination refused the credential"),
             Self::Unreachable => f.write_str("the destination could not be reached"),
             Self::Egress(error) => error.fmt(f),
-            Self::Upstream(status) => write!(f, "the destination answered with status {status}"),
+            Self::Upstream(status) | Self::Answered { status, .. } => {
+                write!(f, "the destination answered with status {status}")
+            }
             Self::RateLimited { .. } => f.write_str("the destination asked for a slower rate"),
             Self::Unsupported => f.write_str("the destination type does not support this"),
             Self::Other(reason) => f.write_str(reason),
@@ -132,6 +143,41 @@ mod tests {
         assert_eq!(
             DestinationError::from(HttpError::Timeout).disposition(),
             Disposition::Retryable
+        );
+    }
+
+    #[test]
+    fn a_408_retries_and_an_unexpected_status_is_terminal_and_the_header_does_not_change_it() {
+        for status in [408, 500, 503, 599] {
+            assert_eq!(
+                DestinationError::Upstream(status).disposition(),
+                Disposition::Retryable,
+                "{status}"
+            );
+        }
+        for status in [100, 301, 302, 307, 404, 600] {
+            assert_eq!(
+                DestinationError::Upstream(status).disposition(),
+                Disposition::Terminal,
+                "{status}"
+            );
+        }
+        let answered = DestinationError::Answered {
+            status: 503,
+            retry_after: Some("120".into()),
+        };
+        assert_eq!(answered.disposition(), Disposition::Retryable);
+        assert_eq!(
+            DestinationError::Answered {
+                status: 429,
+                retry_after: None
+            }
+            .disposition(),
+            Disposition::Throttled { retry_after: None }
+        );
+        assert_eq!(
+            answered.to_string(),
+            "the destination answered with status 503"
         );
     }
 

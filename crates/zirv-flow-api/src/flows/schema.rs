@@ -205,7 +205,9 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
             "action.webhook",
             node(
                 "action.webhook",
-                "Calls a URL with a signed, fixed envelope plus the listed trait keys. Port `next`.",
+                "Calls a URL with a signed JSON body: the fixed envelope plus the listed trait keys, or, \
+                 with a `template`, the headers and body that published webhook template renders. \
+                 Port `next`.",
             )
             .property(
                 "url",
@@ -219,7 +221,8 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
                 ArrayBuilder::new()
                     .items(string())
                     .max_items(Some(MAX_TRAIT_KEYS)),
-            ),
+            )
+            .property("template", uuid()),
         ),
         (
             "action.update_trait",
