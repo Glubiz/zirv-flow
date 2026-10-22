@@ -73,12 +73,17 @@ pub(crate) fn judge_error(error: &HttpError) -> Verdict {
             message: "the request to the destination timed out",
             retry_after: None,
         },
-        HttpError::BodyTooLarge | HttpError::Transport(_) => Verdict::Retry {
-            status: None,
-            reason: "transport",
-            message: "the request to the destination failed",
-            retry_after: None,
-        },
+        HttpError::BodyTooLarge | HttpError::Transport(_) => transport_failed(),
+    }
+}
+
+/// The request never got an answer.
+fn transport_failed() -> Verdict {
+    Verdict::Retry {
+        status: None,
+        reason: "transport",
+        message: "the request to the destination failed",
+        retry_after: None,
     }
 }
 
@@ -122,12 +127,7 @@ pub(crate) fn verdict_of(
             retry_after: *retry_after,
         },
         Err(DestinationError::Egress(error)) => judge_error(error),
-        Err(DestinationError::Unreachable) => Verdict::Retry {
-            status: None,
-            reason: "transport",
-            message: "the request to the destination failed",
-            retry_after: None,
-        },
+        Err(DestinationError::Unreachable) => transport_failed(),
         Err(DestinationError::Other(_)) => Verdict::Retry {
             status: None,
             reason: "other",

@@ -60,16 +60,7 @@ use zirv_flow_store::{
 };
 
 use crate::delivery::{self, Attempt, Verdict};
-
-// The unit tests judge statuses and read headers through the names this module had before the
-// delivery code was shared.
-#[cfg(test)]
-use crate::delivery::verdict::{judge, judge_error, parse_retry_after};
 use crate::{JobContext, JobError, JobKind};
-#[cfg(test)]
-use zirv_flow_connectors::http::HttpError;
-#[cfg(test)]
-use zirv_flow_core::flow::{SIGNATURE_HEADER, TIMESTAMP_HEADER};
 
 pub(crate) struct WebhookCall;
 
@@ -466,8 +457,9 @@ mod tests {
     use time::Duration as Span;
     use time::macros::datetime;
     use tokio::sync::{Notify, watch};
+    use zirv_flow_connectors::http::HttpError;
     use zirv_flow_core::egress::EgressPolicy;
-    use zirv_flow_core::flow::SIGNING_GRACE_SECONDS;
+    use zirv_flow_core::flow::{SIGNATURE_HEADER, SIGNING_GRACE_SECONDS, TIMESTAMP_HEADER};
     use zirv_flow_core::people::{Precedence, TraitType};
     use zirv_flow_core::signature::{Scheme, generate_secret, verify};
     use zirv_flow_core::{
@@ -479,6 +471,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::delivery::verdict::{judge, judge_error, parse_retry_after};
     use crate::{Registry, Worker, WorkerConfig};
 
     const SECRET_BODY: &str = "RESPONSE-BODY-MUST-NOT-LAND-ANYWHERE";
