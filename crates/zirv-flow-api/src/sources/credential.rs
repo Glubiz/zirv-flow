@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::problem::ApiError;
 
 /// The plaintext of a credential secret.
-pub(super) fn to_plaintext(
+pub(crate) fn to_plaintext(
     values: &BTreeMap<String, SecretString>,
 ) -> Result<SecretBytes, ApiError> {
     let fields: BTreeMap<&str, &str> = values
@@ -32,7 +32,7 @@ fn from_plaintext(bytes: &SecretBytes) -> Result<Credential, ApiError> {
 }
 
 /// The keys that open stored secrets, or 503 when the server was started without them.
-pub(super) fn keyring(state: &AppState) -> Result<&std::sync::Arc<Keyring>, ApiError> {
+pub(crate) fn keyring(state: &AppState) -> Result<&std::sync::Arc<Keyring>, ApiError> {
     state.keyring().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

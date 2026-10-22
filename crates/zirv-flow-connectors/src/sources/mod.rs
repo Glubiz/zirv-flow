@@ -33,10 +33,10 @@ pub use types::{
     Batch, Checkpoint, FieldDescriptor, FieldType, Record, Refused, StreamConfig, StreamDescriptor,
     SyncMode,
 };
-pub(crate) use validate::url_problem_https;
 pub use validate::{
     FieldError, StreamSettingsInput, validate_config, validate_credential, validate_stream_settings,
 };
+pub(crate) use validate::{check_config, check_credential, url_problem_https};
 pub use webhook::PAYLOAD_STREAM;
 
 /// The token the fake source's connection test accepts.

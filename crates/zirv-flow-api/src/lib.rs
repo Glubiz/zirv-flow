@@ -7,6 +7,7 @@ mod consent;
 mod contacts;
 mod cookies;
 mod credentials;
+mod destinations;
 mod events;
 mod flows;
 mod health;
@@ -488,6 +489,20 @@ fn routes() -> Router<AppState> {
                 .put(contacts::crud::replace)
                 .patch(contacts::crud::patch)
                 .delete(contacts::crud::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/destinations",
+            get(destinations::crud::list).post(destinations::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/destinations/{id}",
+            get(destinations::crud::get)
+                .patch(destinations::crud::update)
+                .delete(destinations::crud::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/destinations/{id}/check",
+            post(destinations::actions::check),
         )
         .route("/api/v1/source-kinds", get(sources::kinds::list))
         .route(

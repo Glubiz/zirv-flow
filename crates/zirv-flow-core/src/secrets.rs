@@ -284,6 +284,8 @@ pub enum SecretPurpose {
     WebhookSecret,
     /// The per-workspace secret an `action.webhook` call is signed with.
     WebhookSigning,
+    /// The password or token a destination uses to deliver messages.
+    DestinationCredential,
 }
 
 impl SecretPurpose {
@@ -295,6 +297,7 @@ impl SecretPurpose {
             Self::AiProviderKey => "ai_provider_key",
             Self::WebhookSecret => "webhook_secret",
             Self::WebhookSigning => "webhook_signing",
+            Self::DestinationCredential => "destination_credential",
         }
     }
 
@@ -306,6 +309,7 @@ impl SecretPurpose {
             Self::AiProviderKey,
             Self::WebhookSecret,
             Self::WebhookSigning,
+            Self::DestinationCredential,
         ]
         .into_iter()
         .find(|purpose| purpose.as_str() == text)
@@ -908,6 +912,7 @@ mod tests {
             SecretPurpose::AiProviderKey,
             SecretPurpose::WebhookSecret,
             SecretPurpose::WebhookSigning,
+            SecretPurpose::DestinationCredential,
         ] {
             assert_eq!(SecretPurpose::parse(purpose.as_str()), Some(purpose));
         }

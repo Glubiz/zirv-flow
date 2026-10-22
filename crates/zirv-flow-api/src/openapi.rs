@@ -4,6 +4,7 @@ use utoipa::{Modify, OpenApi};
 use crate::assistant;
 use crate::consent::{dimensions, person, suppressions, topics, transfer};
 use crate::contacts;
+use crate::destinations;
 use crate::events::{
     self, CreateEventSchemaRequest, EventPolicyBody, EventSchemaBody, EventSchemaDetailBody,
     IngestRejectBody, IngestRejectsBody, PropertyBody, ReasonBody, RedactionBody, SaveDraftRequest,
@@ -171,6 +172,12 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         templates::publish::version,
         templates::where_used::where_used,
         templates::preview::preview,
+        destinations::crud::list,
+        destinations::crud::create,
+        destinations::crud::get,
+        destinations::crud::update,
+        destinations::crud::remove,
+        destinations::actions::check,
         sources::kinds::list,
         sources::crud::list,
         sources::crud::create,
@@ -463,6 +470,10 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         lists::person::PersonListBody,
         lists::person::MembershipHistoryBody,
         lists::person::MembershipChangeBody,
+        destinations::crud::DestinationBody,
+        destinations::crud::CreateDestinationRequest,
+        destinations::crud::UpdateDestinationRequest,
+        destinations::actions::DestinationCheckBody,
         sources::kinds::SourceKindBody,
         sources::kinds::FieldSpecBody,
         sources::kinds::CapabilitiesBody,
