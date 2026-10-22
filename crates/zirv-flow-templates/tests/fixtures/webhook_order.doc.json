@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "channel": "webhook",
+  "mode": "code",
+  "webhook": {
+    "headers": {
+      "X-Order": "{{ event.order_id }}",
+      "X-Static": "zirv-flow"
+    },
+    "body": "{\"order\":\"{{ event.order_id }}\",\"customer\":{\"name\":\"{{ person.first_name }}\",\"age\":\"{{ person.age }}\",\"vip\":\"{{ person.vip }}\",\"tags\":\"{{ person.tags }}\"},\"total\":\"{{ event.total * 2 }}\",\"note\":\"Order {{ event.order_id }} for {{ person.first_name }}\",\"fixed\":[1,true,null,\"plain\"]}"
+  }
+}

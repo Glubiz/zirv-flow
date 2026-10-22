@@ -1,0 +1,9 @@
+{
+  "person": { "first_name": "Ann <Admin>", "vip": true, "age": 41 },
+  "event": { "order_id": "A-1001", "items": ["Tea & biscuits", "Mug"] },
+  "message": { "id": "0192f4b7-0000-7000-8000-000000000001" },
+  "system": {
+    "unsubscribe_url": "https://flow.example/u/abc?s=1&t=2",
+    "preferences_url": "https://flow.example/p/abc?s=1&t=3"
+  }
+}
