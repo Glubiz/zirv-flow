@@ -1,0 +1,13 @@
+{
+  "headers": [
+    [
+      "List-Unsubscribe",
+      "<https://flow.example/u/abc?s=1&t=2>"
+    ],
+    [
+      "List-Unsubscribe-Post",
+      "List-Unsubscribe=One-Click"
+    ]
+  ],
+  "subject": "Ann <Admin>, your order A-1001 shipped"
+}

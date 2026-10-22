@@ -1,0 +1,13 @@
+{
+  "headers": [
+    [
+      "X-Order",
+      "A-1001"
+    ],
+    [
+      "X-Static",
+      "zirv-flow"
+    ]
+  ],
+  "body": "{\"customer\":{\"age\":41,\"name\":\"Ann \\\"The Boss\\\"\",\"tags\":[\"a\",\"b\"],\"vip\":true},\"fixed\":[1,true,null,\"plain\"],\"note\":\"Order A-1001 for Ann \\\"The Boss\\\"\",\"order\":\"A-1001\",\"total\":25.0}"
+}

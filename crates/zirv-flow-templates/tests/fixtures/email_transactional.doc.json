@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "code",
+  "email": {
+    "subject": "Your receipt\r\n for {{ event.order_id }}",
+    "sender": "snd_0192f4a1",
+    "lang": "da",
+    "category": "transactional",
+    "html": "<p>Tak, {{ person.first_name | default('kunde') }}.</p><p><a href=\"https://shop.example/receipt/{{ event.order_id }}\">Receipt</a></p>",
+    "text": "Tak, {{ person.first_name | default('kunde') }}.\nhttps://shop.example/receipt/{{ event.order_id }}"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "person": { "first_name": "Ann \"The Boss\"", "age": 41, "vip": true, "tags": ["a", "b"] },
+  "event": { "order_id": "A-1001", "total": 12.5 },
+  "message": { "id": "0192f4b7-0000-7000-8000-000000000003" }
+}

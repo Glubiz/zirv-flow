@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "code",
+  "email": {
+    "subject": "{{ person.first_name | default('Hi') }}, your order {{ event.order_id }} shipped",
+    "sender": "snd_0192f4a1",
+    "lang": "en",
+    "category": "marketing",
+    "html": "<!doctype html>\n<html lang=\"en\"><body>\n<h1>Hello {{ person.first_name }}</h1>\n<p>Order {{ event.order_id }} is on its way.</p>\n{% if person.vip %}<p>Thanks for being a VIP.</p>{% endif %}\n<ul>{% for item in event.items %}<li>{{ item }}</li>{% endfor %}</ul>\n<p><a href=\"https://shop.example/orders/{{ event.order_id }}?ref=mail&utm=1\">Track</a> | <a href=\"mailto:help@shop.example\">Help</a></p>\n<p><a href=\"{{ system.preferences_url }}\">Preferences</a> | <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></p>\n</body></html>\n",
+    "text": "Hello {{ person.first_name }}\nOrder {{ event.order_id }} is on its way.\nUnsubscribe: {{ system.unsubscribe_url }}\n"
+  }
+}
