@@ -171,6 +171,35 @@ pub async fn list_domain_records<'e>(
     .map_err(StoreError::query)
 }
 
+#[derive(FromRow)]
+struct WorkspaceRecord {
+    domain_id: Uuid,
+    #[sqlx(flatten)]
+    record: DomainRecord,
+}
+
+/// Every record of every domain of the workspace, tagged with its domain id, each domain's
+/// records in the order DKIM, SPF, DMARC: one query for a listing, not one per domain.
+pub async fn list_workspace_domain_records<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+) -> Result<Vec<(Uuid, DomainRecord)>, StoreError> {
+    let rows: Vec<WorkspaceRecord> = sqlx::query_as(concat!(
+        "SELECT domain_id, ",
+        record_columns!(),
+        " FROM sending_domain_records WHERE workspace_id = $1 \
+         ORDER BY domain_id, array_position(ARRAY['dkim', 'spf', 'dmarc'], kind)"
+    ))
+    .bind(workspace.as_uuid())
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.domain_id, row.record))
+        .collect())
+}
+
 /// What deleting a domain did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DomainDelete {
@@ -279,6 +308,28 @@ mod tests {
         assert!(records[0].expected_text.starts_with("v=DKIM1; k=rsa; p="));
         assert_eq!(records[1].expected_text, "v=spf1 ~all");
         assert_eq!(records[2].expected_text, "v=DMARC1; p=none");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_workspace_listing_of_records_matches_the_per_domain_one(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let first = plant_domain(&pool, ws, "a.example.com").await.unwrap();
+        let second = plant_domain(&pool, ws, "b.example.com").await.unwrap();
+        plant_domain(&pool, other, "c.example.com").await.unwrap();
+
+        let all = list_workspace_domain_records(&pool, ws).await.unwrap();
+
+        assert_eq!(all.len(), 6);
+        for id in [first, second] {
+            let of_domain: Vec<_> = all
+                .iter()
+                .filter(|(domain, _)| *domain == id)
+                .map(|(_, record)| record.clone())
+                .collect();
+            assert_eq!(of_domain, list_domain_records(&pool, ws, id).await.unwrap());
+        }
     }
 
     #[sqlx::test]

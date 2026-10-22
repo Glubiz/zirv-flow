@@ -20,7 +20,7 @@ mod verify;
 pub use domains::{
     DomainDelete, DomainRecord, NewSendingDomain, SendingDomain, create_sending_domain,
     delete_sending_domain, due_sending_domains, find_sending_domain, list_domain_records,
-    list_sending_domains,
+    list_sending_domains, list_workspace_domain_records,
 };
 pub use identities::{
     IdentityError, NewSenderIdentity, SenderIdentity, SenderIdentityPatch, archive_sender_identity,

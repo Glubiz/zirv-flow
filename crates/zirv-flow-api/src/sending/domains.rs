@@ -291,10 +291,19 @@ pub(crate) async fn list(
 ) -> Result<Json<Vec<SendingDomainBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let domains = zirv_flow_store::list_sending_domains(&state.pool, workspace.id).await?;
-    let mut bodies = Vec::with_capacity(domains.len());
-    for domain in &domains {
-        bodies.push(records_of(&state.pool, workspace.id, domain).await?);
-    }
+    let all_records =
+        zirv_flow_store::list_workspace_domain_records(&state.pool, workspace.id).await?;
+    let bodies = domains
+        .iter()
+        .map(|domain| {
+            let records: Vec<DomainRecord> = all_records
+                .iter()
+                .filter(|(id, _)| *id == domain.id)
+                .map(|(_, record)| record.clone())
+                .collect();
+            SendingDomainBody::new(domain, &records)
+        })
+        .collect();
     Ok(Json(bodies))
 }
 
