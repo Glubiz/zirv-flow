@@ -27,24 +27,30 @@ pub(crate) enum FrameError {
     Io(io::Error),
 }
 
-fn check(length: usize, max: usize) -> Result<(), FrameError> {
-    if length > max {
-        Err(FrameError::TooLarge(length))
-    } else {
-        Ok(())
-    }
-}
-
-fn eof_or(error: io::Error, truncated: bool) -> FrameError {
+/// A read that hit the end of the stream inside a frame: cut short, or the stream failed.
+fn cut(error: io::Error) -> FrameError {
     if error.kind() == io::ErrorKind::UnexpectedEof {
-        if truncated {
-            FrameError::Truncated
-        } else {
-            FrameError::Closed
-        }
+        FrameError::Truncated
     } else {
         FrameError::Io(error)
     }
+}
+
+/// The payload length a prefix announces, refused when over `max`.
+fn payload_length(prefix: [u8; 4], max: usize) -> Result<usize, FrameError> {
+    let length = u32::from_be_bytes(prefix) as usize;
+    if length > max {
+        Err(FrameError::TooLarge(length))
+    } else {
+        Ok(length)
+    }
+}
+
+/// The 4-byte prefix for `payload`.
+fn length_prefix(payload: &[u8]) -> io::Result<[u8; 4]> {
+    u32::try_from(payload.len())
+        .map(u32::to_be_bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too long"))
 }
 
 /// Read one frame, refusing a length over `max`.
@@ -61,23 +67,15 @@ pub(crate) fn read_frame(input: &mut impl Read, max: usize) -> Result<Vec<u8>, F
     if first == 0 {
         return Err(FrameError::Closed);
     }
-    input
-        .read_exact(&mut prefix[1..])
-        .map_err(|error| eof_or(error, true))?;
-    let length = u32::from_be_bytes(prefix) as usize;
-    check(length, max)?;
-    let mut payload = vec![0u8; length];
-    input
-        .read_exact(&mut payload)
-        .map_err(|error| eof_or(error, true))?;
+    input.read_exact(&mut prefix[1..]).map_err(cut)?;
+    let mut payload = vec![0u8; payload_length(prefix, max)?];
+    input.read_exact(&mut payload).map_err(cut)?;
     Ok(payload)
 }
 
 /// Write one frame and flush.
 pub(crate) fn write_frame(output: &mut impl Write, payload: &[u8]) -> io::Result<()> {
-    let length = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too long"))?;
-    output.write_all(&length.to_be_bytes())?;
+    output.write_all(&length_prefix(payload)?)?;
     output.write_all(payload)?;
     output.flush()
 }
@@ -92,17 +90,9 @@ pub(crate) async fn read_frame_async(
     if first == 0 {
         return Err(FrameError::Closed);
     }
-    input
-        .read_exact(&mut prefix[1..])
-        .await
-        .map_err(|error| eof_or(error, true))?;
-    let length = u32::from_be_bytes(prefix) as usize;
-    check(length, max)?;
-    let mut payload = vec![0u8; length];
-    input
-        .read_exact(&mut payload)
-        .await
-        .map_err(|error| eof_or(error, true))?;
+    input.read_exact(&mut prefix[1..]).await.map_err(cut)?;
+    let mut payload = vec![0u8; payload_length(prefix, max)?];
+    input.read_exact(&mut payload).await.map_err(cut)?;
     Ok(payload)
 }
 
@@ -111,9 +101,7 @@ pub(crate) async fn write_frame_async(
     output: &mut (impl AsyncWrite + Unpin),
     payload: &[u8],
 ) -> io::Result<()> {
-    let length = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame too long"))?;
-    output.write_all(&length.to_be_bytes()).await?;
+    output.write_all(&length_prefix(payload)?).await?;
     output.write_all(payload).await?;
     output.flush().await
 }

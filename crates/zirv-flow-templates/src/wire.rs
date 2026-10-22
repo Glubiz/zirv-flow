@@ -82,12 +82,16 @@ impl RenderResponse {
         }
     }
 
+    fn typed_error<T>(code: &str, field: Option<&str>) -> Option<Result<T, RenderError>> {
+        RenderError::from_wire(code, field).map(Err)
+    }
+
     /// The email result, or `None` when this response is not an answer to an email request (or
     /// names an error code this crate does not define): a protocol fault.
     pub fn into_email(self) -> Option<Result<Rendered, RenderError>> {
         match self {
             Self::Email(rendered) => Some(Ok(rendered)),
-            Self::Error { code, field } => RenderError::from_wire(&code, field.as_deref()).map(Err),
+            Self::Error { code, field } => Self::typed_error(&code, field.as_deref()),
             Self::Webhook(_) => None,
         }
     }
@@ -96,7 +100,7 @@ impl RenderResponse {
     pub fn into_webhook(self) -> Option<Result<RenderedWebhook, RenderError>> {
         match self {
             Self::Webhook(rendered) => Some(Ok(rendered)),
-            Self::Error { code, field } => RenderError::from_wire(&code, field.as_deref()).map(Err),
+            Self::Error { code, field } => Self::typed_error(&code, field.as_deref()),
             Self::Email(_) => None,
         }
     }
