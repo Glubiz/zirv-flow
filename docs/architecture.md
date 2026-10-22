@@ -131,7 +131,7 @@ fails, loops back off and ingestion returns `503`; v1 does not buffer locally.
 ## 5. Module and crate layout
 
 M0 is a single crate. The Cargo workspace arrives in M1: `crates/<name>` for
-each crate below (`zirv-flow-ai` joins in M3, `zirv-flow-identity` in M1 with OIDC sign-in and `zirv-flow-templates` in M6), plus `web/` (TypeScript +
+each crate below (`zirv-flow-ai` joins in M3, `zirv-flow-identity` in M1 with OIDC sign-in, `zirv-flow-templates` and `zirv-flow-render` in M6), plus `web/` (TypeScript +
 React SPA, Vite, React Flow canvas).
 
 | Crate | Contents | Independent reason to exist |
@@ -144,16 +144,19 @@ React SPA, Vite, React Flow canvas).
 | `zirv-flow-connectors` | `Source`/`Destination` traits, connector runtime, built-ins, HTTP manifests, email transport | Heavy, fast-moving external dependencies (HTTP, SMTP, source DB drivers). Depends on `core` only: yields records and checkpoints, never writes the profile store. |
 | `zirv-flow-identity` | OIDC discovery, JWKS and the authorization-code exchange with ID-token verification (`openidconnect`, rustls) | Every outbound call to the operator-configured identity provider lives here, so `api` stays inbound-only. Depends on `core` only. The issuer is operator-configured, so the M3 egress policy does not apply to it. |
 | `zirv-flow-ai` | Provider trait and OpenAI-compatible and Anthropic adapters; structured tool-call orchestration, bounded repair, budgets, audit inputs and deterministic fake provider | Optional outbound protocols and HTTP dependencies change independently from the deterministic domain crates. The crate coordinates existing typed tools and validators but neither defines nor bypasses them. |
-| `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with code templates; M7 adds block documents. |
+| `zirv-flow-templates` | Template document types and schema migrations, MiniJinja sandbox, rich-text sanitizer, MJML generation and rendering via `mrml`, text-part generation, webhook payload rendering, publish validation | Pure renderer used by `api` (preview) and `jobs` (send), so preview and send share one code path. Own golden corpus (per-block renders, migrations). Its dependencies (`mrml`, MiniJinja, sanitizer) are pure but too heavy for `core`, and `connectors` cannot be held pure by the `cargo tree` check. Starts in M6 with HTML and MJML code templates and the v1 block document; M7 adds themes, snippets and migrations. |
+| `zirv-flow-render` | Pool client for the isolated render host (11.9): spawns and supervises `zirv-flow render-host` children, length-prefixed JSON framing, per-render deadline, kill and respawn, typed render failure, metrics; the child-side serve loop | The one place that spawns render processes, so `templates` stays pure and `api` and `jobs` share one pool implementation. Depends on `core` and `templates`. |
 | `zirv-flow-api` | axum router, auth, OpenAPI, ingestion, tracking, static UI serving, assistant tools (`AiTool` implementations and their registry) | HTTP surface; neither `api` nor `jobs` depends on the other |
 | `zirv-flow-jobs` | Worker and scheduler loops, job registry, job handlers | Composition point for background work: handlers combine `store`, `segments`, `engine`, `templates`, `connectors`, which no other crate needs together |
 
 ```mermaid
 flowchart LR
   bin[zirv-flow] --> api & jobs & store
-  api --> segments & engine & templates & connectors & ai & identity & store & core
-  jobs --> segments & engine & templates & connectors & ai & store & core
-  segments & engine & templates & connectors & ai & identity & store --> core
+  bin --> render
+  api --> segments & engine & templates & render & connectors & ai & identity & store & core
+  jobs --> segments & engine & templates & render & connectors & ai & store & core
+  render --> templates
+  segments & engine & templates & render & connectors & ai & identity & store --> core
 ```
 
 ### 5.1 Allowed crate dependencies
@@ -163,7 +166,7 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 
 | Crate | May depend directly on |
 |-------|-------------------------|
-| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs`, `zirv-flow-store` |
+| `zirv-flow` (bin) | `zirv-flow-api`, `zirv-flow-jobs`, `zirv-flow-store`, `zirv-flow-render` |
 | `zirv-flow-core` | none |
 | `zirv-flow-store` | `zirv-flow-core` |
 | `zirv-flow-segments` | `zirv-flow-core` |
@@ -172,14 +175,15 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 | `zirv-flow-ai` | `zirv-flow-core` |
 | `zirv-flow-identity` | `zirv-flow-core` |
 | `zirv-flow-templates` | `zirv-flow-core` |
+| `zirv-flow-render` | `zirv-flow-core`, `zirv-flow-templates` |
 | `zirv-flow-loadgen` (tools/loadgen) | none |
-| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates` |
-| `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates` |
+| `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates`, `zirv-flow-render` |
+| `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates`, `zirv-flow-render` |
 
 `api` and `jobs` never depend on each other, and no crate depends on the binary.
 The pure crates (`core`, `segments`, `engine`, `templates`) never depend on an
 I/O crate, sqlx, an HTTP client or tokio networking. `store` owns sqlx;
-`connectors`, `ai` and `identity` are the outbound-I/O crates.
+`connectors`, `ai` and `identity` are the outbound-I/O crates, and `render` is the process-spawning one.
 
 `engine` depends on `core` only, so it never sees `segments`. The flow graph types
 and their structural publish validation (cycles, unreachable nodes, untyped edges)
@@ -231,7 +235,7 @@ the registry enumerates implementations.
 |-----------|-------|--------------|---------------------------|
 | Connectors | `Source` | `zirv-flow-connectors` | One source module and one source-registry line |
 | Destinations and channels | `Destination` | `zirv-flow-connectors` | One destination module and one destination-registry line |
-| Template content types | `TemplateContent` | `zirv-flow-templates` | One content-type module and one content-registry line |
+| Template content types | `TemplateContent` | `zirv-flow-templates` | One content-type module and one content-registry line (`html`, `mjml`, `blocks` and `webhook` in M6) |
 | Job kinds | `JobKind` | `zirv-flow-jobs` | One handler module and one job-registry line |
 | AI tools | `AiTool` (defined in `zirv-flow-ai`) | `zirv-flow-api` (`assistant` feature module) | One tool module and one tool-registry line; tools live in `api` because they call validators and store reads that `ai` may not depend on (5.1) |
 
@@ -1216,8 +1220,11 @@ versioned JSON, edited in the React builder and rendered server-side in Rust per
 channel (ADR-006). Preview and send call the same renderer
 (`zirv-flow-templates`). v1.0 builds email and webhook content. SMS, push and
 in-app content types are defined in the schema from day one, and their builders
-ship with those channels after 1.0. M6 ships code templates (MiniJinja HTML and
-text); M7 adds the block builder on the same renderer.
+ship with those channels after 1.0. M6 ships HTML and MJML code templates and the
+builder core (block document v1, its renderer and the WYSIWYG block editor); M7
+adds themes, snippets, assets, visibility conditions, the webhook payload editor
+and assistant drafting on the same renderer. Rendering runs in an isolated child
+process (11.9).
 
 ### 11.1 Content model
 
@@ -1238,7 +1245,7 @@ text); M7 adds the block builder on the same renderer.
 | `in_app` | Title, body, image, call to action | Reserved |
 
 - Every document carries an integer `schema`. The server reads older schemas through migrations (11.8) and refuses newer ones.
-- `mode` is `blocks` or `code`. Code mode (raw HTML + text with MiniJinja) is the escape hatch. Conversion is one-way: blocks to code produces HTML and text with merge tags kept; code to blocks is never offered.
+- `mode` is `blocks` or `code`. Code mode is the escape hatch and is HTML (raw HTML + text with MiniJinja) or MJML (MJML source with MiniJinja, plus a text part). The registered content types are `html`, `mjml` and `blocks` for email, and `webhook`. Conversion is one-way: blocks to MJML code keeps merge tags; code to blocks is never offered.
 - Reserved channel types define typed fields and length rules now, so content and validation keep their shape when those builders ship.
 
 ### 11.2 Email block set v1
@@ -1279,8 +1286,10 @@ under the block-set growth policy (OQ-23).
 6. Generate the text part from the block tree (headings, paragraphs, links as `label: url`), not by scraping the HTML.
 7. Post-render: rewrite links for click tracking, bind the required `marketing` unsubscribe footer to the message's signed URLs, add the `List-Unsubscribe` headers. Preview runs this step with inert tokens.
 
-Code mode runs steps 4 (on the whole HTML and text) and 7; webhook content
-renders as in 11.7. Output is deterministic: no clock reads, random ids or
+HTML code mode runs steps 4 (on the whole HTML and text) and 7. MJML code mode runs
+step 4 over the whole MJML source and the text part, then step 5 (`mrml` with its
+include loaders disabled; a parse error is a blocking validation issue), then 7.
+Webhook content renders as in 11.7. Every step runs inside the render host (11.9). Output is deterministic: no clock reads, random ids or
 map-order dependence, so equal inputs give equal bytes. Golden tests and the
 preview-equals-send test rely on this.
 
@@ -1303,6 +1312,18 @@ Published versions are stored as saved and never rewritten; drafts are upgraded
 when saved. Each migration ships with golden tests: a schema-`N` fixture
 migrates to the expected document and renders byte-identically. The builder
 refuses a document whose schema is newer than the server's.
+
+### 11.9 Render isolation
+
+Fuel and output caps do not bound the memory a template allocates mid-render (ruling f5213fbb),
+so `api` (preview) and `jobs` (send and test send) render in a child process through
+`zirv-flow-render`, never in their own address space.
+
+- **Host.** The `zirv-flow` binary has a hidden `render-host` subcommand. It reads length-prefixed JSON requests on stdin and writes responses on stdout, one render at a time, and calls the `templates` renderer.
+- **Limits.** On Linux the child sets `RLIMIT_AS` on itself, through a safe wrapper, before it reads its first request. Other operating systems run without the OS limit and log a startup warning (development only). The parent enforces a per-render deadline and the existing output caps.
+- **Failure.** A child that exits, is killed by the limit or overruns its deadline is killed and respawned, and that render fails with a typed render error (`render_error` on a send). It never stops the worker, and the next render succeeds.
+- **Pool and metrics.** A fixed-size pool per process (size is configuration) with metrics for queue wait, render time, restarts and failures by reason.
+- **Equality.** The host calls the same renderer functions as an in-process call, so preview and send give the same bytes.
 
 ## 12. Event logging and traceability
 
@@ -2236,9 +2257,11 @@ they were ruled as their capabilities were added to the plan.
 
 - **Context.** Marketers must build content for every channel without writing HTML. Email HTML has to render across clients with very uneven CSS support. Merge fields, unsubscribe links and sender identities must be checked against Zirv Flow's own registry and consent model at publish, and preview must show exactly what will be sent. Rendering runs in Rust on the server for both preview and send, and must be deterministic for golden tests.
 - **Options.** (1) Zirv Flow's own channel-aware block document (versioned JSON) with a server-side Rust renderer. (2) Embed an open-source JavaScript email editor and store the HTML it produces, with form editors for other channels: fast to start, but the stored HTML is opaque to merge-field and compliance checks, every channel gets a different model, and the embedded editor's format and output changes become dependencies Zirv Flow does not control. (3) Code-only templates (status quo): nothing to maintain, but marketers write responsive email HTML by hand, which is the problem being solved.
-- **Decision.** (1). The React builder edits the block document. Rust renders it per channel: email blocks become MJML and then responsive HTML via the `mrml` crate, plus a generated text part; webhook content (later SMS, push and in-app) renders from typed content schemas. Code mode (raw HTML + text with MiniJinja) stays as an escape hatch, one-way only: blocks to code is allowed, code to blocks never. Preview uses the same renderer as send. The first release is narrow: a small email block set, typed forms for other channels, explicit document schema versions. Representative email layouts are validated through `mrml` before the initial block set is committed (an M7 exit criterion). v1.0 covers email and webhook payloads; SMS, push and in-app content types are reserved in the schema, and their builders ship with those channels after 1.0.
+- **Decision.** (1). The React builder edits the block document. Rust renders it per channel: email blocks become MJML and then responsive HTML via the `mrml` crate, plus a generated text part; webhook content (later SMS, push and in-app) renders from typed content schemas. Code mode (raw HTML + text with MiniJinja) stays as an escape hatch, one-way only: blocks to code is allowed, code to blocks never. Preview uses the same renderer as send. The first release is narrow: a small email block set, typed forms for other channels, explicit document schema versions. Representative email layouts are validated through `mrml` before the initial block set is committed (an M6 exit criterion, see the amendment). v1.0 covers email and webhook payloads; SMS, push and in-app content types are reserved in the schema, and their builders ship with those channels after 1.0.
 - **Consequences.** Zirv Flow owns the editor and the document schema migrations; this cost is accepted. Structured content makes validation, personalization checks and preview-equals-send possible. `mrml` becomes a key dependency, so its MJML gaps become Zirv Flow's. Each block added is a permanent migration commitment (OQ-23). The raw HTML block and code mode escape most structural checks other than parsing, size and the required unsubscribe link.
 - **Reverse if.** Block-set requests consistently outpace delivery, so marketers fall back to code mode for common layouts; `mrml` output fails client compatibility for representative layouts and cannot be fixed or worked around; or maintaining the editor and its migrations measurably crowds out the segmentation, data source and integration work.
+
+- **Amendment (M6, rulings 963d119f and f5213fbb).** The builder core ships in M6, not M7: block document v1, its renderer and the WYSIWYG block editor; MJML joins HTML as a code mode; the `mrml` layout check on the representative set is an M6 exit criterion (OQ-25). Rendering runs in an isolated child process with an OS memory limit (11.9). Themes, snippets, assets, visibility conditions, the assistant, the webhook payload editor and document migrations stay in M7.
 
 ### ADR-007: Governed customer events and a distinct causality log
 
@@ -2276,7 +2299,7 @@ they were ruled as their capabilities were added to the plan.
 | OQ-22 | Dark-mode handling: themed dark variants, or rely on client inversion with contrast checks? | M7 |
 | OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
 | OQ-24 | Localization: multi-language variants per template selected by a person trait, in v1.0 or post-1.0? | M7 |
-| OQ-25 | Representative layout set and mail-client matrix used to validate `mrml` output | M7, before the block set is frozen |
+| OQ-25 | Representative layout set and mail-client matrix used to validate `mrml` output | M6, before the v1 block set is frozen |
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
@@ -2408,3 +2431,6 @@ they were ruled as their capabilities were added to the plan.
   AST, with a built-in `recorded consent` rule and new `consent` and `messages` leaves. Reason: a catalog
   keeps values typed and addressable by the read rule, and reusing the AST adds no second language.
   (10.1; supervisor ruling, unparsed reply, with the deny-only refinement an orchestrator decision).
+
+- **Builder core in M6:** Decided for v1 (ruling 963d119f). Block document v1 (with a `schema` number), the v1 email block set, per-document style settings, MJML rendering through `mrml` with a generated text part, an MJML code mode beside HTML code mode and the WYSIWYG block editor ship in M6; the `mrml` check on the representative layout set (OQ-25) is an M6 exit criterion. Themes, snippets, the asset store, visibility conditions, the assistant, the webhook payload editor and document migrations stay in M7. Reason: the operator chose a WYSIWYG block editor and MJML beside HTML code for M6's template editor (2026-10-22), and an `mrml` gap is cheaper to find before sends depend on it (11, ADR-006).
+- **Render memory:** Decided for v1 (ruling f5213fbb). Templates render in a child process under an OS memory limit, with a per-render deadline and output caps; a child termination is a render failure, never a worker crash. Reason: fuel and the end-of-render output cap do not bound intermediate allocation, which a template can use to exhaust the worker's memory (11.9, 5.1).
