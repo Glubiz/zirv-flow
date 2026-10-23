@@ -674,6 +674,8 @@ mod tests {
         version: i32,
         /// The worker has no identifier key, so a send fails after its row was written.
         no_key: bool,
+        /// The master keys the worker opens credentials with.
+        keyring: Option<Arc<zirv_flow_core::Keyring>>,
     }
 
     /// A message queued: its id, and the enrollment it is for.
@@ -731,6 +733,7 @@ mod tests {
                 ledger,
                 flow: Uuid::now_v7(),
                 no_key: false,
+                keyring: None,
                 version: 1,
             };
             env.publish_flow().await;
@@ -985,7 +988,7 @@ mod tests {
                     .with_identifier_key((!self.no_key).then(identifier_key))
                     .with_render_pool(self.render.clone())
                     .with_rate_gates(Arc::clone(&self.gates))
-                    .with_outbound(None, loopback(), Arc::default());
+                    .with_outbound(self.keyring.clone(), loopback(), Arc::default());
                 DeliverySend.run(&mut ctx, claimed.payload.clone()).await
             };
             match result {
@@ -1775,6 +1778,60 @@ mod tests {
             .execute(&env.pool)
             .await
             .unwrap();
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_opens_the_workspace_credential_its_destination_links(pool: PgPool) {
+        use zirv_flow_core::{Keyring, MasterKey, SecretId, SecretPurpose, seal, secret_aad};
+        use zirv_flow_store::secrets::insert_unchecked;
+        use zirv_flow_store::{NewWorkspaceCredential, create_credential};
+
+        let config = json!({"mode": "ok", "require_token": "s3cret"});
+        let mut env = Env::with(pool, "one", config, 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        env.keyring = Some(Arc::clone(&keys));
+        let secret = SecretId::new();
+        let purpose = SecretPurpose::WorkspaceCredential;
+        let sealed = seal(
+            &keys,
+            br#"{"token":"s3cret"}"#,
+            &secret_aad(env.ws, secret, purpose),
+        );
+        insert_unchecked(&env.pool, env.ws, purpose, secret, &sealed)
+            .await
+            .unwrap();
+        let credential = create_credential(
+            &env.pool,
+            env.ws,
+            &NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: "mail",
+                name: "Mail",
+                kind: "custom",
+                schema: None,
+                fields: &json!({}),
+                secret_id: secret,
+                hints: &json!({"token": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE destinations SET credential_id = $1 WHERE id = $2")
+            .bind(credential.id)
+            .bind(env.destination)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+
+        let sent = env.send(person, template).await;
+
+        assert_eq!(sent.status, "sent");
+        assert_eq!(env.sent().len(), 1, "the destination saw the token");
     }
 
     #[sqlx::test]

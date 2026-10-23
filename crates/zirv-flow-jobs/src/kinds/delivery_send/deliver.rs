@@ -12,9 +12,9 @@ use uuid::Uuid;
 use zirv_flow_connectors::destinations::{DestinationContext, ErasedDestination, Outbound};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
-use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
+use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::Destination;
-use zirv_flow_store::secrets::{self, OpenError};
+use zirv_flow_store::secrets::OpenError;
 
 use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError};
@@ -77,30 +77,23 @@ pub(super) async fn deliver(
     .await)
 }
 
-/// The destination's credential, opened from its sealed secret; an empty one for a destination
-/// with none. A secret that cannot be opened (the worker has no master key, or a wrong one) is
-/// retried like a transport error and, on the last attempt, recorded as the message's failure.
+/// The destination's workspace credential, opened from its sealed secret and merged with its
+/// non-secret fields; an empty one for a destination with none. A credential that cannot be
+/// opened (the worker has no master key, a wrong one, or the credential is gone) is retried like
+/// a transport error and, on the last attempt, recorded as the message's failure.
 async fn open_credential(
     ctx: &mut JobContext<'_>,
     workspace: WorkspaceId,
     destination: &Destination,
 ) -> Result<Result<Credential, Verdict>, JobError> {
-    let Some(secret) = destination.credential_secret_id else {
+    let Some(id) = destination.credential_id else {
         return Ok(Ok(Credential::new()));
     };
     let Some(keyring) = ctx.keyring().cloned() else {
         return Ok(Err(credential_unavailable()));
     };
-    match secrets::open_json(
-        ctx.conn(),
-        &keyring,
-        workspace,
-        SecretId::from_uuid(secret),
-        SecretPurpose::DestinationCredential,
-    )
-    .await
-    {
-        Ok(bytes) => match Credential::from_json(&bytes) {
+    match zirv_flow_store::open_credential(ctx.conn(), &keyring, workspace, id).await {
+        Ok(opened) => match Credential::from_parts(&opened.secret, &opened.fields) {
             Ok(credential) => Ok(Ok(credential)),
             Err(_) => Ok(Err(credential_unavailable())),
         },

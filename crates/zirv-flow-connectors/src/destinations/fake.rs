@@ -158,10 +158,19 @@ impl Destination for Fake {
         &self,
         ctx: &DestinationContext,
         config: &Value,
-        _: &Credential,
+        credential: &Credential,
         message: &Outbound<'_>,
     ) -> Result<Delivered, DestinationError> {
         resolve_host(ctx, config).await?;
+        // A destination that wants a token (a test of the credential a send opens) refuses any
+        // other.
+        if let Some(wanted) = config.get("require_token").and_then(Value::as_str)
+            && credential
+                .get("token")
+                .is_none_or(|token| token.expose() != wanted)
+        {
+            return Err(DestinationError::Upstream(401));
+        }
         let mode = config.get("mode").and_then(Value::as_str).unwrap_or("ok");
         let ledger = config.get("ledger").and_then(Value::as_str);
         match mode {
