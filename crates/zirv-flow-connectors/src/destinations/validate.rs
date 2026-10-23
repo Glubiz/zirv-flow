@@ -67,6 +67,7 @@ mod tests {
             batching: false,
             rate_limit: false,
             erase: false,
+            signs_dkim: false,
         },
         config_check: None,
     };

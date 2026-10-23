@@ -1230,8 +1230,10 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Delivery and recovery.** Before the destination call the row is marked `sending` in a
   statement of its own, and no lock is held during the call. A retry that finds `sending` skips
   the person gates and delivers again under the same idempotency key. When it cannot (the sender,
-  address or enrollment is gone, or the six-hour rate wait ran out) the message ends
-  `failed: delivery_unconfirmed`, because the first call may have been accepted. The scheduler
+  address or enrollment is gone, the template, the destination or its type is unavailable, the
+  render fails, or the six-hour rate wait ran out) the message ends
+  `failed: delivery_unconfirmed`, because the first call may have been accepted; what really went
+  wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
   is no longer `ready` or `running` (it went dead): `pending` as `failed: internal_error`,
   `sending` as `failed: delivery_unconfirmed`.
@@ -1251,6 +1253,55 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   429 halves the bucket's rate until its `Retry-After`
   (`throttle_bucket`). The leader's queue-depth and oldest-item-lag gauges read the destination's
   ready `delivery.send` jobs.
+- **SMTP destination (#218).** The `smtp` destination is a small MIME builder and SMTP client over
+  `tokio-rustls`. A small client keeps the connection on an address from `resolve_checked`, the one
+  the egress policy checked, with the host name as the TLS server name, and bounds every read and
+  every step. TLS is implicit or `STARTTLS` (a server that does not offer it is not used in the
+  clear). The connection and the login live in the destination's `smtp` workspace credential:
+  `host`, `port`, `tls` (`starttls`, `tls` for implicit TLS, or `none`), `username` and the sealed
+  `password`; all five are the destination's credential fields. `none` (plaintext) is refused
+  outside a test build, in the check and in a delivery, as a configuration error that never
+  connects. The destination's own configuration holds only the optional `ca_certificate`. The
+  message is `multipart/alternative` with `List-Unsubscribe`,
+  `List-Unsubscribe-Post`, a `Message-ID` and `X-Zirv-Idempotency-Key` that are the message id, so a
+  retry repeats them. A destination whose spec says `signs_dkim` is handed the sender domain's key
+  by the pipeline, which opens the sealed `dkim_key` secret right before the call and passes a
+  parsed signer in `Outbound::dkim`; a key that cannot be opened is the same retried
+  `credential_unavailable` as a credential. Every read is bounded and every step has a timeout.
+  Header names from the template are compared case-insensitively and a name given twice keeps the
+  last one given (the payload object's key order); a header the builder sets itself cannot be set
+  again: every `Content-` and `Resent-` header and `From`, `To`, `Cc`, `Bcc`, `Sender`, `Reply-To`,
+  `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Return-Path`, `Received`,
+  `Authentication-Results`, `DKIM-Signature` and `X-Zirv-Idempotency-Key` are dropped.
+  `List-Unsubscribe` never uses encoded words: a non-ASCII byte inside a `<...>` URI span is `%XX`,
+  non-ASCII outside a span is refused. `List-Unsubscribe-Post` must be ASCII (RFC 8058 fixes it as
+  `List-Unsubscribe=One-Click`), and a line break is refused in both. `Subject` and the `From` display name fold at white
+  space within 78 characters where it allows. **A reply lost after the final dot** (the connection
+  drops, the answer times out or cannot be read once the whole message and its end marker were
+  sent) is `DestinationError::Unconfirmed`: the server may have accepted the message. It retries
+  under the same `Message-ID` and `X-Zirv-Idempotency-Key`; a later `250` ends the message `sent`,
+  and when the attempts run out it ends `failed: delivery_unconfirmed` (the reason the orphan sweep
+  uses) with `email.failed`. The unconfirmed state is a `delivery` entry in the `sending` row's
+  `gate_results`, written in a statement of its own before the attempt is settled, so it survives a
+  job retry, a failed settle and a lost lease. Once it is there, one rule holds: every ending other
+  than `sent` and `hard_bounce` is `failed: delivery_unconfirmed` with `email.failed`. That covers
+  every terminal reason (`destination_auth`, `destination_config`, `egress_denied`,
+  `destination_unsupported`, `smtp_rejected` at any stage, `credential_unavailable`) and retries
+  that run out of any kind, a `4xx` included (never a `soft_bounce`), because a later failure that
+  is not a verdict about the address cannot show that the earlier copy was refused. The real reason
+  is the gate record's `note` and the log line. A `5.1.x` hard bounce keeps its ending and its
+  suppression: it is a verdict about the address. The flag that the end marker was sent is set as
+  soon as it is written, so a flush that fails or stalls is also unconfirmed.
+  The same state is written ahead of the call for every destination type: the write that marks
+  the row `sending` also notes a call in flight, committed before the destination is called. It is
+  cleared, before the attempt is settled, only when the outcome proves the call was not accepted (a
+  `4xx` or `5xx` reply, an auth, config or egress error, or a transport failure before the end
+  marker). A reply lost after the end marker latches the unconfirmed mark instead, and a success
+  ends the message. A worker that crashes, or whose lease is lost, between the call and the clear
+  leaves the note, and the next attempt counts it like the unconfirmed mark (the earlier call's
+  outcome is unknown); a crash after a definitive reply but before the clear is counted the same
+  way, which is deliberately conservative. A resumed message that fails at the enrollment or flow
+  step ends `delivery_unconfirmed` with the reason as its note, like the other resumed failures.
 - **Links.** Until the tracking endpoints exist, the unsubscribe and preference links of a
   message are placeholders on a reserved `.invalid` host that carry the message id; a signed link
   replaces them.
@@ -1265,9 +1316,9 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 
 - **Templates:** content model, builder, rendering, validation and preview are in section 11. Marketing email must contain an unsubscribe link (publish fails otherwise); messages carry `List-Unsubscribe` and `List-Unsubscribe-Post` (RFC 8058 one-click).
 - **Categories:** `marketing` or `transactional`. Transactional skips the marketing-consent gate and always honours suppression. There is no dedicated transactional API in v1 (OQ-11, decided): transactional email is a flow started by the M5 API trigger, with an `action.send` of a `transactional` template, through the same send pipeline. The job-queue hops (trigger, `flow.enroll`, `flow.step`, `delivery.send`) add latency, which the docs state. A dedicated API is a post-1.0 (M9) theme.
-- **Sender authentication**: the roadmap wins over the earlier "relay's job" position. A workspace registers sending domains. Zirv Flow generates the DKIM key pair, shows the DNS record text to publish, verifies the published records, and signs SMTP mail with the key. Sending from an unverified domain is refused. Key generation uses the `rsa` crate already in the workspace (it passes the dependency advisory check with no ignores); signing goes through `rsa` or `ring`, which the implementing issue picks. Provider destinations use the provider's own domain-status request (10.1).
+- **Sender authentication**: the roadmap wins over the earlier "relay's job" position. A workspace registers sending domains. Zirv Flow generates the DKIM key pair, shows the DNS record text to publish, verifies the published records, and signs SMTP mail with the key. Sending from an unverified domain is refused. Key generation uses the `rsa` crate already in the workspace (it passes the dependency advisory check with no ignores); signing is `rsa-sha256` with relaxed/relaxed canonicalization through `ring` (#218), whose private-key operations are constant-time; `rsa` is only for generation. The signed headers are From, To, Subject, Date, Message-ID, MIME-Version, Content-Type and the `List-Unsubscribe` pair. Provider destinations use the provider's own domain-status request (10.1).
 - **Tracking:** open pixel `/t/o/{token}`, click redirect `/t/c/{token}`, unsubscribe page and one-click endpoint `/u/{token}` on `server.public_url`. Tokens are HMAC-signed (message id, link index, no personal data); redirects only go to links recorded for that message. `email.opened` carries `machine` (bool) and `machine_reason`, computed at request time from a known prefetch-proxy user agent or a short delay after delivery; neither the IP nor the user agent is stored (OQ-10, decided). The segment builder and the wait and goal editors add a visible, removable `machine = false` filter when `email.opened` is chosen; the AST and compiler do not change. `machine = false` means "not detected as machine-generated", not "verified human".
-- **Feedback:** provider webhooks map to `email.delivered`, `email.bounced` (`hard`/`soft`), `email.complained`; hard bounce and complaint add a suppression (hard bounces organization-wide, complaints per workspace). SMTP bounce handling is synchronous only (OQ-12, decided): a permanent recipient failure at RCPT or DATA, a 5xx whose enhanced status is 5.1.x or one the destination classifies as a recipient failure, records `email.bounced` hard and suppresses. A 5xx caused by authentication, relay policy or content fails the message without suppressing the recipient. Exhausted 4xx retries record a soft bounce with no suppression. VERP, DSN mailbox polling and raw-DSN HTTP intake are post-1.0; the docs point SMTP-only setups at relays that reject synchronously, or at providers with webhooks. Feedback and tracking decisions are appended under the message's originating trace (12.4). Engagement events (`email.opened`, `email.clicked`, `email.unsubscribed`) are ordinary person events usable in segments and waits; opens are low-confidence because some clients prefetch images (see Tracking).
+- **Feedback:** provider webhooks map to `email.delivered`, `email.bounced` (`hard`/`soft`), `email.complained`; hard bounce and complaint add a suppression (hard bounces organization-wide, complaints per workspace). SMTP bounce handling is synchronous only (OQ-12, decided): a permanent recipient failure at RCPT or DATA, a 5xx whose enhanced status is 5.1.x or one the destination classifies as a recipient failure, records `email.bounced` hard and suppresses. A 5xx caused by authentication, relay policy or content fails the message without suppressing the recipient. Exhausted 4xx retries record a soft bounce with no suppression. As built (#218): the destination returns `Refusal::HardBounce`, `Rejected` or `Deferred`; the message ends `failed` with reason `hard_bounce` (event `email.bounced`, `bounce: "hard"`, and an organization-wide suppression written in the same transaction), `smtp_rejected` (`email.failed`, no suppression) or, when the attempts run out, `soft_bounce` (`email.bounced`, `bounce: "soft"`, no suppression). Only an enhanced status `5.1.x` other than `5.1.7` and `5.1.8`, at `RCPT` or `DATA`, is a recipient failure; the enhanced code is read from the final line of a multi-line reply, else from the first line that carries one. A permanent 5xx with no enhanced code (a bare `550 relay not permitted`) is `smtp_rejected`, without suppression. VERP, DSN mailbox polling and raw-DSN HTTP intake are post-1.0; the docs point SMTP-only setups at relays that reject synchronously, or at providers with webhooks. Feedback and tracking decisions are appended under the message's originating trace (12.4). Engagement events (`email.opened`, `email.clicked`, `email.unsubscribed`) are ordinary person events usable in segments and waits; opens are low-confidence because some clients prefetch images (see Tracking).
 - **Webhooks and sync:** outbound webhooks are HMAC-signed with a timestamp and send `X-Zirv-Idempotency-Key` (the shipped header; provider manifests name their own), with timeout and retries. Keeping a segment in an external system is a flow (entry: `action.sync` upsert; exit: remove), not a second mechanism. Deletion and erasure call the destination's remove/erase capability where declared.
 
 ## 11. Templates and the builder
@@ -2545,8 +2596,9 @@ they were ruled as their capabilities were added to the plan.
   trigger with an `action.send` of a `transactional` template. Reason: it reuses the one send pipeline and
   its gates, at the cost of job-queue hops, which the docs state. A dedicated API is a post-1.0 (M9) theme.
   (10.2; supervisor ruling, unparsed reply).
-- **OQ-12:** SMTP bounce handling is synchronous only: a permanent recipient failure at RCPT or DATA
-  records a hard bounce and suppresses; other 5xx failures fail the message without suppressing, and
+- **OQ-12:** SMTP bounce handling is synchronous only: a permanent recipient failure at RCPT or DATA,
+  stated by an enhanced status of class 5.1.x, records a hard bounce and suppresses; other 5xx
+  failures, a bare 5xx with no enhanced status included, fail the message without suppressing, and
   exhausted 4xx retries record a soft bounce. VERP, DSN mailbox polling and raw-DSN HTTP intake are
   post-1.0. Reason: asynchronous bounce intake is a separate subsystem with its own deployment burden.
   (10.2; supervisor ruling, unparsed reply).

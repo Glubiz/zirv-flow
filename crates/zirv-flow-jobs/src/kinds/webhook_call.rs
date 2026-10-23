@@ -393,6 +393,7 @@ async fn deliver(
         channel: "webhook",
         to: "",
         payload: &payload,
+        dkim: None,
     };
     Ok(delivery::send(
         destination,

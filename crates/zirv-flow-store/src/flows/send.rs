@@ -12,7 +12,9 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::Dimensions;
-use zirv_flow_core::events::{EMAIL_FAILED_EVENT, EMAIL_SENT_EVENT, EMAIL_SKIPPED_EVENT};
+use zirv_flow_core::events::{
+    EMAIL_BOUNCED_EVENT, EMAIL_FAILED_EVENT, EMAIL_SENT_EVENT, EMAIL_SKIPPED_EVENT,
+};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::arrivals::{Arrival, enqueue_arrivals};
@@ -28,12 +30,31 @@ pub const SEND_JOB_KIND: &str = "delivery.send";
 /// The source of the events a flow writes.
 const FLOWS_SOURCE: &str = "flows";
 
-/// The event an ended message writes; none for a message that has not ended.
-const fn event_of(status: MessageStatus) -> Option<&'static str> {
+/// The failure code of a message a mail server refused the recipient of for good (OQ-12). The
+/// message ends `failed` with this reason, writes `email.bounced` (hard), and the address is
+/// suppressed in every workspace of the organization.
+pub const HARD_BOUNCE: &str = "hard_bounce";
+/// The failure code of a message whose temporary refusals outlasted the retries. It writes
+/// `email.bounced` (soft) and suppresses nobody.
+pub const SOFT_BOUNCE: &str = "soft_bounce";
+
+/// The bounce kind a failure reason stands for, if it is one.
+fn bounce_of(reason: Option<&str>) -> Option<&'static str> {
+    match reason {
+        Some(HARD_BOUNCE) => Some("hard"),
+        Some(SOFT_BOUNCE) => Some("soft"),
+        _ => None,
+    }
+}
+
+/// The event an ended message writes; none for a message that has not ended. A message that failed
+/// as a bounce writes `email.bounced` in place of `email.failed`.
+fn event_of(status: MessageStatus, reason: Option<&str>) -> Option<&'static str> {
     match status {
         MessageStatus::Pending | MessageStatus::Sending => None,
         MessageStatus::Sent => Some(EMAIL_SENT_EVENT),
         MessageStatus::Skipped => Some(EMAIL_SKIPPED_EVENT),
+        MessageStatus::Failed if bounce_of(reason).is_some() => Some(EMAIL_BOUNCED_EVENT),
         MessageStatus::Failed => Some(EMAIL_FAILED_EVENT),
     }
 }
@@ -73,14 +94,17 @@ pub async fn record_send_outcome(
     outcome: &SendOutcome<'_>,
 ) -> Result<Option<Uuid>, StoreError> {
     let message = &outcome.message;
-    let (Some(name), Some(result)) = (event_of(message.status), outcome_of(message.status)) else {
+    let (Some(name), Some(result)) = (
+        event_of(message.status, message.reason),
+        outcome_of(message.status),
+    ) else {
         return Ok(None);
     };
     if !insert_message(&mut *connection, message).await? {
         return Ok(None);
     }
     let event = Uuid::now_v7();
-    let properties = json!({
+    let mut properties = json!({
         "message_id": message.id,
         "node_id": message.node,
         "enrollment_id": message.enrollment,
@@ -89,6 +113,9 @@ pub async fn record_send_outcome(
         "reason": message.reason,
         "attempts": message.attempts,
     });
+    if let (Some(bounce), Some(object)) = (bounce_of(message.reason), properties.as_object_mut()) {
+        object.insert("bounce".to_owned(), json!(bounce));
+    }
     sqlx::query(
         "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
             properties, source, trace_id, validation_state) \
@@ -304,13 +331,30 @@ mod tests {
 
     #[test]
     fn each_status_has_its_own_event_name_and_outcome() {
-        assert_eq!(event_of(MessageStatus::Sent), Some("email.sent"));
-        assert_eq!(event_of(MessageStatus::Skipped), Some("email.skipped"));
-        assert_eq!(event_of(MessageStatus::Failed), Some("email.failed"));
+        assert_eq!(event_of(MessageStatus::Sent, None), Some("email.sent"));
+        assert_eq!(
+            event_of(MessageStatus::Skipped, None),
+            Some("email.skipped")
+        );
+        assert_eq!(
+            event_of(MessageStatus::Failed, Some("render_error")),
+            Some("email.failed")
+        );
+        assert_eq!(
+            event_of(MessageStatus::Failed, Some(HARD_BOUNCE)),
+            Some("email.bounced")
+        );
+        assert_eq!(
+            event_of(MessageStatus::Failed, Some(SOFT_BOUNCE)),
+            Some("email.bounced")
+        );
+        assert_eq!(bounce_of(Some(HARD_BOUNCE)), Some("hard"));
+        assert_eq!(bounce_of(Some(SOFT_BOUNCE)), Some("soft"));
+        assert_eq!(bounce_of(Some("delivery_unconfirmed")), None);
         assert_eq!(outcome_of(MessageStatus::Sent), Some("sent"));
         assert_eq!(outcome_of(MessageStatus::Skipped), Some("skipped"));
         assert_eq!(outcome_of(MessageStatus::Failed), Some("failed"));
-        assert_eq!(event_of(MessageStatus::Pending), None);
+        assert_eq!(event_of(MessageStatus::Pending, None), None);
         assert_eq!(outcome_of(MessageStatus::Pending), None);
         for status in [
             MessageStatus::Sent,
@@ -318,7 +362,7 @@ mod tests {
             MessageStatus::Failed,
         ] {
             assert!(zirv_flow_core::events::is_reserved_event_name(
-                event_of(status).unwrap()
+                event_of(status, None).unwrap()
             ));
         }
     }

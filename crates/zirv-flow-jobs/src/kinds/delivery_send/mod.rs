@@ -53,14 +53,16 @@ use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
-use zirv_flow_core::TraceContext;
-use zirv_flow_core::consent::Dimensions;
+use zirv_flow_core::consent::{Dimensions, SuppressionReason};
+use zirv_flow_core::{HmacKey, TraceContext};
 use zirv_flow_store::{
-    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, MessageStatus, NewJob,
-    NewMessage, PgConnection, PgPool, SEND_JOB_KIND, SendOutcome, SubjectKind, WebhookPerson,
-    WebhookSubject, document_sender, find_destination, find_flow, find_template,
-    find_template_version, insert_message, lock_webhook_person, mark_message_sending,
-    message_status, read_template_field_catalog, read_webhook_subject, record_send_outcome,
+    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
+    MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
+    SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
+    add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
+    find_flow, find_template, find_template_version, insert_message, lock_webhook_person,
+    mark_message_sending, mark_message_unconfirmed, message_in_flight, message_status,
+    message_unconfirmed, read_template_field_catalog, read_webhook_subject, record_send_outcome,
     throttle_bucket,
 };
 
@@ -69,6 +71,7 @@ pub(crate) use payload::Queued;
 use self::gates::Blocked;
 use self::payload::SendJob;
 use crate::delivery::attempt::AttemptTarget;
+use crate::delivery::verdict::SMTP_DEFERRED;
 use crate::delivery::{self, Verdict};
 use crate::{JobContext, JobError, JobKind};
 
@@ -97,6 +100,9 @@ struct Trail {
     category: Option<String>,
     /// The delivery attempts the destination saw.
     attempts: i32,
+    /// The suppression hash of an address a mail server refused for good: the write that ends the
+    /// message suppresses it in the whole organization (a hard bounce, OQ-12).
+    bounced: Option<[u8; 32]>,
 }
 
 impl Trail {
@@ -110,6 +116,7 @@ impl Trail {
             sender: None,
             category: None,
             attempts,
+            bounced: None,
         }
     }
 
@@ -132,6 +139,32 @@ impl Trail {
         self.status = MessageStatus::Failed;
         self.reason = Some(reason);
         Step::Finished(self)
+    }
+
+    /// Ends the message here as `delivery_unconfirmed`: an earlier call may have been accepted, so
+    /// nothing that went wrong since shows it was not. `was` is what really went wrong, kept as the
+    /// gate record's note and in the log; it is a code, never an address.
+    fn unconfirmed(mut self, gate: &'static str, was: Option<&'static str>) -> Step {
+        warn!(gate, was, "message ends unconfirmed");
+        let mut record = GateRecord::blocked(gate, DELIVERY_UNCONFIRMED);
+        if let Some(was) = was {
+            record = record.with_note(was);
+        }
+        self.gates.push(record);
+        self.status = MessageStatus::Failed;
+        self.reason = Some(DELIVERY_UNCONFIRMED);
+        Step::Finished(self)
+    }
+
+    /// Ends the message here for a failure before the destination was called. A resumed message
+    /// (its row was `sending` when the attempt began) may have been accepted on an earlier call,
+    /// so it ends unconfirmed instead.
+    fn fail_unsent(self, resuming: bool, gate: &'static str, reason: &'static str) -> Step {
+        if resuming {
+            self.unconfirmed(gate, Some(reason))
+        } else {
+            self.fail(gate, reason)
+        }
     }
 }
 
@@ -224,7 +257,7 @@ async fn decide(
         None => None,
     };
     let (Some(template), Some(version)) = (template, version) else {
-        return Ok(trail.fail("template", "template_unavailable"));
+        return Ok(trail.fail_unsent(resuming, "template", "template_unavailable"));
     };
     trail.pass(GateRecord::passed("template"));
     trail.template_version = Some(version.version);
@@ -234,7 +267,10 @@ async fn decide(
     // The sender.
     let sender = match gates::sender(&pool, workspace, document_sender(&version.document)).await? {
         Ok(sender) => sender,
-        Err(_) if resuming => return Ok(trail.fail("sender", DELIVERY_UNCONFIRMED)),
+        Err(blocked) if resuming => {
+            let was = blocked.gate.reason.unwrap_or("sender_unavailable");
+            return Ok(trail.fail_unsent(true, "sender", was));
+        }
         Err(blocked) => return Ok(trail.skip(blocked)),
     };
     trail.sender = Some(sender.identity_id);
@@ -243,16 +279,26 @@ async fn decide(
     // Gate 2: the address.
     let address = match gates::address(ctx.conn(), workspace, person).await? {
         Ok(address) => address,
-        Err(_) if resuming => return Ok(trail.fail("address", DELIVERY_UNCONFIRMED)),
+        Err(blocked) if resuming => {
+            let was = blocked.gate.reason.unwrap_or("address_unavailable");
+            return Ok(trail.fail_unsent(true, "address", was));
+        }
         Err(blocked) => return Ok(trail.skip(blocked)),
     };
     trail.pass(GateRecord::passed("address"));
+    // The key that hashes the address, fetched once: the suppression gate reads it, and so does
+    // the hard bounce that ends a delivery, including that of a resumed message, which skips the
+    // gates. It is fetched here so a worker without it can still end a message the steps above
+    // stop.
+    let key = ctx
+        .identifier_key()
+        .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
 
     // Gates 3 to 6 judged the message when it first went out. A retry of a message that may have
     // gone out does not judge it again: a person who withdrew consent since was sent this one.
     if !resuming
         && let Some(blocked) =
-            person_gates(ctx, job, &pool, &address, transactional, &mut trail).await?
+            person_gates(ctx, job, &pool, &key, &address, transactional, &mut trail).await?
     {
         return Ok(trail.skip(blocked));
     }
@@ -263,7 +309,7 @@ async fn decide(
     let rendered = match render::render(pool_for_render.as_ref(), version.document, &context).await
     {
         Ok(rendered) => rendered,
-        Err(reason) => return Ok(trail.fail("render", reason)),
+        Err(reason) => return Ok(trail.fail_unsent(resuming, "render", reason)),
     };
     trail.pass(GateRecord::passed("render"));
     let email = render::email_payload(&sender, &rendered);
@@ -273,49 +319,78 @@ async fn decide(
         .first_wait
         .is_some_and(|first| now - first > MAX_RATE_WAIT)
     {
-        // A resumed message may have gone out on an earlier call: it is not `rate_limited`.
-        let reason = if resuming {
-            DELIVERY_UNCONFIRMED
-        } else {
-            "rate_limited"
-        };
-        return Ok(trail.fail("rate_limit", reason));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "rate_limited"));
     }
     let Some(destination) = find_destination(ctx.conn(), workspace, job.destination)
         .await?
         .filter(|destination| destination.archived_at.is_none())
     else {
-        return Ok(trail.fail("rate_limit", "destination_unavailable"));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
     };
     let registry = Registry::built_in();
     let Some(driver) = registry.get(&destination.kind) else {
-        return Ok(trail.fail("rate_limit", "destination_unavailable"));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
     };
     if !driver.spec().capabilities.channels.contains(&"email") {
-        return Ok(trail.fail("rate_limit", "destination_unsupported"));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unsupported"));
     }
     let gates = Arc::clone(ctx.rate_gates());
     let clock = ctx.clock().clone();
     match gates.admit(&pool, destination.id, &clock).await? {
         Admission::Granted => trail.pass(GateRecord::passed("rate_limit")),
         Admission::Wait(wait) => return defer(ctx, job, payload, wait, now).await,
-        Admission::Gone => return Ok(trail.fail("rate_limit", "destination_unavailable")),
+        Admission::Gone => {
+            return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
+        }
     }
 
     // Gate 9: deliver, holding no lock, then record the attempt. The row is marked `sending`
     // first, in a statement of its own: from here on the message may go out, and a retry knows it.
     let attempts = ctx.attempts();
     let number = job.attempt_base + attempts;
-    mark_message_sending(&pool, workspace, job.message, number - 1).await?;
+    // An earlier call may have been accepted: it lost the server's reply after the whole message
+    // was sent (the unconfirmed mark), or it was cut off before its outcome was known (the
+    // in-flight mark, written before every call). Both are kept on the row (they survive a job
+    // retry), and read once, before this attempt writes its own in-flight mark. A crash after a
+    // definitive reply but before the clear below also counts as carried: that is deliberately
+    // conservative.
+    let carried = resuming
+        && (message_unconfirmed(&pool, workspace, job.message).await?
+            || message_in_flight(&pool, workspace, job.message).await?);
+    // The attempt number fences the mark: a stale attempt clears only its own.
+    let mark = number - 1;
+    mark_message_sending(&pool, workspace, job.message, mark).await?;
     let call = deliver::Call {
         workspace,
         destination: &destination,
         driver,
+        sender: &sender,
         message: job.message,
         address: &address,
         payload: &email,
     };
-    let done = deliver::deliver(ctx, &call, now).await?;
+    let done = match deliver::deliver(ctx, &call, now).await {
+        Ok(done) => done,
+        Err(error) => {
+            // An error here comes before the destination is called: nothing was sent, so this
+            // attempt no longer counts as in flight. A failed clear leaves the original error.
+            let _ = clear_message_in_flight(&pool, workspace, job.message, mark).await;
+            return Err(error);
+        }
+    };
+    // A reply lost after the final dot leaves the message possibly accepted. The mark is written
+    // before the attempt is settled, so a settle that fails or a lease that is lost cannot skip it.
+    let lost_reply = matches!(
+        done.verdict,
+        Verdict::Retry { reason, .. } if reason == DELIVERY_UNCONFIRMED
+    );
+    if lost_reply {
+        mark_message_unconfirmed(&pool, workspace, job.message).await?;
+    } else if !matches!(done.verdict, Verdict::Succeeded { .. }) {
+        // The outcome proves this call was not accepted: it no longer counts as in flight. A
+        // success ends the message, and the ending write replaces the marks.
+        clear_message_in_flight(&pool, workspace, job.message, mark).await?;
+    }
     let target = AttemptTarget {
         destination_id: destination.id,
         subject_kind: SubjectKind::Message,
@@ -323,10 +398,22 @@ async fn decide(
     };
     delivery::settle(ctx, Some(&target), number, &done).await?;
     trail.attempts = number;
+    // Once an earlier call may have been accepted, nothing that goes wrong after it shows that it
+    // was not: every ending but a sent message and a verdict about the address is unconfirmed.
+    let unconfirmed = carried || lost_reply;
     match done.verdict {
         Verdict::Succeeded { .. } => {
             trail.pass(GateRecord::passed("delivery"));
             Ok(Step::Finished(trail))
+        }
+        Verdict::Terminal { reason, .. } if reason == HARD_BOUNCE => {
+            // The server says the address cannot receive mail: it is suppressed with the write
+            // that ends the message, whatever an earlier call came to.
+            trail.bounced = gates::address_hash(&key, &address);
+            Ok(trail.fail("delivery", reason))
+        }
+        Verdict::Terminal { reason, .. } if unconfirmed => {
+            Ok(trail.unconfirmed("delivery", Some(reason)))
         }
         Verdict::Terminal { reason, .. } => Ok(trail.fail("delivery", reason)),
         Verdict::Retry {
@@ -343,7 +430,15 @@ async fn decide(
                 let error = JobError::new(message);
                 return Err(retry_after.map_or(error, |wait| error.with_retry_after(wait)));
             }
-            Ok(trail.fail("delivery", reason))
+            if unconfirmed {
+                Ok(trail.unconfirmed("delivery", Some(reason)))
+            } else if reason == SMTP_DEFERRED {
+                // Temporary refusals that outlast the retries are a soft bounce, with no
+                // suppression.
+                Ok(trail.fail("delivery", SOFT_BOUNCE))
+            } else {
+                Ok(trail.fail("delivery", reason))
+            }
         }
     }
 }
@@ -353,6 +448,7 @@ async fn person_gates(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
     pool: &PgPool,
+    key: &HmacKey,
     address: &str,
     transactional: bool,
     trail: &mut Trail,
@@ -364,10 +460,7 @@ async fn person_gates(
         }
         Err(blocked) => return Ok(Some(blocked)),
     }
-    let key = ctx
-        .identifier_key()
-        .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
-    match gates::suppression(ctx.conn(), job.workspace, &key, address).await? {
+    match gates::suppression(ctx.conn(), job.workspace, key, address).await? {
         Ok(passed) => trail.pass(passed),
         Err(blocked) => return Ok(Some(blocked)),
     }
@@ -405,7 +498,7 @@ async fn stopped(
     let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
     if recorded == Some(MessageStatus::Sending) {
         // It may have gone out already: it is not skipped, which would say it was not sent.
-        return Ok(trail.fail("enrollment", DELIVERY_UNCONFIRMED));
+        return Ok(trail.unconfirmed("enrollment", Some(reason)));
     }
     if recorded == Some(MessageStatus::Pending) {
         return Ok(trail.skip(Blocked::new("enrollment", reason)));
@@ -553,17 +646,33 @@ async fn write_end(
     };
     if !held {
         insert_message(&mut *connection, &message).await?;
-        return Ok(());
+    } else {
+        record_send_outcome(
+            &mut *connection,
+            &SendOutcome {
+                message,
+                trace,
+                job: Some(job_ref),
+            },
+        )
+        .await?;
     }
-    record_send_outcome(
-        connection,
-        &SendOutcome {
-            message,
-            trace,
-            job: Some(job_ref),
-        },
-    )
-    .await?;
+    if let Some(identifier_hash) = trail.bounced {
+        // A hard bounce suppresses the address in every workspace of the organization (OQ-19). The
+        // row holds the HMAC of the address, never the address.
+        add_organization_suppression(
+            &mut *connection,
+            &NewSuppression {
+                identifier_hash,
+                kind: "email",
+                reason: SuppressionReason::HardBounce,
+                source: "bounce",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -577,7 +686,10 @@ mod tests {
     use sqlx::PgPool;
     use time::Duration as Span;
     use time::macros::datetime;
-    use zirv_flow_connectors::destinations::{fake_ledger_calls, fake_ledger_sent};
+    use zirv_flow_connectors::destinations::{
+        SMTP_SINK_DROP, SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions,
+        SmtpSinkStage, fake_ledger_calls, fake_ledger_sent,
+    };
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::{
@@ -1664,6 +1776,11 @@ mod tests {
         );
         assert_eq!(env.events("email.failed").await.len(), 1);
         assert_eq!(env.events("email.skipped").await.len(), 0);
+        let note = message.gate_results.to_string();
+        assert!(
+            note.contains("flow_paused"),
+            "the real reason is kept: {note}"
+        );
     }
 
     #[sqlx::test]
@@ -2196,5 +2313,718 @@ mod tests {
         ] {
             assert_eq!(render::failed(failure), "render_error", "{failure}");
         }
+    }
+
+    // --- the smtp destination through the pipeline (#218) ---
+
+    /// An env whose destination is an SMTP relay at `sink` (no TLS: the sink is on loopback), whose
+    /// sender domain has a real DKIM key sealed under a keyring the worker holds, and whose render
+    /// host is running. Returns the env and the public key the domain publishes.
+    async fn smtp_env(pool: PgPool, sink: &SmtpSink) -> (Env, String) {
+        use zirv_flow_core::sending::generate_dkim_key;
+        use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
+        use zirv_flow_store::secrets::{insert_unchecked, replace_unchecked};
+        use zirv_flow_store::{NewWorkspaceCredential, create_credential};
+
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        env.keyring = Some(Arc::clone(&keys));
+        let key = generate_dkim_key().unwrap();
+        let secret: Uuid = sqlx::query_scalar(
+            "SELECT dkim_secret_id FROM sending_domains WHERE workspace_id = $1",
+        )
+        .bind(env.ws.as_uuid())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let secret = SecretId::from_uuid(secret);
+        let sealed = seal(
+            &keys,
+            key.private_pkcs8.expose(),
+            &secret_aad(env.ws, secret, SecretPurpose::DkimKey),
+        );
+        assert!(
+            replace_unchecked(&env.pool, env.ws, secret, &sealed)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE sending_domains SET dkim_public_key = $2 WHERE workspace_id = $1")
+            .bind(env.ws.as_uuid())
+            .bind(&key.public_key)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        // The relay's server and login are an `smtp` workspace credential, sealed under the same
+        // keyring; the sink is on loopback, so TLS is off.
+        let credential_secret = SecretId::new();
+        let purpose = SecretPurpose::WorkspaceCredential;
+        let sealed = seal(
+            &keys,
+            json!({"password": SMTP_SINK_PASSWORD})
+                .to_string()
+                .as_bytes(),
+            &secret_aad(env.ws, credential_secret, purpose),
+        );
+        insert_unchecked(&env.pool, env.ws, purpose, credential_secret, &sealed)
+            .await
+            .unwrap();
+        let credential = create_credential(
+            &env.pool,
+            env.ws,
+            &NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: "relay",
+                name: "Relay",
+                kind: "smtp",
+                schema: None,
+                fields: &json!({
+                    "host": "127.0.0.1",
+                    "port": sink.port(),
+                    "tls": "none",
+                    "username": SMTP_SINK_USER,
+                }),
+                secret_id: credential_secret,
+                hints: &json!({"password": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        env.destination = create_destination(
+            &env.pool,
+            env.ws,
+            &NewDestination {
+                id: Uuid::now_v7(),
+                kind: "smtp",
+                name: "Relay",
+                config: &json!({}),
+                credential_id: Some(credential.id),
+                rate: 100,
+                burst: 100,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        (env, key.public_key)
+    }
+
+    /// The value of the first header called `name` of a captured message.
+    fn header_of(data: &[u8], name: &str) -> Option<String> {
+        let text = String::from_utf8_lossy(data);
+        let head = text.split("\r\n\r\n").next()?;
+        head.split("\r\n").find_map(|line| {
+            let (candidate, value) = line.split_once(':')?;
+            candidate
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+    }
+
+    async fn suppressions(env: &Env) -> i64 {
+        env.count("SELECT count(*) FROM suppressions WHERE reason = 'hard_bounce'")
+            .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_smtp_send_is_signed_with_the_sender_domains_sealed_key_and_verifies_against_the_published_record(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::verify_dkim_signature;
+        use zirv_flow_core::sending::dkim_record_text;
+
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, public_key) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let captured = sink.messages();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].mail_from, "news@example.com");
+        assert_eq!(captured[0].recipients, ["ada@example.com"]);
+        let data = &captured[0].data;
+        assert_eq!(
+            verify_dkim_signature(data, &dkim_record_text(&public_key)),
+            Ok(())
+        );
+        let signature = header_of(data, "DKIM-Signature").unwrap();
+        assert!(signature.contains("d=example.com;") && signature.contains("s=zirv;"));
+        let id = queued.message.to_string();
+        assert_eq!(header_of(data, "X-Zirv-Idempotency-Key"), Some(id.clone()));
+        assert_eq!(
+            header_of(data, "Message-ID"),
+            Some(format!("<{id}@example.com>"))
+        );
+        assert!(
+            header_of(data, "List-Unsubscribe")
+                .unwrap()
+                .starts_with("<https://links.zirv-flow.invalid/u/")
+        );
+        assert_eq!(
+            header_of(data, "List-Unsubscribe-Post").as_deref(),
+            Some("List-Unsubscribe=One-Click")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_smtp_delivery_reuses_the_message_id_and_the_idempotency_key(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, "451 4.3.0 try again");
+
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        let offered = sink.offered();
+        assert_eq!(offered.len(), 2, "the message went to the server twice");
+        let id = queued.message.to_string();
+        for data in &offered {
+            assert_eq!(header_of(data, "X-Zirv-Idempotency-Key"), Some(id.clone()));
+            assert_eq!(
+                header_of(data, "Message-ID"),
+                Some(format!("<{id}@example.com>"))
+            );
+        }
+        assert_eq!(sink.messages().len(), 1);
+        assert_eq!(env.message(queued.message).await.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reply_lost_after_the_final_dot_on_every_attempt_ends_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 2).await;
+        sink.reply_at(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(
+            env.message(queued.message).await.status,
+            "sending",
+            "a first lost reply is retried"
+        );
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        assert_eq!(env.count("SELECT count(*) FROM suppressions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reply_lost_once_and_a_250_on_the_retry_ends_sent_under_one_message_id(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 3).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let captured = sink.messages();
+        assert_eq!(captured.len(), 2, "the server saw the message twice");
+        let id = queued.message.to_string();
+        for message in &captured {
+            assert_eq!(
+                header_of(&message.data, "Message-ID"),
+                Some(format!("<{id}@example.com>"))
+            );
+            assert_eq!(
+                header_of(&message.data, "X-Zirv-Idempotency-Key"),
+                Some(id.clone())
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transport_failure_after_a_lost_reply_still_ends_delivery_unconfirmed(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 2).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+
+        env.attempt().await.unwrap_err();
+        // The server goes away: the next attempt cannot connect.
+        drop(sink);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "a refused connection does not show that the first attempt was refused"
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_that_gets_a_hard_bounce_suppresses_the_address(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 3).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        assert_eq!(suppressions(&env).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_on_a_worker_without_the_identifier_key_is_retried_not_bounced_unsuppressed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (mut env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 3).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+        env.attempt().await.unwrap_err();
+        env.no_key = true;
+
+        env.attempt().await.unwrap_err();
+
+        assert_eq!(
+            env.message(queued.message).await.status,
+            "sending",
+            "the bounce is not written without its suppression"
+        );
+        assert_eq!(suppressions(&env).await, 0);
+    }
+
+    /// Runs a first attempt that loses the server's reply, so the message is `sending` and marked
+    /// unconfirmed, and returns it queued for more attempts.
+    async fn after_a_lost_reply(env: &Env, sink: &SmtpSink, attempts: i32) -> Queued1 {
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, attempts).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        queued
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_login_refused_after_a_lost_reply_ends_delivery_unconfirmed(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let queued = after_a_lost_reply(&env, &sink, 3).await;
+        sqlx::query(
+            "UPDATE credentials SET fields = jsonb_set(fields, '{username}', '\"nobody\"')",
+        )
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "a refused login does not show that the first copy was refused"
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        let note = ended.gate_results.to_string();
+        assert!(note.contains("destination_auth"), "{note}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn temporary_refusals_after_a_lost_reply_end_delivery_unconfirmed_not_as_a_soft_bounce(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let queued = after_a_lost_reply(&env, &sink, 3).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        assert_eq!(suppressions(&env).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_550_5_1_1_after_a_lost_reply_is_still_a_hard_bounce_and_suppresses(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let queued = after_a_lost_reply(&env, &sink, 3).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        assert_eq!(env.events("email.bounced").await.len(), 1);
+        assert_eq!(suppressions(&env).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_cut_off_before_its_outcome_was_known_makes_the_next_definitive_refusal_unconfirmed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        env.attempt().await.unwrap_err();
+        assert!(
+            !message_in_flight(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "a 4xx is a definitive non-acceptance and clears the mark"
+        );
+        // An attempt that wrote its pre-call mark and was cut off before it knew the outcome.
+        mark_message_sending(&env.pool, env.ws, queued.message, 1)
+            .await
+            .unwrap();
+        sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "the cut-off call may have been accepted"
+        );
+        assert!(ended.gate_results.to_string().contains("smtp_rejected"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn plain_4xx_retries_clear_the_mark_so_a_later_refusal_ends_with_its_real_reason(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap_err();
+        sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("smtp_rejected"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_first_attempt_with_a_definitive_refusal_ends_with_its_real_reason(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("smtp_rejected"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_whose_destination_was_archived_ends_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        zirv_flow_store::archive_destination(&env.pool, env.ws, env.destination)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert!(
+            message
+                .gate_results
+                .to_string()
+                .contains("destination_unavailable")
+        );
+        assert_eq!(fake_ledger_calls(&env.ledger).len(), 1, "no second call");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_without_the_identifier_key_still_ends_an_unavailable_template_as_such(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.no_key = true;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 3).await;
+        sqlx::query("UPDATE templates SET archived_at = now() WHERE id = $1")
+            .bind(template)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("template_unavailable"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hard_bounce_ends_the_message_as_email_bounced_and_suppresses_the_address_in_the_organization(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+
+        let bounced = env.send(person, template).await;
+
+        assert_eq!(
+            (bounced.status.as_str(), bounced.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        let events = env.events("email.bounced").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["bounce"], "hard");
+        assert_eq!(events[0]["reason"], "hard_bounce");
+        assert!(env.events("email.failed").await.is_empty());
+        assert_eq!(suppressions(&env).await, 1);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM suppressions WHERE scope = 'organization' AND source = 'bounce'"
+            )
+            .await,
+            1,
+            "organization-wide (OQ-19)"
+        );
+        let connections = sink.connections();
+
+        // The next message to the address is stopped by the suppression gate: no connection.
+        let again = env.send(person, template).await;
+
+        assert_eq!(
+            (again.status.as_str(), again.reason.as_deref()),
+            ("skipped", Some("suppressed"))
+        );
+        assert_eq!(
+            again.deciding_rule.as_deref(),
+            Some("suppression_organization")
+        );
+        assert_eq!(sink.connections(), connections);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refusal_that_is_not_about_the_recipient_fails_the_message_without_suppressing(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "554 5.7.1 relay access denied");
+
+        let failed = env.send(person, template).await;
+
+        assert_eq!(
+            (failed.status.as_str(), failed.reason.as_deref()),
+            ("failed", Some("smtp_rejected"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        assert_eq!(
+            env.count("SELECT count(*) FROM suppressions").await,
+            0,
+            "nobody is suppressed"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn temporary_refusals_retry_and_when_they_run_out_are_a_soft_bounce_without_suppression(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        let queued = env.queue(person, template, 2).await;
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(
+            env.message(queued.message).await.status,
+            "sending",
+            "a first 4xx is retried, not ended"
+        );
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (
+                ended.status.as_str(),
+                ended.reason.as_deref(),
+                ended.attempts
+            ),
+            ("failed", Some("soft_bounce"), 2)
+        );
+        let events = env.events("email.bounced").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["bounce"], "soft");
+        assert_eq!(env.count("SELECT count(*) FROM suppressions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dkim_key_that_cannot_be_opened_is_retried_as_credential_unavailable_and_nothing_connects(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::{Keyring, MasterKey};
+
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (mut env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+
+        // No master key at all, then another one: both are the retry of an unopenable credential.
+        env.keyring = None;
+        env.attempt().await.unwrap_err();
+        env.keyring = Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap()));
+        env.attempt().await.unwrap_err();
+
+        assert_eq!(sink.connections(), 0);
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        let attempts = env.attempts_of(queued.message).await;
+        assert_eq!(attempts.len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_from_an_unverified_domain_is_skipped_before_any_connection(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        sqlx::query("UPDATE sending_domains SET status = 'unverified' WHERE workspace_id = $1")
+            .bind(env.ws.as_uuid())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        let skipped = env.send(person, template).await;
+
+        assert_eq!(
+            (skipped.status.as_str(), skipped.reason.as_deref()),
+            ("skipped", Some("sender_unverified"))
+        );
+        assert_eq!(sink.connections(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_destination_that_does_not_sign_never_has_the_domain_key_opened(pool: PgPool) {
+        // The fake destination declares no signing, and the worker holds no master key: a key that
+        // had to be opened would retry the send. It is sent.
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+
+        let sent = env.send(person, template).await;
+
+        assert_eq!(sent.status, "sent");
+        assert!(env.keyring.is_none());
     }
 }

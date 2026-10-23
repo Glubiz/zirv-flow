@@ -89,6 +89,7 @@ mod tests {
             channel: "email",
             to: "a@example.test",
             payload: &payload,
+            dkim: None,
         };
         let now = OffsetDateTime::UNIX_EPOCH;
 
@@ -140,6 +141,7 @@ mod tests {
             channel: "email",
             to: "a@example.test",
             payload: &payload,
+            dkim: None,
         };
         let done = send(
             destination,

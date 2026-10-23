@@ -35,6 +35,9 @@ pub struct Capabilities {
     pub rate_limit: bool,
     /// Whether it can erase a person's data at the remote system.
     pub erase: bool,
+    /// Whether it signs the message itself with the sender domain's DKIM key. The send pipeline
+    /// opens that key only for a type that says so, and passes it in [`Outbound::dkim`](super::Outbound::dkim).
+    pub signs_dkim: bool,
 }
 
 #[cfg(test)]
@@ -49,6 +52,7 @@ mod tests {
             batching: false,
             rate_limit: true,
             erase: false,
+            signs_dkim: false,
         };
 
         assert_eq!(base, base);
@@ -56,6 +60,13 @@ mod tests {
             base,
             Capabilities {
                 erase: true,
+                ..base
+            }
+        );
+        assert_ne!(
+            base,
+            Capabilities {
+                signs_dkim: true,
                 ..base
             }
         );

@@ -40,10 +40,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_registry_lists_the_webhook_and_with_test_support_the_fake_and_nothing_else() {
+    fn the_registry_lists_the_webhook_smtp_and_with_test_support_the_fake_and_nothing_else() {
         let kinds: Vec<_> = registry().specs().iter().map(|spec| spec.kind).collect();
 
-        assert_eq!(kinds, ["webhook", "fake"]);
+        assert_eq!(kinds, ["webhook", "smtp", "fake"]);
         assert!(registry().get("nonesuch").is_none());
     }
 

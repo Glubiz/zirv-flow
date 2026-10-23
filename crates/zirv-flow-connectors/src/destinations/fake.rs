@@ -137,6 +137,7 @@ impl Destination for Fake {
             batching: false,
             rate_limit: true,
             erase: true,
+            signs_dkim: false,
         },
         config_check: None,
     };
@@ -277,6 +278,7 @@ mod tests {
             channel: "email",
             to: "a@example.test",
             payload: &payload,
+            dkim: None,
         };
         let deliver = |mode: &'static str| {
             let config = json!({"mode": mode});
@@ -314,6 +316,7 @@ mod tests {
                     channel: "email",
                     to: "a@example.test",
                     payload,
+                    dkim: None,
                 };
                 Fake.deliver(&ctx(), &config, &credential("x"), &message)
                     .await
@@ -354,6 +357,7 @@ mod tests {
             channel: "email",
             to: "a@example.test",
             payload: &payload,
+            dkim: None,
         };
 
         let error = Fake
@@ -388,6 +392,7 @@ mod tests {
             channel: "email",
             to: "a@example.test",
             payload: &payload,
+            dkim: None,
         };
         let credential = credential(GOOD_TOKEN);
 

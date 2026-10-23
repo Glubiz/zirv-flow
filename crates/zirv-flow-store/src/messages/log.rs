@@ -78,6 +78,9 @@ pub struct GateRecord {
     /// The id the gate's finding rests on, such as the consent change that decided or the scope
     /// of the suppression that blocked, as `(name, id)`.
     pub detail: Option<(&'static str, Uuid)>,
+    /// A code that adds to the reason, such as what a message that ended unconfirmed really ran
+    /// into. A code, never an address.
+    pub note: Option<&'static str>,
 }
 
 impl GateRecord {
@@ -88,6 +91,7 @@ impl GateRecord {
             passed: true,
             reason: None,
             detail: None,
+            note: None,
         }
     }
 
@@ -98,12 +102,19 @@ impl GateRecord {
             passed: false,
             reason: Some(reason),
             detail: None,
+            note: None,
         }
     }
 
     /// The same record, naming the id its finding rests on.
     pub const fn with_detail(mut self, name: &'static str, id: Uuid) -> Self {
         self.detail = Some((name, id));
+        self
+    }
+
+    /// The same record, with a code that says more than the reason does.
+    pub const fn with_note(mut self, note: &'static str) -> Self {
+        self.note = Some(note);
         self
     }
 
@@ -117,6 +128,9 @@ impl GateRecord {
         }
         if let Some((name, id)) = self.detail {
             entry[name] = json!(id);
+        }
+        if let Some(note) = self.note {
+            entry["note"] = json!(note);
         }
         entry
     }
@@ -228,9 +242,22 @@ pub async fn insert_message<'e>(
     Ok(written == 1)
 }
 
+/// The gate entry that notes a destination call may be in flight: written before the call, cleared
+/// once the call is known not to have been accepted.
+fn in_flight_note() -> Value {
+    json!([{"gate": "delivery", "result": "in_flight"}])
+}
+
+/// The in-flight entry one attempt writes: its number fences who may clear it.
+fn in_flight_entry(attempt: i32) -> Value {
+    json!([{"gate": "delivery", "result": "in_flight", "attempt": attempt}])
+}
+
 /// Marks the message `sending` before the destination is called, in a statement of its own, so
-/// the mark survives a job transaction that rolls back. A message that has ended is left alone;
-/// false then.
+/// the mark survives a job transaction that rolls back. The same write notes that a call is in
+/// flight (see [`clear_message_in_flight`]), so the mark is committed before the call starts. The
+/// entry records `attempts` and replaces any older in-flight entry. A message that has ended is
+/// left alone; false then.
 pub async fn mark_message_sending<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -238,16 +265,112 @@ pub async fn mark_message_sending<'e>(
     attempts: i32,
 ) -> Result<bool, StoreError> {
     let marked = sqlx::query(
-        "UPDATE messages SET status = 'sending', attempts = $3          WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'sending')",
+        "UPDATE messages SET status = 'sending', attempts = $3,
+             gate_results = COALESCE(
+                 (SELECT jsonb_agg(entry) FROM jsonb_array_elements(gate_results) AS entry
+                  WHERE NOT entry @> ($5::jsonb -> 0)), '[]'::jsonb) || $4::jsonb
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'sending')",
     )
     .bind(workspace.as_uuid())
     .bind(id)
     .bind(attempts)
+    .bind(in_flight_entry(attempts))
+    .bind(in_flight_note())
     .execute(executor)
     .await
     .map_err(StoreError::query)?
     .rows_affected();
     Ok(marked == 1)
+}
+
+/// Clears the in-flight note of a `sending` message: the call is known not to have been accepted
+/// (a 4xx or 5xx reply, an auth, config or egress error, or a transport failure before the final
+/// dot). A call that is not known to have failed leaves the note, so a crash between the call and
+/// this write counts as a call that may have been accepted. Only the entry written by `attempts` is removed, so
+/// a stale attempt cannot clear a newer attempt's mark. False when there was nothing to clear.
+pub async fn clear_message_in_flight<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+    attempts: i32,
+) -> Result<bool, StoreError> {
+    let cleared = sqlx::query(
+        "UPDATE messages SET gate_results = COALESCE(
+             (SELECT jsonb_agg(entry) FROM jsonb_array_elements(gate_results) AS entry
+              WHERE entry <> ($3::jsonb -> 0)), '[]'::jsonb)
+         WHERE workspace_id = $1 AND id = $2 AND status = 'sending' AND gate_results @> $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(in_flight_entry(attempts))
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(cleared == 1)
+}
+
+/// Whether a `sending` message carries the in-flight note of [`mark_message_sending`].
+pub async fn message_in_flight<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = $1 AND id = $2
+             AND status = 'sending' AND gate_results @> $3)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(in_flight_note())
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// The gate entry that notes an attempt lost the mail server's reply after the end of the message.
+fn unconfirmed_note() -> Value {
+    json!([{"gate": "delivery", "result": "unconfirmed"}])
+}
+
+/// Notes on a `sending` message that an attempt sent the whole message and then lost the server's
+/// reply, so it may have been accepted. The note is a `delivery` entry in `gate_results`, written
+/// in a statement of its own so it survives a job retry, a deferral and a lost lease; the write
+/// that ends the message replaces the gate results. False when the message is not `sending` or
+/// already carries the note.
+pub async fn mark_message_unconfirmed<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    let marked = sqlx::query(
+        "UPDATE messages SET gate_results = gate_results || $3          WHERE workspace_id = $1 AND id = $2 AND status = 'sending'            AND NOT gate_results @> $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(unconfirmed_note())
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(marked == 1)
+}
+
+/// Whether a `sending` message carries the note of [`mark_message_unconfirmed`].
+pub async fn message_unconfirmed<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = $1 AND id = $2              AND status = 'sending' AND gate_results @> $3)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(unconfirmed_note())
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
 }
 
 /// The message with this id in the workspace.
@@ -515,6 +638,145 @@ mod tests {
             found.created_at, pending.created_at,
             "the row keeps its start"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_unconfirmed_note_is_kept_on_a_sending_message_until_it_ends(pool: sqlx::PgPool) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        let ws = crate::create_workspace(
+            &pool,
+            &WorkspaceName::parse("two").unwrap(),
+            &Slug::parse("two").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        let message = |status, reason| NewMessage {
+            id,
+            workspace: ws,
+            person,
+            enrollment: Uuid::now_v7(),
+            flow: None,
+            flow_version: None,
+            node: "mail",
+            template: Uuid::from_u128(1),
+            template_version: None,
+            destination: Uuid::from_u128(2),
+            sender_identity: None,
+            category: None,
+            topic: None,
+            dimensions: &dimensions,
+            status,
+            reason,
+            deciding_rule: None,
+            gates: &[],
+            attempts: 1,
+            now: OffsetDateTime::now_utc(),
+        };
+        insert_message(&pool, &message(MessageStatus::Pending, None))
+            .await
+            .unwrap();
+
+        let pending = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        mark_message_sending(&pool, ws, id, 1).await.unwrap();
+        let before = message_unconfirmed(&pool, ws, id).await.unwrap();
+        let first = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        let second = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        let after = message_unconfirmed(&pool, ws, id).await.unwrap();
+        mark_message_sending(&pool, ws, id, 2).await.unwrap();
+        let kept = message_unconfirmed(&pool, ws, id).await.unwrap();
+        insert_message(
+            &pool,
+            &message(MessageStatus::Failed, Some("delivery_unconfirmed")),
+        )
+        .await
+        .unwrap();
+        let ended = message_unconfirmed(&pool, ws, id).await.unwrap();
+
+        assert!(!pending, "only a sending message takes the note");
+        assert!(!before);
+        assert!(first && !second, "noted once");
+        assert!(after && kept, "a new attempt's mark keeps it");
+        assert!(!ended, "an ended message carries no note");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_in_flight_note_is_written_with_the_sending_mark_and_cleared_alone(
+        pool: sqlx::PgPool,
+    ) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        let ws = crate::create_workspace(
+            &pool,
+            &WorkspaceName::parse("three").unwrap(),
+            &Slug::parse("three").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        insert_message(
+            &pool,
+            &NewMessage {
+                id,
+                workspace: ws,
+                person,
+                enrollment: Uuid::now_v7(),
+                flow: None,
+                flow_version: None,
+                node: "mail",
+                template: Uuid::from_u128(1),
+                template_version: None,
+                destination: Uuid::from_u128(2),
+                sender_identity: None,
+                category: None,
+                topic: None,
+                dimensions: &dimensions,
+                status: MessageStatus::Pending,
+                reason: None,
+                deciding_rule: None,
+                gates: &[],
+                attempts: 0,
+                now: OffsetDateTime::now_utc(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let pending = message_in_flight(&pool, ws, id).await.unwrap();
+        mark_message_sending(&pool, ws, id, 1).await.unwrap();
+        mark_message_sending(&pool, ws, id, 2).await.unwrap();
+        let marked = message_in_flight(&pool, ws, id).await.unwrap();
+        mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        let stale = clear_message_in_flight(&pool, ws, id, 1).await.unwrap();
+        let kept = message_in_flight(&pool, ws, id).await.unwrap();
+        let cleared = clear_message_in_flight(&pool, ws, id, 2).await.unwrap();
+        let again = clear_message_in_flight(&pool, ws, id, 2).await.unwrap();
+        let after = message_in_flight(&pool, ws, id).await.unwrap();
+        let unconfirmed = message_unconfirmed(&pool, ws, id).await.unwrap();
+
+        assert!(!pending && marked, "the sending write notes the call");
+        assert!(!stale && kept, "a stale attempt cannot clear a newer mark");
+        assert!(cleared && !again && !after, "cleared once");
+        assert!(unconfirmed, "clearing leaves the unconfirmed note");
     }
 
     #[test]

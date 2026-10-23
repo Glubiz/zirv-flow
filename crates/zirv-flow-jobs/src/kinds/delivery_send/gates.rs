@@ -176,6 +176,13 @@ pub(super) async fn suppression(
     )
 }
 
+/// The suppression hash of `address`, as the gate takes it; none for text that is not an email
+/// address.
+pub(super) fn address_hash(key: &HmacKey, address: &str) -> Option<[u8; 32]> {
+    let identifier = Identifier::parse("email", address).ok()?;
+    Some(identifier_hash(key, &identifier))
+}
+
 /// Gate 5, the frequency cap per person, channel and window. #221 fills it; until then it lets
 /// every message through.
 pub(super) fn frequency_cap() -> GateRecord {

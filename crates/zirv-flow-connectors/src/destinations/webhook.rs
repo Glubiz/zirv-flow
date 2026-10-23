@@ -89,6 +89,7 @@ impl Destination for Webhook {
             // A raw URL has no rate bucket (architecture 10.1).
             rate_limit: false,
             erase: false,
+            signs_dkim: false,
         },
         config_check: None,
     };
@@ -309,6 +310,7 @@ mod tests {
             channel: "webhook",
             to: "",
             payload,
+            dkim: None,
         }
     }
 
