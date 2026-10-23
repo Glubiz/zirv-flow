@@ -2,7 +2,7 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, Secur
 use utoipa::{Modify, OpenApi};
 
 use crate::assistant;
-use crate::consent::{person, suppressions, topics};
+use crate::consent::{dimensions, person, suppressions, topics, transfer};
 use crate::contacts;
 use crate::destinations;
 use crate::events::{
@@ -209,6 +209,13 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         topics::list,
         topics::create,
         topics::update,
+        dimensions::list,
+        dimensions::create,
+        dimensions::update,
+        dimensions::add_value_handler,
+        dimensions::update_value_handler,
+        transfer::import_handler,
+        transfer::export,
         person::get,
         person::set,
         person::history,
@@ -525,7 +532,15 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         topics::TopicBody,
         topics::CreateTopicRequest,
         topics::UpdateTopicRequest,
+        dimensions::DimensionBody,
+        dimensions::DimensionValueBody,
+        dimensions::CreateDimensionRequest,
+        dimensions::NewValueRequest,
+        dimensions::UpdateDimensionRequest,
+        transfer::ConsentImportBody,
+        transfer::ConsentImportRowBody,
         person::ConsentBody,
+        person::ReadBody,
         person::ConsentStateBody,
         person::SetConsentRequest,
         person::HistoryBody,

@@ -201,6 +201,7 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
             &mut tx,
             ws,
             &ConsentChange {
+                dimensions: Default::default(),
                 person,
                 channel: Channel::Email,
                 topic: None,

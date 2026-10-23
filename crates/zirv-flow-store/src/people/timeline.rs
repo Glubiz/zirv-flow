@@ -444,6 +444,7 @@ mod tests {
             &mut tx,
             ws,
             &ConsentChange {
+                dimensions: Default::default(),
                 person: survivor,
                 channel: Channel::Email,
                 topic: None,

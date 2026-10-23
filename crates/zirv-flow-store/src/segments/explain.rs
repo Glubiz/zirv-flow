@@ -155,7 +155,8 @@ pub async fn load_explain_person(
     .map_err(StoreError::bounded)?;
 
     let rows: Vec<(String, Option<Uuid>, String)> = sqlx::query_as(
-        "SELECT channel, topic_id, status FROM consent WHERE workspace_id = $1 AND person_id = $2",
+        "SELECT channel, topic_id, status FROM consent \
+         WHERE workspace_id = $1 AND person_id = $2 AND dimensions_key = ''",
     )
     .bind(workspace.as_uuid())
     .bind(found.id)

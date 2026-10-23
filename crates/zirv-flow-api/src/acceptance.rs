@@ -4622,6 +4622,669 @@ mod tests {
         assert_eq!(in_other.body.as_array().unwrap().len(), 0);
     }
 
+    fn dimensions_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/consent/dimensions{rest}")
+    }
+
+    /// Declares a `vertical` dimension with the values `retail` and `b2b`.
+    async fn create_verticals(router: &Router, owner: &Login, ws: &str) {
+        let reply = call(
+            router,
+            "POST",
+            &dimensions_uri(ws, ""),
+            Some(json!({
+                "key": "vertical", "name": "Vertical",
+                "values": [{"key": "retail", "name": "Retail"}, {"key": "b2b", "name": "B2B"}]
+            })),
+            Auth::Session(owner),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn dimensions_are_listed_to_readers_and_changed_only_by_admins_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let other = workspace(&router, &owner, "Beta").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, stranger) = user(&pool, &router, "stranger@example.com").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
+        let body = json!({"key": "brand", "name": "Brand"});
+
+        create_verticals(&router, &owner, &ws).await;
+        let listed = call(
+            &router,
+            "GET",
+            &dimensions_uri(&ws, ""),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let key_listed = call(
+            &router,
+            "GET",
+            &dimensions_uri(&ws, ""),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let member_create = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(body.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let read_key_create = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(body.clone()),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let member_patch = call(
+            &router,
+            "PATCH",
+            &dimensions_uri(&ws, "/vertical"),
+            Some(json!({"name": "V"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let member_value = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, "/vertical/values"),
+            Some(json!({"key": "gov", "name": "Gov"})),
+            Auth::Session(&member),
+        )
+        .await;
+        let no_csrf = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(body.clone()),
+            Auth::SessionWithoutCsrf(&owner),
+        )
+        .await;
+        let admin_create = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(body),
+            Auth::Key(&admin_key),
+        )
+        .await;
+        let foreign_read = call(
+            &router,
+            "GET",
+            &dimensions_uri(&ws, ""),
+            None,
+            Auth::Session(&stranger),
+        )
+        .await;
+        let foreign_write = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(json!({"key": "x", "name": "x"})),
+            Auth::Session(&stranger),
+        )
+        .await;
+        let other_read = call(
+            &router,
+            "GET",
+            &dimensions_uri(&other, ""),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let anonymous = call(
+            &router,
+            "GET",
+            &dimensions_uri(&ws, ""),
+            None,
+            Auth::Anonymous,
+        )
+        .await;
+
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        assert_eq!(key_listed.status, StatusCode::OK);
+        let dimensions = listed.body.as_array().unwrap();
+        assert_eq!(dimensions[0]["key"], "topic");
+        assert_eq!(dimensions[0]["builtin"], true);
+        assert_eq!(dimensions[0]["values"][0]["key"], "news");
+        assert_eq!(dimensions[1]["key"], "vertical");
+        assert_eq!(dimensions[1]["values"].as_array().unwrap().len(), 2);
+        assert_eq!(member_create.status, StatusCode::FORBIDDEN);
+        assert_eq!(read_key_create.status, StatusCode::FORBIDDEN);
+        assert_eq!(member_patch.status, StatusCode::FORBIDDEN);
+        assert_eq!(member_value.status, StatusCode::FORBIDDEN);
+        assert_eq!(no_csrf.status, StatusCode::FORBIDDEN);
+        assert_eq!(admin_create.status, StatusCode::CREATED);
+        assert_eq!(foreign_read.status, StatusCode::NOT_FOUND);
+        assert_eq!(foreign_write.status, StatusCode::NOT_FOUND);
+        assert_eq!(other_read.status, StatusCode::NOT_FOUND);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+
+        let renamed = call(
+            &router,
+            "PATCH",
+            &dimensions_uri(&ws, "/vertical"),
+            Some(json!({"name": "Vertical market"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let added = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, "/vertical/values"),
+            Some(json!({"key": "gov", "name": "Gov"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let duplicate = call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, "/vertical/values"),
+            Some(json!({"key": "gov", "name": "Again"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let archived = call(
+            &router,
+            "PATCH",
+            &dimensions_uri(&ws, "/vertical/values/gov"),
+            Some(json!({"archived": true})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let live = call(
+            &router,
+            "GET",
+            &dimensions_uri(&ws, ""),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let all = call(
+            &router,
+            "GET",
+            &dimensions_uri(&ws, "?archived=true"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(renamed.status, StatusCode::OK, "{:?}", renamed.body);
+        assert_eq!(renamed.body["name"], "Vertical market");
+        assert_eq!(added.status, StatusCode::CREATED);
+        assert_eq!(duplicate.status, StatusCode::CONFLICT);
+        assert_eq!(archived.body["archived"], true);
+        assert_eq!(live.body[2]["values"].as_array().unwrap().len(), 2);
+        assert_eq!(all.body[2]["values"].as_array().unwrap().len(), 3);
+        for (method, uri, bad) in [
+            (
+                "POST",
+                dimensions_uri(&ws, ""),
+                json!({"key": "topic", "name": "T"}),
+            ),
+            (
+                "POST",
+                dimensions_uri(&ws, ""),
+                json!({"key": "Bad Key", "name": "T"}),
+            ),
+            (
+                "POST",
+                dimensions_uri(&ws, ""),
+                json!({"key": "ok", "name": " "}),
+            ),
+            ("PATCH", dimensions_uri(&ws, "/vertical"), json!({})),
+            (
+                "POST",
+                dimensions_uri(&ws, "/vertical/values"),
+                json!({"key": "A B", "name": "x"}),
+            ),
+        ] {
+            let reply = call(&router, method, &uri, Some(bad), Auth::Session(&owner)).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{method} {uri} {:?}",
+                reply.body
+            );
+        }
+        for (method, uri, body) in [
+            ("PATCH", dimensions_uri(&ws, "/topic"), json!({"name": "x"})),
+            ("PATCH", dimensions_uri(&ws, "/nope"), json!({"name": "x"})),
+            (
+                "POST",
+                dimensions_uri(&ws, "/nope/values"),
+                json!({"key": "a", "name": "x"}),
+            ),
+            (
+                "PATCH",
+                dimensions_uri(&ws, "/vertical/values/nope"),
+                json!({"name": "x"}),
+            ),
+        ] {
+            let reply = call(&router, method, &uri, Some(body), Auth::Session(&owner)).await;
+            assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+
+        let audit = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let actions: Vec<&str> = audit
+            .iter()
+            .filter(|row| row.action.starts_with("consent_dimension."))
+            .map(|row| row.action.as_str())
+            .collect();
+        for action in [
+            "consent_dimension.created",
+            "consent_dimension.updated",
+            "consent_dimension.value_added",
+            "consent_dimension.value_updated",
+        ] {
+            assert!(actions.contains(&action), "{action} in {actions:?}");
+        }
+        let updated = audit
+            .iter()
+            .find(|row| row.action == "consent_dimension.updated")
+            .unwrap();
+        assert_eq!(
+            updated.summary,
+            json!({"key": "vertical", "fields": ["name"]})
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_per_dimension_value_is_written_read_and_filtered_in_the_history(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        create_verticals(&router, &owner, &ws).await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let put = |body: Value| {
+            let (router, owner, uri) = (router.clone(), &owner, consent_uri(&ws, &person));
+            async move { call(&router, "PUT", &uri, Some(body), Auth::Session(owner)).await }
+        };
+
+        let subscribed =
+            put(json!({"channel": "email", "topic_key": "news", "status": "subscribed"})).await;
+        let scoped_out = put(json!({
+            "channel": "email", "topic_key": "news", "status": "unsubscribed",
+            "dimensions": {"vertical": "retail"}
+        }))
+        .await;
+
+        assert_eq!(subscribed.status, StatusCode::OK, "{:?}", subscribed.body);
+        assert_eq!(scoped_out.status, StatusCode::OK, "{:?}", scoped_out.body);
+        let states = scoped_out.body["states"].as_array().unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0]["dimensions"], json!({}));
+        assert_eq!(states[1]["dimensions"], json!({"vertical": "retail"}));
+        let read = |query: &str| {
+            let (router, owner, uri) = (
+                router.clone(),
+                &owner,
+                format!("{}?{query}", consent_uri(&ws, &person)),
+            );
+            async move { call(&router, "GET", &uri, None, Auth::Session(owner)).await }
+        };
+        let retail = read("topic_key=news&dimension.vertical=retail").await;
+        let b2b = read("topic_key=news&dimension.vertical=b2b").await;
+        let unscoped = read("topic_key=news").await;
+        let plain = read("").await;
+        assert_eq!(retail.body["read"]["allowed"], false, "{:?}", retail.body);
+        assert_eq!(retail.body["read"]["default_policy"], "opt_out");
+        assert!(retail.body["read"]["deciding_change"].is_string());
+        assert_eq!(b2b.body["read"]["allowed"], true);
+        assert_eq!(unscoped.body["read"]["allowed"], true);
+        assert!(plain.body["read"].is_null());
+        for query in [
+            "topic_key=news&dimension.vertical=nope",
+            "topic_key=news&dimension.brand=acme",
+            "topic_key=missing",
+            "channel=sms",
+            "dimension.topic=news",
+        ] {
+            assert_eq!(
+                read(query).await.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{query}"
+            );
+        }
+
+        for bad in [
+            json!({"channel": "email", "status": "unsubscribed", "dimensions": {"vertical": "nope"}}),
+            json!({"channel": "email", "status": "unsubscribed", "dimensions": {"brand": "acme"}}),
+            json!({"channel": "email", "status": "unsubscribed", "dimensions": {"topic": "news"}}),
+            json!({"channel": "email", "status": "unsubscribed", "dimensions": {"vertical": "Retail"}}),
+        ] {
+            let reply = put(bad).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                reply.body
+            );
+        }
+        let history_uri = format!("{}/history", consent_uri(&ws, &person));
+        let everything = call(&router, "GET", &history_uri, None, Auth::Session(&owner)).await;
+        let retail_only = call(
+            &router,
+            "GET",
+            &format!("{history_uri}?dimension.vertical=retail"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let bad_filter = call(
+            &router,
+            "GET",
+            &format!("{history_uri}?dimension.vertical=A%20B"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(everything.body["entries"].as_array().unwrap().len(), 2);
+        let scoped: &Vec<Value> = retail_only.body["entries"].as_array().unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0]["dimensions"], json!({"vertical": "retail"}));
+        assert_eq!(bad_filter.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    fn consent_csv_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/consent/{rest}")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_csv_round_trips_dimension_values_and_an_old_csv_still_imports(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        create_verticals(&router, &owner, &ws).await;
+        let ada = seed_person(&pool, &ws, "ada@example.com").await;
+        let bob = seed_person(&pool, &ws, "bob@example.com").await;
+        let post = |rest: &str, csv: String| {
+            let (router, owner, uri) = (router.clone(), &owner, consent_csv_uri(&ws, rest));
+            async move {
+                call_text(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some("text/csv"),
+                    csv,
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+        let export = || async {
+            call_text(
+                &router,
+                "GET",
+                &consent_csv_uri(&ws, "export"),
+                None,
+                String::new(),
+                Auth::Session(&owner),
+            )
+            .await
+        };
+        let csv = format!(
+            "person_id,channel,topic,status,dimension:vertical\n\
+             {ada},email,news,unsubscribed,retail\n\
+             {ada},email,news,subscribed,\n\
+             {bob},email,,subscribed,b2b\n\
+             {bob},email,nope,subscribed,\n\
+             {bob},email,news,subscribed,gone\n\
+             not-a-uuid,email,,subscribed,\n"
+        );
+
+        let dry = post("import?dry_run=true", csv.clone()).await;
+        let dry_body: Value = serde_json::from_str(&dry.text).unwrap();
+        assert_eq!(dry.status, StatusCode::OK, "{}", dry.text);
+        assert_eq!(dry_body["changed"], 3);
+        assert_eq!(
+            dry_body["invalid"],
+            json!([
+                {"row": 5, "reason": "unknown_topic"},
+                {"row": 6, "reason": "unknown_dimension_value"},
+                {"row": 7, "reason": "invalid_person_id"}
+            ])
+        );
+        let after_dry: i64 = sqlx::query_scalar("SELECT count(*) FROM consent")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after_dry, 0);
+
+        let committed = post("import", csv.clone()).await;
+        let committed_body: Value = serde_json::from_str(&committed.text).unwrap();
+        assert_eq!(committed_body["changed"], 3);
+        let first = export().await;
+        assert_eq!(first.status, StatusCode::OK);
+        assert!(
+            first.headers[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/csv")
+        );
+        let mut lines = first.text.lines();
+        assert_eq!(
+            lines.next(),
+            Some("person_id,channel,topic,status,dimension:vertical")
+        );
+        let mut rows: Vec<&str> = lines.collect();
+        rows.sort_unstable();
+        let mut expected = vec![
+            format!("{ada},email,news,subscribed,"),
+            format!("{ada},email,news,unsubscribed,retail"),
+            format!("{bob},email,,subscribed,b2b"),
+        ];
+        expected.sort_unstable();
+        assert_eq!(rows, expected);
+
+        sqlx::query("DELETE FROM consent")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let replay = post("import", first.text.clone()).await;
+        let replay_body: Value = serde_json::from_str(&replay.text).unwrap();
+        assert_eq!(replay_body["changed"], 3, "{}", replay.text);
+        assert_eq!(replay_body["invalid"], json!([]));
+        assert_eq!(export().await.text, first.text);
+
+        let old = post(
+            "import",
+            format!(
+                "person_id,channel,topic,status\n{ada},email,,unsubscribed\n{ada},email,news,subscribed\n"
+            ),
+        )
+        .await;
+        let old_body: Value = serde_json::from_str(&old.text).unwrap();
+        assert_eq!(old.status, StatusCode::OK, "{}", old.text);
+        assert_eq!(
+            (old_body["changed"].as_u64(), old_body["unchanged"].as_u64()),
+            // The repeated unscoped news state is advanced, not skipped: the replay wrote the
+            // retail-scoped news state after it, so the held row was no longer the latest.
+            (Some(2), Some(0))
+        );
+        let unscoped_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM consent WHERE person_id = $1 AND dimensions_key = ''",
+        )
+        .bind(ada.parse::<uuid::Uuid>().unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unscoped_rows, 2);
+
+        let bad_header = post("import", "value,kind\nx,y\n".to_owned()).await;
+        let bad_column = post(
+            "import",
+            "person_id,channel,topic,status,vertical\n".to_owned(),
+        )
+        .await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let read_export = call_text(
+            &router,
+            "GET",
+            &consent_csv_uri(&ws, "export"),
+            None,
+            String::new(),
+            Auth::Key(&read_key),
+        )
+        .await;
+        assert_eq!(bad_header.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad_column.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(read_export.status, StatusCode::FORBIDDEN);
+        let audit = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let imports: Vec<&Value> = audit
+            .iter()
+            .filter(|row| row.action == "consent.imported")
+            .map(|row| &row.summary)
+            .collect();
+        assert_eq!(imports.len(), 3, "the dry run left no audit row");
+        assert!(imports.contains(&&json!({"changed": 3, "unchanged": 0, "invalid": 3})));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_consent_import_names_an_unknown_value_apart_from_an_unknown_dimension_and_caps_rows(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        call(
+            &router,
+            "POST",
+            &dimensions_uri(&ws, ""),
+            Some(json!({"key": "vertical", "name": "Vertical",
+                        "values": [{"key": "retail", "name": "Retail"}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let ada = seed_person(&pool, &ws, "ada@example.com").await;
+        let post = |csv: String| {
+            let (router, owner, uri) = (router.clone(), &owner, consent_csv_uri(&ws, "import"));
+            async move {
+                call_text(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some("text/csv"),
+                    csv,
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+
+        let value = post(format!(
+            "person_id,channel,topic,status,dimension:vertical
+{ada},email,,subscribed,b2b
+"
+        ))
+        .await;
+        let dimension = post(format!(
+            "person_id,channel,topic,status,dimension:brand
+{ada},email,,subscribed,acme
+"
+        ))
+        .await;
+        let row = format!(
+            "{ada},email,,subscribed
+"
+        );
+        let over = post(format!(
+            "person_id,channel,topic,status
+{}",
+            row.repeat(10_001)
+        ))
+        .await;
+
+        let value: Value = serde_json::from_str(&value.text).unwrap();
+        let dimension: Value = serde_json::from_str(&dimension.text).unwrap();
+        assert_eq!(
+            value["invalid"],
+            json!([{"row": 2, "reason": "unknown_dimension_value"}])
+        );
+        assert_eq!(
+            dimension["invalid"],
+            json!([{"row": 2, "reason": "unknown_dimension"}])
+        );
+        assert_eq!(
+            over.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            over.text
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_import_row_older_than_the_held_state_counts_as_unchanged_and_moves_nothing(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let ada = seed_person(&pool, &ws, "ada@example.com").await;
+        let put = call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &ada),
+            Some(json!({"channel": "email", "status": "subscribed"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(put.status, StatusCode::OK, "{:?}", put.body);
+        sqlx::query("UPDATE consent SET changed_at = now() + interval '1 day'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let reply = call_text(
+            &router,
+            "POST",
+            &consent_csv_uri(&ws, "import"),
+            Some("text/csv"),
+            format!(
+                "person_id,channel,topic,status
+{ada},email,,unsubscribed
+"
+            ),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        let body: Value = serde_json::from_str(&reply.text).unwrap();
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
+        assert_eq!(
+            (body["changed"].as_u64(), body["unchanged"].as_u64()),
+            (Some(0), Some(1))
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM consent")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let history: i64 = sqlx::query_scalar("SELECT count(*) FROM consent_changes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((status.as_str(), history), ("subscribed", 2));
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn consent_is_set_read_and_its_history_shows_source_and_evidence(pool: PgPool) {

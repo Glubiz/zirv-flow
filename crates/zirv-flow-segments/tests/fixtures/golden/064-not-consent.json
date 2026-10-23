@@ -34,6 +34,6 @@
       "text": "subscribed"
     }
   ],
-  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (NOT (EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id = $2::uuid AND c.status = $4::text)))",
+  "sql": "SELECT p.id FROM people p WHERE p.workspace_id = $1 AND p.merged_into IS NULL AND (NOT (EXISTS (SELECT 1 FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id AND c.channel = $3::text AND c.topic_id = $2::uuid AND c.dimensions_key = '' AND c.status = $4::text)))",
   "time_sensitive": false
 }
