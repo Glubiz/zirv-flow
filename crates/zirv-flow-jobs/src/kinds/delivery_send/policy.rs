@@ -86,7 +86,7 @@ pub(super) async fn denial(
     };
     // A transaction of its own that ends here, as the other gates that read the workspace.
     let mut connection = begin(pool).await?;
-    let now = clock.now(&mut *connection).await?;
+    let now = clock.now(&mut connection).await?;
     let send = SendContext {
         channel: Channel::Email,
         dimensions: dimensions.clone(),
@@ -94,7 +94,7 @@ pub(super) async fn denial(
     };
     // The catalog is only read when a rule has a condition to compile.
     let (catalog, storage) = if published.rules.iter().any(|rule| rule.condition.is_some()) {
-        catalog_of(segment_catalog(&mut *connection, workspace).await?)
+        catalog_of(segment_catalog(&mut connection, workspace).await?)
     } else {
         (Catalog::default(), TraitStorage::default())
     };
@@ -107,7 +107,7 @@ pub(super) async fn denial(
         recorded_denies,
     );
     Ok(
-        evaluate_consent_policy(&mut *connection, workspace, person, &rules)
+        evaluate_consent_policy(&mut connection, workspace, person, &rules)
             .await?
             .map(Denial::from),
     )

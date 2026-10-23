@@ -372,7 +372,7 @@ pub(crate) async fn evaluate_policy(
     let mut connection = zirv_flow_store::begin(pool).await?;
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let (catalog, storage) = if rules.iter().any(|rule| rule.condition.is_some()) {
-        catalog_of(zirv_flow_store::segment_catalog(&mut *connection, workspace).await?)
+        catalog_of(zirv_flow_store::segment_catalog(&mut connection, workspace).await?)
     } else {
         (Catalog::default(), TraitStorage::default())
     };
@@ -398,7 +398,7 @@ pub(crate) async fn evaluate_policy(
         })
         .collect();
     let deciding = zirv_flow_store::evaluate_consent_policy(
-        &mut *connection,
+        &mut connection,
         workspace,
         request.person_id,
         &checks,

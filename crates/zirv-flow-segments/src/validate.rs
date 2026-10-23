@@ -330,9 +330,7 @@ impl Checker<'_> {
         }
         let dimensions = pointer_push(&base, "dimensions");
         for (key, value) in &condition.dimensions {
-            if !is_dimension_key(key) || key == TOPIC_DIMENSION {
-                self.report(&pointer_push(&dimensions, key), code::VALUE_NOT_ALLOWED);
-            } else if !is_dimension_key(value) {
+            if !is_dimension_key(key) || key == TOPIC_DIMENSION || !is_dimension_key(value) {
                 self.report(&pointer_push(&dimensions, key), code::VALUE_NOT_ALLOWED);
             }
         }
