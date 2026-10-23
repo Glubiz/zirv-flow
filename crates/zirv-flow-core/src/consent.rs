@@ -1,6 +1,8 @@
 //! The pure consent rules (architecture sections 6, 7.3 and 10.1): channels, consent states,
 //! topic policies, the send-time `allowed` check and the merge of two people's states.
 
+pub mod policy;
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;

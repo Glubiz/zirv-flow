@@ -3,6 +3,7 @@
 
 mod dimensions;
 mod merge;
+mod policy;
 mod state;
 mod topics;
 
@@ -12,6 +13,12 @@ pub use dimensions::{
     update_dimension, update_dimension_value,
 };
 pub(crate) use merge::move_on_merge;
+pub use policy::{
+    ConsentPolicy, DecidingRule, PolicyVersion, RuleCheck, RuleToCheck, consent_policy_draft,
+    evaluate_consent_policy, find_consent_policy, list_consent_policy_versions,
+    lock_consent_policy, publish_consent_policy, published_consent_policy,
+    save_consent_policy_draft,
+};
 pub use state::{
     ConsentChange, ConsentEntry, ConsentExportCursor, ConsentExportRow, ConsentHistoryEntry,
     ConsentOutcome, ReadOutcome, consent_export_page, consent_for, consent_history, consent_read,
