@@ -221,7 +221,44 @@ mod verification {
     use sha2::{Digest, Sha256};
     use zirv_flow_core::sending::dkim_record_public_key;
 
-    use super::{canonical_body, canonical_header};
+    /// The relaxed form of a header (RFC 6376 3.4.2), written apart from the signer's: the name
+    /// in lower case, the folds removed, each run of space and tab one space and none at either
+    /// end of the value.
+    pub(super) fn relaxed_header(name: &str, value: &str) -> String {
+        let unfolded = value.replace("\r\n", "");
+        let words: Vec<&str> = unfolded
+            .split([' ', '\t'])
+            .filter(|word| !word.is_empty())
+            .collect();
+        format!("{}:{}", name.to_ascii_lowercase(), words.join(" "))
+    }
+
+    /// The relaxed form of a body (RFC 6376 3.4.4), written apart from the signer's: a line keeps
+    /// one space where it starts with white space, its inner runs shrink to one space and its
+    /// trailing white space goes; empty lines at the end go; a body with text ends in one CRLF.
+    pub(super) fn relaxed_body(body: &[u8]) -> Vec<u8> {
+        let text = String::from_utf8_lossy(body);
+        let mut lines: Vec<String> = text
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .map(|line| {
+                let words: Vec<&str> = line
+                    .split([' ', '\t'])
+                    .filter(|word| !word.is_empty())
+                    .collect();
+                let lead = line.starts_with([' ', '\t']) && !words.is_empty();
+                format!("{}{}", if lead { " " } else { "" }, words.join(" "))
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines
+            .iter()
+            .map(|line| format!("{line}\r\n"))
+            .collect::<String>()
+            .into_bytes()
+    }
 
     /// The DER prefix of a SHA-256 `DigestInfo`.
     const SHA256_PREFIX: [u8; 19] = [
@@ -276,7 +313,7 @@ mod verification {
         if tag("v")? != "1" || tag("a")? != "rsa-sha256" || tag("c")? != "relaxed/relaxed" {
             return Err("unexpected v, a or c".into());
         }
-        let body_hash = STANDARD.encode(Sha256::digest(canonical_body(body)));
+        let body_hash = STANDARD.encode(Sha256::digest(relaxed_body(body)));
         if body_hash != tag("bh")? {
             return Err("the body hash does not match".into());
         }
@@ -288,7 +325,7 @@ mod verification {
                 .rev()
                 .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
                 .ok_or(format!("signed header {name} is absent"))?;
-            hashed.extend_from_slice(canonical_header(found, value).as_bytes());
+            hashed.extend_from_slice(relaxed_header(found, value).as_bytes());
             hashed.extend_from_slice(b"\r\n");
         }
         // The signature header with the value of b= removed.
@@ -297,7 +334,7 @@ mod verification {
             .filter(|at| raw[..*at].ends_with(|c: char| c.is_whitespace() || c == ';'))
             .ok_or("no b= tag")?;
         let without = format!("{}b=", &raw[..value_of_b]);
-        hashed.extend_from_slice(canonical_header("DKIM-Signature", &without).as_bytes());
+        hashed.extend_from_slice(relaxed_header("DKIM-Signature", &without).as_bytes());
 
         let signature = STANDARD.decode(tag("b")?).map_err(|_| "b= is not base64")?;
         let public = dkim_record_public_key(record_text).ok_or("the record has no key")?;
@@ -393,6 +430,50 @@ pub(crate) mod tests {
         );
         assert!(canonical_body(b"").is_empty());
         assert!(canonical_body(b"\r\n\r\n").is_empty());
+    }
+
+    /// Known answers for the relaxed forms, written by hand: the signer's canonicalizers and the
+    /// verifier's own must both produce them.
+    #[test]
+    fn both_canonicalizers_give_the_hand_written_answers() {
+        use super::verification::{relaxed_body, relaxed_header};
+
+        // RFC 6376 section 3.4.5.
+        let headers: [(&str, &str, &str); 6] = [
+            ("A", " X\r\n", "a:X"),
+            ("B", " Y\t\r\n\tZ  \r\n", "b:Y Z"),
+            // A folded header.
+            (
+                "Subject",
+                " one\r\n two\r\n\tthree",
+                "subject:one two three",
+            ),
+            // Trailing white space and tabs.
+            ("X-T", " v \t \t", "x-t:v"),
+            // Runs of white space.
+            ("X-R", "   a  \t b     c", "x-r:a b c"),
+            ("To", "", "to:"),
+        ];
+        let bodies: [(&[u8], &str); 8] = [
+            (b" C \r\nD \t E\r\n\r\n\r\n", " C\r\nD E\r\n"),
+            (b"a \t \r\nb\t\r\n", "a\r\nb\r\n"),
+            (b"x   y\t\t z\r\n", "x y z\r\n"),
+            (b"a\r\n\r\n\r\n", "a\r\n"),
+            (b"a\r\n \r\n\t\r\n", "a\r\n"),
+            (b"a\r\n\r\nb\r\n", "a\r\n\r\nb\r\n"),
+            (b"abc", "abc\r\n"),
+            (b"", ""),
+        ];
+
+        for (name, value, expected) in headers {
+            assert_eq!(canonical_header(name, value), expected, "signer {name}");
+            assert_eq!(relaxed_header(name, value), expected, "verifier {name}");
+        }
+        for (body, expected) in bodies {
+            assert_eq!(canonical_body(body), expected.as_bytes(), "signer {body:?}");
+            assert_eq!(relaxed_body(body), expected.as_bytes(), "verifier {body:?}");
+        }
+        assert!(canonical_body(b"\r\n\r\n").is_empty() && relaxed_body(b"\r\n\r\n").is_empty());
     }
 
     #[test]
