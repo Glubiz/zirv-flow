@@ -1292,6 +1292,16 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   is the gate record's `note` and the log line. A `5.1.x` hard bounce keeps its ending and its
   suppression: it is a verdict about the address. The flag that the end marker was sent is set as
   soon as it is written, so a flush that fails or stalls is also unconfirmed.
+  The same state is written ahead of the call for every destination type: the write that marks
+  the row `sending` also notes a call in flight, committed before the destination is called. It is
+  cleared, before the attempt is settled, only when the outcome proves the call was not accepted (a
+  `4xx` or `5xx` reply, an auth, config or egress error, or a transport failure before the end
+  marker). A reply lost after the end marker latches the unconfirmed mark instead, and a success
+  ends the message. A worker that crashes, or whose lease is lost, between the call and the clear
+  leaves the note, and the next attempt counts it like the unconfirmed mark (the earlier call's
+  outcome is unknown); a crash after a definitive reply but before the clear is counted the same
+  way, which is deliberately conservative. A resumed message that fails at the enrollment or flow
+  step ends `delivery_unconfirmed` with the reason as its note, like the other resumed failures.
 - **Links.** Until the tracking endpoints exist, the unsubscribe and preference links of a
   message are placeholders on a reserved `.invalid` host that carry the message id; a signed link
   replaces them.

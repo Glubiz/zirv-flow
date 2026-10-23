@@ -242,9 +242,16 @@ pub async fn insert_message<'e>(
     Ok(written == 1)
 }
 
+/// The gate entry that notes a destination call may be in flight: written before the call, cleared
+/// once the call is known not to have been accepted.
+fn in_flight_note() -> Value {
+    json!([{"gate": "delivery", "result": "in_flight"}])
+}
+
 /// Marks the message `sending` before the destination is called, in a statement of its own, so
-/// the mark survives a job transaction that rolls back. A message that has ended is left alone;
-/// false then.
+/// the mark survives a job transaction that rolls back. The same write notes that a call is in
+/// flight (see [`clear_message_in_flight`]), so the mark is committed before the call starts. A
+/// message that has ended is left alone; false then.
 pub async fn mark_message_sending<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -252,16 +259,62 @@ pub async fn mark_message_sending<'e>(
     attempts: i32,
 ) -> Result<bool, StoreError> {
     let marked = sqlx::query(
-        "UPDATE messages SET status = 'sending', attempts = $3          WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'sending')",
+        "UPDATE messages SET status = 'sending', attempts = $3,
+             gate_results = CASE WHEN gate_results @> $4 THEN gate_results ELSE gate_results || $4 END
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'sending')",
     )
     .bind(workspace.as_uuid())
     .bind(id)
     .bind(attempts)
+    .bind(in_flight_note())
     .execute(executor)
     .await
     .map_err(StoreError::query)?
     .rows_affected();
     Ok(marked == 1)
+}
+
+/// Clears the in-flight note of a `sending` message: the call is known not to have been accepted
+/// (a 4xx or 5xx reply, an auth, config or egress error, or a transport failure before the final
+/// dot). A call that is not known to have failed leaves the note, so a crash between the call and
+/// this write counts as a call that may have been accepted. False when there was nothing to clear.
+pub async fn clear_message_in_flight<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    let cleared = sqlx::query(
+        "UPDATE messages SET gate_results = COALESCE(
+             (SELECT jsonb_agg(entry) FROM jsonb_array_elements(gate_results) AS entry
+              WHERE entry <> ($3::jsonb -> 0)), '[]'::jsonb)
+         WHERE workspace_id = $1 AND id = $2 AND status = 'sending' AND gate_results @> $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(in_flight_note())
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(cleared == 1)
+}
+
+/// Whether a `sending` message carries the in-flight note of [`mark_message_sending`].
+pub async fn message_in_flight<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = $1 AND id = $2
+             AND status = 'sending' AND gate_results @> $3)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(in_flight_note())
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
 }
 
 /// The gate entry that notes an attempt lost the mail server's reply after the end of the message.
@@ -644,6 +697,72 @@ mod tests {
         assert!(first && !second, "noted once");
         assert!(after && kept, "a new attempt's mark keeps it");
         assert!(!ended, "an ended message carries no note");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_in_flight_note_is_written_with_the_sending_mark_and_cleared_alone(
+        pool: sqlx::PgPool,
+    ) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        let ws = crate::create_workspace(
+            &pool,
+            &WorkspaceName::parse("three").unwrap(),
+            &Slug::parse("three").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        insert_message(
+            &pool,
+            &NewMessage {
+                id,
+                workspace: ws,
+                person,
+                enrollment: Uuid::now_v7(),
+                flow: None,
+                flow_version: None,
+                node: "mail",
+                template: Uuid::from_u128(1),
+                template_version: None,
+                destination: Uuid::from_u128(2),
+                sender_identity: None,
+                category: None,
+                topic: None,
+                dimensions: &dimensions,
+                status: MessageStatus::Pending,
+                reason: None,
+                deciding_rule: None,
+                gates: &[],
+                attempts: 0,
+                now: OffsetDateTime::now_utc(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let pending = message_in_flight(&pool, ws, id).await.unwrap();
+        mark_message_sending(&pool, ws, id, 1).await.unwrap();
+        mark_message_sending(&pool, ws, id, 2).await.unwrap();
+        let marked = message_in_flight(&pool, ws, id).await.unwrap();
+        mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        let cleared = clear_message_in_flight(&pool, ws, id).await.unwrap();
+        let again = clear_message_in_flight(&pool, ws, id).await.unwrap();
+        let after = message_in_flight(&pool, ws, id).await.unwrap();
+        let unconfirmed = message_unconfirmed(&pool, ws, id).await.unwrap();
+
+        assert!(!pending && marked, "the sending write notes the call");
+        assert!(cleared && !again && !after, "cleared once");
+        assert!(unconfirmed, "clearing leaves the unconfirmed note");
     }
 
     #[test]

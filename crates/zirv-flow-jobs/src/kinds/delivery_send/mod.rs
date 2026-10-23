@@ -59,10 +59,11 @@ use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
     MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
-    add_organization_suppression, document_sender, find_destination, find_flow, find_template,
-    find_template_version, insert_message, lock_webhook_person, mark_message_sending,
-    mark_message_unconfirmed, message_status, message_unconfirmed, read_template_field_catalog,
-    read_webhook_subject, record_send_outcome, throttle_bucket,
+    add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
+    find_flow, find_template, find_template_version, insert_message, lock_webhook_person,
+    mark_message_sending, mark_message_unconfirmed, message_in_flight, message_status,
+    message_unconfirmed, read_template_field_catalog, read_webhook_subject, record_send_outcome,
+    throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -347,9 +348,15 @@ async fn decide(
     // first, in a statement of its own: from here on the message may go out, and a retry knows it.
     let attempts = ctx.attempts();
     let number = job.attempt_base + attempts;
-    // An earlier attempt may have lost the server's reply after the whole message was sent: the
-    // note is kept on the row (it survives a job retry), and read before this attempt adds to it.
-    let carried = resuming && message_unconfirmed(&pool, workspace, job.message).await?;
+    // An earlier call may have been accepted: it lost the server's reply after the whole message
+    // was sent (the unconfirmed mark), or it was cut off before its outcome was known (the
+    // in-flight mark, written before every call). Both are kept on the row (they survive a job
+    // retry), and read once, before this attempt writes its own in-flight mark. A crash after a
+    // definitive reply but before the clear below also counts as carried: that is deliberately
+    // conservative.
+    let carried = resuming
+        && (message_unconfirmed(&pool, workspace, job.message).await?
+            || message_in_flight(&pool, workspace, job.message).await?);
     mark_message_sending(&pool, workspace, job.message, number - 1).await?;
     let call = deliver::Call {
         workspace,
@@ -369,6 +376,10 @@ async fn decide(
     );
     if lost_reply {
         mark_message_unconfirmed(&pool, workspace, job.message).await?;
+    } else if !matches!(done.verdict, Verdict::Succeeded { .. }) {
+        // The outcome proves this call was not accepted: it no longer counts as in flight. A
+        // success ends the message, and the ending write replaces the marks.
+        clear_message_in_flight(&pool, workspace, job.message).await?;
     }
     let target = AttemptTarget {
         destination_id: destination.id,
@@ -477,7 +488,7 @@ async fn stopped(
     let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
     if recorded == Some(MessageStatus::Sending) {
         // It may have gone out already: it is not skipped, which would say it was not sent.
-        return Ok(trail.fail("enrollment", DELIVERY_UNCONFIRMED));
+        return Ok(trail.unconfirmed("enrollment", Some(reason)));
     }
     if recorded == Some(MessageStatus::Pending) {
         return Ok(trail.skip(Blocked::new("enrollment", reason)));
@@ -1755,6 +1766,11 @@ mod tests {
         );
         assert_eq!(env.events("email.failed").await.len(), 1);
         assert_eq!(env.events("email.skipped").await.len(), 0);
+        let note = message.gate_results.to_string();
+        assert!(
+            note.contains("flow_paused"),
+            "the real reason is kept: {note}"
+        );
     }
 
     #[sqlx::test]
@@ -2689,6 +2705,85 @@ mod tests {
         );
         assert_eq!(env.events("email.bounced").await.len(), 1);
         assert_eq!(suppressions(&env).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_call_cut_off_before_its_outcome_was_known_makes_the_next_definitive_refusal_unconfirmed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        env.attempt().await.unwrap_err();
+        assert!(
+            !message_in_flight(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "a 4xx is a definitive non-acceptance and clears the mark"
+        );
+        // An attempt that wrote its pre-call mark and was cut off before it knew the outcome.
+        mark_message_sending(&env.pool, env.ws, queued.message, 1)
+            .await
+            .unwrap();
+        sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "the cut-off call may have been accepted"
+        );
+        assert!(ended.gate_results.to_string().contains("smtp_rejected"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn plain_4xx_retries_clear_the_mark_so_a_later_refusal_ends_with_its_real_reason(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap_err();
+        sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("smtp_rejected"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_first_attempt_with_a_definitive_refusal_ends_with_its_real_reason(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("smtp_rejected"))
+        );
     }
 
     #[sqlx::test]
