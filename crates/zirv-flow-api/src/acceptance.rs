@@ -12952,4 +12952,299 @@ email,b@example.com,
         assert_eq!(leaves[1]["outcome"], "unknown");
         assert_eq!(leaves[1]["reason"], "capped");
     }
+
+    fn policy_uri(ws: &str, rest: &str) -> String {
+        format!("/api/v1/workspaces/{ws}/consent/policy{rest}")
+    }
+
+    async fn evaluate_policy_as(router: &Router, ws: &str, who: &Login, body: Value) -> Reply {
+        call(
+            router,
+            "POST",
+            &policy_uri(ws, "/evaluate"),
+            Some(body),
+            Auth::Session(who),
+        )
+        .await
+    }
+
+    fn cooldown_rule(name: &str) -> Value {
+        json!({"name": name, "condition": {"v": 1, "messages": {"channel": "email",
+            "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_policy_draft_is_written_by_writers_published_by_admins_and_each_publish_is_a_definition_change_decision(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
+        let draft = json!({"rules": [
+            {"id": "recorded_consent", "name": "x"},
+            cooldown_rule("Cooldown")
+        ]});
+
+        let empty = call(
+            &router,
+            "GET",
+            &policy_uri(&ws, "/draft"),
+            None,
+            Auth::Key(&read_key),
+        )
+        .await;
+        let read_put = call(
+            &router,
+            "PUT",
+            &policy_uri(&ws, "/draft"),
+            Some(draft.clone()),
+            Auth::Key(&read_key),
+        )
+        .await;
+        let saved = call(
+            &router,
+            "PUT",
+            &policy_uri(&ws, "/draft"),
+            Some(draft.clone()),
+            Auth::Session(&member),
+        )
+        .await;
+        let member_publish = call(
+            &router,
+            "POST",
+            &policy_uri(&ws, "/publish"),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+        let published = call(
+            &router,
+            "POST",
+            &policy_uri(&ws, "/publish"),
+            None,
+            Auth::Key(&admin_key),
+        )
+        .await;
+        let versions = call(
+            &router,
+            "GET",
+            &policy_uri(&ws, "/versions"),
+            None,
+            Auth::Session(&member),
+        )
+        .await;
+
+        assert_eq!(empty.status, StatusCode::OK);
+        assert_eq!(empty.body["revision"], 0);
+        assert_eq!(empty.body["rules"][0]["id"], "recorded_consent");
+        assert_eq!(empty.body["rules"][0]["builtin"], true);
+        assert_eq!(read_put.status, StatusCode::FORBIDDEN);
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["revision"], 1);
+        assert_eq!(saved.body["rules"][0]["name"], "Recorded consent");
+        assert_eq!(saved.body["rules"][1]["name"], "Cooldown");
+        assert!(saved.body["rules"][1]["id"].is_string());
+        assert_eq!(saved.body["published_version"], Value::Null);
+        assert_eq!(member_publish.status, StatusCode::FORBIDDEN);
+        assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
+        assert_eq!(published.body["version"], 1);
+        assert_eq!(published.body["rules"].as_array().unwrap().len(), 2);
+        assert_eq!(versions.body.as_array().unwrap().len(), 1);
+        let decisions: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT action, outcome, cause_kind FROM decision_records \
+             WHERE action = 'consent_policy.publish'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            decisions,
+            [(
+                "consent_policy.publish".to_owned(),
+                "published".to_owned(),
+                "definition_change".to_owned()
+            )]
+        );
+        let audited: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM audit_log WHERE action LIKE 'consent_policy.%' ORDER BY action",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            audited,
+            ["consent_policy.published", "consent_policy.saved"]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_invalid_policy_is_refused_with_every_issue_and_the_built_in_rule_cannot_be_removed(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let put = |body: Value| {
+            let (router, owner, uri) = (router.clone(), &owner, policy_uri(&ws, "/draft"));
+            async move { call(&router, "PUT", &uri, Some(body), Auth::Session(owner)).await }
+        };
+
+        let removed = put(json!({"rules": [cooldown_rule("Only")]})).await;
+        let bad = put(json!({"rules": [
+            {"name": "Ghost", "condition": {"v": 1, "trait": "ghost", "op": "exists"}},
+            {"name": "Segment style", "condition": {"v": 1,
+                "consent": {"channel": "email", "status": "granted"}}},
+            {"id": "recorded_consent", "name": "Recorded consent"}
+        ]}))
+        .await;
+        let in_a_segment = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/segments"),
+            Some(json!({"name": "Policy leaf", "definition": {"v": 1,
+                "consent": {"status": "granted"}}})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let after = call(
+            &router,
+            "GET",
+            &policy_uri(&ws, "/draft"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(removed.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(removed.body["code"], "consent_policy_invalid");
+        assert_eq!(
+            removed.body["issues"],
+            json!([{"pointer": "/rules", "code": "builtin_rule_required"}])
+        );
+        assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            bad.body["issues"],
+            json!([
+                {"pointer": "/rules/0/condition/trait", "code": "unknown_trait"},
+                {"pointer": "/rules/1/condition/consent/status", "code": "value_not_allowed"}
+            ])
+        );
+        // The same leaf in a segment says it is for a policy only.
+        assert_eq!(in_a_segment.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            in_a_segment.body["issues"],
+            json!([{"pointer": "/consent", "code": "policy_only"}])
+        );
+        assert_eq!(after.body["revision"], 0, "a refused draft writes nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn evaluating_a_person_names_the_rule_that_denies_and_holds_no_personal_data(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        create_topic(&router, &owner, &ws, "news", "opt_out").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let unpublished = evaluate_policy_as(
+            &router,
+            &ws,
+            &owner,
+            json!({"person_id": person, "topic_key": "news"}),
+        )
+        .await;
+        let saved = call(
+            &router,
+            "PUT",
+            &policy_uri(&ws, "/draft"),
+            Some(json!({"rules": [
+                {"name": "No mail to anyone who consented", "condition": {"v": 1,
+                    "consent": {"status": "granted"}}},
+                {"id": "recorded_consent", "name": "Recorded consent"}
+            ]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        call(
+            &router,
+            "POST",
+            &policy_uri(&ws, "/publish"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let denied_by_default = evaluate_policy_as(
+            &router,
+            &ws,
+            &owner,
+            json!({"person_id": person, "topic_key": "news"}),
+        )
+        .await;
+        call(
+            &router,
+            "PUT",
+            &consent_uri(&ws, &person),
+            Some(json!({"channel": "email", "topic_key": "news", "status": "subscribed"})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let denied_by_rule = evaluate_policy_as(
+            &router,
+            &ws,
+            &owner,
+            json!({"person_id": person, "topic_key": "news"}),
+        )
+        .await;
+        let by_member =
+            evaluate_policy_as(&router, &ws, &member, json!({"person_id": person})).await;
+        let unknown_person = evaluate_policy_as(
+            &router,
+            &ws,
+            &owner,
+            json!({"person_id": uuid::Uuid::now_v7()}),
+        )
+        .await;
+        let unknown_topic = evaluate_policy_as(
+            &router,
+            &ws,
+            &owner,
+            json!({"person_id": person, "topic_key": "nope"}),
+        )
+        .await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        // Before a publish only the built-in rule exists; an opt-out topic allows.
+        assert_eq!(unpublished.status, StatusCode::OK, "{:?}", unpublished.body);
+        assert_eq!(unpublished.body["allowed"], true);
+        assert_eq!(unpublished.body["rule"], Value::Null);
+        assert_eq!(unpublished.body["policy_version"], Value::Null);
+        // Published: the person has no record, so the first rule (granted) does not match.
+        assert_eq!(denied_by_default.body["allowed"], true);
+        assert_eq!(denied_by_default.body["policy_version"], 1);
+        // Subscribed: consent is granted, so the first rule denies and is named.
+        assert_eq!(
+            denied_by_rule.body["allowed"], false,
+            "{:?}",
+            denied_by_rule.body
+        );
+        assert_eq!(
+            denied_by_rule.body["rule"]["name"],
+            "No mail to anyone who consented"
+        );
+        assert!(denied_by_rule.body["rule"]["id"].is_string());
+        assert!(!denied_by_rule.body.to_string().contains("ada@example.com"));
+        assert_eq!(by_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(unknown_person.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown_topic.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }
