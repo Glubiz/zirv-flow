@@ -1,11 +1,10 @@
 //! The built-in `smtp` destination: one email through a mail server or relay (architecture 10.1 and
 //! 10.2).
 //!
-//! **Crate choice.** A small MIME builder ([`message`]) and a minimal SMTP client ([`client`]) over
-//! `tokio-rustls`, not `lettre`. The client must dial an address the egress policy already checked
-//! (`DestinationContext::resolve_checked`) and use the host name as the TLS server name; `lettre`
-//! resolves the host name itself when it connects and has no way to be handed a connected socket,
-//! so it would bypass the policy. TLS is rustls on the `ring` provider, as everywhere else in the
+//! **Why a small client.** A MIME builder ([`message`]) and a minimal SMTP client ([`client`]) over
+//! `tokio-rustls` keep the connection on the address the egress policy already checked
+//! (`DestinationContext::resolve_checked`), with the host name as the TLS server name, and bound
+//! every read and every step. TLS is rustls on the `ring` provider, as everywhere else in the
 //! workspace: no aws-lc and no OpenSSL.
 //!
 //! **The conversation.** Resolve and check, connect (every address in turn, each within a
