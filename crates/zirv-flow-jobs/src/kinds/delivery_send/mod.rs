@@ -459,19 +459,25 @@ async fn defer(
     Ok(Step::Over)
 }
 
-/// Writes the end of the message: locks the person for the short write, and records the row, the
-/// event and the decisions, unless the person was erased or merged away while the message was
-/// being read, rendered and delivered, in which case nothing is written for them.
+/// Writes the end of the message: locks the person for the short write, and ends the row, with the
+/// event and the decisions.
+///
+/// A person erased while the message was being read, rendered and delivered has no row left (the
+/// erasure deleted it) and nothing is written. A person merged away meanwhile keeps the message
+/// on the id it was sent to, as every message does, so the row is ended; the event and the
+/// decisions are not written, since the merge's rewrite has passed the id they would sit on.
 async fn finish(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
     trail: Trail,
     now: OffsetDateTime,
 ) -> Result<(), JobError> {
-    match lock_webhook_person(ctx.conn(), job.workspace, job.enrollment, job.person).await? {
-        WebhookPerson::Held => {}
-        WebhookPerson::Gone | WebhookPerson::Moved => return Ok(()),
-    }
+    let held =
+        match lock_webhook_person(ctx.conn(), job.workspace, job.enrollment, job.person).await? {
+            WebhookPerson::Held => true,
+            WebhookPerson::Moved => false,
+            WebhookPerson::Gone => return Ok(()),
+        };
     let trace = ctx.trace().clone();
     let dimensions: &Dimensions = &job.dimensions;
     let message = NewMessage {
@@ -496,6 +502,10 @@ async fn finish(
         attempts: trail.attempts,
         now,
     };
+    if !held {
+        insert_message(ctx.conn(), &message).await?;
+        return Ok(());
+    }
     let job_ref = (ctx.job_id(), ctx.attempts());
     record_send_outcome(
         ctx.conn(),
@@ -1657,6 +1667,55 @@ mod tests {
 
         assert_eq!(failed.reason.as_deref(), Some("render_error"));
         assert_eq!(sent.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_whose_person_was_merged_away_while_it_was_sent_is_ended_without_an_event(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool, "one").await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let survivor = env.person("survivor@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        let claimed = env.claim().await.expect("the send is ready");
+        let job = SendJob::parse(&claimed.payload).unwrap();
+        let now = env.clock.now();
+        start_message(&env.pool, &job, now).await.unwrap();
+        // The merge commits while the message is on the wire.
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(person)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let mut trail = Trail::new(1);
+        trail.pass(GateRecord::passed("delivery"));
+
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        {
+            let mut ctx =
+                JobContext::new(&mut tx, &claimed).with_clock(Clock::Manual(env.clock.clone()));
+            finish(&mut ctx, &job, trail, now).await.unwrap();
+        }
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            message.status, "sent",
+            "the message was sent, and the log says so"
+        );
+        assert_eq!(
+            message.person_id, person,
+            "it stays on the id it was sent to"
+        );
+        assert!(env.events("email.sent").await.is_empty());
+        assert!(
+            env.decisions(&["send.gate", "message.send"])
+                .await
+                .is_empty()
+        );
     }
 
     #[test]

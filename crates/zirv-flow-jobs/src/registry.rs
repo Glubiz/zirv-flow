@@ -129,6 +129,7 @@ mod tests {
                 "flow.settle",
                 "flow.lifecycle",
                 "webhook.call",
+                "delivery.send",
                 "sending_domain.verify"
             ]
         );
@@ -178,6 +179,7 @@ mod tests {
                 "flow.settle",
                 "flow.lifecycle",
                 "webhook.call",
+                "delivery.send",
                 "sending_domain.verify",
                 "test.first",
                 "test.second"
