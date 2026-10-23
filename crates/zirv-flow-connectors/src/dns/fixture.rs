@@ -182,6 +182,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_private_alias_is_reported_whatever_its_target_holds_or_does() {
+        let resolver = FixtureResolver::new();
+        resolver.set_cname("nx.example.com", "gone.secret.corp");
+        resolver.set_cname("failing.example.com", "down.secret.corp");
+        resolver.fail("down.secret.corp");
+        resolver.set_cname("public-nx.example.com", "gone.provider.example.net");
+
+        for name in ["nx.example.com", "failing.example.com"] {
+            assert_eq!(
+                resolver.lookup_txt(name).await,
+                Err(DnsError::PrivateAlias),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            resolver.lookup_txt("public-nx.example.com").await,
+            Ok(Vec::new())
+        );
+    }
+
+    #[tokio::test]
     async fn an_alias_chain_into_a_private_zone_is_refused_as_a_private_alias() {
         let resolver = FixtureResolver::new();
         resolver.set_cname("_dmarc.attacker.example.com", "hop.provider.example.net");
