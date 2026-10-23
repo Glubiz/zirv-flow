@@ -172,6 +172,12 @@ mod tests {
         let mut topics = HashMap::new();
         topics.insert("news".to_owned(), Uuid::parse_str(NEWS).unwrap());
         catalog.topics.insert(Channel::Email, topics);
+        catalog.dimensions.insert(
+            "vertical".to_owned(),
+            ["sports".to_owned(), "retail".to_owned()]
+                .into_iter()
+                .collect(),
+        );
         catalog
     }
 

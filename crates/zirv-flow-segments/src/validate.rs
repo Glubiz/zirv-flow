@@ -332,6 +332,14 @@ impl Checker<'_> {
         for (key, value) in &condition.dimensions {
             if !is_dimension_key(key) || key == TOPIC_DIMENSION || !is_dimension_key(value) {
                 self.report(&pointer_push(&dimensions, key), code::VALUE_NOT_ALLOWED);
+            } else {
+                match self.catalog.dimensions.get(key) {
+                    None => self.report(&pointer_push(&dimensions, key), code::UNKNOWN_DIMENSION),
+                    Some(values) if !values.contains(value) => {
+                        self.report(&pointer_push(&dimensions, key), code::VALUE_NOT_ALLOWED);
+                    }
+                    Some(_) => {}
+                }
             }
         }
         let agg_at = pointer_push(&base, "agg");
@@ -678,6 +686,12 @@ mod tests {
         let mut topics = HashMap::new();
         topics.insert("news".to_owned(), Uuid::parse_str(NEWS).unwrap());
         catalog.topics.insert(Channel::Email, topics);
+        catalog.dimensions.insert(
+            "vertical".to_owned(),
+            ["sports".to_owned(), "retail".to_owned()]
+                .into_iter()
+                .collect(),
+        );
         catalog
     }
 
@@ -1519,6 +1533,32 @@ mod tests {
         assert_eq!(
             issues,
             [("/consent/status".to_owned(), code::VALUE_NOT_ALLOWED)]
+        );
+    }
+
+    #[test]
+    fn a_messages_dimension_filter_must_be_live_in_the_catalog() {
+        let bad = |dimensions: Value| {
+            check_policy(
+                json!({"messages": {"channel": "email", "dimensions": dimensions,
+                "agg": {"fn": "count", "op": "gte", "value": 1}}}),
+            )
+            .unwrap_err()
+        };
+
+        assert_eq!(
+            bad(json!({"verticl": "sports"})),
+            [(
+                "/messages/dimensions/verticl".to_owned(),
+                code::UNKNOWN_DIMENSION
+            )]
+        );
+        assert_eq!(
+            bad(json!({"vertical": "sprts"})),
+            [(
+                "/messages/dimensions/vertical".to_owned(),
+                code::VALUE_NOT_ALLOWED
+            )]
         );
     }
 
