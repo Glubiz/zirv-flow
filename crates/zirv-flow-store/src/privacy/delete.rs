@@ -1079,7 +1079,7 @@ mod tests {
         let enrollment = enrollment_of(&pool, person).await;
         let payload = match kind {
             "flow.step" => serde_json::json!({ "enrollment_id": enrollment }),
-            "webhook.call" => serde_json::json!({ "person_id": person }),
+            "webhook.call" | "delivery.send" => serde_json::json!({ "person_id": person }),
             "person.merge.rewrite" => {
                 serde_json::json!({ "workspace_id": ws, "merged_person_id": merged })
             }
@@ -1170,8 +1170,71 @@ mod tests {
     erased_while_running_tests! {
         running_flow_step: "flow.step",
         running_webhook_call: "webhook.call",
+        running_delivery_send: "delivery.send",
         running_merge_rewrite: "person.merge.rewrite",
         running_flow_enroll: "flow.enroll",
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erased_person_loses_their_messages_and_their_pending_sends_but_not_a_bystanders(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws,
+            person,
+            merged,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let kept = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id,                 template_id, destination_id, status)              VALUES ($1, $2, $3, gen_random_uuid(), 'n', gen_random_uuid(), gen_random_uuid(),                 'sent')",
+        )
+        .bind(kept)
+        .bind(ws.as_uuid())
+        .bind(bystander)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let messages = |people: Vec<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM messages WHERE person_id = ANY($1)",
+                )
+                .bind(people)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(messages(vec![person, merged]).await, 2);
+        let sends = "SELECT count(*) FROM jobs WHERE kind = 'delivery.send'";
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(sends)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+
+        erase(&pool, ws, person).await;
+
+        assert_eq!(messages(vec![person, merged]).await, 0);
+        assert_eq!(
+            messages(vec![bystander]).await,
+            1,
+            "a bystander keeps their log"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(sends)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "the pending send is purged"
+        );
     }
 
     #[sqlx::test]

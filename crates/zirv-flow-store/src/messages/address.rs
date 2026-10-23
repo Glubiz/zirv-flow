@@ -41,7 +41,7 @@ pub async fn read_send_address(
         let from_trait = keys
             .iter()
             .filter_map(|key| held?.get(key)?.as_str())
-            .find_map(|value| email_of(value));
+            .find_map(email_of);
         if from_trait.is_some() {
             return Ok(from_trait);
         }

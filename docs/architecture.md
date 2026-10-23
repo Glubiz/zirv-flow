@@ -370,8 +370,9 @@ As built (consent, topics and suppressions):
 - **Tables** (migration `0008_consent.sql`). `topics` (unique `(workspace_id, key)`),
   `consent` (one row per person, channel and topic, `topic_id` null for the whole channel,
   unique with `NULLS NOT DISTINCT`), `consent_changes` (the history: from and to status,
-  source, evidence up to 4 KiB, actor, trace) and `suppressions` (primary key
-  `(workspace_id, identifier_hash)`). A trigger refuses any update of `consent_changes` other
+  source, evidence up to 4 KiB, actor, trace) and `suppressions` (a unique index per scope:
+  `(workspace_id, identifier_hash)` for the workspace and `(identifier_hash)` for the
+  organization, migration `0048`). A trigger refuses any update of `consent_changes` other
   than moving `person_id` to the person its owner was merged into, which a merge needs;
   deletes stay possible for erasure. `suppressions` carries an opaque `id` for paging, so a
   cursor never holds a hash.
@@ -1211,6 +1212,39 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Events.** The reserved `email.` prefix covers `email.sent`, `email.skipped`,
   `email.failed`, `email.delivered`, `email.bounced` (hard or soft),
   `email.complained`, `email.opened`, `email.clicked` and `email.unsubscribed`.
+
+**As built (send pipeline, #220).**
+
+- **Message id.** `flow.step` mints the v7 message id when it enqueues the job, in the step's
+  transaction, so the id is the idempotency key at the destination on every attempt, deferral and
+  retry. The `messages` row is written when the message ends (`sent`, `skipped` or `failed`),
+  together with the event and the decisions, under a short `FOR KEY SHARE` lock on the person
+  (skipped when the person was erased or merged away meanwhile). A job that finds its message
+  recorded does nothing. Migration `0048_messages.sql`.
+- **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
+  enrollment ended or the flow is paused or archived: a decision, no row), `template`
+  (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared
+  `require_verified_sender`, run in a transaction of its own so no lock outlives it), `address`,
+  `consent` (skipped for a transactional template), `suppression`, the `frequency_cap` and
+  `quiet_hours` stubs, `render` (the pool; every failure is `failed: render_error`),
+  `rate_limit` and `delivery`. The sender check comes before the gates that read the person
+  because it needs nothing about them.
+- **Rate limit.** The destination is loaded again for every message, and an archived one is
+  refused whatever a held block of tokens says (`failed: destination_unavailable`). With no token
+  the job ends and a copy runs at the instant the bucket will hold one, under the key
+  `<effect key>:defer:<n>`, with its attempt budget carried over; after six hours of waiting the
+  message fails as `rate_limited`. A 429 halves the bucket's rate until its `Retry-After`
+  (`throttle_bucket`). The leader's queue-depth and oldest-item-lag gauges read the destination's
+  ready `delivery.send` jobs.
+- **Links.** Until the tracking endpoints exist, the unsubscribe and preference links of a
+  message are placeholders on a reserved `.invalid` host that carry the message id; a signed link
+  replaces them.
+- **Suppression scope** (OQ-19). `suppressions.scope` is `workspace` or `organization`; an
+  organization row has no workspace and is keyed by the hash alone, and `is_suppressed` reads both
+  scopes in one statement over the two unique indexes.
+- **Erasure and merge.** `messages` is deleted with the person; a queued `delivery.send` is purged
+  by `person_id`. On a merge messages stay on the old id, and the log reads through
+  `person_merges`.
 
 ### 10.2 Email, tracking and feedback
 

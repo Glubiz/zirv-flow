@@ -1414,8 +1414,20 @@ mod tests {
             .await
             .unwrap();
         }
-        // An ended enrollment of the loser: history, kept on the old id.
+        // An ended enrollment of the loser: history, kept on the old id. So is a message sent to
+        // them.
         let ended = enroll_in(&pool, ws, loser, "completed").await;
+        let message = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id,                 template_id, destination_id, status)              VALUES ($1, $2, $3, $4, 'n', gen_random_uuid(), gen_random_uuid(), 'sent')",
+        )
+        .bind(message)
+        .bind(ws.as_uuid())
+        .bind(loser)
+        .bind(ended)
+        .execute(&pool)
+        .await
+        .unwrap();
         apply_one(
             &pool,
             ws,
@@ -1464,6 +1476,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, loser, "ended enrollments stay on the old id");
+        let sent_to: Uuid = sqlx::query_scalar("SELECT person_id FROM messages WHERE id = $1")
+            .bind(message)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sent_to, loser, "messages stay on the old id");
+        let through_merges = crate::list_person_messages(&pool, ws, survivor, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            through_merges
+                .iter()
+                .map(|found| found.id)
+                .collect::<Vec<_>>(),
+            [message],
+            "the survivor's log reads through person_merges"
+        );
     }
 
     #[sqlx::test]
