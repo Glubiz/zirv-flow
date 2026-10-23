@@ -28,6 +28,9 @@ pub use validate::{validate_config, validate_credential};
 /// The token the fake destination's check accepts.
 #[cfg(feature = "test-support")]
 pub use fake::GOOD_TOKEN as FAKE_GOOD_TOKEN;
+/// The calls and the accepted messages the fake destination keeps under a ledger name.
+#[cfg(feature = "test-support")]
+pub use fake::{FakeSent, ledger_calls as fake_ledger_calls, ledger_sent as fake_ledger_sent};
 
 pub(crate) static ALL: &[&dyn ErasedDestination] = &[
     &webhook::Webhook,

@@ -11,9 +11,11 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc2822;
-use zirv_flow_connectors::destinations::{Delivered, DestinationError};
+use zirv_flow_connectors::destinations::{
+    Delivered, DestinationError, parse_retry_after as connector_parse,
+};
 use zirv_flow_connectors::http::HttpError;
 
 /// How an attempt went.
@@ -88,17 +90,16 @@ fn transport_failed() -> Verdict {
 }
 
 /// The wait a `Retry-After` header asks for: delta-seconds, or an HTTP date counted from `now`.
-/// A date in the past, or text that is neither, asks for nothing.
+/// A date in the past, or text that is neither (a signed number included), asks for nothing.
+///
+/// The reading is the connectors' ([`connector_parse`]), the one parser every destination type
+/// shares; only the "a past date asks for nothing" rule is added here, where the connectors'
+/// answer a past date with a wait of zero.
 pub(crate) fn parse_retry_after(value: &str, now: OffsetDateTime) -> Option<Duration> {
-    let value = value.trim();
-    if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
-    }
-    let at = OffsetDateTime::parse(value, &Rfc2822).ok()?;
-    let wait = at - now;
-    u64::try_from(wait.whole_seconds())
-        .ok()
-        .map(Duration::from_secs)
+    let at = DateTime::<Utc>::from_timestamp(now.unix_timestamp(), now.nanosecond())?;
+    let wait = connector_parse(Some(value), at)?;
+    let seconds = value.trim().bytes().all(|byte| byte.is_ascii_digit());
+    (seconds || !wait.is_zero()).then_some(wait)
 }
 
 /// What a destination's result means at `now`. The one function every outbound job judges

@@ -9,7 +9,9 @@
 
 use serde_json::{Map, Value, json};
 use tracing::warn;
-use zirv_flow_render::{Hooks, RenderContext, RenderPool, Rendered, TemplateDocument};
+use zirv_flow_render::{
+    Hooks, RenderContext, RenderFailure, RenderPool, Rendered, TemplateDocument,
+};
 use zirv_flow_store::VerifiedSender;
 
 use super::payload::SendJob;
@@ -58,17 +60,17 @@ pub(super) async fn render(
         warn!("email not rendered: the stored document is not a template document");
         return Err(RENDER_ERROR);
     };
-    match pool
-        .render_email(&document, context, &Hooks::untracked())
+    pool.render_email(&document, context, &Hooks::untracked())
         .await
-    {
-        Ok(rendered) => Ok(rendered),
-        Err(failure) => {
-            // The reason is a fixed code; the failure's text can quote the template.
-            warn!(reason = failure.reason(), "email not rendered");
-            Err(RENDER_ERROR)
-        }
-    }
+        .map_err(failed)
+}
+
+/// What a failed render comes to for the message: always [`RENDER_ERROR`], whether the renderer
+/// refused the document or the host failed (`memory_limit`, `deadline`, a crashed child). Only the
+/// failure's fixed reason is logged; its text can quote the template.
+pub(super) fn failed(failure: RenderFailure) -> &'static str {
+    warn!(reason = failure.reason(), "email not rendered");
+    RENDER_ERROR
 }
 
 /// The payload an email destination is given: the sender, the rendered parts and the extra

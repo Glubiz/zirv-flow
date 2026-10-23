@@ -455,3 +455,1131 @@ async fn finish(
     .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use sqlx::PgPool;
+    use time::Duration as Span;
+    use time::macros::datetime;
+    use zirv_flow_connectors::destinations::{fake_ledger_calls, fake_ledger_sent};
+    use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
+    use zirv_flow_core::egress::EgressPolicy;
+    use zirv_flow_core::{
+        Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceId, WorkspaceName,
+    };
+    use zirv_flow_render::{ChildCommand, PoolConfig, RenderPool};
+    use zirv_flow_store::sending_fixtures::{plant_domain, plant_identity, plant_verified_sender};
+    use zirv_flow_store::{
+        ClaimedJob, Clock, ConsentChange, EnrollRequest, Enrolled, ManualClock, NewDestination,
+        NewFlow, NewSuppression, NewTemplate, Occurrence, ProfileRecord,
+        add_organization_suppression, add_suppression, create_destination, create_template,
+        lock_template, publish_template, set_consent,
+    };
+
+    use super::*;
+    use crate::context::IngestSettings;
+    use crate::delivery::rate::RateGates;
+
+    // The render host is this test binary run again, filtered to `render_host_child`, which does
+    // nothing unless the pool started it.
+
+    /// What the child does: `serve` is a render host, `oom_once` dies of an allocation failure on
+    /// its first request (the marker file says whether this is the first child) and serves after.
+    #[test]
+    fn render_host_child() {
+        let Ok(mode) = std::env::var("ZIRV_FLOW_TEST_SEND_RENDER_HOST") else {
+            return;
+        };
+        if mode == "oom_once" {
+            let marker = std::env::var("ZIRV_FLOW_TEST_SEND_RENDER_MARKER").unwrap_or_default();
+            if !std::path::Path::new(&marker).exists() {
+                std::fs::write(&marker, b"x").expect("the marker can be written");
+                let ready = br#"{"kind":"ready"}"#;
+                let mut stdout = std::io::stdout().lock();
+                stdout
+                    .write_all(&u32::try_from(ready.len()).unwrap().to_be_bytes())
+                    .unwrap();
+                stdout.write_all(ready).unwrap();
+                stdout.flush().unwrap();
+                let mut stdin = std::io::stdin().lock();
+                let mut length = [0_u8; 4];
+                stdin.read_exact(&mut length).unwrap();
+                let mut request = vec![0; u32::from_be_bytes(length) as usize];
+                stdin.read_exact(&mut request).unwrap();
+                eprintln!("memory allocation of 8589934592 bytes failed");
+                std::process::abort();
+            }
+        }
+        std::process::exit(i32::from(zirv_flow_render::host::run(None)));
+    }
+
+    async fn start_pool(mode: &str, marker: &str) -> RenderPool {
+        let command = ChildCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "kinds::delivery_send::tests::render_host_child",
+                "--nocapture",
+                "--test-threads",
+                "1",
+                "-q",
+            ])
+            .env("ZIRV_FLOW_TEST_SEND_RENDER_HOST", mode)
+            .env("ZIRV_FLOW_TEST_SEND_RENDER_MARKER", marker)
+            .skip_stdout_until("running 1 test\n");
+        let config = PoolConfig {
+            size: 1,
+            deadline: Duration::from_secs(60),
+        };
+        RenderPool::start(command, config).await.unwrap()
+    }
+
+    fn loopback() -> Arc<EgressPolicy> {
+        Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap())
+    }
+
+    fn identifier_key() -> Arc<zirv_flow_core::HmacKey> {
+        let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
+        Arc::new(HmacRoot::bootstrap_from(&master).hmac_key(HmacPurpose::Identifier))
+    }
+
+    /// One workspace with a verified sender, a fake destination that keeps a ledger, a published
+    /// flow, and a worker that runs `delivery.send` jobs by hand.
+    struct Env {
+        pool: PgPool,
+        ws: WorkspaceId,
+        clock: ManualClock,
+        gates: Arc<RateGates>,
+        render: Option<RenderPool>,
+        /// A verified sender identity.
+        sender: Uuid,
+        destination: Uuid,
+        ledger: String,
+        flow: Uuid,
+        version: i32,
+    }
+
+    /// A message queued: its id, and the enrollment it is for.
+    struct Queued1 {
+        message: Uuid,
+        enrolled: Enrolled,
+    }
+
+    impl Env {
+        async fn new(pool: PgPool, name: &str) -> Self {
+            Self::with(pool, name, json!({"mode": "ok"}), 100, 100).await
+        }
+
+        async fn with(pool: PgPool, name: &str, config: Value, rate: i32, burst: i32) -> Self {
+            zirv_flow_store::migrate(&pool).await.unwrap();
+            let ws = zirv_flow_store::create_workspace(
+                &pool,
+                &WorkspaceName::parse(name).unwrap(),
+                &Slug::parse(name).unwrap(),
+            )
+            .await
+            .unwrap()
+            .id;
+            let sender = plant_verified_sender(&pool, ws, "example.com")
+                .await
+                .unwrap();
+            let ledger = format!("send-{name}-{}", Uuid::now_v7());
+            let mut config = config;
+            config["ledger"] = json!(ledger);
+            let destination = create_destination(
+                &pool,
+                ws,
+                &NewDestination {
+                    id: Uuid::now_v7(),
+                    kind: "fake",
+                    name: "Mail",
+                    config: &config,
+                    credential_secret_id: None,
+                    credential_fields: &[],
+                    rate,
+                    burst,
+                    created_by: None,
+                },
+            )
+            .await
+            .unwrap()
+            .id;
+            let mut env = Self {
+                pool,
+                ws,
+                clock: ManualClock::new(datetime!(2031-05-06 07:08:09 UTC)),
+                gates: Arc::default(),
+                render: None,
+                sender,
+                destination,
+                ledger,
+                flow: Uuid::now_v7(),
+                version: 1,
+            };
+            env.publish_flow().await;
+            env
+        }
+
+        async fn publish_flow(&mut self) {
+            let mut connection = self.pool.acquire().await.unwrap();
+            zirv_flow_store::create_flow(
+                &mut connection,
+                self.ws,
+                &NewFlow {
+                    id: self.flow,
+                    name: "Mail".to_owned(),
+                    graph: json!({"v": 1, "nodes": [{"id": "mail", "type": "exit"}], "edges": []}),
+                    settings: json!({"trigger": {"type": "manual"}, "reentry": {"mode": "always"}}),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            drop(connection);
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let locked = zirv_flow_store::lock_flow(&mut tx, self.ws, self.flow)
+                .await
+                .unwrap();
+            let (_, version) = zirv_flow_store::publish_flow(
+                &mut tx,
+                &Clock::default(),
+                self.ws,
+                &locked,
+                None,
+                &TraceContext::root(Cause::api("publish")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            self.version = version.version;
+        }
+
+        /// A person with an email identity and the traits given.
+        async fn person(&self, email: &str) -> Uuid {
+            let record = ProfileRecord {
+                source: "crm".into(),
+                stream: "contacts".into(),
+                record_key: email.into(),
+                identifiers: vec![("email".into(), email.into())],
+                traits: serde_json::Map::new(),
+                observed_at: self.clock.now() - Span::days(1),
+                trace: TraceContext::root(Cause::api("t")),
+            };
+            self.profile(record).await
+        }
+
+        /// A person who has a phone number and no email address.
+        async fn person_without_address(&self) -> Uuid {
+            let record = ProfileRecord {
+                source: "crm".into(),
+                stream: "contacts".into(),
+                record_key: "phone-only".into(),
+                identifiers: vec![("phone".into(), "+4512345678".into())],
+                traits: serde_json::Map::new(),
+                observed_at: self.clock.now() - Span::days(1),
+                trace: TraceContext::root(Cause::api("t")),
+            };
+            self.profile(record).await
+        }
+
+        async fn profile(&self, record: ProfileRecord) -> Uuid {
+            match &zirv_flow_store::apply_profile_batch(&self.pool, self.ws, &[record])
+                .await
+                .unwrap()[0]
+            {
+                zirv_flow_store::ProfileOutcome::Applied { person_id, .. }
+                | zirv_flow_store::ProfileOutcome::Unchanged { person_id, .. } => *person_id,
+                zirv_flow_store::ProfileOutcome::Rejected { reason } => {
+                    panic!("rejected: {reason}")
+                }
+            }
+        }
+
+        /// The person subscribes to email as a whole.
+        async fn subscribe(&self, person: Uuid) {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            set_consent(
+                &mut tx,
+                self.ws,
+                &ConsentChange {
+                    dimensions: Default::default(),
+                    person,
+                    channel: Channel::Email,
+                    topic: None,
+                    status: ConsentStatus::Subscribed,
+                    source: ChangeSource::Api,
+                    evidence: json!({}),
+                    occurred_at: self.clock.now() - Span::hours(1),
+                    actor: None,
+                },
+                &TraceContext::root(Cause::api("t")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        }
+
+        /// A published email template of `category` from the verified sender.
+        async fn template(&self, category: &str, html: &str) -> Uuid {
+            self.template_from(self.sender, category, html).await
+        }
+
+        async fn template_from(&self, sender: Uuid, category: &str, html: &str) -> Uuid {
+            let document = json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+                "subject": "Hello", "sender": sender, "lang": "en", "category": category,
+                "html": html, "text": "Hello {{ system.unsubscribe_url }}",
+            }});
+            let id = Uuid::now_v7();
+            let mut connection = self.pool.acquire().await.unwrap();
+            create_template(
+                &mut connection,
+                self.ws,
+                &NewTemplate {
+                    id,
+                    name: format!("T {id}"),
+                    channel: "email".into(),
+                    category: category.into(),
+                    document,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            let locked = lock_template(&mut connection, self.ws, id).await.unwrap();
+            publish_template(
+                &mut connection,
+                self.ws,
+                &locked,
+                &json!([]),
+                None,
+                &TraceContext::root(Cause::api("publish")),
+            )
+            .await
+            .unwrap();
+            id
+        }
+
+        /// A template whose HTML is fine.
+        async fn plain_template(&self, category: &str) -> Uuid {
+            self.template(category, PLAIN).await
+        }
+
+        /// Enrolls the person; an enrollment of theirs still in flight has ended, as a person who
+        /// is sent a second message by the same flow has finished the first walk.
+        async fn enroll(&self, person: Uuid) -> Enrolled {
+            sqlx::query(
+                "UPDATE enrollments SET state = 'completed', ended_at = now() WHERE flow_id = $1 AND person_id = $2 AND state IN ('active', 'waiting')",
+            )
+            .bind(self.flow)
+            .bind(person)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let outcome = zirv_flow_store::enroll(
+                &mut tx,
+                &EnrollRequest {
+                    workspace: self.ws,
+                    flow: self.flow,
+                    version: self.version,
+                    people: &[person],
+                    occurrence: Occurrence {
+                        trigger: "manual",
+                        id: Uuid::now_v7(),
+                    },
+                    now: self.clock.now(),
+                    trace: &TraceContext::root(Cause::api("enroll")),
+                },
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            outcome.enrolled[0].clone()
+        }
+
+        /// Queues the job `flow.step` would for `person`, to the env's destination.
+        async fn queue(&self, person: Uuid, template: Uuid, max_attempts: i32) -> Queued1 {
+            self.queue_to(person, template, self.destination, None, max_attempts)
+                .await
+        }
+
+        async fn queue_to(
+            &self,
+            person: Uuid,
+            template: Uuid,
+            destination: Uuid,
+            topic: Option<Uuid>,
+            max_attempts: i32,
+        ) -> Queued1 {
+            let enrolled = self.enroll(person).await;
+            let message = Uuid::now_v7();
+            let key = format!("{}:mail:send", enrolled.enrollment);
+            let dimensions = Dimensions::new();
+            let mut job = NewJob::new(SEND_JOB_KIND, enrolled.trace.clone());
+            job.workspace_id = Some(self.ws);
+            job.unique_key = Some(key.clone());
+            job.max_attempts = max_attempts;
+            job.payload = Queued {
+                workspace: self.ws,
+                message,
+                key: &key,
+                flow: self.flow,
+                version: self.version,
+                node: "mail",
+                enrollment: enrolled.enrollment,
+                person,
+                template,
+                destination,
+                topic,
+                dimensions: &dimensions,
+                queued_at: self.clock.now(),
+            }
+            .payload()
+            .unwrap();
+            zirv_flow_store::enqueue(&self.pool, &job).await.unwrap();
+            Queued1 { message, enrolled }
+        }
+
+        async fn claim(&self) -> Option<ClaimedJob> {
+            zirv_flow_store::claim_job(
+                &self.pool,
+                "test",
+                &[SEND_JOB_KIND],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+            .unwrap()
+        }
+
+        /// Runs one claimed job as a worker does: its work commits with its completion, and an
+        /// error rolls it back and puts the job up for another attempt at once.
+        async fn execute(&self, claimed: ClaimedJob) -> Result<(), JobError> {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let result = {
+                let mut ctx = JobContext::new(&mut tx, &claimed)
+                    .with_clock(Clock::Manual(self.clock.clone()))
+                    .with_ingest(IngestSettings {
+                        pool: self.pool.clone(),
+                        redaction_key: None,
+                        batch_size: 1,
+                        shards: 1,
+                    })
+                    .with_identifier_key(Some(identifier_key()))
+                    .with_render_pool(self.render.clone())
+                    .with_rate_gates(Arc::clone(&self.gates))
+                    .with_outbound(None, loopback(), Arc::default());
+                DeliverySend.run(&mut ctx, claimed.payload.clone()).await
+            };
+            match result {
+                Ok(()) => {
+                    zirv_flow_store::complete_job(&mut *tx, claimed.id, claimed.lease_token)
+                        .await
+                        .unwrap();
+                    zirv_flow_store::commit(tx).await.unwrap();
+                    Ok(())
+                }
+                Err(error) => {
+                    drop(tx);
+                    zirv_flow_store::fail_job(
+                        &self.pool,
+                        claimed.id,
+                        claimed.lease_token,
+                        Duration::ZERO,
+                        error.message(),
+                    )
+                    .await
+                    .unwrap();
+                    Err(error)
+                }
+            }
+        }
+
+        /// Claims the next job and runs one attempt of it.
+        async fn attempt(&self) -> Result<(), JobError> {
+            let claimed = self.claim().await.expect("a delivery.send job is ready");
+            self.execute(claimed).await
+        }
+
+        /// Queues a send and runs it to its end; the message it recorded.
+        async fn send(&self, person: Uuid, template: Uuid) -> zirv_flow_store::Message {
+            let queued = self.queue(person, template, 5).await;
+            self.attempt().await.unwrap();
+            self.message(queued.message).await
+        }
+
+        async fn message(&self, id: Uuid) -> zirv_flow_store::Message {
+            zirv_flow_store::find_message(&self.pool, self.ws, id)
+                .await
+                .unwrap()
+                .expect("the message was recorded")
+        }
+
+        async fn count(&self, sql: &str) -> i64 {
+            sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        }
+
+        async fn events(&self, name: &str) -> Vec<Value> {
+            sqlx::query_scalar(
+                "SELECT properties FROM events WHERE workspace_id = $1 AND name = $2",
+            )
+            .bind(self.ws.as_uuid())
+            .bind(name)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        /// The (action, outcome, reason) of every decision of the workspace for the actions.
+        async fn decisions(&self, actions: &[&str]) -> Vec<(String, String, Option<String>)> {
+            let actions: Vec<String> = actions.iter().map(|action| (*action).to_owned()).collect();
+            sqlx::query_as(
+                "SELECT action, outcome, reason FROM decision_records \
+                 WHERE workspace_id = $1 AND action = ANY($2) ORDER BY recorded_at, id",
+            )
+            .bind(self.ws.as_uuid())
+            .bind(&actions)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        async fn attempts_of(&self, message: Uuid) -> Vec<(String, i32)> {
+            sqlx::query_as(
+                "SELECT outcome, attempt FROM delivery_attempts WHERE subject_id = $1 \
+                 ORDER BY attempt",
+            )
+            .bind(message)
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        fn sent(&self) -> Vec<zirv_flow_connectors::destinations::FakeSent> {
+            fake_ledger_sent(&self.ledger)
+        }
+    }
+
+    const PLAIN: &str =
+        "<p>Hello {{ person.email }}</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>";
+
+    fn gate_names(message: &zirv_flow_store::Message) -> Vec<String> {
+        message
+            .gate_results
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|gate| {
+                format!(
+                    "{}:{}",
+                    gate["gate"].as_str().unwrap(),
+                    gate["result"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_passes_every_gate_and_is_sent_once_with_its_log_event_and_decisions(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.plain_template("marketing").await;
+        let queued = env.queue(person, template, 5).await;
+        let waiting = zirv_flow_store::destination_report(&env.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            waiting
+                .iter()
+                .find(|stat| stat.destination_id == env.destination)
+                .map(|stat| stat.queue_depth),
+            Some(1),
+            "the queued send is the destination's queue depth"
+        );
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "sent");
+        assert_eq!(message.reason, None);
+        assert_eq!(message.attempts, 1);
+        assert_eq!(message.person_id, queued.enrolled.person);
+        assert_eq!(message.template_version, Some(1));
+        assert_eq!(message.sender_identity_id, Some(env.sender));
+        assert_eq!(message.category.as_deref(), Some("marketing"));
+        assert_eq!(message.deciding_rule.as_deref(), Some("recorded_consent"));
+        assert_eq!(
+            gate_names(&message),
+            [
+                "enrollment:passed",
+                "template:passed",
+                "sender:passed",
+                "address:passed",
+                "consent:passed",
+                "suppression:passed",
+                "frequency_cap:passed",
+                "quiet_hours:passed",
+                "render:passed",
+                "rate_limit:passed",
+                "delivery:passed",
+            ]
+        );
+        let sent = env.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].key,
+            queued.message.to_string(),
+            "the message id is the key"
+        );
+        assert_eq!(sent[0].to, "ada@example.com");
+        assert_eq!(sent[0].payload["from"]["address"], "news@example.com");
+        assert_eq!(sent[0].payload["subject"], "Hello");
+        assert!(
+            sent[0].payload["html"]
+                .as_str()
+                .unwrap()
+                .contains("Hello ada@example.com"),
+            "{}",
+            sent[0].payload
+        );
+        assert!(
+            sent[0].payload["headers"]["List-Unsubscribe"].is_string(),
+            "marketing mail carries the unsubscribe header"
+        );
+        let events = env.events("email.sent").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["message_id"], json!(queued.message));
+        assert!(!events[0].to_string().contains('@'), "{}", events[0]);
+        assert_eq!(
+            env.attempts_of(queued.message).await,
+            [("delivered".to_owned(), 1)]
+        );
+        let trail = env.decisions(&["send.gate", "message.send"]).await;
+        assert_eq!(trail.len(), 12, "{trail:?}");
+        assert_eq!(
+            trail.last().unwrap(),
+            &("message.send".to_owned(), "sent".to_owned(), None)
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind = 'delivery.send'")
+                .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_gate_stops_a_message_with_its_own_reason_and_stores_it_exactly(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let ok_template = env.plain_template("marketing").await;
+
+        // no_address: a person with a phone number only.
+        let nobody = env.person_without_address().await;
+        env.subscribe(nobody).await;
+        let no_address = env.send(nobody, ok_template).await;
+
+        // no_consent: an address and no recorded consent under the opt-in default.
+        let silent = env.person("silent@example.com").await;
+        let no_consent = env.send(silent, ok_template).await;
+
+        // suppressed: the address is suppressed in the workspace.
+        let blocked = env.person("blocked@example.com").await;
+        env.subscribe(blocked).await;
+        add_suppression(
+            &env.pool,
+            env.ws,
+            &NewSuppression {
+                identifier_hash: crate_hash("blocked@example.com"),
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::Manual,
+                source: "api",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let suppressed = env.send(blocked, ok_template).await;
+
+        // sender_unverified: the template names a sender on a domain whose records are not in place.
+        let domain = plant_domain(&env.pool, env.ws, "unverified.example")
+            .await
+            .unwrap();
+        let identity = plant_identity(&env.pool, env.ws, domain, "news@unverified.example")
+            .await
+            .unwrap();
+        let unverified_template = env.template_from(identity, "marketing", PLAIN).await;
+        let fine = env.person("fine@example.com").await;
+        env.subscribe(fine).await;
+        let sender_unverified = env.send(fine, unverified_template).await;
+
+        // render_error: strict undefined in the template.
+        let broken = env
+            .template(
+                "marketing",
+                "<a href=\"{{ system.unsubscribe_url }}\">{{ person.nothing_here }}</a>",
+            )
+            .await;
+        let render_error = env.send(fine, broken).await;
+
+        let table = [
+            (&no_address, "skipped", "no_address", "address:blocked"),
+            (&no_consent, "skipped", "no_consent", "consent:blocked"),
+            (&suppressed, "skipped", "suppressed", "suppression:blocked"),
+            (
+                &sender_unverified,
+                "skipped",
+                "sender_unverified",
+                "sender:blocked",
+            ),
+            (&render_error, "failed", "render_error", "render:blocked"),
+        ];
+        for (message, status, reason, last_gate) in table {
+            assert_eq!(message.status, status, "{reason}");
+            assert_eq!(message.reason.as_deref(), Some(reason));
+            assert_eq!(
+                gate_names(message).last().map(String::as_str),
+                Some(last_gate)
+            );
+        }
+        assert_eq!(no_consent.deciding_rule.as_deref(), Some("topic_default"));
+        assert_eq!(
+            suppressed.deciding_rule.as_deref(),
+            Some("suppression_workspace")
+        );
+        assert!(
+            env.sent().is_empty(),
+            "no skipped or failed message reached the destination"
+        );
+        assert_eq!(env.events("email.skipped").await.len(), 4);
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert_eq!(env.events("email.sent").await.len(), 0);
+        let reasons: Vec<Option<String>> = env
+            .decisions(&["message.send"])
+            .await
+            .into_iter()
+            .map(|(_, _, reason)| reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                Some("no_address".into()),
+                Some("no_consent".into()),
+                Some("suppressed".into()),
+                Some("sender_unverified".into()),
+                Some("render_error".into()),
+            ]
+        );
+    }
+
+    /// The suppression hash of an address, as the pipeline takes it.
+    fn crate_hash(address: &str) -> [u8; 32] {
+        zirv_flow_core::people::identifier_hash(
+            &identifier_key(),
+            &zirv_flow_core::people::Identifier::parse("email", address).unwrap(),
+        )
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_send_reuses_the_message_id_and_a_destination_that_honours_keys_sees_one_message(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.plain_template("marketing").await;
+        let queued = env.queue(person, template, 5).await;
+
+        // The first attempt reaches the destination, which accepts the message; the answer is a
+        // 503 and the job is retried.
+        let first = env.attempt().await.unwrap_err();
+        assert_eq!(
+            first.message(),
+            "the destination answered with a server error"
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM messages").await,
+            0,
+            "nothing is recorded yet"
+        );
+        // The retry sends again, under the same key, and succeeds.
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!((message.status.as_str(), message.attempts), ("sent", 2));
+        let key = queued.message.to_string();
+        assert_eq!(fake_ledger_calls(&env.ledger), [key.clone(), key.clone()]);
+        assert_eq!(
+            env.sent().len(),
+            1,
+            "zero duplicates: the destination accepted one message"
+        );
+        assert_eq!(env.sent()[0].key, key);
+        assert_eq!(
+            env.attempts_of(queued.message).await,
+            [("retryable".to_owned(), 1), ("delivered".to_owned(), 2)]
+        );
+        assert_eq!(env.events("email.sent").await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_runs_again_after_its_outcome_committed_sends_nothing(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.plain_template("marketing").await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap();
+        assert_eq!(env.sent().len(), 1);
+
+        // The lease was lost after the commit and the job comes back: same payload.
+        let mut again = NewJob::new(SEND_JOB_KIND, queued.enrolled.trace.clone());
+        again.workspace_id = Some(env.ws);
+        again.payload = {
+            let dimensions = Dimensions::new();
+            Queued {
+                workspace: env.ws,
+                message: queued.message,
+                key: "again",
+                flow: env.flow,
+                version: env.version,
+                node: "mail",
+                enrollment: queued.enrolled.enrollment,
+                person,
+                template,
+                destination: env.destination,
+                topic: None,
+                dimensions: &dimensions,
+                queued_at: env.clock.now(),
+            }
+            .payload()
+            .unwrap()
+        };
+        zirv_flow_store::enqueue(&env.pool, &again).await.unwrap();
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.sent().len(), 1);
+        assert_eq!(fake_ledger_calls(&env.ledger).len(), 1);
+        assert_eq!(env.count("SELECT count(*) FROM messages").await, 1);
+        assert_eq!(env.events("email.sent").await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transactional_send_skips_consent_but_not_suppression(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        // Nobody has subscribed to anything.
+        let receipt = env.person("receipt@example.com").await;
+        let sent = env.send(receipt, template).await;
+        let blocked = env.person("blocked@example.com").await;
+        add_suppression(
+            &env.pool,
+            env.ws,
+            &NewSuppression {
+                identifier_hash: crate_hash("blocked@example.com"),
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::Complaint,
+                source: "api",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let skipped = env.send(blocked, template).await;
+        // The same two people through a marketing template: neither has consented.
+        let marketing = env.plain_template("marketing").await;
+        let refused = env.send(receipt, marketing).await;
+
+        assert_eq!(sent.status, "sent");
+        assert_eq!(sent.deciding_rule.as_deref(), Some("transactional"));
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(skipped.reason.as_deref(), Some("suppressed"));
+        assert_eq!(refused.reason.as_deref(), Some("no_consent"));
+        assert_eq!(env.sent().len(), 1);
+        assert!(
+            !env.sent()[0].payload["headers"]
+                .as_object()
+                .unwrap()
+                .contains_key("List-Unsubscribe"),
+            "transactional mail has no unsubscribe header"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_organization_wide_suppression_blocks_a_send_from_another_workspace(pool: PgPool) {
+        let mut one = Env::new(pool.clone(), "one").await;
+        let mut two = Env::new(pool, "two").await;
+        for env in [&mut one, &mut two] {
+            env.render = Some(start_pool("serve", "").await);
+        }
+        // A hard bounce in workspace one suppresses the address for the whole organization.
+        add_organization_suppression(
+            &one.pool,
+            &NewSuppression {
+                identifier_hash: crate_hash("gone@example.com"),
+                kind: "email",
+                reason: zirv_flow_core::consent::SuppressionReason::HardBounce,
+                source: "bounce",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let template = two.plain_template("transactional").await;
+        let person = two.person("gone@example.com").await;
+
+        let message = two.send(person, template).await;
+
+        assert_eq!(message.status, "skipped");
+        assert_eq!(message.reason.as_deref(), Some("suppressed"));
+        assert_eq!(
+            message.deciding_rule.as_deref(),
+            Some("suppression_organization")
+        );
+        assert!(two.sent().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archived_destination_is_refused_even_while_a_token_block_is_held(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let first = env.person("first@example.com").await;
+        let second = env.person("second@example.com").await;
+
+        // The first send takes a block of tokens from the bucket and keeps it in the gate.
+        let sent = env.send(first, template).await;
+        assert_eq!(sent.status, "sent");
+        zirv_flow_store::archive_destination(&env.pool, env.ws, env.destination)
+            .await
+            .unwrap();
+        let refused = env.send(second, template).await;
+
+        assert_eq!(refused.status, "failed");
+        assert_eq!(refused.reason.as_deref(), Some("destination_unavailable"));
+        assert_eq!(
+            fake_ledger_calls(&env.ledger).len(),
+            1,
+            "the destination was not called"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_429_with_a_retry_after_slows_the_bucket_and_asks_the_worker_to_wait(pool: PgPool) {
+        let mut env = Env::with(pool, "one", json!({"mode": "throttle_retry_after"}), 10, 10).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+
+        let error = env.attempt().await.unwrap_err();
+
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+        let bucket = zirv_flow_store::bucket_state(&env.pool, env.destination)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bucket.rate, 5.0, "the rate is halved");
+        assert_eq!(
+            bucket.penalty_until,
+            Some(env.clock.now() + Span::seconds(120)),
+            "until the Retry-After has passed"
+        );
+        assert_eq!(
+            env.attempts_of(queued.message).await,
+            [("throttled".to_owned(), 1)]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_that_finds_no_token_runs_again_when_the_bucket_will_hold_one(pool: PgPool) {
+        // One token a second and a burst of one.
+        let mut env = Env::with(pool, "one", json!({"mode": "ok"}), 1, 1).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let first = env.person("first@example.com").await;
+        let second = env.person("second@example.com").await;
+        assert_eq!(env.send(first, template).await.status, "sent");
+        let queued = env.queue(second, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        // No row, no event, no call: the job was replaced by one that runs after the wait.
+        assert_eq!(env.count("SELECT count(*) FROM messages").await, 1);
+        assert_eq!(env.sent().len(), 1);
+        let next: Vec<(Option<String>, Value, bool)> = sqlx::query_as(
+            "SELECT unique_key, payload, run_at > $1 FROM jobs WHERE kind = 'delivery.send'",
+        )
+        .bind(env.clock.now())
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(next.len(), 1);
+        assert!(
+            next[0]
+                .0
+                .as_deref()
+                .unwrap()
+                .ends_with(":mail:send:defer:1")
+        );
+        assert_eq!(next[0].1["deferrals"], 1);
+        assert_eq!(next[0].1["message_id"], json!(queued.message));
+        assert!(next[0].2, "it runs later than now");
+        assert_eq!(
+            env.decisions(&["message.send"]).await.last().unwrap(),
+            &(
+                "message.send".to_owned(),
+                "deferred".to_owned(),
+                Some("rate_limit".to_owned())
+            )
+        );
+
+        // The bucket refills; the deferred job sends the same message.
+        env.clock.advance(Span::seconds(5));
+        sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'delivery.send'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "sent");
+        assert_eq!(env.sent().len(), 2);
+        assert_eq!(env.sent()[1].key, queued.message.to_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_for_an_ended_enrollment_or_a_paused_flow_is_dropped_with_a_decision_only(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        env.queue(person, template, 5).await;
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(env.flow)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.count("SELECT count(*) FROM messages").await, 0);
+        assert_eq!(
+            env.count("SELECT count(*) FROM events WHERE name LIKE 'email.%'")
+                .await,
+            0
+        );
+        assert!(env.sent().is_empty());
+        assert_eq!(
+            env.decisions(&["message.send"]).await,
+            [(
+                "message.send".to_owned(),
+                "dropped".to_owned(),
+                Some("flow_paused".to_owned())
+            )]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_email_that_exhausts_the_render_hosts_memory_fails_as_a_render_error_and_the_next_is_sent(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        let marker = std::env::temp_dir().join(format!("zirv-send-oom-{}", Uuid::now_v7()));
+        env.render = Some(start_pool("oom_once", marker.to_str().unwrap()).await);
+        let template = env.plain_template("transactional").await;
+        let first = env.person("first@example.com").await;
+        let second = env.person("second@example.com").await;
+        let queued_first = env.queue(first, template, 5).await;
+        let queued_second = env.queue(second, template, 5).await;
+
+        // Both jobs run on the same worker: the first meets the child that dies of an
+        // allocation failure, the second the child the pool started in its place.
+        env.attempt().await.unwrap();
+        env.attempt().await.unwrap();
+
+        let failed = env.message(queued_first.message).await;
+        assert_eq!(
+            (failed.status.as_str(), failed.reason.as_deref()),
+            ("failed", Some("render_error"))
+        );
+        let sent = env.message(queued_second.message).await;
+        assert_eq!(sent.status, "sent");
+        assert_eq!(env.sent().len(), 1);
+        assert_eq!(env.sent()[0].to, "second@example.com");
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        let _ = std::fs::remove_file(marker);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_that_doubles_a_string_fails_as_a_render_error_and_the_next_is_sent(
+        pool: PgPool,
+    ) {
+        if !cfg!(target_os = "linux") {
+            eprintln!("skipped: the host's OS memory limit is applied on Linux only");
+            return;
+        }
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let doubling = env
+            .template(
+                "transactional",
+                "{% set ns = namespace(s='xxxxxxxx') %}{% for i in range(60) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{{ ns.s | length }}",
+            )
+            .await;
+        let plain = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+
+        let failed = env.send(person, doubling).await;
+        let sent = env.send(env.person("bob@example.com").await, plain).await;
+
+        assert_eq!(failed.reason.as_deref(), Some("render_error"));
+        assert_eq!(sent.status, "sent");
+    }
+
+    #[test]
+    fn every_failure_of_the_render_host_is_a_render_error() {
+        use zirv_flow_render::RenderFailure;
+        for failure in [
+            RenderFailure::MemoryLimit,
+            RenderFailure::Deadline,
+            RenderFailure::ChildExited,
+            RenderFailure::Protocol,
+            RenderFailure::RequestTooLarge,
+            RenderFailure::UnsupportedDocument,
+        ] {
+            assert_eq!(render::failed(failure), "render_error", "{failure}");
+        }
+    }
+}
