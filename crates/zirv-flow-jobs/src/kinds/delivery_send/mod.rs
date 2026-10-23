@@ -139,6 +139,32 @@ impl Trail {
         self.reason = Some(reason);
         Step::Finished(self)
     }
+
+    /// Ends the message here as `delivery_unconfirmed`: an earlier call may have been accepted, so
+    /// nothing that went wrong since shows it was not. `was` is what really went wrong, kept as the
+    /// gate record's note and in the log; it is a code, never an address.
+    fn unconfirmed(mut self, gate: &'static str, was: Option<&'static str>) -> Step {
+        warn!(gate, was, "message ends unconfirmed");
+        let mut record = GateRecord::blocked(gate, DELIVERY_UNCONFIRMED);
+        if let Some(was) = was {
+            record = record.with_note(was);
+        }
+        self.gates.push(record);
+        self.status = MessageStatus::Failed;
+        self.reason = Some(DELIVERY_UNCONFIRMED);
+        Step::Finished(self)
+    }
+
+    /// Ends the message here for a failure before the destination was called. A resumed message
+    /// (its row was `sending` when the attempt began) may have been accepted on an earlier call,
+    /// so it ends unconfirmed instead.
+    fn fail_unsent(self, resuming: bool, gate: &'static str, reason: &'static str) -> Step {
+        if resuming {
+            self.unconfirmed(gate, Some(reason))
+        } else {
+            self.fail(gate, reason)
+        }
+    }
 }
 
 impl JobKind for DeliverySend {
@@ -216,12 +242,6 @@ async fn decide(
     // The first run writes the row, pending, in a statement of its own: it stays whatever this
     // attempt comes to (a retry, a wait for a token), and shows the message in the log meanwhile.
     start_message(&pool, job, now).await?;
-    // The key that hashes the address, fetched once: the suppression gate reads it, and so does
-    // the hard bounce that ends a delivery, including that of a resumed message, which skips the
-    // gates.
-    let key = ctx
-        .identifier_key()
-        .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
 
     // The template, as published now.
     let template = find_template(ctx.conn(), workspace, job.template).await?;
@@ -236,7 +256,7 @@ async fn decide(
         None => None,
     };
     let (Some(template), Some(version)) = (template, version) else {
-        return Ok(trail.fail("template", "template_unavailable"));
+        return Ok(trail.fail_unsent(resuming, "template", "template_unavailable"));
     };
     trail.pass(GateRecord::passed("template"));
     trail.template_version = Some(version.version);
@@ -246,7 +266,10 @@ async fn decide(
     // The sender.
     let sender = match gates::sender(&pool, workspace, document_sender(&version.document)).await? {
         Ok(sender) => sender,
-        Err(_) if resuming => return Ok(trail.fail("sender", DELIVERY_UNCONFIRMED)),
+        Err(blocked) if resuming => {
+            let was = blocked.gate.reason.unwrap_or("sender_unavailable");
+            return Ok(trail.fail_unsent(true, "sender", was));
+        }
         Err(blocked) => return Ok(trail.skip(blocked)),
     };
     trail.sender = Some(sender.identity_id);
@@ -255,10 +278,20 @@ async fn decide(
     // Gate 2: the address.
     let address = match gates::address(ctx.conn(), workspace, person).await? {
         Ok(address) => address,
-        Err(_) if resuming => return Ok(trail.fail("address", DELIVERY_UNCONFIRMED)),
+        Err(blocked) if resuming => {
+            let was = blocked.gate.reason.unwrap_or("address_unavailable");
+            return Ok(trail.fail_unsent(true, "address", was));
+        }
         Err(blocked) => return Ok(trail.skip(blocked)),
     };
     trail.pass(GateRecord::passed("address"));
+    // The key that hashes the address, fetched once: the suppression gate reads it, and so does
+    // the hard bounce that ends a delivery, including that of a resumed message, which skips the
+    // gates. It is fetched here so a worker without it can still end a message the steps above
+    // stop.
+    let key = ctx
+        .identifier_key()
+        .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
 
     // Gates 3 to 6 judged the message when it first went out. A retry of a message that may have
     // gone out does not judge it again: a person who withdrew consent since was sent this one.
@@ -275,7 +308,7 @@ async fn decide(
     let rendered = match render::render(pool_for_render.as_ref(), version.document, &context).await
     {
         Ok(rendered) => rendered,
-        Err(reason) => return Ok(trail.fail("render", reason)),
+        Err(reason) => return Ok(trail.fail_unsent(resuming, "render", reason)),
     };
     trail.pass(GateRecord::passed("render"));
     let email = render::email_payload(&sender, &rendered);
@@ -285,33 +318,29 @@ async fn decide(
         .first_wait
         .is_some_and(|first| now - first > MAX_RATE_WAIT)
     {
-        // A resumed message may have gone out on an earlier call: it is not `rate_limited`.
-        let reason = if resuming {
-            DELIVERY_UNCONFIRMED
-        } else {
-            "rate_limited"
-        };
-        return Ok(trail.fail("rate_limit", reason));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "rate_limited"));
     }
     let Some(destination) = find_destination(ctx.conn(), workspace, job.destination)
         .await?
         .filter(|destination| destination.archived_at.is_none())
     else {
-        return Ok(trail.fail("rate_limit", "destination_unavailable"));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
     };
     let registry = Registry::built_in();
     let Some(driver) = registry.get(&destination.kind) else {
-        return Ok(trail.fail("rate_limit", "destination_unavailable"));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
     };
     if !driver.spec().capabilities.channels.contains(&"email") {
-        return Ok(trail.fail("rate_limit", "destination_unsupported"));
+        return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unsupported"));
     }
     let gates = Arc::clone(ctx.rate_gates());
     let clock = ctx.clock().clone();
     match gates.admit(&pool, destination.id, &clock).await? {
         Admission::Granted => trail.pass(GateRecord::passed("rate_limit")),
         Admission::Wait(wait) => return defer(ctx, job, payload, wait, now).await,
-        Admission::Gone => return Ok(trail.fail("rate_limit", "destination_unavailable")),
+        Admission::Gone => {
+            return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
+        }
     }
 
     // Gate 9: deliver, holding no lock, then record the attempt. The row is marked `sending`
@@ -332,6 +361,15 @@ async fn decide(
         payload: &email,
     };
     let done = deliver::deliver(ctx, &call, now).await?;
+    // A reply lost after the final dot leaves the message possibly accepted. The mark is written
+    // before the attempt is settled, so a settle that fails or a lease that is lost cannot skip it.
+    let lost_reply = matches!(
+        done.verdict,
+        Verdict::Retry { reason, .. } if reason == DELIVERY_UNCONFIRMED
+    );
+    if lost_reply {
+        mark_message_unconfirmed(&pool, workspace, job.message).await?;
+    }
     let target = AttemptTarget {
         destination_id: destination.id,
         subject_kind: SubjectKind::Message,
@@ -339,19 +377,24 @@ async fn decide(
     };
     delivery::settle(ctx, Some(&target), number, &done).await?;
     trail.attempts = number;
+    // Once an earlier call may have been accepted, nothing that goes wrong after it shows that it
+    // was not: every ending but a sent message and a verdict about the address is unconfirmed.
+    let unconfirmed = carried || lost_reply;
     match done.verdict {
         Verdict::Succeeded { .. } => {
             trail.pass(GateRecord::passed("delivery"));
             Ok(Step::Finished(trail))
         }
-        Verdict::Terminal { reason, .. } => {
-            if reason == HARD_BOUNCE {
-                // The server says the address cannot receive mail: it is suppressed with the
-                // write that ends the message.
-                trail.bounced = gates::address_hash(&key, &address);
-            }
+        Verdict::Terminal { reason, .. } if reason == HARD_BOUNCE => {
+            // The server says the address cannot receive mail: it is suppressed with the write
+            // that ends the message, whatever an earlier call came to.
+            trail.bounced = gates::address_hash(&key, &address);
             Ok(trail.fail("delivery", reason))
         }
+        Verdict::Terminal { reason, .. } if unconfirmed => {
+            Ok(trail.unconfirmed("delivery", Some(reason)))
+        }
+        Verdict::Terminal { reason, .. } => Ok(trail.fail("delivery", reason)),
         Verdict::Retry {
             reason,
             message,
@@ -359,15 +402,6 @@ async fn decide(
             ..
         } => {
             warn!(attempt = number, reason, "message will be retried");
-            // A reply lost after the final dot leaves the message possibly accepted. Once that
-            // happened, an attempt that fails at the transport level shows nothing about it
-            // (it was not refused), so the message stays unconfirmed; a server's own answer,
-            // a 4xx or a 5xx, is judged as usual.
-            let lost_reply = reason == DELIVERY_UNCONFIRMED;
-            if lost_reply {
-                mark_message_unconfirmed(&pool, workspace, job.message).await?;
-            }
-            let unconfirmed = lost_reply || (carried && says_nothing_of_the_message(reason));
             if reason == "http_429" {
                 slow_down(&pool, &destination, retry_after, ctx).await;
             }
@@ -375,27 +409,17 @@ async fn decide(
                 let error = JobError::new(message);
                 return Err(retry_after.map_or(error, |wait| error.with_retry_after(wait)));
             }
-            // Temporary refusals that outlast the retries are a soft bounce, with no suppression.
-            let ended = if unconfirmed {
-                DELIVERY_UNCONFIRMED
+            if unconfirmed {
+                Ok(trail.unconfirmed("delivery", Some(reason)))
             } else if reason == SMTP_DEFERRED {
-                SOFT_BOUNCE
+                // Temporary refusals that outlast the retries are a soft bounce, with no
+                // suppression.
+                Ok(trail.fail("delivery", SOFT_BOUNCE))
             } else {
-                reason
-            };
-            Ok(trail.fail("delivery", ended))
+                Ok(trail.fail("delivery", reason))
+            }
         }
     }
-}
-
-/// Whether a retried attempt's failure says nothing about the message: it failed before or beside
-/// the mail conversation (a connection, a timeout, a credential that could not be opened), so it
-/// neither confirms nor refutes that an earlier attempt's message was accepted.
-fn says_nothing_of_the_message(reason: &str) -> bool {
-    matches!(
-        reason,
-        "transport" | "timeout" | "other" | "credential_unavailable"
-    )
 }
 
 /// Gates 3 to 6: consent, suppression and the two caps. The gate that blocks, if one does.
@@ -2584,6 +2608,145 @@ mod tests {
             "the bounce is not written without its suppression"
         );
         assert_eq!(suppressions(&env).await, 0);
+    }
+
+    /// Runs a first attempt that loses the server's reply, so the message is `sending` and marked
+    /// unconfirmed, and returns it queued for more attempts.
+    async fn after_a_lost_reply(env: &Env, sink: &SmtpSink, attempts: i32) -> Queued1 {
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, attempts).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        queued
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_login_refused_after_a_lost_reply_ends_delivery_unconfirmed(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let queued = after_a_lost_reply(&env, &sink, 3).await;
+        sqlx::query(
+            "UPDATE credentials SET fields = jsonb_set(fields, '{username}', '\"nobody\"')",
+        )
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "a refused login does not show that the first copy was refused"
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        let note = ended.gate_results.to_string();
+        assert!(note.contains("destination_auth"), "{note}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn temporary_refusals_after_a_lost_reply_end_delivery_unconfirmed_not_as_a_soft_bounce(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let queued = after_a_lost_reply(&env, &sink, 3).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        assert_eq!(suppressions(&env).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_550_5_1_1_after_a_lost_reply_is_still_a_hard_bounce_and_suppresses(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let queued = after_a_lost_reply(&env, &sink, 3).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        assert_eq!(env.events("email.bounced").await.len(), 1);
+        assert_eq!(suppressions(&env).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_whose_destination_was_archived_ends_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        zirv_flow_store::archive_destination(&env.pool, env.ws, env.destination)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert!(
+            message
+                .gate_results
+                .to_string()
+                .contains("destination_unavailable")
+        );
+        assert_eq!(fake_ledger_calls(&env.ledger).len(), 1, "no second call");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_worker_without_the_identifier_key_still_ends_an_unavailable_template_as_such(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.no_key = true;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 3).await;
+        sqlx::query("UPDATE templates SET archived_at = now() WHERE id = $1")
+            .bind(template)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("template_unavailable"))
+        );
     }
 
     #[sqlx::test]

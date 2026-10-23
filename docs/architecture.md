@@ -1230,8 +1230,10 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Delivery and recovery.** Before the destination call the row is marked `sending` in a
   statement of its own, and no lock is held during the call. A retry that finds `sending` skips
   the person gates and delivers again under the same idempotency key. When it cannot (the sender,
-  address or enrollment is gone, or the six-hour rate wait ran out) the message ends
-  `failed: delivery_unconfirmed`, because the first call may have been accepted. The scheduler
+  address or enrollment is gone, the template, the destination or its type is unavailable, the
+  render fails, or the six-hour rate wait ran out) the message ends
+  `failed: delivery_unconfirmed`, because the first call may have been accepted; what really went
+  wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
   is no longer `ready` or `running` (it went dead): `pending` as `failed: internal_error`,
   `sending` as `failed: delivery_unconfirmed`.
@@ -1268,18 +1270,28 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `credential_unavailable` as a credential. Every read is bounded and every step has a timeout.
   Header names from the template are compared case-insensitively and a name given twice keeps the
   last one given (the payload object's key order); a header the builder sets itself cannot be set
-  again. `List-Unsubscribe` and `List-Unsubscribe-Post` never use encoded words: a non-ASCII byte in
-  one is `%XX`, and a line break is refused. `Subject` and the `From` display name fold at white
+  again: every `Content-` and `Resent-` header and `From`, `To`, `Cc`, `Bcc`, `Sender`, `Reply-To`,
+  `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Return-Path`, `Received`,
+  `Authentication-Results`, `DKIM-Signature` and `X-Zirv-Idempotency-Key` are dropped.
+  `List-Unsubscribe` never uses encoded words: a non-ASCII byte inside a `<...>` URI span is `%XX`,
+  non-ASCII outside a span is refused. `List-Unsubscribe-Post` must be ASCII (RFC 8058 fixes it as
+  `List-Unsubscribe=One-Click`), and a line break is refused in both. `Subject` and the `From` display name fold at white
   space within 78 characters where it allows. **A reply lost after the final dot** (the connection
   drops, the answer times out or cannot be read once the whole message and its end marker were
   sent) is `DestinationError::Unconfirmed`: the server may have accepted the message. It retries
   under the same `Message-ID` and `X-Zirv-Idempotency-Key`; a later `250` ends the message `sent`,
   and when the attempts run out it ends `failed: delivery_unconfirmed` (the reason the orphan sweep
   uses) with `email.failed`. The unconfirmed state is a `delivery` entry in the `sending` row's
-  `gate_results`, written in a statement of its own, so it survives a job retry: once it is there, a
-  later attempt that fails at the transport level (a refused connection, a timeout before `DATA`, a
-  drop) still ends `delivery_unconfirmed`, since that cannot show the earlier attempt was refused;
-  a later definitive `4xx` or `5xx` reply is classified as usual.
+  `gate_results`, written in a statement of its own before the attempt is settled, so it survives a
+  job retry, a failed settle and a lost lease. Once it is there, one rule holds: every ending other
+  than `sent` and `hard_bounce` is `failed: delivery_unconfirmed` with `email.failed`. That covers
+  every terminal reason (`destination_auth`, `destination_config`, `egress_denied`,
+  `destination_unsupported`, `smtp_rejected` at any stage, `credential_unavailable`) and retries
+  that run out of any kind, a `4xx` included (never a `soft_bounce`), because a later failure that
+  is not a verdict about the address cannot show that the earlier copy was refused. The real reason
+  is the gate record's `note` and the log line. A `5.1.x` hard bounce keeps its ending and its
+  suppression: it is a verdict about the address. The flag that the end marker was sent is set as
+  soon as it is written, so a flush that fails or stalls is also unconfirmed.
 - **Links.** Until the tracking endpoints exist, the unsubscribe and preference links of a
   message are placeholders on a reserved `.invalid` host that carry the message id; a signed link
   replaces them.

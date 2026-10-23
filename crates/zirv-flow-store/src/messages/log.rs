@@ -78,6 +78,9 @@ pub struct GateRecord {
     /// The id the gate's finding rests on, such as the consent change that decided or the scope
     /// of the suppression that blocked, as `(name, id)`.
     pub detail: Option<(&'static str, Uuid)>,
+    /// A code that adds to the reason, such as what a message that ended unconfirmed really ran
+    /// into. A code, never an address.
+    pub note: Option<&'static str>,
 }
 
 impl GateRecord {
@@ -88,6 +91,7 @@ impl GateRecord {
             passed: true,
             reason: None,
             detail: None,
+            note: None,
         }
     }
 
@@ -98,12 +102,19 @@ impl GateRecord {
             passed: false,
             reason: Some(reason),
             detail: None,
+            note: None,
         }
     }
 
     /// The same record, naming the id its finding rests on.
     pub const fn with_detail(mut self, name: &'static str, id: Uuid) -> Self {
         self.detail = Some((name, id));
+        self
+    }
+
+    /// The same record, with a code that says more than the reason does.
+    pub const fn with_note(mut self, note: &'static str) -> Self {
+        self.note = Some(note);
         self
     }
 
@@ -117,6 +128,9 @@ impl GateRecord {
         }
         if let Some((name, id)) = self.detail {
             entry[name] = json!(id);
+        }
+        if let Some(note) = self.note {
+            entry["note"] = json!(note);
         }
         entry
     }
