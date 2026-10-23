@@ -39,6 +39,31 @@ pub async fn credential_users<'e>(
     .map_err(StoreError::query)
 }
 
+/// A live source or destination, with the credential it uses.
+#[derive(Clone, Debug, Eq, FromRow, PartialEq)]
+pub struct CredentialUse {
+    pub credential_id: Uuid,
+    /// `source` or `destination`.
+    pub kind: String,
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// Every live source and destination of the workspace that uses a credential, by credential
+/// then kind then name: one read for a whole list.
+pub async fn credential_uses<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+) -> Result<Vec<CredentialUse>, StoreError> {
+    sqlx::query_as(
+        "SELECT credential_id, kind, id, name FROM (             SELECT credential_id, 'source' AS kind, id, name FROM sources             WHERE workspace_id = $1 AND credential_id IS NOT NULL             UNION ALL             SELECT credential_id, 'destination', id, name FROM destinations             WHERE workspace_id = $1 AND credential_id IS NOT NULL AND archived_at IS NULL) users          ORDER BY credential_id, kind, lower(name), id",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// How many live sources and destinations use each credential of the workspace that is used at
 /// all.
 pub async fn credential_use_counts<'e>(
@@ -123,6 +148,7 @@ mod tests {
             .unwrap();
 
         let users = credential_users(&pool, ws, shared.id).await.unwrap();
+        let uses = credential_uses(&pool, ws).await.unwrap();
         let counts: std::collections::BTreeMap<_, _> = credential_use_counts(&pool, ws)
             .await
             .unwrap()
@@ -137,6 +163,13 @@ mod tests {
         assert_eq!(users[1].id, source.id);
         assert_eq!(counts.get(&shared.id), Some(&2));
         assert_eq!(counts.get(&other.id), Some(&1));
+        assert_eq!(uses.len(), 3);
+        assert_eq!(
+            uses.iter()
+                .filter(|used| used.credential_id == shared.id)
+                .count(),
+            2
+        );
     }
 
     #[sqlx::test]

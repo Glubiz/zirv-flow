@@ -172,6 +172,7 @@ mod tests {
         csrf: String,
     }
 
+    #[derive(Clone, Copy)]
     enum Auth<'a> {
         Anonymous,
         Key(&'a str),
@@ -181,7 +182,36 @@ mod tests {
         Cookie(&'a Login),
     }
 
+    /// Sends a request. A body that still carries an inline credential for a source or
+    /// destination is expanded to a workspace credential first (`expand_inline_credential`).
     async fn call(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        auth: Auth<'_>,
+    ) -> Reply {
+        let sent = crate::test_support::expand_inline_credential(
+            |method, uri, body| async move {
+                let reply = call_once(router, &method, &uri, body, auth).await;
+                (reply.status, reply.body)
+            },
+            method,
+            uri,
+            body,
+        )
+        .await;
+        match sent {
+            Ok(body) => call_once(router, method, uri, body, auth).await,
+            Err((status, body)) => Reply {
+                status,
+                headers: Default::default(),
+                body,
+            },
+        }
+    }
+
+    async fn call_once(
         router: &Router,
         method: &str,
         uri: &str,
@@ -1286,14 +1316,15 @@ mod tests {
         let deleted = fx.as_key("DELETE", &format!("/sources/{id}"), None).await;
 
         assert_eq!(deleted.status, StatusCode::NO_CONTENT);
-        assert_eq!(fx.count("SELECT count(*) FROM encrypted_secrets").await, 0);
+        // The workspace credential stays; the account tokens go with the source.
+        assert_eq!(fx.count("SELECT count(*) FROM encrypted_secrets").await, 1);
         let deletions = fx
             .actions()
             .await
             .iter()
             .filter(|a| *a == "secret.deleted")
             .count();
-        assert_eq!(deletions, 2, "the credential and the account tokens");
+        assert_eq!(deletions, 1, "the account tokens");
     }
 
     #[sqlx::test]

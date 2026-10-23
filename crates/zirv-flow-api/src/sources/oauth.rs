@@ -160,7 +160,7 @@ pub(crate) async fn start(
     {
         return Err(super::invalid("credential.client_id", "is required"));
     }
-    let credential = credential::load(&state, workspace.id, source.credential_secret_id).await?;
+    let credential = credential::load(&state, workspace.id, source.credential_id).await?;
     let client_id = credential
         .get("client_id")
         .ok_or_else(|| super::invalid("credential.client_id", "is required"))?;
@@ -383,7 +383,7 @@ async fn complete(
     let public_url = state
         .public_url()
         .ok_or_else(|| failed("exchange_failed"))?;
-    let credential = credential::load(state, workspace, source.credential_secret_id)
+    let credential = credential::load(state, workspace, source.credential_id)
         .await
         .map_err(Failure::fault)?;
     let client_id = credential

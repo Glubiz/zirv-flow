@@ -1,40 +1,21 @@
-//! A destination's credential as a sealed secret of purpose `destination_credential`: a JSON
-//! object of field name to value, opened right before a call and handed to the connector as a
-//! typed, zeroizing [`Credential`] (architecture 16.2). Sealing is the sources' (the shared
-//! `to_plaintext` and `keyring`); only the purpose differs.
+//! A destination's workspace credential, opened right before a call and handed to the connector as
+//! a typed, zeroizing [`Credential`] (architecture 16.2).
 
 use uuid::Uuid;
 use zirv_flow_connectors::sources::Credential;
-use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
-use zirv_flow_store::secrets;
+use zirv_flow_core::WorkspaceId;
 
 use crate::AppState;
 use crate::problem::ApiError;
-use crate::sources::credential::keyring;
 
-/// Opens the credential secret of a destination. A destination with none gets an empty
+/// Opens the workspace credential of a destination. A destination with none gets an empty
 /// credential.
 pub(super) async fn load(
     state: &AppState,
     workspace: WorkspaceId,
-    secret: Option<Uuid>,
+    credential: Option<Uuid>,
 ) -> Result<Credential, ApiError> {
-    let Some(secret) = secret else {
-        return Ok(Credential::new());
-    };
-    let bytes = secrets::open_json(
-        &state.pool,
-        keyring(state)?,
-        workspace,
-        SecretId::from_uuid(secret),
-        SecretPurpose::DestinationCredential,
-    )
-    .await
-    .map_err(|error| {
-        tracing::warn!(?error, "a destination credential could not be opened");
-        ApiError::internal()
-    })?;
-    Credential::from_json(&bytes).map_err(|_| ApiError::internal())
+    crate::workspace_credentials::resolve::load(state, workspace, credential).await
 }
 
 #[cfg(test)]

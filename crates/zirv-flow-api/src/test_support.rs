@@ -1,6 +1,102 @@
 //! Helpers the acceptance modules share.
 
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use axum::http::StatusCode;
+use serde_json::{Value, json};
 use sqlx::PgPool;
+
+static CREDENTIALS_MADE: AtomicU64 = AtomicU64::new(0);
+
+/// Test setup sugar for the acceptance modules written before sources and destinations took a
+/// workspace credential. A `POST` to `/sources` or `/destinations` that carries an inline
+/// `"credential": {name: value}` first creates a `custom` workspace credential holding exactly
+/// those fields (all required secrets) and sends `credential_id` instead. A `PATCH` that carries
+/// one rotates the credential the source or destination already uses (or creates and links one
+/// when it has none), which is what replacing the whole credential meant. An empty inline
+/// credential is dropped, so the request is refused as it always was. Anything else is untouched.
+/// `send` issues a request with the caller's own authentication and returns the status and body.
+/// `Err` is the refusal of a credential call, to be shown as the answer to the original one.
+pub(crate) async fn expand_inline_credential<F, Fut>(
+    send: F,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+) -> Result<Option<Value>, (StatusCode, Value)>
+where
+    F: Fn(String, String, Option<Value>) -> Fut,
+    Fut: Future<Output = (StatusCode, Value)>,
+{
+    let Some(Value::Object(mut map)) = body.clone() else {
+        return Ok(body);
+    };
+    let Some(Value::Object(inline)) = map.get("credential").cloned() else {
+        return Ok(body);
+    };
+    let cut = ["/sources", "/destinations"]
+        .iter()
+        .filter_map(|marker| uri.find(marker))
+        .min();
+    let Some(cut) = cut else {
+        return Ok(body);
+    };
+    let base = &uri[..cut];
+    map.remove("credential");
+    if inline.is_empty() {
+        return Ok(Some(Value::Object(map)));
+    }
+    let collection = uri.ends_with("/sources") || uri.ends_with("/destinations");
+    let existing = if method == "PATCH" && !collection {
+        let (status, current) = send("GET".into(), uri.to_owned(), None).await;
+        if !status.is_success() {
+            // Not ours to read: the request goes on without a credential and is refused as before.
+            return Ok(Some(Value::Object(map)));
+        }
+        current["credential_id"].as_str().map(str::to_owned)
+    } else {
+        None
+    };
+    let id = match existing {
+        Some(id) => {
+            let (status, answer) = send(
+                "PUT".into(),
+                format!("{base}/credentials/{id}/secret"),
+                Some(json!({"secret": inline})),
+            )
+            .await;
+            if !status.is_success() {
+                return Err((status, answer));
+            }
+            id
+        }
+        None => {
+            let number = CREDENTIALS_MADE.fetch_add(1, Ordering::Relaxed);
+            let fields: Vec<Value> = inline
+                .keys()
+                .map(|key| {
+                    json!({"key": key, "label": key, "type": "string",
+                           "required": true, "secret": true})
+                })
+                .collect();
+            let (status, answer) = send(
+                "POST".into(),
+                format!("{base}/credentials"),
+                Some(
+                    json!({"kind": "custom", "name": format!("test credential {number}"),
+                            "schema": {"fields": fields}, "secret": inline}),
+                ),
+            )
+            .await;
+            if status != StatusCode::CREATED {
+                return Err((status, answer));
+            }
+            answer["id"].as_str().unwrap_or_default().to_owned()
+        }
+    };
+    map.insert("credential_id".into(), Value::String(id));
+    Ok(Some(Value::Object(map)))
+}
 
 /// The text of every row of every table, in both bytea encodings, holds no plaintext marker.
 pub(crate) async fn tables_hold_no(pool: &PgPool, markers: &[&str]) {

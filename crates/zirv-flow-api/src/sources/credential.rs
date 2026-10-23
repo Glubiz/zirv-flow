@@ -8,8 +8,7 @@ use axum::http::StatusCode;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::{Keyring, SecretBytes, SecretId, SecretPurpose, SecretString};
-use zirv_flow_store::secrets;
+use zirv_flow_core::{Keyring, SecretBytes, SecretString};
 
 use crate::AppState;
 use crate::problem::ApiError;
@@ -27,6 +26,8 @@ pub(crate) fn to_plaintext(
         .map_err(|_| ApiError::internal())
 }
 
+#[cfg(test)]
+#[cfg(test)]
 fn from_plaintext(bytes: &SecretBytes) -> Result<Credential, ApiError> {
     Credential::from_json(bytes).map_err(|_| ApiError::internal())
 }
@@ -41,30 +42,14 @@ pub(crate) fn keyring(state: &AppState) -> Result<&std::sync::Arc<Keyring>, ApiE
     })
 }
 
-/// Opens the credential secret of a source. No source has one when `secret` is `None`, and the
-/// connector then gets an empty credential.
+/// Opens the workspace credential of a source. No source has one when `credential` is `None`,
+/// and the connector then gets an empty credential.
 pub(super) async fn load(
     state: &AppState,
     workspace: WorkspaceId,
-    secret: Option<Uuid>,
+    credential: Option<Uuid>,
 ) -> Result<Credential, ApiError> {
-    let Some(secret) = secret else {
-        return Ok(Credential::new());
-    };
-    let keyring = keyring(state)?;
-    let bytes = secrets::open_json(
-        &state.pool,
-        keyring,
-        workspace,
-        SecretId::from_uuid(secret),
-        SecretPurpose::ConnectorCredential,
-    )
-    .await
-    .map_err(|error| {
-        tracing::warn!(?error, "a source credential could not be opened");
-        ApiError::internal()
-    })?;
-    from_plaintext(&bytes)
+    crate::workspace_credentials::resolve::load(state, workspace, credential).await
 }
 
 #[cfg(test)]

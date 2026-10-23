@@ -1,9 +1,9 @@
-//! The sources of a workspace: create, read, change and delete. A credential goes in sealed, in
-//! the transaction that stores the source, and comes back only as the names of its fields.
-//! Each change is audited with ids, names and field names, never a value.
+//! The sources of a workspace: create, read, change and delete. A source uses a workspace
+//! credential by id and shows only the names of its fields. Each change is audited with ids,
+//! names and field names, never a value.
 
 use hashbrown::HashMap;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -13,18 +13,17 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::sources::{validate_config, validate_credential};
-use zirv_flow_core::{Freshness, SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
+use zirv_flow_connectors::sources::{validate_config, validate_credential_names};
+use zirv_flow_core::{Freshness, SecretId, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
-use super::{
-    credential, field_problems, invalid, is_push, kind_unavailable, managed_by_webhooks, registry,
-};
+use super::{field_problems, invalid, is_push, kind_unavailable, managed_by_webhooks, registry};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::resolve::lock_for_use;
 
 const MAX_NAME_CHARS: usize = 128;
 /// The schedules of sources are cron expressions in UTC.
@@ -54,7 +53,9 @@ pub(crate) struct SourceBody {
     /// The plain settings. Never holds a credential.
     #[schema(value_type = BTreeMap<String, serde_json::Value>)]
     config: Value,
-    /// The names of the credential fields that are set. Their values are never returned.
+    /// The workspace credential the source uses.
+    credential_id: Option<Uuid>,
+    /// The names of the fields the credential holds. Their values are never returned.
     credential_fields_set: Vec<String>,
     /// The OAuth2 consent state; never a token.
     oauth: OAuthBody,
@@ -81,6 +82,7 @@ impl From<&Source> for SourceBody {
             kind: source.kind.clone(),
             name: source.name.clone(),
             config: source.config.clone(),
+            credential_id: source.credential_id,
             credential_fields_set: source.credential_fields.clone(),
             oauth: OAuthBody {
                 required: source
@@ -134,10 +136,9 @@ pub(crate) struct CreateSourceRequest {
     /// The plain settings, checked against the type's field specs.
     #[schema(value_type = BTreeMap<String, serde_json::Value>)]
     config: Value,
-    /// The credential fields by name. Sealed on arrival and never returned.
-    #[serde(default)]
-    #[schema(value_type = BTreeMap<String, String>)]
-    credential: BTreeMap<String, SecretString>,
+    /// The workspace credential the source uses (`/credentials`). Required when the source type
+    /// has required credential fields, which the credential must hold.
+    credential_id: Option<Uuid>,
     /// A cron expression in UTC.
     schedule: Option<String>,
 }
@@ -150,9 +151,8 @@ pub(crate) struct UpdateSourceRequest {
     /// A cron expression in UTC; an empty string clears the schedule.
     schedule: Option<String>,
     enabled: Option<bool>,
-    /// Replaces the whole credential: every required credential field must be given.
-    #[schema(value_type = Option<BTreeMap<String, String>>)]
-    credential: Option<BTreeMap<String, SecretString>>,
+    /// Uses another workspace credential, which must hold every required credential field.
+    credential_id: Option<Uuid>,
 }
 
 pub(crate) fn check_name(name: &str) -> Result<&str, ApiError> {
@@ -192,12 +192,8 @@ fn auth_of(config: &Value) -> &Value {
         .unwrap_or(&Value::Null)
 }
 
-pub(crate) fn field_names(values: &BTreeMap<String, SecretString>) -> Vec<String> {
-    values.keys().cloned().collect()
-}
-
-/// Creates a source, seals its credential and audits `source.created` (and `secret.created`
-/// for the credential), all in one transaction.
+/// Creates a source that uses a workspace credential and audits `source.created`, in one
+/// transaction.
 pub(crate) async fn create_source(
     state: &AppState,
     context: &Context,
@@ -215,30 +211,24 @@ pub(crate) async fn create_source(
     }
     let name = check_name(&request.name)?;
     validate_config(spec, &request.config).map_err(|errors| field_problems("config", errors))?;
-    validate_credential(spec, &request.credential, true)
-        .map_err(|errors| field_problems("credential", errors))?;
+    if request.credential_id.is_none() {
+        validate_credential_names(spec, &BTreeSet::new())
+            .map_err(|errors| field_problems("credential", errors))?;
+    }
     if let Some(schedule) = &request.schedule {
         check_schedule(schedule)?;
     }
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let secret = if request.credential.is_empty() {
-        None
-    } else {
-        let plaintext = credential::to_plaintext(&request.credential)?;
-        Some(
-            admin::create_secret_in(
-                &mut tx,
-                context,
-                credential::keyring(state)?,
-                workspace,
-                SecretPurpose::ConnectorCredential,
-                &plaintext,
-            )
+    let linked = match request.credential_id {
+        Some(id) => Some(
+            lock_for_use(&mut tx, workspace, id, |present| {
+                validate_credential_names(spec, present)
+            })
             .await?,
-        )
+        ),
+        None => None,
     };
-    let fields = field_names(&request.credential);
     let source = zirv_flow_store::create_source(
         &mut *tx,
         workspace,
@@ -247,8 +237,7 @@ pub(crate) async fn create_source(
             kind: spec.kind,
             name,
             config: &request.config,
-            credential_secret_id: secret,
-            credential_fields: &fields,
+            credential_id: linked.as_ref().map(|credential| credential.id),
             schedule: request.schedule.as_deref().filter(|text| !text.is_empty()),
             created_by,
         },
@@ -269,7 +258,8 @@ pub(crate) async fn create_source(
         Some(workspace),
         "source.created",
         Some(("source", source.id)),
-        json!({"kind": source.kind, "name": source.name, "credential_fields": fields}),
+        json!({"kind": source.kind, "name": source.name, "credential_id": source.credential_id,
+               "credential_fields": source.credential_fields}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -313,12 +303,7 @@ pub(crate) async fn update_source(
     if request.enabled.is_some() {
         fields.push("enabled");
     }
-    if let Some(values) = &request.credential {
-        if values.is_empty() {
-            return Err(invalid("credential", "must not be empty"));
-        }
-        validate_credential(spec, values, true)
-            .map_err(|errors| field_problems("credential", errors))?;
+    if request.credential_id.is_some() {
         fields.push("credential");
     }
     if fields.is_empty() {
@@ -338,38 +323,22 @@ pub(crate) async fn update_source(
             .config
             .as_ref()
             .is_some_and(|config| auth_of(config) != auth_of(&locked.config));
-    let mut linked = None;
-    let credential_names = request.credential.as_ref().map(field_names);
-    if let Some(values) = &request.credential {
-        let plaintext = credential::to_plaintext(values)?;
-        let keyring = credential::keyring(state)?;
-        match locked.credential_secret_id {
-            Some(secret) => {
-                admin::replace_secret_in(
-                    &mut tx,
-                    context,
-                    keyring,
-                    workspace,
-                    SecretId::from_uuid(secret),
-                    &plaintext,
-                )
-                .await?;
-            }
-            None => {
-                linked = Some(
-                    admin::create_secret_in(
-                        &mut tx,
-                        context,
-                        keyring,
-                        workspace,
-                        SecretPurpose::ConnectorCredential,
-                        &plaintext,
-                    )
-                    .await?,
-                );
-            }
-        }
-    }
+    let linked = match request.credential_id {
+        Some(id) => Some(
+            lock_for_use(&mut tx, workspace, id, |present| {
+                validate_credential_names(spec, present)
+            })
+            .await?,
+        ),
+        None => None,
+    };
+    // A refresh token belongs to one client: a source that now uses another credential drops the
+    // connected account too.
+    let disconnect = disconnect
+        || (locked.oauth_secret_id.is_some()
+            && linked
+                .as_ref()
+                .is_some_and(|credential| Some(credential.id) != locked.credential_id));
     if disconnect && let Some(secret) = locked.oauth_secret_id {
         zirv_flow_store::clear_tokens(&mut tx, workspace, id).await?;
         admin::audit(
@@ -396,8 +365,7 @@ pub(crate) async fn update_source(
                 .as_deref()
                 .map(|text| Some(text).filter(|text| !text.is_empty())),
             enabled: request.enabled,
-            credential_secret_id: linked,
-            credential_fields: credential_names.as_deref(),
+            credential_id: linked.as_ref().map(|credential| credential.id),
         },
     )
     .await
@@ -430,8 +398,9 @@ pub(crate) async fn update_source(
     Ok(source)
 }
 
-/// Deletes a source with its streams and its credential secret, and audits `source.deleted`
-/// (and `secret.deleted` for the credential), all in one transaction.
+/// Deletes a source with its streams and its token secret, and audits `source.deleted` (and
+/// `secret.deleted` for the token secret), all in one transaction. The workspace credential it
+/// used stays.
 pub(crate) async fn delete_source(
     pool: &PgPool,
     context: &Context,
@@ -456,10 +425,6 @@ pub(crate) async fn delete_source(
         json!({"kind": source.kind, "name": source.name}),
     )
     .await?;
-    if let Some(secret) = source.credential_secret_id {
-        admin::audit_secret_deleted(&mut tx, context, workspace, SecretId::from_uuid(secret))
-            .await?;
-    }
     if let Some(secret) = source.oauth_secret_id {
         admin::audit_secret_deleted(&mut tx, context, workspace, SecretId::from_uuid(secret))
             .await?;
@@ -655,6 +620,7 @@ mod tests {
             kind: "fake".into(),
             name: "CRM".into(),
             config: json!({"streams": 2}),
+            credential_id: Some(Uuid::nil()),
             credential_secret_id: Some(Uuid::nil()),
             oauth_secret_id: None,
             oauth_connected_at: None,
@@ -692,16 +658,5 @@ mod tests {
             check_schedule("not cron").unwrap_err().status(),
             StatusCode::UNPROCESSABLE_ENTITY
         );
-    }
-
-    #[test]
-    fn field_names_are_the_keys_only() {
-        let mut values = BTreeMap::new();
-        values.insert(
-            "token".to_owned(),
-            SecretString::new("secret-value".to_owned()),
-        );
-
-        assert_eq!(field_names(&values), ["token"]);
     }
 }

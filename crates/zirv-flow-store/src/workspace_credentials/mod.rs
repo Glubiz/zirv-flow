@@ -16,13 +16,15 @@ mod backfill;
 #[cfg(test)]
 pub(crate) use crud::testing;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use crud::import_secret_as_credential;
 pub use crud::{
     ArchiveOutcome, CredentialUpdate, NewWorkspaceCredential, WorkspaceCredential,
     archive_credential, create_credential, find_credential, find_credential_for_update,
     list_credentials, lock_credential_for_use, record_credential_test, swap_credential_secret,
     update_credential,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use crud::import_secret_as_credential;
 pub use open::{OpenedCredential, open_credential};
-pub use usage::{CredentialUser, credential_use_counts, credential_users};
+pub use usage::{
+    CredentialUse, CredentialUser, credential_use_counts, credential_users, credential_uses,
+};
