@@ -422,7 +422,7 @@ pub(crate) mod testing {
 mod tests {
     use serde_json::json;
     use sqlx::PgPool;
-    use zirv_flow_core::{Keyring, MasterKey, SecretPurpose};
+    use zirv_flow_core::{Keyring, MasterKey, SecretPurpose, seal, secret_aad};
 
     use super::testing::{credential, secret, workspace};
     use super::*;
@@ -720,6 +720,119 @@ mod tests {
         let outcome = archive_credential(&mut tx, ws, shared.id).await.unwrap();
         commit(tx).await.unwrap();
         assert!(matches!(outcome, ArchiveOutcome::Archived(_)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_held_use_lock_blocks_an_archive_which_then_sees_the_new_reference(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let shared = credential(&pool, ws, "mail").await;
+        let config = json!({});
+
+        let mut linking = begin(&pool).await.unwrap();
+        lock_credential_for_use(&mut linking, ws, shared.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let archiver_pool = pool.clone();
+        let id = shared.id;
+        let archiver = tokio::spawn(async move {
+            let mut tx = begin(&archiver_pool).await.unwrap();
+            archive_credential(&mut tx, ws, id).await.unwrap()
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !archiver.is_finished(),
+            "the archive waits for the linking transaction"
+        );
+
+        create_source(
+            &mut *linking,
+            ws,
+            &NewSource {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "S",
+                config: &config,
+                credential_id: Some(shared.id),
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        commit(linking).await.unwrap();
+
+        let ArchiveOutcome::InUse(users) = archiver.await.unwrap() else {
+            panic!("the archive must see the reference the linking transaction committed");
+        };
+        assert_eq!(users.len(), 1);
+        let kept = find_credential(&pool, ws, shared.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(kept.archived_at.is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_concurrent_rotations_leave_one_secret_row_and_a_credential_that_opens(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let keys = std::sync::Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        let before = credential(&pool, ws, "mail").await;
+        let mut rotations = Vec::new();
+        for round in 0..2_u8 {
+            let (pool, keys, id) = (pool.clone(), keys.clone(), before.id);
+            rotations.push(tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                find_credential_for_update(&mut tx, ws, id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let new_id = SecretId::new();
+                let purpose = SecretPurpose::WorkspaceCredential;
+                let plaintext = format!("{{\"api_key\":\"round-{round}\"}}");
+                let sealed = seal(
+                    &keys,
+                    plaintext.as_bytes(),
+                    &secret_aad(ws, new_id, purpose),
+                );
+                secrets::insert_unchecked(&mut *tx, ws, purpose, new_id, &sealed)
+                    .await
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let old = swap_credential_secret(
+                    &mut tx,
+                    ws,
+                    id,
+                    new_id,
+                    &json!({"api_key": ""}),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(secrets::delete(&mut *tx, ws, old).await.unwrap());
+                commit(tx).await.unwrap();
+            }));
+        }
+        for rotation in rotations {
+            rotation.await.unwrap();
+        }
+
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM encrypted_secrets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "each rotation deleted the secret it replaced");
+        let opened = crate::open_credential(&pool, &keys, ws, before.id)
+            .await
+            .unwrap();
+        let text = String::from_utf8(opened.secret.expose().to_vec()).unwrap();
+        assert!(text.contains("round-"), "{text}");
     }
 
     #[sqlx::test]
