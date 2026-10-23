@@ -113,7 +113,7 @@ pub(crate) struct Slot {
 pub(crate) struct NodeRef<'a> {
     /// The JSON pointer of the node; empty for the root.
     pub(crate) pointer: String,
-    /// The node key: one of the nine in `NODE_KEYS`.
+    /// The node key: one of the ten in `NODE_KEYS`.
     pub(crate) kind: &'static str,
     pub(crate) value: &'a Value,
 }
@@ -866,7 +866,7 @@ mod tests {
 
     #[test]
     fn every_node_kind_of_the_ast_is_walked_and_only_value_carrying_ones_have_literals() {
-        let samples: [(&str, Value, usize); 9] = [
+        let samples: [(&str, Value, usize); 10] = [
             (
                 "all",
                 json!({"all": [{"trait": "t", "op": "eq", "value": "a"}]}),
@@ -910,6 +910,13 @@ mod tests {
                 0,
             ),
             ("identifier", json!({"identifier": "email"}), 0),
+            (
+                // A policy leaf: its dimension values are catalog keys, not literals of a person.
+                "messages",
+                json!({"messages": {"channel": "email", "dimensions": {"vertical": "retail"},
+                    "agg": {"fn": "count", "op": "gte", "value": 2}, "window": {"last": "P7D"}}}),
+                0,
+            ),
         ];
         // A new node kind in the AST has to be added here, and so decided on, before this passes.
         let kinds: Vec<&str> = samples.iter().map(|(kind, _, _)| *kind).collect();

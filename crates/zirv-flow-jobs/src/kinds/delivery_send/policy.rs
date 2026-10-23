@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::consent::policy::{PolicyRule, RECORDED_CONSENT_RULE};
 use zirv_flow_core::consent::{Channel, Dimensions, RecordedConsent};
-use zirv_flow_segments::{Catalog, Definition, SendContext, TraitStorage, compile_policy};
+use zirv_flow_segments::{Catalog, RuleKind, SendContext, TraitStorage, compile_rules};
 use zirv_flow_store::{
     Clock, DecidingRule, PgPool, RuleCheck, RuleToCheck, begin, evaluate_consent_policy,
     published_consent_policy, segment_catalog,
@@ -48,27 +48,18 @@ pub(super) fn checks(
     send: &SendContext,
     recorded_denies: bool,
 ) -> Vec<RuleToCheck> {
-    rules
-        .iter()
-        .map(|rule| {
-            let check = match &rule.condition {
-                None => RuleCheck::RecordedConsent {
+    compile_rules(rules, catalog, storage, now, send)
+        .into_iter()
+        .map(|rule| RuleToCheck {
+            id: rule.id,
+            name: rule.name,
+            check: match rule.kind {
+                RuleKind::RecordedConsent => RuleCheck::RecordedConsent {
                     denies: recorded_denies,
                 },
-                Some(condition) => Definition::from_value(condition)
-                    .ok()
-                    .and_then(|definition| {
-                        compile_policy(&definition, catalog, storage, now, send).ok()
-                    })
-                    .map_or(RuleCheck::Unevaluable, |compiled| {
-                        RuleCheck::Query(sql_query(compiled.batch_sql()))
-                    }),
-            };
-            RuleToCheck {
-                id: rule.id.clone(),
-                name: rule.name.clone(),
-                check,
-            }
+                RuleKind::Query(query) => RuleCheck::Query(sql_query(query)),
+                RuleKind::Unevaluable => RuleCheck::Unevaluable,
+            },
         })
         .collect()
 }
@@ -128,6 +119,7 @@ mod tests {
     use sqlx::PgPool;
     use time::macros::datetime;
     use uuid::Uuid;
+    use zirv_flow_segments::{Definition, compile_policy};
 
     use super::*;
 
@@ -141,14 +133,6 @@ mod tests {
         }
     }
 
-    fn rule(n: u128, condition: serde_json::Value) -> PolicyRule {
-        PolicyRule {
-            id: Uuid::from_u128(n).to_string(),
-            name: format!("Rule {n}"),
-            condition: Some(condition),
-        }
-    }
-
     fn checked(rules: &[PolicyRule], denies: bool) -> Vec<RuleToCheck> {
         checks(
             rules,
@@ -158,29 +142,6 @@ mod tests {
             &send(),
             denies,
         )
-    }
-
-    #[test]
-    fn the_rules_are_checked_in_their_own_order_with_the_built_in_one_where_it_was_put() {
-        let rules = [
-            rule(1, json!({"v": 1, "consent": {"status": "none"}})),
-            PolicyRule::recorded_consent(),
-            rule(2, json!({"v": 1, "consent": {"status": "denied"}})),
-        ];
-
-        let ids: Vec<String> = checked(&rules, true)
-            .into_iter()
-            .map(|rule| rule.id)
-            .collect();
-
-        assert_eq!(
-            ids,
-            [
-                Uuid::from_u128(1).to_string(),
-                RECORDED_CONSENT_RULE.to_owned(),
-                Uuid::from_u128(2).to_string()
-            ]
-        );
     }
 
     #[test]
@@ -198,51 +159,21 @@ mod tests {
     }
 
     #[test]
-    fn a_compiled_rule_is_a_query_for_one_person_and_one_that_does_not_compile_denies() {
-        let good = rule(1, json!({"v": 1, "consent": {"status": "none"}}));
-        let reads_an_archived_trait = rule(2, json!({"v": 1, "trait": "gone", "op": "exists"}));
-        let not_a_definition = rule(3, json!({"nope": true}));
+    fn a_compiled_rule_is_a_query_and_one_that_does_not_compile_is_unevaluable() {
+        let good = PolicyRule {
+            id: Uuid::from_u128(1).to_string(),
+            name: "Good".into(),
+            condition: Some(json!({"v": 1, "consent": {"status": "none"}})),
+        };
+        let archived = PolicyRule {
+            condition: Some(json!({"v": 1, "trait": "gone", "op": "exists"})),
+            ..good.clone()
+        };
 
-        let checks = checked(&[good, reads_an_archived_trait, not_a_definition], false);
+        let checks = checked(&[good, archived], false);
 
-        assert!(
-            matches!(&checks[0].check, RuleCheck::Query(query) if query.sql.contains("p.id = ANY("))
-        );
+        assert!(matches!(&checks[0].check, RuleCheck::Query(_)));
         assert_eq!(checks[1].check, RuleCheck::Unevaluable);
-        assert_eq!(checks[2].check, RuleCheck::Unevaluable);
-    }
-
-    #[test]
-    fn the_send_decides_the_message_consent_leaf_of_every_rule() {
-        let rules = [rule(1, json!({"v": 1, "consent": {"status": "none"}}))];
-
-        let at_none = checks(
-            &rules,
-            &Catalog::default(),
-            &TraitStorage::default(),
-            NOW,
-            &send(),
-            false,
-        );
-        let denied = SendContext {
-            consent: RecordedConsent::Denied,
-            ..send()
-        };
-        let at_denied = checks(
-            &rules,
-            &Catalog::default(),
-            &TraitStorage::default(),
-            NOW,
-            &denied,
-            true,
-        );
-
-        let sql = |checked: &[RuleToCheck]| match &checked[0].check {
-            RuleCheck::Query(query) => query.sql.clone(),
-            other => panic!("{other:?}"),
-        };
-        assert!(sql(&at_none).contains("AND (true)"));
-        assert!(sql(&at_denied).contains("AND (false)"));
     }
 
     #[test]

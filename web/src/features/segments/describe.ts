@@ -66,7 +66,9 @@ export function describeNode(node: Node, names: Names): string {
   if ("segment" in node) return `Is in the segment ${names.segments.get(node.segment) ?? "(unknown segment)"}`;
   if ("consent" in node) {
     const { channel, topic, status } = node.consent;
+    if (channel === undefined) return `Consent for the message is ${status.replaceAll("_", " ")}`;
     return `Consent for ${channel}${topic ? `, topic ${topic},` : ""} is ${status.replaceAll("_", " ")}`;
   }
+  if ("messages" in node) return `Has sent messages on ${node.messages.channel}`;
   return `Has a ${node.identifier} identifier`;
 }

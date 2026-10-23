@@ -30,7 +30,9 @@ pub use compile::{CompiledSegment, compile, compile_policy};
 pub use deps::Deps;
 pub use evaluate::{EvalNode, Evaluation, Observed, Outcome, evaluate, evaluate_policy};
 pub use normalize::normalize;
-pub use policy::{PolicyFacts, SendContext, SnapshotMessage};
+pub use policy::{
+    CompiledRule, PolicyFacts, RuleKind, SendContext, SnapshotMessage, compile_rules,
+};
 pub use query::{Param, Query};
 pub use snapshot::{PersonSnapshot, SnapshotConsent, SnapshotEvent};
 pub use storage::{SlotColumn, Storage, TraitStorage};

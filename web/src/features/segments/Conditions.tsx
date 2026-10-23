@@ -171,7 +171,9 @@ const CHANNELS = ["email"];
 export function ConsentEditor({ node, path }: { node: ConsentNode; path: Path }) {
   const { catalog, readOnly, edit } = useBuilder();
   const error = useErrors(path);
-  const { channel, status, topic } = node.consent;
+  const { status, topic } = node.consent;
+  // A segment always names its channel; only a consent policy rule leaves it out.
+  const channel = node.consent.channel ?? "";
   const topics = catalog.topics.filter((entry) => entry.channel === channel && !entry.archived);
 
   function change(next: Partial<{ channel: string; status: ConsentNode["consent"]["status"]; topic: string }>) {

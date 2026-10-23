@@ -149,8 +149,12 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
         node_object(
             "consent",
             ObjectBuilder::new()
-                .property("channel", string().build())
-                .required("channel")
+                .property(
+                    "channel",
+                    string().description(Some(
+                        "The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent.",
+                    )),
+                )
                 .property("topic", string().build())
                 .property(
                     "status",
@@ -159,12 +163,15 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
                         "unsubscribed",
                         "pending_confirmation",
                         "unknown",
+                        "granted",
+                        "denied",
+                        "none",
                     ]),
                 )
                 .required("status")
                 .additional_properties(closed())
                 .build(),
-            "The person's consent status for a channel, or one of its topics.",
+            "The person's consent status for a channel, or one of its topics. In a consent              policy rule, with no channel, the status is `granted`, `denied` or `none` for the              message being sent; a segment refuses that form.",
         ),
     );
     put(
@@ -174,6 +181,29 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
             string().build(),
             "The person has an identifier of this kind: `email`, `phone`, `anonymous_id` or \
              `external:<namespace>`.",
+        ),
+    );
+    put(
+        "messages",
+        node_object(
+            "messages",
+            ObjectBuilder::new()
+                .property("channel", string().build())
+                .required("channel")
+                .property(
+                    "dimensions",
+                    ObjectBuilder::new()
+                        .additional_properties(Some(string()))
+                        .description(Some(
+                            "Dimension key to value key; a message must carry all of them.",
+                        )),
+                )
+                .property("agg", reference(AGGREGATE))
+                .required("agg")
+                .property("window", reference(WINDOW))
+                .additional_properties(closed())
+                .build(),
+            "Policy only, refused in a segment. The messages sent to the person on a channel,              counted or reduced to the latest, within a window and filtered by dimension values.              Only messages that were sent count.",
         ),
     );
     builders

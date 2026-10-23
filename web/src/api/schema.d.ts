@@ -595,6 +595,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/consent/policy/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The draft of the workspace's consent policy: the saved draft, or the built-in rule alone when
+         *     none was saved.
+         */
+        get: operations["get_consent_policy_draft"];
+        /**
+         * Replaces the draft. The rules are checked as a list (the built-in `recorded_consent` rule is
+         *     present, ids are unique, names are 1 to 100 characters) and each condition is validated as a
+         *     policy condition against the workspace's catalog; any problem is a 422
+         *     `consent_policy_invalid` that lists every issue with its pointer and writes nothing. The
+         *     published version is not changed. Audited as `consent_policy.saved`.
+         */
+        put: operations["save_consent_policy_draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/consent/policy/evaluate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluates the published policy for one person and one message, as gate 3 of a send would, and
+         *     names the rule that denies it. The reply holds a rule id and name or none, and no personal
+         *     data. A workspace without a published policy is evaluated with the built-in rule alone.
+         */
+        post: operations["evaluate_consent_policy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/consent/policy/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publishes the draft as the next immutable version, which the send gate then evaluates. The
+         *     draft is validated again; a problem is a 422 `consent_policy_invalid` and nothing is written.
+         *     Appends a `consent_policy.publish` decision caused by a definition change. Audited as
+         *     `consent_policy.published`.
+         */
+        post: operations["publish_consent_policy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/consent/policy/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The published versions of the policy, newest first. */
+        get: operations["list_consent_policy_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/contact-definition": {
         parameters: {
             query?: never;
@@ -3806,6 +3893,74 @@ export interface components {
             /** @description The line of the file, the header being line 1. */
             row: number;
         };
+        /** @description The draft of the workspace's policy. */
+        ConsentPolicyDraftBody: {
+            /**
+             * Format: int32
+             * @description The version the send gate evaluates; none before the first publish.
+             */
+            published_version?: number | null;
+            /**
+             * Format: int32
+             * @description Counts the saves of the draft; 0 before one was saved.
+             */
+            revision: number;
+            rules: components["schemas"]["ConsentPolicyRuleBody"][];
+            /** Format: date-time */
+            updated_at?: string | null;
+        };
+        /** @description What the published policy decides for a person and a message. It holds no personal data. */
+        ConsentPolicyEvaluationBody: {
+            /** @description Whether a marketing send would proceed. */
+            allowed: boolean;
+            /**
+             * Format: int32
+             * @description The published version evaluated; none when the workspace has not published one, in which
+             *     case only the built-in rule applies.
+             */
+            policy_version?: number | null;
+            rule?: null | components["schemas"]["DecidingRuleBody"];
+        };
+        /** @description One rule of a policy as the API shows it. */
+        ConsentPolicyRuleBody: {
+            /**
+             * @description The built-in rule: it matches when the recorded consent does not allow the send. It can be
+             *     moved but not removed, and has no condition.
+             */
+            builtin: boolean;
+            /**
+             * @description A segment definition (`{"v": 1, ...}`) in which the `consent` leaf may leave out its
+             *     channel (its `status` is then `granted`, `denied` or `none` for the message being sent)
+             *     and the `messages` leaf is allowed. The rule matches, and so denies the send, when the
+             *     condition holds for the person. Absent on the built-in rule.
+             */
+            condition?: Record<string, never> | null;
+            /** @description `recorded_consent` for the built-in rule, otherwise a UUID. */
+            id: string;
+            name: string;
+        };
+        /** @description A rule in a request. */
+        ConsentPolicyRuleRequest: {
+            /** @description The condition of every rule but the built-in one, which has none. */
+            condition?: Record<string, never> | null;
+            /**
+             * @description `recorded_consent` for the built-in rule; for any other rule a UUID, or absent for a new
+             *     rule, which is given one.
+             */
+            id?: string | null;
+            /** @description 1 to 100 characters. The built-in rule keeps its own name. */
+            name: string;
+        };
+        /** @description One published version of the policy. */
+        ConsentPolicyVersionBody: {
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            rules: components["schemas"]["ConsentPolicyRuleBody"][];
+            /** Format: int32 */
+            version: number;
+        };
         ConsentStateBody: {
             /** Format: date-time */
             changed_at: string;
@@ -4467,6 +4622,11 @@ export interface components {
             /** @description 32 lowercase hex characters. */
             trace_id: string;
         };
+        /** @description The rule that denied a send. */
+        DecidingRuleBody: {
+            id: string;
+            name: string;
+        };
         DecisionBody: {
             /** @example job.attempt */
             action: string;
@@ -4897,6 +5057,19 @@ export interface components {
             erasures: components["schemas"]["ErasureBody"][];
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
+        };
+        /** @description The send to evaluate the policy for, and the person. */
+        EvaluateConsentPolicyRequest: {
+            /** @description `email`; the default. */
+            channel?: string | null;
+            /** @description The message's other dimension values, by dimension key. */
+            dimensions?: {
+                [key: string]: string;
+            };
+            /** Format: uuid */
+            person_id: string;
+            /** @description The key of the message's topic, if it has one. */
+            topic_key?: string | null;
         };
         EventEntryBody: {
             /**
@@ -6939,6 +7112,10 @@ export interface components {
             /** @description The stream to read, by name. */
             stream: string;
         };
+        /** @description The draft rules in order. The built-in `recorded_consent` rule must be among them. */
+        SaveConsentPolicyDraftRequest: {
+            rules: components["schemas"]["ConsentPolicyRuleRequest"][];
+        };
         SaveDraftRequest: {
             /** @description Replaces the draft. */
             properties: components["schemas"]["PropertyBody"][];
@@ -7105,12 +7282,13 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description The person's consent status for a channel, or one of its topics. */
+        /** @description The person's consent status for a channel, or one of its topics. In a consent              policy rule, with no channel, the status is `granted`, `denied` or `none` for the              message being sent; a segment refuses that form. */
         SegmentConsentNode: {
             consent: {
-                channel: string;
+                /** @description The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent. */
+                channel?: string;
                 /** @enum {string} */
-                status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown";
+                status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown" | "granted" | "denied" | "none";
                 topic?: string;
             };
         };
@@ -7153,15 +7331,28 @@ export interface components {
             v: 1;
         } | {
             consent: {
-                channel: string;
+                /** @description The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent. */
+                channel?: string;
                 /** @enum {string} */
-                status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown";
+                status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown" | "granted" | "denied" | "none";
                 topic?: string;
             };
             /** @enum {integer} */
             v: 1;
         } | {
             identifier: string;
+            /** @enum {integer} */
+            v: 1;
+        } | {
+            messages: {
+                agg: components["schemas"]["SegmentAggregate"];
+                channel: string;
+                /** @description Dimension key to value key; a message must carry all of them. */
+                dimensions?: {
+                    [key: string]: string;
+                };
+                window?: components["schemas"]["SegmentWindow"];
+            };
             /** @enum {integer} */
             v: 1;
         };
@@ -7211,7 +7402,7 @@ export interface components {
         /** @description One problem with a definition. It carries a position and a fixed code, never a value from the definition. */
         SegmentIssue: {
             /** @enum {string} */
-            code: "unsupported_version" | "malformed" | "unknown_key" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_list" | "unknown_segment" | "unknown_topic" | "invalid_identifier_kind" | "operator_not_allowed" | "value_type_mismatch" | "value_missing" | "value_not_allowed" | "aggregate_not_allowed" | "invalid_duration" | "window_too_long" | "invalid_range" | "too_deep" | "too_many_nodes" | "too_many_values" | "value_too_long";
+            code: "unsupported_version" | "malformed" | "unknown_key" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_list" | "unknown_segment" | "unknown_topic" | "invalid_identifier_kind" | "operator_not_allowed" | "value_type_mismatch" | "value_missing" | "value_not_allowed" | "aggregate_not_allowed" | "invalid_duration" | "window_too_long" | "invalid_range" | "too_deep" | "too_many_nodes" | "too_many_values" | "value_too_long" | "policy_only";
             /** @description A JSON pointer into the definition. */
             pointer: string;
         };
@@ -7250,8 +7441,20 @@ export interface components {
             /** @description Pass as `cursor` for the next page; null when there is none. */
             next_cursor?: string | null;
         };
+        /** @description Policy only, refused in a segment. The messages sent to the person on a channel,              counted or reduced to the latest, within a window and filtered by dimension values.              Only messages that were sent count. */
+        SegmentMessagesNode: {
+            messages: {
+                agg: components["schemas"]["SegmentAggregate"];
+                channel: string;
+                /** @description Dimension key to value key; a message must carry all of them. */
+                dimensions?: {
+                    [key: string]: string;
+                };
+                window?: components["schemas"]["SegmentWindow"];
+            };
+        };
         /** @description One node of a segment condition tree: an object with exactly one node key. */
-        SegmentNode: components["schemas"]["SegmentAllNode"] | components["schemas"]["SegmentAnyNode"] | components["schemas"]["SegmentNotNode"] | components["schemas"]["SegmentTraitNode"] | components["schemas"]["SegmentEventNode"] | components["schemas"]["SegmentListNode"] | components["schemas"]["SegmentSegmentNode"] | components["schemas"]["SegmentConsentNode"] | components["schemas"]["SegmentIdentifierNode"];
+        SegmentNode: components["schemas"]["SegmentAllNode"] | components["schemas"]["SegmentAnyNode"] | components["schemas"]["SegmentNotNode"] | components["schemas"]["SegmentTraitNode"] | components["schemas"]["SegmentEventNode"] | components["schemas"]["SegmentListNode"] | components["schemas"]["SegmentSegmentNode"] | components["schemas"]["SegmentConsentNode"] | components["schemas"]["SegmentIdentifierNode"] | components["schemas"]["SegmentMessagesNode"];
         /** @description Boolean negation of the child. A leaf's operator is never rewritten under it. */
         SegmentNotNode: {
             not: components["schemas"]["SegmentNode"];
@@ -10548,6 +10751,291 @@ export interface operations {
             };
             /** @description A wrong header, or more than 10,000 rows */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_consent_policy_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The draft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentPolicyDraftBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    save_consent_policy_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveConsentPolicyDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The saved draft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentPolicyDraftBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The rules or a condition are not valid */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    evaluate_consent_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EvaluateConsentPolicyRequest"];
+            };
+        };
+        responses: {
+            /** @description What the policy decides */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentPolicyEvaluationBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid channel, topic or dimension */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    publish_consent_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The new version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentPolicyVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft is not valid */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_consent_policy_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConsentPolicyVersionBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
