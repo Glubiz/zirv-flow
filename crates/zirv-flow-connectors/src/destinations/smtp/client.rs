@@ -113,7 +113,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
     }
 
     /// Writes the message and its end marker as they are, then reads the reply, all within
-    /// `limit`. A failure once everything was written is [`WireError::Unconfirmed`]: the server
+    /// `limit`. A failure once everything was written (even a flush that fails or stalls) is
+    /// [`WireError::Unconfirmed`]: the server
     /// has seen the end of the message and may have accepted it. A failure while writing is a
     /// plain one, since a server that did not see the end marker cannot have accepted the message.
     pub(super) async fn exchange_final(
@@ -124,8 +125,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         let mut written = false;
         let result = tokio::time::timeout(limit, async {
             self.io.write_all(bytes).await.map_err(|_| WireError::Io)?;
-            self.io.flush().await.map_err(|_| WireError::Io)?;
+            // From here the server may have the end marker, even when the flush does not finish.
             written = true;
+            self.io.flush().await.map_err(|_| WireError::Io)?;
             self.read_reply().await
         })
         .await;
@@ -440,6 +442,75 @@ mod tests {
             .exchange_final(&[b'x'; 1024], Duration::from_millis(50))
             .await;
         assert_eq!(stuck.err(), Some(WireError::Timeout));
+    }
+
+    /// A connection that takes every write and whose flush fails, or never finishes.
+    struct BadFlush {
+        stalls: bool,
+    }
+
+    impl AsyncRead for BadFlush {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for BadFlush {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.stalls {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+            }
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flush_that_fails_or_stalls_after_the_end_marker_was_written_is_unconfirmed() {
+        for stalls in [false, true] {
+            let mut session = Session::new(BadFlush { stalls });
+
+            let result = session
+                .exchange_final(b"x\r\n.\r\n", Duration::from_millis(50))
+                .await;
+
+            assert_eq!(
+                result.err(),
+                Some(WireError::Unconfirmed),
+                "stalls: {stalls}"
+            );
+        }
+        // An ordinary command that fails to flush stays a plain failure.
+        let mut session = Session::new(BadFlush { stalls: false });
+        assert_eq!(
+            session
+                .exchange(b"NOOP\r\n", Duration::from_millis(50))
+                .await
+                .err(),
+            Some(WireError::Io)
+        );
     }
 
     #[test]

@@ -19,8 +19,9 @@ use super::super::error::DestinationError;
 /// The header the idempotency key travels in.
 pub(crate) const IDEMPOTENCY_HEADER: &str = "X-Zirv-Idempotency-Key";
 
-/// Headers a template cannot set: the destination owns them, or they describe the route.
-const RESERVED: [&str; 17] = [
+/// Headers a template cannot set, besides every `Content-` and `Resent-` header: the destination
+/// owns them, they describe the route, or they vouch for the message. In lower case.
+const RESERVED: [&str; 15] = [
     "from",
     "to",
     "cc",
@@ -31,18 +32,20 @@ const RESERVED: [&str; 17] = [
     "date",
     "message-id",
     "mime-version",
-    "content-type",
-    "content-transfer-encoding",
     "return-path",
     "received",
+    "authentication-results",
     "dkim-signature",
     "x-zirv-idempotency-key",
-    "resent-from",
 ];
 
-/// Headers whose value is a list of links: a non-ASCII byte in one is percent-encoded, never sent
-/// as an RFC 2047 encoded word, which a mail client would not read as part of the URI.
-const LINK_HEADERS: [&str; 2] = ["list-unsubscribe", "list-unsubscribe-post"];
+/// Whether a template cannot set the header `name`.
+fn is_reserved(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("content-")
+        || lower.starts_with("resent-")
+        || RESERVED.contains(&lower.as_str())
+}
 
 /// The longest header line RFC 5322 allows, without the line break.
 const MAX_LINE: usize = 998;
@@ -170,16 +173,17 @@ pub(crate) fn build(
             if !valid_header_name(name) {
                 return Err(malformed("headers"));
             }
-            if RESERVED.contains(&name.to_ascii_lowercase().as_str()) {
+            if is_reserved(name) {
                 continue;
             }
             if value.chars().any(|ch| ch != '\t' && ch.is_control()) {
                 return Err(malformed("headers"));
             }
-            let value = if LINK_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
-                percent_encoded(value)
-            } else {
-                unstructured(value)
+            let value = match name.to_ascii_lowercase().as_str() {
+                "list-unsubscribe" => link_encoded(value).ok_or_else(|| malformed("headers"))?,
+                // RFC 8058 fixes the value as `List-Unsubscribe=One-Click`.
+                "list-unsubscribe-post" if !value.is_ascii() => return Err(malformed("headers")),
+                _ => unstructured(value),
             };
             // Names are case-insensitive and the signature covers one instance of a name: a name
             // given twice, in any case, keeps the last one given.
@@ -291,20 +295,35 @@ fn unstructured(value: &str) -> String {
     }
 }
 
-/// `value` with every non-ASCII byte as `%XX` (the UTF-8 octets), for a header that holds URIs.
-fn percent_encoded(value: &str) -> String {
+/// A `List-Unsubscribe` value with every non-ASCII byte inside a `<...>` URI span as `%XX` (the
+/// UTF-8 octets). Non-ASCII outside a closed span has no URI to encode in: none is returned.
+fn link_encoded(value: &str) -> Option<String> {
     let mut out = String::with_capacity(value.len());
+    let mut inside = false;
+    // Whether the span still open holds a byte that was encoded: if it never closes, it is no span.
+    let mut encoded_in_open_span = false;
     for ch in value.chars() {
+        match ch {
+            '<' if !inside => inside = true,
+            '>' if inside => {
+                inside = false;
+                encoded_in_open_span = false;
+            }
+            _ => {}
+        }
         if ch.is_ascii() {
             out.push(ch);
-        } else {
+        } else if inside {
+            encoded_in_open_span = true;
             let mut buffer = [0u8; 4];
             for byte in ch.encode_utf8(&mut buffer).bytes() {
                 out.push_str(&format!("%{byte:02X}"));
             }
+        } else {
+            return None;
         }
     }
-    out
+    (!encoded_in_open_span).then_some(out)
 }
 
 /// An unstructured ASCII `value` of the header `name`, folded at white space so a line stays within
@@ -562,6 +581,70 @@ mod tests {
         );
         body["headers"] = json!({"list-unsubscribe": "<https://a.example/é>\r\nBcc: x@y.z"});
         assert!(build(&body, "ada@example.net", "msg-1", now()).is_err());
+    }
+
+    #[test]
+    fn non_ascii_is_encoded_only_inside_an_unsubscribe_uri_span_and_the_post_value_is_ascii() {
+        let mut body = payload();
+        let build_with = |body: &Value| build(body, "ada@example.net", "msg-1", now());
+
+        body["headers"] = json!({
+            "List-Unsubscribe": "<https://a.example/ø>, <mailto:u@a.example?subject=å>",
+        });
+        let built = build_with(&body).unwrap();
+        assert_eq!(
+            header(&built, "List-Unsubscribe"),
+            Some("<https://a.example/%C3%B8>, <mailto:u@a.example?subject=%C3%A5>")
+        );
+
+        for bad in [
+            "ø <https://a.example/1>",
+            "<https://a.example/1> ø",
+            "<https://a.example/1>, ø",
+            "<https://a.example/ø",
+        ] {
+            body["headers"] = json!({"List-Unsubscribe": bad});
+            assert!(build_with(&body).is_err(), "{bad}");
+        }
+
+        body["headers"] = json!({"List-Unsubscribe-Post": "List-Unsubscribe=One-Clickø"});
+        assert!(build_with(&body).is_err());
+        body["headers"] = json!({"List-Unsubscribe-Post": "List-Unsubscribe=One-Click\r\nX: y"});
+        assert!(build_with(&body).is_err());
+    }
+
+    #[test]
+    fn a_content_resent_or_vouching_header_from_the_payload_is_dropped() {
+        let mut body = payload();
+        body["headers"] = json!({
+            "Content-Disposition": "attachment",
+            "content-id": "<x@y.z>",
+            "Resent-To": "x@example.net",
+            "RESENT-Date": "now",
+            "Authentication-Results": "mx.example; dkim=pass",
+            "Received": "from nowhere",
+            "Return-Path": "<x@example.net>",
+            "X-Campaign": "spring",
+        });
+
+        let built = build(&body, "ada@example.net", "msg-1", now()).unwrap();
+
+        for name in [
+            "Content-Disposition",
+            "Content-Id",
+            "Resent-To",
+            "Resent-Date",
+            "Authentication-Results",
+            "Received",
+            "Return-Path",
+        ] {
+            assert_eq!(header(&built, name), None, "{name}");
+        }
+        assert_eq!(header(&built, "X-Campaign"), Some("spring"));
+        assert!(
+            header(&built, "Content-Type").is_some(),
+            "the owned one stays"
+        );
     }
 
     #[test]
