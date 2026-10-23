@@ -1227,6 +1227,14 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   written with it, under a short `FOR KEY SHARE` lock on the person (skipped when the person was
   erased or merged away meanwhile). A job that finds its message ended does nothing. Migration
   `0048_messages.sql`.
+- **Delivery and recovery.** Before the destination call the row is marked `sending` in a
+  statement of its own, and no lock is held during the call. A retry that finds `sending` skips
+  the person gates and delivers again under the same idempotency key. When it cannot (the sender,
+  address or enrollment is gone, or the six-hour rate wait ran out) the message ends
+  `failed: delivery_unconfirmed`, because the first call may have been accepted. The scheduler
+  leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
+  is no longer `ready` or `running` (it went dead): `pending` as `failed: internal_error`,
+  `sending` as `failed: delivery_unconfirmed`.
 - **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
   enrollment ended or the flow is paused or archived: a decision, no row), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared
@@ -1238,8 +1246,9 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Rate limit.** The destination is loaded again for every message, and an archived one is
   refused whatever a held block of tokens says (`failed: destination_unavailable`). With no token
   the job ends and a copy runs at the instant the bucket will hold one, under the key
-  `<effect key>:defer:<n>`, with its attempt budget carried over; after six hours of waiting the
-  message fails as `rate_limited`. A 429 halves the bucket's rate until its `Retry-After`
+  `<effect key>:defer:<n>`, with its attempt budget carried over; six hours after its first wait
+  the message fails as `rate_limited` (`delivery_unconfirmed` for a message marked `sending`). A
+  429 halves the bucket's rate until its `Retry-After`
   (`throttle_bucket`). The leader's queue-depth and oldest-item-lag gauges read the destination's
   ready `delivery.send` jobs.
 - **Links.** Until the tracking endpoints exist, the unsubscribe and preference links of a
