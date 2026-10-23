@@ -116,7 +116,7 @@ pub async fn add_suppression<'e>(
     // state the statement acted on.
     let (inserted, upgraded): (bool, bool) = sqlx::query_as(
         "WITH prior AS (\
-            SELECT reason FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2), \
+            SELECT reason FROM suppressions WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2), \
          written AS (\
             INSERT INTO suppressions \
                 (workspace_id, identifier_hash, kind, reason, source, note, created_by, id) \
@@ -197,7 +197,7 @@ pub async fn count_suppressed<'e>(
     let hashes: Vec<&[u8]> = hashes.iter().map(|hash| hash.as_slice()).collect();
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM suppressions \
-         WHERE workspace_id = $1 AND identifier_hash = ANY($2::bytea[])",
+         WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = ANY($2::bytea[])",
     )
     .bind(workspace.as_uuid())
     .bind(hashes)
@@ -216,11 +216,11 @@ pub async fn remove_suppression<'e>(
     let (removed, erased): (i64, bool) = sqlx::query_as(
         "WITH removed AS (\
             DELETE FROM suppressions \
-            WHERE workspace_id = $1 AND identifier_hash = $2 AND reason <> 'erased' \
+            WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2 AND reason <> 'erased' \
             RETURNING 1) \
          SELECT (SELECT count(*) FROM removed), \
                 EXISTS (SELECT 1 FROM suppressions \
-                        WHERE workspace_id = $1 AND identifier_hash = $2 AND reason = 'erased')",
+                        WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2 AND reason = 'erased')",
     )
     .bind(workspace.as_uuid())
     .bind(identifier_hash.as_slice())
@@ -241,7 +241,7 @@ pub async fn find_suppression<'e>(
 ) -> Result<Option<Suppression>, StoreError> {
     let row: Option<SuppressionRow> = sqlx::query_as(
         "SELECT id, identifier_hash, kind, reason, source, note, created_at, created_by \
-         FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2",
+         FROM suppressions WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2",
     )
     .bind(workspace.as_uuid())
     .bind(identifier_hash.as_slice())
@@ -594,6 +594,57 @@ mod tests {
             add_organization_suppression(&pool, &erased).await.unwrap(),
             AddOutcome::Upgraded
         );
+    }
+
+    /// The plan of `sql` for one workspace and one hash, as text.
+    async fn plan(pool: &PgPool, sql: &str, ws: WorkspaceId, hash: &[u8; 32]) -> String {
+        let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {sql}")))
+            .bind(ws.as_uuid())
+            .bind(hash.as_slice())
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        lines.join("\n")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_workspace_lookups_state_the_scope_so_they_use_the_partial_unique_index(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        sqlx::query(
+            "INSERT INTO suppressions (id, workspace_id, identifier_hash, kind, reason, source) \
+             SELECT gen_random_uuid(), $1, sha256(i::text::bytea), 'email', 'manual', 'api' \
+             FROM generate_series(1, 5000) AS i",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE suppressions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hash = hash("ada@example.com");
+        let without =
+            "SELECT id FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2";
+        let with = "SELECT id FROM suppressions \
+                    WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2";
+
+        let before = plan(&pool, without, ws, &hash).await;
+        let after = plan(&pool, with, ws, &hash).await;
+
+        println!("without the scope:\n{before}\nwith the scope:\n{after}");
+        assert!(after.contains("suppressions_workspace_hash_idx"), "{after}");
+        assert!(
+            !before.contains("suppressions_workspace_hash_idx"),
+            "{before}"
+        );
+        // The functions use the stated form: a hit is found through it.
+        add_suppression(&pool, ws, &manual(hash)).await.unwrap();
+        assert!(find_suppression(&pool, ws, &hash).await.unwrap().is_some());
+        assert_eq!(count_suppressed(&pool, ws, &[hash]).await.unwrap(), 1);
     }
 
     #[sqlx::test]
