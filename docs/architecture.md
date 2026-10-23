@@ -1255,9 +1255,12 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `tokio-rustls` (no `lettre`: it resolves the host itself and cannot be handed an address the egress
   policy checked). The connection goes to an address from `resolve_checked` with the host name as
   the TLS server name; TLS is implicit or `STARTTLS` (a server that does not offer it is not used in
-  the clear), plaintext only in a test build. Settings: `host`, `port`, `tls`, an optional
-  `ca_certificate`; the login is a `basic` workspace credential (`username` field, sealed
-  `password`). The message is `multipart/alternative` with `List-Unsubscribe`,
+  the clear). The connection and the login live in the destination's `smtp` workspace credential:
+  `host`, `port`, `tls` (`starttls`, `tls` for implicit TLS, or `none`), `username` and the sealed
+  `password`; all five are the destination's credential fields. `none` (plaintext) is refused
+  outside a test build, in the check and in a delivery, as a configuration error that never
+  connects. The destination's own configuration holds only the optional `ca_certificate`. The
+  message is `multipart/alternative` with `List-Unsubscribe`,
   `List-Unsubscribe-Post`, a `Message-ID` and `X-Zirv-Idempotency-Key` that are the message id, so a
   retry repeats them. A destination whose spec says `signs_dkim` is handed the sender domain's key
   by the pipeline, which opens the sealed `dkim_key` secret right before the call and passes a

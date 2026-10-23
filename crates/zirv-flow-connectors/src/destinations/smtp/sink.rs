@@ -20,6 +20,11 @@ use tokio_rustls::TlsAcceptor;
 /// The name the sink's certificate is for, besides `localhost` and 127.0.0.1.
 pub const SINK_HOST: &str = "mail.example.test";
 
+/// The login the default sink accepts.
+pub const SINK_USER: &str = "sink-user";
+/// The password of [`SINK_USER`].
+pub const SINK_PASSWORD: &str = "sink-password";
+
 /// How the sink secures its connections.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SinkTls {
@@ -50,10 +55,11 @@ pub struct SinkOptions {
 }
 
 impl Default for SinkOptions {
+    /// No TLS, and the login [`SINK_USER`] with [`SINK_PASSWORD`].
     fn default() -> Self {
         Self {
             tls: SinkTls::Plain,
-            auth: None,
+            auth: Some((SINK_USER.to_owned(), SINK_PASSWORD.to_owned())),
         }
     }
 }

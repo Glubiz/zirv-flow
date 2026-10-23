@@ -616,7 +616,8 @@ mod tests {
     use time::Duration as Span;
     use time::macros::datetime;
     use zirv_flow_connectors::destinations::{
-        SmtpSink, SmtpSinkOptions, SmtpSinkStage, fake_ledger_calls, fake_ledger_sent,
+        SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions, SmtpSinkStage,
+        fake_ledger_calls, fake_ledger_sent,
     };
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::egress::EgressPolicy;
@@ -2246,7 +2247,8 @@ mod tests {
     async fn smtp_env(pool: PgPool, sink: &SmtpSink) -> (Env, String) {
         use zirv_flow_core::sending::generate_dkim_key;
         use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
-        use zirv_flow_store::secrets::replace_unchecked;
+        use zirv_flow_store::secrets::{insert_unchecked, replace_unchecked};
+        use zirv_flow_store::{NewWorkspaceCredential, create_credential};
 
         let mut env = Env::new(pool, "one").await;
         env.render = Some(start_pool("serve", "").await);
@@ -2277,7 +2279,43 @@ mod tests {
             .execute(&env.pool)
             .await
             .unwrap();
-        let config = json!({"host": "127.0.0.1", "port": sink.port(), "tls": "none"});
+        // The relay's server and login are an `smtp` workspace credential, sealed under the same
+        // keyring; the sink is on loopback, so TLS is off.
+        let credential_secret = SecretId::new();
+        let purpose = SecretPurpose::WorkspaceCredential;
+        let sealed = seal(
+            &keys,
+            json!({"password": SMTP_SINK_PASSWORD})
+                .to_string()
+                .as_bytes(),
+            &secret_aad(env.ws, credential_secret, purpose),
+        );
+        insert_unchecked(&env.pool, env.ws, purpose, credential_secret, &sealed)
+            .await
+            .unwrap();
+        let credential = create_credential(
+            &env.pool,
+            env.ws,
+            &NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: "relay",
+                name: "Relay",
+                kind: "smtp",
+                schema: None,
+                fields: &json!({
+                    "host": "127.0.0.1",
+                    "port": sink.port(),
+                    "tls": "none",
+                    "username": SMTP_SINK_USER,
+                }),
+                secret_id: credential_secret,
+                hints: &json!({"password": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
         env.destination = create_destination(
             &env.pool,
             env.ws,
@@ -2285,8 +2323,8 @@ mod tests {
                 id: Uuid::now_v7(),
                 kind: "smtp",
                 name: "Relay",
-                config: &config,
-                credential_id: None,
+                config: &json!({}),
+                credential_id: Some(credential.id),
                 rate: 100,
                 burst: 100,
                 created_by: None,

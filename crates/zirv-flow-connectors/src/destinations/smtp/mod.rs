@@ -12,9 +12,11 @@
 //! timeout), TLS (implicit from the first byte, or `STARTTLS` and then `EHLO` again; a server that
 //! does not offer `STARTTLS` is not talked to in the clear), `AUTH PLAIN` or `LOGIN` with the
 //! workspace credential's `username` and `password`, `MAIL`, `RCPT`, `DATA` with dot-stuffing,
-//! `QUIT`. Every step has a timeout and every read a bound ([`client`]). Plaintext
-//! (`tls: none`) exists only in a test build or with `test-support`; a release build refuses it
-//! when the configuration is stored.
+//! `QUIT`. Every step has a timeout and every read a bound ([`client`]). The server's `host`,
+//! `port` and `tls` mode come from the same `smtp` credential; the destination's own
+//! configuration is only the optional `ca_certificate`. Plaintext (`tls: none`) is allowed only
+//! in a test build or with `test-support`; anywhere else the check and a delivery refuse it as a
+//! configuration error before any connection.
 //!
 //! **The message.** `multipart/alternative` of the text and the HTML part, the template's extra
 //! headers (`List-Unsubscribe` and `List-Unsubscribe-Post`), a `Message-ID` and an
@@ -60,7 +62,9 @@ use crate::http::HttpError;
 use crate::sources::{Credential, FieldError, FieldKind, FieldSpec};
 
 #[cfg(feature = "test-support")]
-pub use self::sink::{Captured, SINK_HOST, SinkOptions, SinkStage, SinkTls, SmtpSink};
+pub use self::sink::{
+    Captured, SINK_HOST, SINK_PASSWORD, SINK_USER, SinkOptions, SinkStage, SinkTls, SmtpSink,
+};
 
 /// How long one address gets to accept the connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -69,11 +73,8 @@ const MAX_MESSAGE_BYTES: usize = 25 * 1024 * 1024;
 /// The name given to `EHLO` when no message says which domain is sending (the connection check).
 const CHECK_HELO: &str = "localhost";
 
-/// How the connection is secured. Plaintext exists in test builds only.
-#[cfg(not(any(test, feature = "test-support")))]
-const TLS_OPTIONS: &[&str] = &["starttls", "implicit"];
-#[cfg(any(test, feature = "test-support"))]
-const TLS_OPTIONS: &[&str] = &["starttls", "implicit", "none"];
+/// Whether this build may speak plaintext: test builds only, for the sink.
+const PLAINTEXT_ALLOWED: bool = cfg!(any(test, feature = "test-support"));
 
 pub(crate) struct Smtp;
 
@@ -82,7 +83,16 @@ impl Destination for Smtp {
         kind: "smtp",
         label: "SMTP",
         description: "Email through a mail server or relay, signed with the sending domain's DKIM key.",
-        config_fields: &[
+        config_fields: &[FieldSpec {
+            key: "ca_certificate",
+            label: "CA certificate",
+            help: "Trust only this certificate authority (PEM) for the server, such as a private relay's. Empty trusts the public roots.",
+            kind: FieldKind::LongText,
+            required: false,
+            secret: false,
+        }],
+        // The five fields of the built-in `smtp` workspace credential kind.
+        credential_fields: &[
             FieldSpec {
                 key: "host",
                 label: "Host",
@@ -101,31 +111,29 @@ impl Destination for Smtp {
             },
             FieldSpec {
                 key: "tls",
-                label: "TLS",
-                help: "STARTTLS upgrades the connection after the greeting; implicit TLS secures it from the first byte.",
-                kind: FieldKind::Select(TLS_OPTIONS),
+                label: "TLS mode",
+                help: "starttls upgrades the connection after the greeting; tls secures it from the first byte.",
+                kind: FieldKind::Select(&["starttls", "tls", "none"]),
                 required: true,
                 secret: false,
             },
             FieldSpec {
-                key: "ca_certificate",
-                label: "CA certificate",
-                help: "Trust only this certificate authority (PEM) for the server, such as a private relay's. Empty trusts the public roots.",
-                kind: FieldKind::LongText,
-                required: false,
+                key: "username",
+                label: "Username",
+                help: "Authenticates the connection, together with the password.",
+                kind: FieldKind::Text,
+                required: true,
                 secret: false,
             },
+            FieldSpec {
+                key: "password",
+                label: "Password",
+                help: "Authenticates the connection, together with the username.",
+                kind: FieldKind::Text,
+                required: true,
+                secret: true,
+            },
         ],
-        // The user name is a non-secret field of the workspace credential (kind `basic`), read
-        // beside this password.
-        credential_fields: &[FieldSpec {
-            key: "password",
-            label: "Password",
-            help: "Authenticates the connection, together with the credential's username.",
-            kind: FieldKind::Text,
-            required: true,
-            secret: true,
-        }],
         capabilities: Capabilities {
             channels: &["email"],
             idempotency_key: true,
@@ -143,9 +151,9 @@ impl Destination for Smtp {
         config: &Value,
         credential: &Credential,
     ) -> Result<(), DestinationError> {
-        let settings = Settings::parse(config)?;
+        let settings = Settings::parse(config, credential, PLAINTEXT_ALLOWED)?;
         let auth = Auth::of(credential)?;
-        run(ctx, &settings, auth.as_ref(), CHECK_HELO, None).await?;
+        run(ctx, &settings, &auth, CHECK_HELO, None).await?;
         Ok(())
     }
 
@@ -156,7 +164,7 @@ impl Destination for Smtp {
         credential: &Credential,
         message: &Outbound<'_>,
     ) -> Result<Delivered, DestinationError> {
-        let settings = Settings::parse(config)?;
+        let settings = Settings::parse(config, credential, PLAINTEXT_ALLOWED)?;
         let auth = Auth::of(credential)?;
         let built = message::build(
             message.payload,
@@ -195,51 +203,21 @@ impl Destination for Smtp {
             data: dot_stuffed(&wire),
             size: wire.len(),
         };
-        run(
-            ctx,
-            &settings,
-            auth.as_ref(),
-            &built.from_domain,
-            Some(&envelope),
-        )
-        .await
+        run(ctx, &settings, &auth, &built.from_domain, Some(&envelope)).await
     }
 }
 
-/// Checks that span the settings: the host, the port and the CA certificate.
+/// Checks the CA certificate, the only setting the configuration holds.
 fn config_check(config: &Value) -> Vec<FieldError> {
-    let mut errors = Vec::new();
-    let mut fail = |field: &str, reason: &str| {
-        errors.push(FieldError {
-            field: field.to_owned(),
-            reason: reason.to_owned(),
-        });
-    };
-    if let Some(host) = config.get("host").and_then(Value::as_str)
-        && !host_ok(host)
-    {
-        fail(
-            "host",
-            "must be a host name or an IP address, without a scheme or a port",
-        );
+    match config.get("ca_certificate").and_then(Value::as_str) {
+        Some(pem) if !pem.trim().is_empty() && root_store(Some(pem)).is_none() => {
+            vec![FieldError {
+                field: "ca_certificate".to_owned(),
+                reason: "must hold PEM certificates usable as a CA".to_owned(),
+            }]
+        }
+        _ => Vec::new(),
     }
-    if let Some(port) = config.get("port")
-        && !port
-            .as_u64()
-            .is_some_and(|port| (1..=u64::from(u16::MAX)).contains(&port))
-    {
-        fail("port", "must be a whole number from 1 to 65535");
-    }
-    if let Some(pem) = config.get("ca_certificate").and_then(Value::as_str)
-        && !pem.trim().is_empty()
-        && root_store(Some(pem)).is_none()
-    {
-        fail(
-            "ca_certificate",
-            "must hold PEM certificates usable as a CA",
-        );
-    }
-    errors
 }
 
 fn host_ok(host: &str) -> bool {
@@ -273,11 +251,34 @@ fn root_store(ca_certificate: Option<&str>) -> Option<RootCertStore> {
 enum TlsMode {
     Implicit,
     StartTls,
-    #[cfg(any(test, feature = "test-support"))]
     Plain,
 }
 
-/// The connection settings, read from the stored configuration.
+impl TlsMode {
+    /// The mode the credential's `tls` value names. Plaintext is a configuration error unless
+    /// `allow_plain`.
+    fn parse(value: Option<&str>, allow_plain: bool) -> Result<Self, DestinationError> {
+        match value {
+            Some("tls") => Ok(Self::Implicit),
+            Some("starttls") => Ok(Self::StartTls),
+            Some("none") if allow_plain => Ok(Self::Plain),
+            Some("none") => Err(DestinationError::Config {
+                field: "tls".to_owned(),
+                reason: "must not be none: the connection has to be encrypted".to_owned(),
+            }),
+            _ => Err(invalid("tls")),
+        }
+    }
+}
+
+fn invalid(field: &str) -> DestinationError {
+    DestinationError::Config {
+        field: field.to_owned(),
+        reason: "is missing or invalid".to_owned(),
+    }
+}
+
+/// The connection settings: the server from the `smtp` credential, the CA from the configuration.
 struct Settings {
     host: String,
     port: u16,
@@ -286,30 +287,21 @@ struct Settings {
 }
 
 impl Settings {
-    fn parse(config: &Value) -> Result<Self, DestinationError> {
-        let invalid = |field: &str| DestinationError::Config {
-            field: field.to_owned(),
-            reason: "is missing or invalid".to_owned(),
-        };
-        let host = config
-            .get("host")
-            .and_then(Value::as_str)
+    fn parse(
+        config: &Value,
+        credential: &Credential,
+        allow_plain: bool,
+    ) -> Result<Self, DestinationError> {
+        let text = |key: &str| credential.get(key).map(|value| value.expose());
+        let host = text("host")
             .filter(|host| host_ok(host))
             .ok_or_else(|| invalid("host"))?
             .to_owned();
-        let port = config
-            .get("port")
-            .and_then(Value::as_u64)
-            .and_then(|port| u16::try_from(port).ok())
+        let port = text("port")
+            .and_then(|port| port.trim().parse::<u16>().ok())
             .filter(|port| *port != 0)
             .ok_or_else(|| invalid("port"))?;
-        let tls = match config.get("tls").and_then(Value::as_str) {
-            Some("implicit") => TlsMode::Implicit,
-            Some("starttls") => TlsMode::StartTls,
-            #[cfg(any(test, feature = "test-support"))]
-            Some("none") => TlsMode::Plain,
-            _ => return Err(invalid("tls")),
-        };
+        let tls = TlsMode::parse(text("tls"), allow_plain)?;
         let ca_certificate = config
             .get("ca_certificate")
             .and_then(Value::as_str)
@@ -339,20 +331,20 @@ impl Settings {
     }
 }
 
-/// The user name and password of the credential, when it has them.
+/// The user name and password of the credential.
 struct Auth<'a> {
     username: &'a str,
     password: &'a str,
 }
 
 impl<'a> Auth<'a> {
-    fn of(credential: &'a Credential) -> Result<Option<Self>, DestinationError> {
-        let username = credential.get("username").map(|value| value.expose());
-        let password = credential.get("password").map(|value| value.expose());
-        match (username, password) {
-            (Some(username), Some(password)) => Ok(Some(Self { username, password })),
-            (None, None) => Ok(None),
-            // One without the other cannot authenticate: the credential is the wrong kind.
+    fn of(credential: &'a Credential) -> Result<Self, DestinationError> {
+        match (credential.get("username"), credential.get("password")) {
+            (Some(username), Some(password)) => Ok(Self {
+                username: username.expose(),
+                password: password.expose(),
+            }),
+            // Without both it cannot authenticate: the credential is the wrong kind.
             _ => Err(DestinationError::Auth),
         }
     }
@@ -433,7 +425,7 @@ fn expect(stage: Stage, reply: &Reply, expected: u16) -> Result<(), DestinationE
 async fn run(
     ctx: &DestinationContext,
     settings: &Settings,
-    auth: Option<&Auth<'_>>,
+    auth: &Auth<'_>,
     helo: &str,
     envelope: Option<&Envelope<'_>>,
 ) -> Result<Delivered, DestinationError> {
@@ -469,7 +461,6 @@ async fn run(
             let extensions = ehlo(&mut session, helo).await?;
             finish(session, &extensions, auth, envelope).await
         }
-        #[cfg(any(test, feature = "test-support"))]
         TlsMode::Plain => {
             let mut session = Session::new(tcp);
             greet(&mut session).await?;
@@ -497,7 +488,7 @@ async fn connect(addresses: &[IpAddr], port: u16) -> Result<TcpStream, Destinati
     Err(last)
 }
 
-/// The TLS handshake, with the configured host name as the server name.
+/// The TLS handshake, with the credential's host name as the server name.
 async fn handshake(
     settings: &Settings,
     tcp: TcpStream,
@@ -539,12 +530,10 @@ async fn ehlo<S: AsyncRead + AsyncWrite + Unpin>(
 async fn finish<S: AsyncRead + AsyncWrite + Unpin>(
     mut session: Session<S>,
     extensions: &Extensions,
-    auth: Option<&Auth<'_>>,
+    auth: &Auth<'_>,
     envelope: Option<&Envelope<'_>>,
 ) -> Result<Delivered, DestinationError> {
-    if let Some(auth) = auth {
-        authenticate(&mut session, extensions, auth).await?;
-    }
+    authenticate(&mut session, extensions, auth).await?;
     let outcome = match envelope {
         Some(envelope) => send(&mut session, extensions, envelope).await,
         None => Ok(()),
@@ -660,20 +649,34 @@ mod tests {
         .with_lookup(Arc::new(Fixed(vec!["127.0.0.1".parse().unwrap()])))
     }
 
-    fn config(sink: &SmtpSink, tls: &str) -> Value {
+    /// The destination's own configuration: the sink's authority.
+    fn config(sink: &SmtpSink) -> Value {
+        json!({"ca_certificate": sink.ca_pem()})
+    }
+
+    /// An `smtp` credential for `sink`: `tls` is `none`, `starttls` or `tls`.
+    fn credential(sink: &SmtpSink, tls: &str, user: &str, password: &str) -> Credential {
         let host = if tls == "none" {
             "127.0.0.1"
         } else {
             SINK_HOST
         };
-        json!({"host": host, "port": sink.port(), "tls": tls, "ca_certificate": sink.ca_pem()})
+        let mut credential = Credential::new();
+        for (key, value) in [
+            ("host", host.to_owned()),
+            ("port", sink.port().to_string()),
+            ("tls", tls.to_owned()),
+            ("username", user.to_owned()),
+            ("password", password.to_owned()),
+        ] {
+            credential.insert(key, SecretString::new(value));
+        }
+        credential
     }
 
-    fn login(user: &str, password: &str) -> Credential {
-        let mut credential = Credential::new();
-        credential.insert("username", SecretString::new(user.to_owned()));
-        credential.insert("password", SecretString::new(password.to_owned()));
-        credential
+    /// An `smtp` credential for `sink` with the login a default sink accepts.
+    fn sink_login(sink: &SmtpSink, tls: &str) -> Credential {
+        credential(sink, tls, SINK_USER, SINK_PASSWORD)
     }
 
     fn payload() -> Value {
@@ -690,7 +693,7 @@ mod tests {
         })
     }
 
-    /// One send through a sink with no authentication and no TLS, as the key `key`.
+    /// One send through a default sink with no TLS, as the key `key`.
     async fn plain_send(
         sink: &SmtpSink,
         payload: &Value,
@@ -699,8 +702,7 @@ mod tests {
     ) -> Result<Delivered, DestinationError> {
         send(
             sink,
-            "none",
-            &Credential::new(),
+            &sink_login(sink, "none"),
             payload,
             key,
             dkim,
@@ -711,7 +713,6 @@ mod tests {
 
     async fn send(
         sink: &SmtpSink,
-        tls: &str,
         credential: &Credential,
         payload: &Value,
         key: &str,
@@ -725,8 +726,7 @@ mod tests {
             payload,
             dkim,
         };
-        Smtp.deliver(ctx, &config(sink, tls), credential, &message)
-            .await
+        Smtp.deliver(ctx, &config(sink), credential, &message).await
     }
 
     fn data_of(sink: &SmtpSink, index: usize) -> Vec<u8> {
@@ -855,10 +855,7 @@ mod tests {
     #[tokio::test]
     async fn starttls_and_implicit_tls_authenticate_and_deliver_with_the_configured_authority() {
         let signer = signer("example.com");
-        for (tls, mode) in [
-            ("starttls", SinkTls::StartTls),
-            ("implicit", SinkTls::Implicit),
-        ] {
+        for (tls, mode) in [("starttls", SinkTls::StartTls), ("tls", SinkTls::Implicit)] {
             let sink = SmtpSink::start(SinkOptions {
                 tls: mode,
                 auth: Some(("ada".to_owned(), "pw".to_owned())),
@@ -867,8 +864,7 @@ mod tests {
 
             let result = send(
                 &sink,
-                tls,
-                &login("ada", "pw"),
+                &credential(&sink, tls, "ada", "pw"),
                 &payload(),
                 "msg-1",
                 Some(&signer),
@@ -892,8 +888,7 @@ mod tests {
 
         let result = send(
             &sink,
-            "starttls",
-            &login("ada", "wrong"),
+            &credential(&sink, "starttls", "ada", "wrong"),
             &payload(),
             "m",
             Some(&signer("example.com")),
@@ -912,23 +907,20 @@ mod tests {
         let plain = SmtpSink::start(SinkOptions::default()).await;
         let secured = SmtpSink::start(SinkOptions {
             tls: SinkTls::StartTls,
-            auth: None,
+            ..SinkOptions::default()
         })
         .await;
         let ctx = context(true);
 
         let no_starttls = send(
             &plain,
-            "starttls",
-            &Credential::new(),
+            &sink_login(&plain, "starttls"),
             &payload(),
             "m",
             Some(&signer),
             &ctx,
         )
         .await;
-        let mut untrusted = config(&secured, "starttls");
-        untrusted["ca_certificate"] = Value::Null;
         let body = payload();
         let message = Outbound {
             idempotency_key: "m",
@@ -938,7 +930,12 @@ mod tests {
             dkim: Some(&signer),
         };
         let handshake = Smtp
-            .deliver(&ctx, &untrusted, &Credential::new(), &message)
+            .deliver(
+                &ctx,
+                &json!({"ca_certificate": null}),
+                &sink_login(&secured, "starttls"),
+                &message,
+            )
             .await;
 
         assert!(matches!(no_starttls, Err(DestinationError::Other(_))));
@@ -977,8 +974,7 @@ mod tests {
 
         let result = send(
             &sink,
-            "none",
-            &Credential::new(),
+            &sink_login(&sink, "none"),
             &payload(),
             "m",
             Some(&signer("example.com")),
@@ -1006,10 +1002,14 @@ mod tests {
         })
         .await;
         let ctx = context(true);
-        let config = config(&sink, "starttls");
+        let config = config(&sink);
 
-        let good = Smtp.check(&ctx, &config, &login("ada", "pw")).await;
-        let bad = Smtp.check(&ctx, &config, &login("ada", "no")).await;
+        let good = Smtp
+            .check(&ctx, &config, &credential(&sink, "starttls", "ada", "pw"))
+            .await;
+        let bad = Smtp
+            .check(&ctx, &config, &credential(&sink, "starttls", "ada", "no"))
+            .await;
 
         assert_eq!(good, Ok(()));
         assert_eq!(bad, Err(DestinationError::Auth));
@@ -1110,59 +1110,120 @@ mod tests {
     #[test]
     fn the_configuration_is_checked_before_it_is_stored() {
         let spec = &Smtp::SPEC;
-        let good = json!({"host": "mail.example.net", "port": 587, "tls": "starttls"});
-        assert!(validate_config(spec, &good).is_ok());
+        assert!(validate_config(spec, &json!({})).is_ok());
+        assert!(validate_config(spec, &json!({"ca_certificate": ""})).is_ok());
 
-        let failed = |config: Value| -> Vec<String> {
-            validate_config(spec, &config)
-                .unwrap_err()
-                .into_iter()
-                .map(|error| error.field)
-                .collect()
-        };
-        let with =
-            |host: &str, port: Value, tls: &str| json!({"host": host, "port": port, "tls": tls});
-        assert_eq!(
-            failed(with("smtp://mail.example.net", json!(587), "starttls")),
-            ["host"]
-        );
-        assert_eq!(
-            failed(with("mail.example.net:25", json!(587), "starttls")),
-            ["host"]
-        );
-        assert_eq!(
-            failed(with("mail.example.net", json!(0), "starttls")),
-            ["port"]
-        );
-        assert_eq!(
-            failed(with("mail.example.net", json!(70000), "starttls")),
-            ["port"]
-        );
-        assert_eq!(failed(with("mail.example.net", json!(587), "ssl")), ["tls"]);
-        assert_eq!(
-            failed(json!({"host": "mail.example.net", "port": 587})),
-            ["tls"]
-        );
-        let mut bad_ca = with("mail.example.net", json!(587), "starttls");
-        bad_ca["ca_certificate"] = json!("nope");
-        assert_eq!(failed(bad_ca), ["ca_certificate"]);
+        let errors = validate_config(spec, &json!({"ca_certificate": "nope"})).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "ca_certificate");
+        // The server lives in the credential, so the configuration refuses it.
+        assert!(validate_config(spec, &json!({"host": "mail.example.net"})).is_err());
     }
 
     #[test]
-    fn plaintext_is_offered_only_to_a_test_build() {
-        let source = include_str!("mod.rs");
+    fn the_credential_fields_are_those_of_the_smtp_credential_kind() {
+        use zirv_flow_core::credentials::CredentialKind;
 
-        assert!(source.contains(
-            "#[cfg(not(any(test, feature = \"test-support\")))]\nconst TLS_OPTIONS: &[&str] = &[\"starttls\", \"implicit\"];"
+        let declared: Vec<&str> = Smtp::SPEC.credential_fields.iter().map(|f| f.key).collect();
+        let kind = CredentialKind::Smtp.schema();
+        let schema: Vec<&str> = kind.fields.iter().map(|f| f.key.as_str()).collect();
+
+        assert_eq!(declared, schema);
+        let secret: Vec<&str> = Smtp::SPEC
+            .credential_fields
+            .iter()
+            .filter(|f| f.secret)
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(secret, ["password"]);
+    }
+
+    #[test]
+    fn plaintext_is_a_configuration_error_unless_the_build_allows_it() {
+        for allowed in [false, true] {
+            let mode = TlsMode::parse(Some("none"), allowed);
+            if allowed {
+                assert_eq!(mode.unwrap(), TlsMode::Plain);
+            } else {
+                assert!(
+                    matches!(mode, Err(DestinationError::Config { ref field, .. }) if field == "tls"),
+                    "{mode:?}"
+                );
+            }
+        }
+        assert_eq!(
+            TlsMode::parse(Some("tls"), false).unwrap(),
+            TlsMode::Implicit
+        );
+        assert_eq!(
+            TlsMode::parse(Some("starttls"), false).unwrap(),
+            TlsMode::StartTls
+        );
+        assert!(TlsMode::parse(Some("implicit"), true).is_err());
+        assert!(TlsMode::parse(None, true).is_err());
+    }
+
+    #[test]
+    fn a_release_build_refuses_plaintext_in_the_check_and_in_a_delivery() {
+        let mut login = Credential::new();
+        for (key, value) in [
+            ("host", "127.0.0.1"),
+            ("port", "25"),
+            ("tls", "none"),
+            ("username", "u"),
+            ("password", "p"),
+        ] {
+            login.insert(key, SecretString::new(value.to_owned()));
+        }
+
+        // `check` and `deliver` both parse the settings with the build's flag first.
+        let refused = Settings::parse(&json!({}), &login, false);
+
+        assert!(matches!(
+            refused,
+            Err(DestinationError::Config { ref field, .. }) if field == "tls"
         ));
-        assert!(
-            TLS_OPTIONS.contains(&"none"),
-            "a test build has it, for the sink"
-        );
+        assert!(Settings::parse(&json!({}), &login, true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_credential_without_a_host_is_a_configuration_error_and_nothing_connects() {
+        let sink = SmtpSink::start(SinkOptions::default()).await;
+        let mut hostless = Credential::new();
+        for (key, value) in [
+            ("port", sink.port().to_string()),
+            ("tls", "none".to_owned()),
+            ("username", SINK_USER.to_owned()),
+            ("password", SINK_PASSWORD.to_owned()),
+        ] {
+            hostless.insert(key, SecretString::new(value));
+        }
+        let ctx = context(true);
+
+        let checked = Smtp.check(&ctx, &json!({}), &hostless).await;
+        let sent = send(
+            &sink,
+            &hostless,
+            &payload(),
+            "m",
+            Some(&signer("example.com")),
+            &ctx,
+        )
+        .await;
+
+        for result in [checked.map(|()| Delivered::default()), sent] {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(error, DestinationError::Config { ref field, .. } if field == "host"),
+                "{error}"
+            );
+            assert_eq!(error.disposition(), Disposition::Terminal);
+        }
+        assert_eq!(sink.connections(), 0);
     }
 
     #[test]
-    fn extensions_are_read_from_the_ehlo_lines_and_a_half_credential_cannot_authenticate() {
+    fn extensions_are_read_from_the_ehlo_lines_and_a_half_login_cannot_authenticate() {
         let reply = Reply {
             code: 250,
             enhanced: None,
@@ -1181,6 +1242,9 @@ mod tests {
         let mut half = Credential::new();
         half.insert("password", SecretString::new("pw".into()));
         assert!(matches!(Auth::of(&half), Err(DestinationError::Auth)));
-        assert!(Auth::of(&Credential::new()).unwrap().is_none());
+        assert!(matches!(
+            Auth::of(&Credential::new()),
+            Err(DestinationError::Auth)
+        ));
     }
 }
