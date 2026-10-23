@@ -4,6 +4,7 @@
 //! arrive, so a retry rule or a row shape is changed in one place.
 //!
 //! - [`send`] calls a destination and judges the result into a [`Verdict`].
+//! - [`rate::RateGates`] holds the process's view of each destination's rate bucket.
 //! - [`settle`] records the attempt for a destination that has a row, in a transaction of its own,
 //!   and counts it after that commits. A call with no destination row, such as the raw URL of an
 //!   `action.webhook` node, records nothing and touches no rate bucket.
@@ -13,6 +14,7 @@
 //! row for the foreign key, so it would wait on a lock its own job holds.
 
 pub(crate) mod attempt;
+pub(crate) mod rate;
 pub(crate) mod verdict;
 
 pub(crate) use attempt::settle;

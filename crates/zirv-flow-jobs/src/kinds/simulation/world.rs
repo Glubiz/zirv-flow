@@ -280,7 +280,7 @@ async fn install_enqueue_log(pool: &PgPool) {
          END $$",
         "DROP TRIGGER IF EXISTS sim_log_enqueue ON jobs",
         "CREATE TRIGGER sim_log_enqueue AFTER INSERT ON jobs FOR EACH ROW \
-         WHEN (NEW.kind = 'webhook.call') EXECUTE FUNCTION sim_log_enqueue()",
+         WHEN (NEW.kind IN ('webhook.call', 'delivery.send')) EXECUTE FUNCTION sim_log_enqueue()",
     ] {
         sqlx::query(statement).execute(pool).await.unwrap();
     }

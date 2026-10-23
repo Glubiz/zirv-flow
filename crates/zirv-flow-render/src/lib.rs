@@ -26,7 +26,7 @@ pub use pool::{ChildCommand, PoolConfig, RenderPool};
 
 /// The template types a render call takes and returns, so a caller of the pool needs no
 /// dependency of its own on the template crate.
-pub use zirv_flow_templates::{RenderContext, RenderedWebhook, TemplateDocument};
+pub use zirv_flow_templates::{Hooks, RenderContext, Rendered, RenderedWebhook, TemplateDocument};
 
 /// Helpers for tests that need a child process: unit tests get no `CARGO_BIN_EXE_*`, so the
 /// child is this test binary itself, re-run filtered to [`child_entry`], which does nothing

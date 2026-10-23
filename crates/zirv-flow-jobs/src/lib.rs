@@ -13,6 +13,7 @@ mod segment_compare;
 mod worker;
 
 pub use context::JobContext;
+pub use delivery::rate::RateGates;
 pub use error::JobError;
 pub use registry::{ErasedKind, JobKind, Registry};
 pub use scheduler::{
