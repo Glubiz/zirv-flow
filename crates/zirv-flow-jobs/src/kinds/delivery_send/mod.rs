@@ -626,7 +626,9 @@ mod tests {
                 std::process::abort();
             }
         }
-        std::process::exit(i32::from(zirv_flow_render::host::run(None)));
+        // The production default limit, so a runaway template fails in the child, not the runner.
+        let limit = 512 * 1024 * 1024;
+        std::process::exit(i32::from(zirv_flow_render::host::run(Some(limit))));
     }
 
     async fn start_pool(mode: &str, marker: &str) -> RenderPool {
