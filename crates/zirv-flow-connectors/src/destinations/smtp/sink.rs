@@ -25,6 +25,10 @@ pub const SINK_USER: &str = "sink-user";
 /// The password of [`SINK_USER`].
 pub const SINK_PASSWORD: &str = "sink-password";
 
+/// The reply to give at [`SinkStage::DataEnd`] to accept the message and then close the connection
+/// without answering: the loss of a reply after the final dot.
+pub const DROP: &str = "DROP";
+
 /// How the sink secures its connections.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SinkTls {
@@ -386,6 +390,15 @@ async fn converse<S: AsyncRead + AsyncWrite + Unpin>(
             }
             state.lock().expect("sink state").offered.push(data.clone());
             let chosen = stage_reply(state, SinkStage::DataEnd, "250 2.0.0 queued");
+            if chosen == DROP {
+                // The server queued the message and the connection died before it said so.
+                state.lock().expect("sink state").messages.push(Captured {
+                    mail_from: std::mem::take(&mut mail_from),
+                    recipients: std::mem::take(&mut recipients),
+                    data,
+                });
+                return Some(Ended::Closed);
+            }
             if chosen.starts_with('2') {
                 state.lock().expect("sink state").messages.push(Captured {
                     mail_from: std::mem::take(&mut mail_from),

@@ -29,6 +29,9 @@ pub(super) enum WireError {
     Io,
     /// The server sent something that is not a reply, or more than the bounds allow.
     Protocol,
+    /// The end of the message was sent, and the connection was lost, the answer never came or it
+    /// could not be read: the server may have accepted the message.
+    Unconfirmed,
 }
 
 /// An enhanced status code (RFC 3463), such as `5.1.1`.
@@ -107,6 +110,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
         })
         .await
         .map_err(|_| WireError::Timeout)?
+    }
+
+    /// Writes the message and its end marker as they are, then reads the reply, all within
+    /// `limit`. A failure once everything was written is [`WireError::Unconfirmed`]: the server
+    /// has seen the end of the message and may have accepted it. A failure while writing is a
+    /// plain one, since a server that did not see the end marker cannot have accepted the message.
+    pub(super) async fn exchange_final(
+        &mut self,
+        bytes: &[u8],
+        limit: Duration,
+    ) -> Result<Reply, WireError> {
+        let mut written = false;
+        let result = tokio::time::timeout(limit, async {
+            self.io.write_all(bytes).await.map_err(|_| WireError::Io)?;
+            self.io.flush().await.map_err(|_| WireError::Io)?;
+            written = true;
+            self.read_reply().await
+        })
+        .await;
+        match result {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) | Err(_) if written => Err(WireError::Unconfirmed),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(WireError::Timeout),
+        }
     }
 
     /// Reads one reply within `limit`, such as the greeting.
@@ -334,6 +362,39 @@ mod tests {
             closed.reply(Duration::from_secs(1)).await.err(),
             Some(WireError::Io)
         );
+    }
+
+    #[tokio::test]
+    async fn a_failure_after_the_whole_message_was_written_is_unconfirmed_and_before_it_is_not() {
+        // The server reads everything and then closes without answering.
+        let (client, mut server) = duplex(64 * 1024);
+        let mut session = Session::new(client);
+        let reader = tokio::spawn(async move {
+            let mut sink = vec![0u8; 16];
+            let _ = tokio::io::AsyncReadExt::read(&mut server, &mut sink).await;
+        });
+        let closed = session
+            .exchange_final(b"x\r\n.\r\n", Duration::from_secs(1))
+            .await;
+        reader.await.unwrap();
+        assert_eq!(closed.err(), Some(WireError::Unconfirmed));
+
+        // The server takes the message and never answers.
+        let (client, mut server) = duplex(64 * 1024);
+        let mut session = Session::new(client);
+        let silent = session
+            .exchange_final(b"x\r\n.\r\n", Duration::from_millis(50))
+            .await;
+        assert_eq!(silent.err(), Some(WireError::Unconfirmed));
+        let _ = server.shutdown().await;
+
+        // The server's buffer is full and never read: the end marker was not written.
+        let (client, _server) = duplex(8);
+        let mut session = Session::new(client);
+        let stuck = session
+            .exchange_final(&[b'x'; 1024], Duration::from_millis(50))
+            .await;
+        assert_eq!(stuck.err(), Some(WireError::Timeout));
     }
 
     #[test]

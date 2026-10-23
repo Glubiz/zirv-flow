@@ -63,7 +63,7 @@ use crate::sources::{Credential, FieldError, FieldKind, FieldSpec};
 
 #[cfg(feature = "test-support")]
 pub use self::sink::{
-    Captured, SINK_HOST, SINK_PASSWORD, SINK_USER, SinkOptions, SinkStage, SinkTls, SmtpSink,
+    Captured, DROP, SINK_HOST, SINK_PASSWORD, SINK_USER, SinkOptions, SinkStage, SinkTls, SmtpSink,
 };
 
 /// How long one address gets to accept the connection.
@@ -404,6 +404,7 @@ impl From<WireError> for DestinationError {
         match error {
             WireError::Timeout => Self::Egress(HttpError::Timeout),
             WireError::Io => Self::Unreachable,
+            WireError::Unconfirmed => Self::Unconfirmed,
             WireError::Protocol => {
                 Self::Other("the mail server sent a reply that could not be read".to_owned())
             }
@@ -599,7 +600,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
             _ => refusal(Stage::Data, &reply),
         });
     }
-    let reply = session.exchange(&envelope.data, DATA_TIMEOUT).await?;
+    let reply = session.exchange_final(&envelope.data, DATA_TIMEOUT).await?;
     expect(Stage::DataEnd, &reply, 2)
 }
 
@@ -965,6 +966,25 @@ mod tests {
 
             assert_eq!(result, Err(DestinationError::Refused(expected)), "{reply}");
             assert!(sink.messages().is_empty(), "{reply}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_lost_after_the_final_dot_is_unconfirmed_and_a_retry_reuses_the_identifiers() {
+        let signer = signer("example.com");
+        let sink = SmtpSink::start(SinkOptions::default()).await;
+        sink.reply_next(SinkStage::DataEnd, super::sink::DROP);
+
+        let lost = plain_send(&sink, &payload(), "msg-9", Some(&signer)).await;
+        let again = plain_send(&sink, &payload(), "msg-9", Some(&signer)).await;
+
+        assert_eq!(lost, Err(DestinationError::Unconfirmed));
+        assert_eq!(lost.unwrap_err().disposition(), Disposition::Retryable);
+        assert_eq!(again, Ok(Delivered::default()));
+        let (first, second) = (data_of(&sink, 0), data_of(&sink, 1));
+        for name in ["Message-ID", "X-Zirv-Idempotency-Key"] {
+            assert_eq!(header_of(&first, name), header_of(&second, name), "{name}");
+            assert!(header_of(&first, name).is_some(), "{name}");
         }
     }
 

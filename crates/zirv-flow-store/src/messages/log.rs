@@ -250,6 +250,51 @@ pub async fn mark_message_sending<'e>(
     Ok(marked == 1)
 }
 
+/// The gate entry that notes an attempt lost the mail server's reply after the end of the message.
+fn unconfirmed_note() -> Value {
+    json!([{"gate": "delivery", "result": "unconfirmed"}])
+}
+
+/// Notes on a `sending` message that an attempt sent the whole message and then lost the server's
+/// reply, so it may have been accepted. The note is a `delivery` entry in `gate_results`, written
+/// in a statement of its own so it survives a job retry, a deferral and a lost lease; the write
+/// that ends the message replaces the gate results. False when the message is not `sending` or
+/// already carries the note.
+pub async fn mark_message_unconfirmed<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    let marked = sqlx::query(
+        "UPDATE messages SET gate_results = gate_results || $3          WHERE workspace_id = $1 AND id = $2 AND status = 'sending'            AND NOT gate_results @> $3",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(unconfirmed_note())
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(marked == 1)
+}
+
+/// Whether a `sending` message carries the note of [`mark_message_unconfirmed`].
+pub async fn message_unconfirmed<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = $1 AND id = $2              AND status = 'sending' AND gate_results @> $3)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(unconfirmed_note())
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// The message with this id in the workspace.
 pub async fn find_message<'e>(
     executor: impl PgExecutor<'e>,
@@ -515,6 +560,76 @@ mod tests {
             found.created_at, pending.created_at,
             "the row keeps its start"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_unconfirmed_note_is_kept_on_a_sending_message_until_it_ends(pool: sqlx::PgPool) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        let ws = crate::create_workspace(
+            &pool,
+            &WorkspaceName::parse("two").unwrap(),
+            &Slug::parse("two").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        let message = |status, reason| NewMessage {
+            id,
+            workspace: ws,
+            person,
+            enrollment: Uuid::now_v7(),
+            flow: None,
+            flow_version: None,
+            node: "mail",
+            template: Uuid::from_u128(1),
+            template_version: None,
+            destination: Uuid::from_u128(2),
+            sender_identity: None,
+            category: None,
+            topic: None,
+            dimensions: &dimensions,
+            status,
+            reason,
+            deciding_rule: None,
+            gates: &[],
+            attempts: 1,
+            now: OffsetDateTime::now_utc(),
+        };
+        insert_message(&pool, &message(MessageStatus::Pending, None))
+            .await
+            .unwrap();
+
+        let pending = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        mark_message_sending(&pool, ws, id, 1).await.unwrap();
+        let before = message_unconfirmed(&pool, ws, id).await.unwrap();
+        let first = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        let second = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
+        let after = message_unconfirmed(&pool, ws, id).await.unwrap();
+        mark_message_sending(&pool, ws, id, 2).await.unwrap();
+        let kept = message_unconfirmed(&pool, ws, id).await.unwrap();
+        insert_message(
+            &pool,
+            &message(MessageStatus::Failed, Some("delivery_unconfirmed")),
+        )
+        .await
+        .unwrap();
+        let ended = message_unconfirmed(&pool, ws, id).await.unwrap();
+
+        assert!(!pending, "only a sending message takes the note");
+        assert!(!before);
+        assert!(first && !second, "noted once");
+        assert!(after && kept, "a new attempt's mark keeps it");
+        assert!(!ended, "an ended message carries no note");
     }
 
     #[test]

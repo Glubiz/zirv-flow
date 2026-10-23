@@ -31,6 +31,11 @@ pub enum DestinationError {
     /// A mail server refused the message or asked to try later, as a classified verdict
     /// (architecture 10.2, OQ-12). Only a mail destination returns it.
     Refused(Refusal),
+    /// A mail server was sent the end of the message and then the connection was lost, or no
+    /// readable answer came: the message may or may not have been accepted. Only a mail
+    /// destination returns it. It is retried under the same message id and idempotency key; when
+    /// the attempts run out the message ends unconfirmed, not failed for a transport reason.
+    Unconfirmed,
     /// The type does not do this (an erase call on a type without the capability).
     Unsupported,
     /// Any other failure. The text must not contain a credential, an address or a URL.
@@ -76,7 +81,9 @@ impl DestinationError {
             | Self::Auth
             | Self::Unsupported
             | Self::Egress(HttpError::EgressDenied { .. }) => Disposition::Terminal,
-            Self::Egress(_) | Self::Unreachable | Self::Other(_) => Disposition::Retryable,
+            Self::Egress(_) | Self::Unreachable | Self::Unconfirmed | Self::Other(_) => {
+                Disposition::Retryable
+            }
             Self::Refused(Refusal::Deferred) => Disposition::Retryable,
             Self::Refused(Refusal::HardBounce | Refusal::Rejected) => Disposition::Terminal,
             Self::RateLimited { retry_after } => Disposition::Throttled {
@@ -110,6 +117,9 @@ impl fmt::Display for DestinationError {
             }
             Self::Refused(Refusal::Deferred) => {
                 f.write_str("the mail server asked to try again later")
+            }
+            Self::Unconfirmed => {
+                f.write_str("the mail server did not confirm whether it accepted the message")
             }
             Self::Unsupported => f.write_str("the destination type does not support this"),
             Self::Other(reason) => f.write_str(reason),

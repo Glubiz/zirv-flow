@@ -66,7 +66,9 @@ fn describe(error: &DestinationError) -> (&'static str, &'static str) {
         DestinationError::Unsupported => {
             ("unsupported", "the destination type does not support this")
         }
-        DestinationError::Other(_) => ("failed", "the check failed"),
+        DestinationError::Unconfirmed | DestinationError::Other(_) => {
+            ("failed", "the check failed")
+        }
     }
 }
 

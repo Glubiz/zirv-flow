@@ -17,7 +17,7 @@ use zirv_flow_connectors::destinations::{
     Delivered, DestinationError, Refusal, parse_retry_after as connector_parse,
 };
 use zirv_flow_connectors::http::HttpError;
-use zirv_flow_store::HARD_BOUNCE;
+use zirv_flow_store::{DELIVERY_UNCONFIRMED, HARD_BOUNCE};
 
 /// The reason of a message a mail server refused for a cause that is not the recipient.
 pub(crate) const SMTP_REJECTED: &str = "smtp_rejected";
@@ -149,6 +149,14 @@ pub(crate) fn verdict_of(
             message: "the mail server asked to try again later",
             retry_after: None,
         },
+        // The server may have accepted the message: retried under the same key, and when the
+        // attempts run out the message ends `delivery_unconfirmed`, never a transport failure.
+        Err(DestinationError::Unconfirmed) => Verdict::Retry {
+            status: None,
+            reason: DELIVERY_UNCONFIRMED,
+            message: "the mail server did not confirm the message",
+            retry_after: None,
+        },
         Err(DestinationError::Other(_)) => Verdict::Retry {
             status: None,
             reason: "other",
@@ -205,6 +213,7 @@ mod tests {
             DestinationError::Refused(Refusal::HardBounce),
             DestinationError::Refused(Refusal::Rejected),
             DestinationError::Refused(Refusal::Deferred),
+            DestinationError::Unconfirmed,
         ];
 
         for error in errors {
@@ -284,6 +293,21 @@ mod tests {
             Verdict::Retry {
                 status: None,
                 reason: "smtp_4xx",
+                retry_after: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_reply_lost_after_the_final_dot_retries_under_the_unconfirmed_reason() {
+        let now = datetime!(2031-05-06 07:08:09 UTC);
+
+        assert!(matches!(
+            verdict_of(&Err(DestinationError::Unconfirmed), now),
+            Verdict::Retry {
+                status: None,
+                reason: "delivery_unconfirmed",
                 retry_after: None,
                 ..
             }

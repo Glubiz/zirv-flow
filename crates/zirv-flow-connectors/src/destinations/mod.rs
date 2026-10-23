@@ -28,9 +28,9 @@ pub use registry::Registry;
 pub use retry_after::parse_retry_after;
 #[cfg(feature = "test-support")]
 pub use smtp::{
-    Captured as SmtpCaptured, SINK_HOST as SMTP_SINK_HOST, SINK_PASSWORD as SMTP_SINK_PASSWORD,
-    SINK_USER as SMTP_SINK_USER, SinkOptions as SmtpSinkOptions, SinkStage as SmtpSinkStage,
-    SinkTls as SmtpSinkTls, SmtpSink,
+    Captured as SmtpCaptured, DROP as SMTP_SINK_DROP, SINK_HOST as SMTP_SINK_HOST,
+    SINK_PASSWORD as SMTP_SINK_PASSWORD, SINK_USER as SMTP_SINK_USER,
+    SinkOptions as SmtpSinkOptions, SinkStage as SmtpSinkStage, SinkTls as SmtpSinkTls, SmtpSink,
 };
 pub use spec::{Capabilities, DestinationSpec};
 pub use validate::{validate_config, validate_credential, validate_credential_names};

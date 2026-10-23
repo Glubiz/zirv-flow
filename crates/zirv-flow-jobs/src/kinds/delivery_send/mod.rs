@@ -53,16 +53,16 @@ use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
-use zirv_flow_core::TraceContext;
 use zirv_flow_core::consent::{Dimensions, SuppressionReason};
+use zirv_flow_core::{HmacKey, TraceContext};
 use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
     MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
     add_organization_suppression, document_sender, find_destination, find_flow, find_template,
     find_template_version, insert_message, lock_webhook_person, mark_message_sending,
-    message_status, read_template_field_catalog, read_webhook_subject, record_send_outcome,
-    throttle_bucket,
+    mark_message_unconfirmed, message_status, message_unconfirmed, read_template_field_catalog,
+    read_webhook_subject, record_send_outcome, throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -216,6 +216,12 @@ async fn decide(
     // The first run writes the row, pending, in a statement of its own: it stays whatever this
     // attempt comes to (a retry, a wait for a token), and shows the message in the log meanwhile.
     start_message(&pool, job, now).await?;
+    // The key that hashes the address, fetched once: the suppression gate reads it, and so does
+    // the hard bounce that ends a delivery, including that of a resumed message, which skips the
+    // gates.
+    let key = ctx
+        .identifier_key()
+        .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
 
     // The template, as published now.
     let template = find_template(ctx.conn(), workspace, job.template).await?;
@@ -258,7 +264,7 @@ async fn decide(
     // gone out does not judge it again: a person who withdrew consent since was sent this one.
     if !resuming
         && let Some(blocked) =
-            person_gates(ctx, job, &pool, &address, transactional, &mut trail).await?
+            person_gates(ctx, job, &pool, &key, &address, transactional, &mut trail).await?
     {
         return Ok(trail.skip(blocked));
     }
@@ -312,6 +318,9 @@ async fn decide(
     // first, in a statement of its own: from here on the message may go out, and a retry knows it.
     let attempts = ctx.attempts();
     let number = job.attempt_base + attempts;
+    // An earlier attempt may have lost the server's reply after the whole message was sent: the
+    // note is kept on the row (it survives a job retry), and read before this attempt adds to it.
+    let carried = resuming && message_unconfirmed(&pool, workspace, job.message).await?;
     mark_message_sending(&pool, workspace, job.message, number - 1).await?;
     let call = deliver::Call {
         workspace,
@@ -339,9 +348,7 @@ async fn decide(
             if reason == HARD_BOUNCE {
                 // The server says the address cannot receive mail: it is suppressed with the
                 // write that ends the message.
-                trail.bounced = ctx
-                    .identifier_key()
-                    .and_then(|key| gates::address_hash(&key, &address));
+                trail.bounced = gates::address_hash(&key, &address);
             }
             Ok(trail.fail("delivery", reason))
         }
@@ -352,6 +359,15 @@ async fn decide(
             ..
         } => {
             warn!(attempt = number, reason, "message will be retried");
+            // A reply lost after the final dot leaves the message possibly accepted. Once that
+            // happened, an attempt that fails at the transport level shows nothing about it
+            // (it was not refused), so the message stays unconfirmed; a server's own answer,
+            // a 4xx or a 5xx, is judged as usual.
+            let lost_reply = reason == DELIVERY_UNCONFIRMED;
+            if lost_reply {
+                mark_message_unconfirmed(&pool, workspace, job.message).await?;
+            }
+            let unconfirmed = lost_reply || (carried && says_nothing_of_the_message(reason));
             if reason == "http_429" {
                 slow_down(&pool, &destination, retry_after, ctx).await;
             }
@@ -360,7 +376,9 @@ async fn decide(
                 return Err(retry_after.map_or(error, |wait| error.with_retry_after(wait)));
             }
             // Temporary refusals that outlast the retries are a soft bounce, with no suppression.
-            let ended = if reason == SMTP_DEFERRED {
+            let ended = if unconfirmed {
+                DELIVERY_UNCONFIRMED
+            } else if reason == SMTP_DEFERRED {
                 SOFT_BOUNCE
             } else {
                 reason
@@ -370,11 +388,22 @@ async fn decide(
     }
 }
 
+/// Whether a retried attempt's failure says nothing about the message: it failed before or beside
+/// the mail conversation (a connection, a timeout, a credential that could not be opened), so it
+/// neither confirms nor refutes that an earlier attempt's message was accepted.
+fn says_nothing_of_the_message(reason: &str) -> bool {
+    matches!(
+        reason,
+        "transport" | "timeout" | "other" | "credential_unavailable"
+    )
+}
+
 /// Gates 3 to 6: consent, suppression and the two caps. The gate that blocks, if one does.
 async fn person_gates(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
     pool: &PgPool,
+    key: &HmacKey,
     address: &str,
     transactional: bool,
     trail: &mut Trail,
@@ -386,10 +415,7 @@ async fn person_gates(
         }
         Err(blocked) => return Ok(Some(blocked)),
     }
-    let key = ctx
-        .identifier_key()
-        .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
-    match gates::suppression(ctx.conn(), job.workspace, &key, address).await? {
+    match gates::suppression(ctx.conn(), job.workspace, key, address).await? {
         Ok(passed) => trail.pass(passed),
         Err(blocked) => return Ok(Some(blocked)),
     }
@@ -616,8 +642,8 @@ mod tests {
     use time::Duration as Span;
     use time::macros::datetime;
     use zirv_flow_connectors::destinations::{
-        SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions, SmtpSinkStage,
-        fake_ledger_calls, fake_ledger_sent,
+        SMTP_SINK_DROP, SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions,
+        SmtpSinkStage, fake_ledger_calls, fake_ledger_sent,
     };
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::egress::EgressPolicy;
@@ -2424,6 +2450,140 @@ mod tests {
         }
         assert_eq!(sink.messages().len(), 1);
         assert_eq!(env.message(queued.message).await.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reply_lost_after_the_final_dot_on_every_attempt_ends_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 2).await;
+        sink.reply_at(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(
+            env.message(queued.message).await.status,
+            "sending",
+            "a first lost reply is retried"
+        );
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        assert_eq!(env.count("SELECT count(*) FROM suppressions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_reply_lost_once_and_a_250_on_the_retry_ends_sent_under_one_message_id(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 3).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let captured = sink.messages();
+        assert_eq!(captured.len(), 2, "the server saw the message twice");
+        let id = queued.message.to_string();
+        for message in &captured {
+            assert_eq!(
+                header_of(&message.data, "Message-ID"),
+                Some(format!("<{id}@example.com>"))
+            );
+            assert_eq!(
+                header_of(&message.data, "X-Zirv-Idempotency-Key"),
+                Some(id.clone())
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transport_failure_after_a_lost_reply_still_ends_delivery_unconfirmed(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 2).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+
+        env.attempt().await.unwrap_err();
+        // The server goes away: the next attempt cannot connect.
+        drop(sink);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "a refused connection does not show that the first attempt was refused"
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_that_gets_a_hard_bounce_suppresses_the_address(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 3).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        assert_eq!(suppressions(&env).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_on_a_worker_without_the_identifier_key_is_retried_not_bounced_unsuppressed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (mut env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 3).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+        env.attempt().await.unwrap_err();
+        env.no_key = true;
+
+        env.attempt().await.unwrap_err();
+
+        assert_eq!(
+            env.message(queued.message).await.status,
+            "sending",
+            "the bounce is not written without its suppression"
+        );
+        assert_eq!(suppressions(&env).await, 0);
     }
 
     #[sqlx::test]

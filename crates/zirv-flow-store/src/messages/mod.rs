@@ -13,5 +13,6 @@ pub use address::read_send_address;
 pub(crate) use log::COLUMNS;
 pub use log::{
     GateRecord, Message, MessageStatus, NewMessage, find_message, insert_message,
-    list_person_messages, mark_message_sending, message_status,
+    list_person_messages, mark_message_sending, mark_message_unconfirmed, message_status,
+    message_unconfirmed,
 };
