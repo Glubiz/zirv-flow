@@ -469,8 +469,23 @@ fn auth(walk: &mut Walk, value: &Value, path: String) -> (Option<Auth>, Option<C
             );
         }
     }
+    if let (Some(auth), Some(spec)) = (&auth, &credential) {
+        let schema = spec.schema();
+        let exposed = super::credential_fields_of(auth).iter().any(|name| {
+            SECRET_READS.contains(name) && schema.field(name).is_some_and(|field| !field.secret)
+        });
+        if exposed {
+            walk.add(
+                code::CREDENTIAL_FIELD_NOT_SECRET,
+                child(&auth_path, "credential"),
+            );
+        }
+    }
     (auth, credential)
 }
+
+/// The credential fields an auth type reads that hold a secret and so must be sealed.
+const SECRET_READS: &[&str] = &["api_key", "password", "token", "client_secret"];
 
 /// `auth.credential`: `{"kind": "<built-in kind>"}` or `{"fields": [...]}`, one of the two.
 fn credential_spec(walk: &mut Walk, value: &Value, path: String) -> Option<CredentialSpec> {
@@ -2049,5 +2064,44 @@ mod tests {
                 path,
             );
         }
+    }
+
+    #[test]
+    fn a_secret_the_auth_reads_must_be_a_secret_field_of_the_credential_schema() {
+        let field = |key: &str, secret: bool| json!({"key": key, "label": "L", "type": "string", "required": true, "secret": secret});
+        let exposed = [
+            ("bearer", vec![field("token", false)]),
+            (
+                "basic",
+                vec![field("username", false), field("password", false)],
+            ),
+            ("api_key", vec![field("api_key", false)]),
+        ];
+        for (kind, fields) in exposed {
+            let auth = match kind {
+                "api_key" => json!({"type": "api_key", "in": "header", "name": "X-Key",
+                                    "credential": {"fields": fields}}),
+                other => json!({"type": other, "credential": {"fields": fields}}),
+            };
+            assert_issue(
+                &with(|v| v["auth"] = auth.clone()),
+                code::CREDENTIAL_FIELD_NOT_SECRET,
+                "/auth/credential",
+            );
+        }
+        let oauth = json!({"type": "oauth2_client_credentials", "token_url": "https://a.test/t",
+                           "credential": {"fields": [field("client_id", false), field("client_secret", false)]}});
+        assert_issue(
+            &with(|v| v["auth"] = oauth.clone()),
+            code::CREDENTIAL_FIELD_NOT_SECRET,
+            "/auth/credential",
+        );
+        // Identifiers may be plain; the secrets sealed; and a built-in kind is already right.
+        assert_valid(&with(|v| {
+            v["auth"] = json!({"type": "basic", "credential": {"fields": [field("username", false), field("password", true)]}});
+        }));
+        assert_valid(&with(|v| {
+            v["auth"] = json!({"type": "basic", "credential": {"kind": "basic"}});
+        }));
     }
 }

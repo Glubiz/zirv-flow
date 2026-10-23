@@ -46,6 +46,9 @@ pub mod code {
     pub const INVALID_CREDENTIAL_SCHEMA: &str = "invalid_credential_schema";
     /// The `auth.credential` schema lacks a field the auth type reads.
     pub const CREDENTIAL_FIELD_MISSING: &str = "credential_field_missing";
+    /// The `auth.credential` schema holds a secret the auth type reads (a token, password, API key
+    /// or client secret) in a field that is not `secret`, which would store it in plaintext.
+    pub const CREDENTIAL_FIELD_NOT_SECRET: &str = "credential_field_not_secret";
 
     /// Every code of this module. Mapping codes (`no_identifier`, `unknown_column`, ...) come
     /// from `zirv_flow_core::mapping::MappingError::code` and are not listed.
@@ -79,6 +82,7 @@ pub mod code {
         LIST_TARGET_NOT_ALLOWED,
         INVALID_CREDENTIAL_SCHEMA,
         CREDENTIAL_FIELD_MISSING,
+        CREDENTIAL_FIELD_NOT_SECRET,
     ];
 }
 

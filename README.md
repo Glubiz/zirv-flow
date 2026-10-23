@@ -1725,7 +1725,7 @@ either `{"kind": "<built-in kind>"}` (`api_key`, `basic`, `smtp`, `oauth2_client
 the field rules of Workspace credentials (1 to 32 fields, unique lowercase keys, `options` only on an
 `enum`, and only a `string` can be `secret`), never both. The schema must contain every credential
 field the auth type reads (above; `client_secret` of the authorization-code grant is optional), or
-the manifest is refused with `credential_field_missing`. A manifest holds no value: the validate
+the manifest is refused with `credential_field_missing`. A field the auth type reads that holds a secret (`api_key`, `password`, `token`, `client_secret`) must be `secret: true`, or the manifest is refused with `credential_field_not_secret`, because a non-secret field is stored in plaintext. A manifest holds no value: the validate
 response returns the schema as `credential_schema`, and the credential is created from it as kind
 `custom`.
 
@@ -1761,7 +1761,7 @@ holding `{{`, `${`, `{%` or `<%`), `unsupported_version`, `manifest_too_large` (
 `forbidden_header`, `invalid_header`, `too_many_query`, `path_invalid`, `invalid_pointer`,
 `duplicate_stream`, `duplicate_field`, `invalid_field_name`, `primary_key_empty`,
 `primary_key_unknown_field`, `cursor_field_unknown`, `invalid_mapping`, `list_target_not_allowed`,
-`invalid_credential_schema`, `credential_field_missing`,
+`invalid_credential_schema`, `credential_field_missing`, `credential_field_not_secret`,
 and the mapping codes of the Mapping reference.
 
 **Sample.** `POST .../sources/{id}/manifest/sample` with `{"stream": "...", "limit": 1-20,
