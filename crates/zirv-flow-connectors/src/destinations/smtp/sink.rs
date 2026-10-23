@@ -462,3 +462,111 @@ fn path_of(command: &str) -> String {
     let end = command.rfind('>').unwrap_or(command.len());
     command.get(start..end).unwrap_or_default().to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bare client of a sink without a login: sends a line, reads one reply line.
+    struct Client {
+        io: BufReader<TcpStream>,
+    }
+
+    impl Client {
+        async fn connect(sink: &SmtpSink) -> Self {
+            let stream = TcpStream::connect(("127.0.0.1", sink.port()))
+                .await
+                .expect("connects");
+            let mut client = Self {
+                io: BufReader::new(stream),
+            };
+            assert!(client.line().await.starts_with("220"));
+            client
+        }
+
+        async fn line(&mut self) -> String {
+            let mut line = String::new();
+            self.io.read_line(&mut line).await.expect("reads");
+            line.trim_end().to_owned()
+        }
+
+        /// Sends a command and reads its reply, to the last line of a multi-line one.
+        async fn ask(&mut self, command: &str) -> String {
+            self.io
+                .write_all(format!("{command}\r\n").as_bytes())
+                .await
+                .expect("writes");
+            loop {
+                let line = self.line().await;
+                if line.as_bytes().get(3) != Some(&b'-') {
+                    return line;
+                }
+            }
+        }
+
+        async fn envelope(&mut self) {
+            assert!(self.ask("EHLO client.test").await.starts_with("250"));
+            assert!(self.ask("MAIL FROM:<a@b.test>").await.starts_with("250"));
+            assert!(self.ask("RCPT TO:<c@d.test>").await.starts_with("250"));
+            assert!(self.ask("DATA").await.starts_with("354"));
+        }
+    }
+
+    async fn open_sink() -> SmtpSink {
+        SmtpSink::start(SinkOptions {
+            tls: SinkTls::Plain,
+            auth: None,
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_sink_records_an_accepted_message_with_its_envelope() {
+        let sink = open_sink().await;
+        let mut client = Client::connect(&sink).await;
+        client.envelope().await;
+
+        let reply = client.ask("Subject: hi\r\n\r\nbody\r\n.").await;
+
+        assert!(reply.starts_with("250"), "{reply}");
+        let messages = sink.messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].mail_from, "a@b.test");
+        assert_eq!(messages[0].recipients, ["c@d.test"]);
+        assert_eq!(sink.offered().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_chosen_reply_replaces_the_step_once_for_next_and_always_for_at() {
+        let sink = open_sink().await;
+        sink.reply_next(SinkStage::Rcpt, "451 4.7.1 later");
+        sink.reply_at(SinkStage::Mail, "550 5.7.1 no");
+        let mut client = Client::connect(&sink).await;
+
+        assert!(client.ask("MAIL FROM:<a@b.test>").await.starts_with("550"));
+        assert!(client.ask("MAIL FROM:<a@b.test>").await.starts_with("550"));
+        // The queued reply is used once, then the default applies.
+        let mut other = Client::connect(&sink).await;
+        assert!(other.ask("RCPT TO:<c@d.test>").await.starts_with("451"));
+        assert!(other.ask("RCPT TO:<c@d.test>").await.starts_with("250"));
+        assert!(sink.messages().is_empty());
+    }
+
+    #[tokio::test]
+    async fn drop_keeps_the_message_and_closes_without_a_reply() {
+        let sink = open_sink().await;
+        sink.reply_next(SinkStage::DataEnd, DROP);
+        let mut client = Client::connect(&sink).await;
+        client.envelope().await;
+
+        client
+            .io
+            .write_all(b"Subject: hi\r\n\r\nbody\r\n.\r\n")
+            .await
+            .expect("writes");
+        let reply = client.line().await;
+
+        assert_eq!(reply, "", "the connection closed with no reply");
+        assert_eq!(sink.messages().len(), 1, "the server had queued it");
+    }
+}
