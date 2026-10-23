@@ -12,7 +12,7 @@ use rsa::RsaPrivateKey;
 use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 use rsa::traits::PublicKeyParts;
 
-use crate::{SecretBytes, ValidationError};
+use crate::{Email, SecretBytes, ValidationError};
 
 /// The modulus size of a generated DKIM key. 2048 bits is the size mail receivers expect.
 pub const DKIM_KEY_BITS: usize = 2048;
@@ -149,9 +149,10 @@ pub fn parse_domain(value: &str) -> Result<String, ValidationError> {
 
 /// Whether a DNS name, such as the target of a CNAME, is a public one by the rule `parse_domain`
 /// applies: at least two labels, a non-numeric top label, and none of the special-use or internal
-/// suffixes. The labels themselves are only checked for being non-empty, because DNS targets
-/// legitimately carry underscores (`selector._domainkey.provider.example`). A name that is not
-/// public must not be followed, or a public name could be made to answer from a private zone.
+/// suffixes. The lower labels are only checked for being non-empty, because DNS targets
+/// legitimately carry underscores (`selector._domainkey.provider.example`); the top label must be a
+/// hostname label (letters, digits and hyphens), so `secret._corp` is not public. A name that is
+/// not public must not be followed, or a public name could be made to answer from a private zone.
 pub fn is_public_name(name: &str) -> bool {
     let lowered = name.trim().to_ascii_lowercase();
     let name = lowered.strip_suffix('.').unwrap_or(&lowered);
@@ -166,6 +167,7 @@ pub fn is_public_name(name: &str) -> bool {
         && labels
             .iter()
             .all(|label| !label.is_empty() && label.len() <= MAX_LABEL)
+        && is_label(last)
         && !last.chars().all(|c| c.is_ascii_digit())
         && !NON_PUBLIC_SUFFIXES.contains(last)
 }
@@ -380,8 +382,12 @@ pub const OTHER_TXT: &str = "(another TXT record, not shown)";
 /// - **SPF** (RFC 7208): `v=spf1`, then only the mechanisms `all`, `include`, `a`, `mx`, `ptr`,
 ///   `ip4`, `ip6`, `exists` (with qualifiers) and the modifiers `redirect` and `exp`, with
 ///   arguments in their grammar. One unknown term hides the whole record.
-/// - **DMARC** (RFC 7489): `v=DMARC1` first, then only the tags `p`, `sp`, `rua`, `ruf`, `adkim`,
-///   `aspf`, `pct`, `fo`, `rf` and `ri`, with values in their grammar.
+/// - **DMARC** (RFC 7489): `v=DMARC1` first, then only the tags `p`, `sp`, `np`, `psd`, `t`, `rua`,
+///   `ruf`, `adkim`, `aspf`, `pct`, `fo`, `rf` and `ri`, with values in their grammar. `rua` and
+///   `ruf` are comma-separated `dmarc-uri` values with an optional `!size`: a `mailto:` address that
+///   parses, or an `https:` URI with a public host and a path of unreserved characters and `/`.
+/// - **SPF macros:** the `include`, `exists`, `redirect` and `exp` domain-specs accept the
+///   RFC 7208 section 7.1 macros (`%{i}`, `%{d}`, `%%`, `%_`, `%-`).
 /// - **DKIM** (RFC 6376): only the key tags `v=DKIM1`, `k`, `p` (valid base64), `h`, `s` and `t`.
 ///   The free-text `n` tag is dropped; any other tag hides the whole record.
 ///
@@ -401,13 +407,61 @@ pub fn redact_observed(kind: RecordKind, observed: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// A domain-spec as the shown records allow it: letters, digits, dots, hyphens and underscores.
+/// The length of the macro-expand at the start of `text` (which begins with `%`), if it is one
+/// of RFC 7208 section 7.1: `%%`, `%_`, `%-`, or `%{` letter digits optional-`r` delimiters `}`.
+fn macro_len(text: &str) -> Option<usize> {
+    let rest = text.strip_prefix('%')?;
+    if rest.starts_with(['%', '_', '-']) {
+        return Some(2);
+    }
+    let inner = rest.strip_prefix('{')?;
+    let end = inner.find('}')?;
+    let body = inner[..end].to_ascii_lowercase();
+    let body = body.strip_prefix(['s', 'l', 'o', 'd', 'i', 'p', 'h', 'c', 'r', 't', 'v'])?;
+    let body = body.trim_start_matches(|c: char| c.is_ascii_digit());
+    let body = body.strip_prefix('r').unwrap_or(body);
+    body.chars()
+        .all(|c| matches!(c, '.' | '-' | '+' | ',' | '/' | '_' | '='))
+        .then_some(end + 3)
+}
+
+/// A domain-spec as the shown records allow it: letters, digits, dots, hyphens and underscores,
+/// and the RFC 7208 section 7.1 macros.
 fn is_domain_spec(text: &str) -> bool {
-    !text.is_empty()
-        && text.len() <= 253
-        && text
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    if text.is_empty() || text.len() > 253 {
+        return false;
+    }
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        if c == '%' {
+            match macro_len(rest) {
+                Some(len) => rest = &rest[len..],
+                None => return false,
+            }
+        } else if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            rest = &rest[c.len_utf8()..];
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+/// The index of the first `/` of `text` that is not inside a macro.
+fn cidr_start(text: &str) -> Option<usize> {
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &text[at..];
+        if rest.starts_with('/') {
+            return Some(at);
+        }
+        at += if rest.starts_with('%') {
+            macro_len(rest).unwrap_or(1)
+        } else {
+            1
+        };
+    }
+    None
 }
 
 /// An optional `/n` (and for `a` and `mx` an optional `//n`) dual CIDR length.
@@ -455,7 +509,7 @@ fn spf_term(term: &str) -> Option<String> {
         "a" | "mx" => match argument {
             None => true,
             Some(a) => match a.strip_prefix(':') {
-                Some(rest) => match rest.find('/') {
+                Some(rest) => match cidr_start(rest) {
                     Some(at) => is_domain_spec(&rest[..at]) && is_dual_cidr(&rest[at..]),
                     None => is_domain_spec(rest),
                 },
@@ -485,29 +539,68 @@ fn rebuild_spf(text: &str) -> Option<String> {
     Some(shown.join(" "))
 }
 
-fn is_mailto_list(value: &str) -> bool {
-    !value.is_empty()
-        && value.split(',').all(|item| {
-            let item = item.trim();
-            let (address, size) = match item.split_once('!') {
-                Some((address, size)) => (address, Some(size)),
-                None => (item, None),
+/// The number of a `!size` suffix, with an optional `k`, `m`, `g` or `t` unit, lower-cased.
+fn dmarc_size(size: &str) -> Option<String> {
+    let lower = size.to_ascii_lowercase();
+    let digits = lower.trim_end_matches(['k', 'm', 'g', 't']);
+    (!digits.is_empty()
+        && lower.len() - digits.len() <= 1
+        && digits.len() <= 18
+        && digits.chars().all(|c| c.is_ascii_digit()))
+    .then_some(lower)
+}
+
+/// One `dmarc-uri` (RFC 7489 section 6.2): `mailto:` with an address that parses, or `https:` with
+/// a public host and a path of unreserved characters and `/`. The scheme is lower-cased.
+fn dmarc_uri(uri: &str) -> Option<String> {
+    let (scheme, rest) = uri.split_once(':')?;
+    match scheme.to_ascii_lowercase().as_str() {
+        "mailto" => {
+            let valid = rest.len() <= 254
+                && rest.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
+                })
+                && Email::parse(rest).is_ok();
+            valid.then(|| format!("mailto:{rest}"))
+        }
+        "https" => {
+            let authority_and_path = rest.strip_prefix("//")?;
+            let (host, path) = match authority_and_path.find('/') {
+                Some(at) => authority_and_path.split_at(at),
+                None => (authority_and_path, ""),
             };
-            let address_ok = address.strip_prefix("mailto:").is_some_and(|a| {
-                a.contains('@')
-                    && a.len() <= 254
-                    && a.chars().all(|c| {
-                        c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
-                    })
-            });
-            let size_ok = size.is_none_or(|s| {
-                let digits = s.trim_end_matches(['k', 'm', 'g', 't', 'K', 'M', 'G', 'T']);
-                !digits.is_empty()
-                    && s.len() - digits.len() <= 1
-                    && digits.chars().all(|c| c.is_ascii_digit())
-            });
-            address_ok && size_ok
-        })
+            let host = host.to_ascii_lowercase();
+            let host_ok = host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                && is_public_name(&host);
+            let path_ok = path.len() <= 200
+                && path
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~' | '/'));
+            (host_ok && path_ok).then(|| format!("https://{host}{path}"))
+        }
+        _ => None,
+    }
+}
+
+/// A comma-separated list of `dmarc-uri` values, each with an optional `!size`, rebuilt.
+fn dmarc_uri_list(value: &str) -> Option<String> {
+    let mut shown = Vec::new();
+    for item in value.split(',') {
+        let item = item.trim();
+        let (uri, size) = match item.split_once('!') {
+            Some((uri, size)) => (uri, Some(dmarc_size(size)?)),
+            None => (item, None),
+        };
+        let mut uri = dmarc_uri(uri)?;
+        if let Some(size) = size {
+            uri.push('!');
+            uri.push_str(&size);
+        }
+        shown.push(uri);
+    }
+    Some(shown.join(","))
 }
 
 fn rebuild_dmarc(text: &str) -> Option<String> {
@@ -524,13 +617,19 @@ fn rebuild_dmarc(text: &str) -> Option<String> {
         let (tag, value) = part.split_once('=')?;
         let tag = tag.trim().to_ascii_lowercase();
         let value = value.trim();
+        let mut rebuilt_uris = None;
         let valid = match tag.as_str() {
-            "p" | "sp" => matches!(
+            "p" | "sp" | "np" => matches!(
                 value.to_ascii_lowercase().as_str(),
                 "none" | "quarantine" | "reject"
             ),
-            "rua" | "ruf" => is_mailto_list(value),
+            "rua" | "ruf" => {
+                rebuilt_uris = dmarc_uri_list(value);
+                rebuilt_uris.is_some()
+            }
             "adkim" | "aspf" => matches!(value.to_ascii_lowercase().as_str(), "r" | "s"),
+            "psd" => matches!(value.to_ascii_lowercase().as_str(), "y" | "n" | "u"),
+            "t" => matches!(value.to_ascii_lowercase().as_str(), "y" | "n"),
             "pct" => value.parse::<u8>().is_ok_and(|n| n <= 100),
             "fo" => {
                 !value.is_empty() && value.split(':').all(|o| matches!(o, "0" | "1" | "d" | "s"))
@@ -542,7 +641,12 @@ fn rebuild_dmarc(text: &str) -> Option<String> {
         if !valid {
             return None;
         }
-        let value = if matches!(tag.as_str(), "p" | "sp" | "adkim" | "aspf") {
+        let value = if let Some(uris) = rebuilt_uris {
+            uris
+        } else if matches!(
+            tag.as_str(),
+            "p" | "sp" | "np" | "adkim" | "aspf" | "psd" | "t"
+        ) {
             value.to_ascii_lowercase()
         } else {
             value.to_owned()
@@ -853,12 +957,68 @@ mod tests {
             "10.0.0.1",
             "a..b.com",
             "exämple.com",
+            "secret._corp",
         ] {
             assert!(!is_public_name(bad), "{bad}");
         }
         // The two rules agree on every refused suffix.
         for suffix in NON_PUBLIC_SUFFIXES {
             assert!(!is_public_name(&format!("a.{suffix}")));
+        }
+    }
+
+    #[test]
+    fn dmarc_uris_follow_the_grammar() {
+        let shown = |text: &str| redact_observed(RecordKind::Dmarc, &[text.to_owned()]);
+        assert_eq!(
+            shown(
+                "v=DMARC1; p=none; rua=MAILTO:a@example.com!10M, https://Reports.Example.net/dmarc/v1~x!5k; ruf=mailto:b@example.com"
+            ),
+            [
+                "v=DMARC1; p=none; rua=mailto:a@example.com!10m,https://reports.example.net/dmarc/v1~x!5k; ruf=mailto:b@example.com"
+            ]
+        );
+        assert_eq!(
+            shown("v=DMARC1; p=reject; np=Quarantine; psd=U; t=Y"),
+            ["v=DMARC1; p=reject; np=quarantine; psd=u; t=y"]
+        );
+        for bad in [
+            "v=DMARC1; p=none; rua=mailto:SECRET@",
+            "v=DMARC1; p=none; rua=mailto:a@example.com!",
+            "v=DMARC1; p=none; rua=mailto:a@example.com!10x",
+            "v=DMARC1; p=none; rua=mailto:a@example.com,",
+            "v=DMARC1; p=none; rua=https://reports.corp/x",
+            "v=DMARC1; p=none; rua=https://reports.example.net/x?token=secret",
+            "v=DMARC1; p=none; rua=https://user@reports.example.net/x",
+            "v=DMARC1; p=none; rua=http://reports.example.net/x",
+            "v=DMARC1; p=none; psd=x",
+            "v=DMARC1; p=none; t=u",
+            "v=DMARC1; p=none; np=other",
+        ] {
+            assert_eq!(shown(bad), [OTHER_TXT], "{bad}");
+        }
+    }
+
+    #[test]
+    fn spf_domain_specs_accept_macros() {
+        let shown = |text: &str| redact_observed(RecordKind::Spf, &[text.to_owned()]);
+        for good in [
+            "v=spf1 exists:%{i}._spf.example.com -all",
+            "v=spf1 include:%{d2r.}.example.com exp=explain.%{d}",
+            "v=spf1 redirect=_spf.%{d}.example.com",
+            "v=spf1 exists:%{l1r+-}%%%_%-.example.com",
+            "v=spf1 a:%{d/}.example.com/24",
+        ] {
+            assert_eq!(shown(good), [good], "{good}");
+        }
+        for bad in [
+            "v=spf1 exists:%{x}.example.com",
+            "v=spf1 exists:%{i",
+            "v=spf1 exists:%{i;}.example.com",
+            "v=spf1 exists:%x.example.com",
+            "v=spf1 exists:%{}.example.com",
+        ] {
+            assert_eq!(shown(bad), [OTHER_TXT], "{bad}");
         }
     }
 
