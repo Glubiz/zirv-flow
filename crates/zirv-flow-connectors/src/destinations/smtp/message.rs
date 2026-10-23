@@ -40,8 +40,14 @@ const RESERVED: [&str; 17] = [
     "resent-from",
 ];
 
+/// Headers whose value is a list of links: a non-ASCII byte in one is percent-encoded, never sent
+/// as an RFC 2047 encoded word, which a mail client would not read as part of the URI.
+const LINK_HEADERS: [&str; 2] = ["list-unsubscribe", "list-unsubscribe-post"];
+
 /// The longest header line RFC 5322 allows, without the line break.
 const MAX_LINE: usize = 998;
+/// The length a folded header line stays within where white space allows (RFC 5322 2.1.1).
+const FOLD_AT: usize = 78;
 /// The most bytes of text one encoded word carries (75 characters in all).
 const WORD_BYTES: usize = 45;
 /// The longest quoted-printable line, before the soft break.
@@ -131,9 +137,15 @@ pub(crate) fn build(
 
     let boundary = boundary_of(idempotency_key);
     let mut headers: Vec<(String, String)> = vec![
-        ("From".into(), mailbox(from_name, &from_address)),
+        (
+            "From".into(),
+            fold("From", &mailbox(from_name, &from_address)),
+        ),
         ("To".into(), format!("<{to}>")),
-        ("Subject".into(), unstructured(&single_line(&subject))),
+        (
+            "Subject".into(),
+            fold("Subject", &unstructured(&single_line(&subject))),
+        ),
         (
             "Date".into(),
             now.format("%a, %d %b %Y %H:%M:%S +0000").to_string(),
@@ -152,6 +164,7 @@ pub(crate) fn build(
     }
     if let Some(extra) = payload.get("headers") {
         let extra = extra.as_object().ok_or_else(|| malformed("headers"))?;
+        let mut chosen: Vec<(String, String)> = Vec::new();
         for (name, value) in extra {
             let value = value.as_str().ok_or_else(|| malformed("headers"))?;
             if !valid_header_name(name) {
@@ -163,8 +176,17 @@ pub(crate) fn build(
             if value.chars().any(|ch| ch != '\t' && ch.is_control()) {
                 return Err(malformed("headers"));
             }
-            headers.push((name.clone(), unstructured(value)));
+            let value = if LINK_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+                percent_encoded(value)
+            } else {
+                unstructured(value)
+            };
+            // Names are case-insensitive and the signature covers one instance of a name: a name
+            // given twice, in any case, keeps the last one given.
+            chosen.retain(|(earlier, _)| !earlier.eq_ignore_ascii_case(name));
+            chosen.push((name.clone(), value));
         }
+        headers.extend(chosen);
     }
     headers.push((IDEMPOTENCY_HEADER.into(), idempotency_key.to_owned()));
     headers.push((
@@ -267,6 +289,52 @@ fn unstructured(value: &str) -> String {
     } else {
         encoded_words(value)
     }
+}
+
+/// `value` with every non-ASCII byte as `%XX` (the UTF-8 octets), for a header that holds URIs.
+fn percent_encoded(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii() {
+            out.push(ch);
+        } else {
+            let mut buffer = [0u8; 4];
+            for byte in ch.encode_utf8(&mut buffer).bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+/// An unstructured ASCII `value` of the header `name`, folded at white space so a line stays within
+/// 78 characters where the white space allows; a word longer than that stays whole on a line of its
+/// own, and the 998 limit is checked by the caller. A value that holds a fold already (encoded
+/// words) is left as it is.
+fn fold(name: &str, value: &str) -> String {
+    if value.contains("\r\n") || !value.is_ascii() {
+        return value.to_owned();
+    }
+    let mut out = String::with_capacity(value.len() + 8);
+    let mut width = name.len() + 2;
+    let mut on_line = false;
+    let mut rest = value;
+    while !rest.is_empty() {
+        let gap = rest.len() - rest.trim_start_matches(' ').len();
+        let after_gap = &rest[gap..];
+        let word = after_gap.find(' ').unwrap_or(after_gap.len());
+        let (gap_text, word_text) = (&rest[..gap], &after_gap[..word]);
+        if on_line && !word_text.is_empty() && width + gap + word > FOLD_AT {
+            out.push_str("\r\n");
+            width = 0;
+        }
+        out.push_str(gap_text);
+        out.push_str(word_text);
+        width += gap + word;
+        on_line = on_line || !word_text.is_empty();
+        rest = &after_gap[word..];
+    }
+    out
 }
 
 /// `text` as `=?UTF-8?B?...?=` words of at most 75 characters, folded between words.
@@ -470,6 +538,104 @@ mod tests {
             .flat_map(|line| line.strip_suffix(b"=\r").unwrap_or(line).to_vec())
             .collect();
         assert_eq!(joined.len(), 200);
+    }
+
+    #[test]
+    fn a_non_ascii_link_is_percent_encoded_never_an_encoded_word_and_a_line_break_is_still_refused()
+    {
+        let mut body = payload();
+        body["headers"] = json!({
+            "List-Unsubscribe": "<https://links.example/u/ø?name=Zoë>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+            "X-Name": "Zoë",
+        });
+
+        let built = build(&body, "ada@example.net", "msg-1", now()).unwrap();
+
+        assert_eq!(
+            header(&built, "List-Unsubscribe"),
+            Some("<https://links.example/u/%C3%B8?name=Zo%C3%AB>")
+        );
+        assert!(
+            header(&built, "X-Name").unwrap().starts_with("=?UTF-8?B?"),
+            "other headers still use encoded words"
+        );
+        body["headers"] = json!({"list-unsubscribe": "<https://a.example/é>\r\nBcc: x@y.z"});
+        assert!(build(&body, "ada@example.net", "msg-1", now()).is_err());
+    }
+
+    #[test]
+    fn a_header_name_given_twice_in_any_case_keeps_one_and_the_owned_ones_cannot_be_set() {
+        let mut body = payload();
+        body["headers"] = json!({
+            "List-Unsubscribe": "<https://a.example/1>",
+            "list-unsubscribe": "<https://a.example/2>",
+            "X-Campaign": "one",
+            "x-campaign": "two",
+            "MESSAGE-id": "<forged@example.net>",
+            "X-ZIRV-Idempotency-Key": "forged",
+            "subject": "forged",
+        });
+
+        let built = build(&body, "ada@example.net", "msg-1", now()).unwrap();
+
+        for name in ["List-Unsubscribe", "X-Campaign", "Message-ID", "Subject"] {
+            let count = built
+                .headers
+                .iter()
+                .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+                .count();
+            assert_eq!(count, 1, "{name}");
+        }
+        assert_eq!(
+            built
+                .headers
+                .iter()
+                .filter(|(candidate, _)| candidate.eq_ignore_ascii_case(IDEMPOTENCY_HEADER))
+                .count(),
+            1
+        );
+        assert_eq!(
+            header(&built, "List-Unsubscribe"),
+            Some("<https://a.example/2>"),
+            "the last given wins"
+        );
+        assert_eq!(header(&built, "X-Campaign"), Some("two"));
+        assert_eq!(header(&built, "Message-ID"), Some("<msg-1@example.com>"));
+        assert_eq!(header(&built, "Subject"), Some("Hello"));
+        assert_eq!(header(&built, IDEMPOTENCY_HEADER), Some("msg-1"));
+    }
+
+    #[test]
+    fn a_long_ascii_subject_and_display_name_fold_at_white_space_within_78_characters() {
+        let subject = "Spring offers for every one of our most loyal customers, picked for you this week only";
+        let mut body = payload();
+        body["subject"] = json!(subject);
+        body["from"]["name"] =
+            json!("The Newsletter Team of the Example Company Limited, Northern Region");
+
+        let built = build(&body, "ada@example.net", "msg-1", now()).unwrap();
+
+        for name in ["Subject", "From"] {
+            let value = header(&built, name).unwrap();
+            assert!(value.contains("\r\n "), "{name} folds: {value}");
+            for (index, line) in value.split("\r\n").enumerate() {
+                let width = if index == 0 { name.len() + 2 } else { 0 } + line.len();
+                assert!(width <= FOLD_AT, "{name}: {width} {line:?}");
+                assert!(!line.trim().is_empty());
+            }
+        }
+        assert_eq!(
+            header(&built, "Subject").unwrap().replace("\r\n", ""),
+            subject
+        );
+        // A short value, and one word longer than a line, are not touched or broken.
+        assert_eq!(fold("Subject", "short one"), "short one");
+        let long = "x".repeat(90);
+        assert_eq!(
+            fold("Subject", &format!("a {long} b")),
+            format!("a\r\n {long}\r\n b")
+        );
     }
 
     #[test]

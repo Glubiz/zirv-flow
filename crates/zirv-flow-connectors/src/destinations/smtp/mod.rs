@@ -817,6 +817,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_percent_encoded_link_a_folded_subject_and_one_instance_of_a_header_verify_under_dkim()
+     {
+        let sink = SmtpSink::start(SinkOptions::default()).await;
+        let mut body = payload();
+        body["subject"] = json!(
+            "A subject of one hundred characters that needs folding so that no line runs past the limit.."
+        );
+        body["headers"] = json!({
+            "List-Unsubscribe": "<https://links.example/u/ø>",
+            "list-unsubscribe": "<https://links.example/u/æ>",
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        });
+
+        plain_send(&sink, &body, "msg-5", Some(&signer("example.com")))
+            .await
+            .unwrap();
+
+        let data = data_of(&sink, 0);
+        assert_eq!(verify(&data, &dkim_record_text(&key().public_key)), Ok(()));
+        let text = String::from_utf8_lossy(&data).into_owned();
+        let head = text.split("\r\n\r\n").next().unwrap();
+        // The subject's lines: from its header to the next one.
+        let subject: Vec<&str> = head
+            .split("\r\n")
+            .skip_while(|line| !line.starts_with("Subject:"))
+            .enumerate()
+            .take_while(|(index, line)| *index == 0 || line.starts_with(' '))
+            .map(|(_, line)| line)
+            .collect();
+        assert!(subject.len() > 1, "the subject folds: {subject:?}");
+        assert!(subject.iter().all(|line| line.len() <= 78), "{subject:?}");
+        let unsubscribe = head
+            .split("\r\n")
+            .filter(|line| line.to_ascii_lowercase().starts_with("list-unsubscribe:"))
+            .count();
+        assert_eq!(unsubscribe, 1, "one instance of the header");
+        assert_eq!(
+            header_of(&data, "List-Unsubscribe").as_deref(),
+            Some("<https://links.example/u/%C3%A6>")
+        );
+    }
+
+    #[tokio::test]
     async fn a_retried_send_reuses_the_message_id_and_the_idempotency_key() {
         let sink = SmtpSink::start(SinkOptions::default()).await;
         let signer = signer("example.com");
