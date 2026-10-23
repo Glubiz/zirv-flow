@@ -346,25 +346,21 @@ pub(crate) async fn create_credential(
 ) -> Result<WorkspaceCredential, ApiError> {
     let name = check_name(&request.name)?;
     let (schema, stored_schema) = schema_of_request(request)?;
-    let mut problems_found = Vec::new();
-    if let Err(issues) = schema.validate_fields(&request.fields, true) {
-        problems_found.extend(issues.into_iter().map(|issue| ("fields", issue)));
+    let mut found = Vec::new();
+    let checks = [
+        ("fields", schema.validate_fields(&request.fields, true)),
+        ("secret", schema.validate_secrets(&request.secret, true)),
+    ];
+    for (group, result) in checks {
+        for issue in result.err().into_iter().flatten() {
+            found.push((
+                format!("{group}.{}", issue.field),
+                issue.code.message().to_owned(),
+            ));
+        }
     }
-    if let Err(issues) = schema.validate_secrets(&request.secret, true) {
-        problems_found.extend(issues.into_iter().map(|issue| ("secret", issue)));
-    }
-    if !problems_found.is_empty() {
-        return Err(problems(
-            problems_found
-                .into_iter()
-                .map(|(group, issue)| {
-                    (
-                        format!("{group}.{}", issue.field),
-                        issue.code.message().to_owned(),
-                    )
-                })
-                .collect(),
-        ));
+    if !found.is_empty() {
+        return Err(problems(found));
     }
     let keyring = keyring(state)?;
     let live = zirv_flow_store::list_credentials(&state.pool, workspace, false).await?;

@@ -22,12 +22,13 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{DiscoveredStream, Source, Stream};
 
 use super::streams::{StreamBody, bodies, checked_mapping};
-use super::{credential, kind_unavailable, registry, tokens};
+use super::{kind_unavailable, registry, tokens};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::imports::MappingBody;
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::resolve;
 
 /// The longest a test or a discovery may take.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -79,7 +80,7 @@ pub(crate) async fn prepare(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let driver = registry().get(&source.kind).ok_or_else(kind_unavailable)?;
-    let mut credential = credential::load(state, workspace, source.credential_id).await?;
+    let mut credential = resolve::load(state, workspace, source.credential_id).await?;
     let context = network_context(
         state,
         driver.spec().kind,

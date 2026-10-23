@@ -5,9 +5,8 @@
 use std::collections::BTreeMap;
 
 use axum::http::StatusCode;
-use uuid::Uuid;
+#[cfg(test)]
 use zirv_flow_connectors::sources::Credential;
-use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::{Keyring, SecretBytes, SecretString};
 
 use crate::AppState;
@@ -27,7 +26,6 @@ pub(crate) fn to_plaintext(
 }
 
 #[cfg(test)]
-#[cfg(test)]
 fn from_plaintext(bytes: &SecretBytes) -> Result<Credential, ApiError> {
     Credential::from_json(bytes).map_err(|_| ApiError::internal())
 }
@@ -40,16 +38,6 @@ pub(crate) fn keyring(state: &AppState) -> Result<&std::sync::Arc<Keyring>, ApiE
             "stored credentials are unavailable until the master key is configured",
         )
     })
-}
-
-/// Opens the workspace credential of a source. No source has one when `credential` is `None`,
-/// and the connector then gets an empty credential.
-pub(super) async fn load(
-    state: &AppState,
-    workspace: WorkspaceId,
-    credential: Option<Uuid>,
-) -> Result<Credential, ApiError> {
-    crate::workspace_credentials::resolve::load(state, workspace, credential).await
 }
 
 #[cfg(test)]

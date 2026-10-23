@@ -15,11 +15,12 @@ use zirv_flow_connectors::destinations::{DestinationContext, DestinationError};
 use zirv_flow_connectors::http::{HttpError, HttpLimits};
 use zirv_flow_core::WorkspaceId;
 
-use super::{archived, credential, kind_unavailable, registry};
+use super::{archived, kind_unavailable, registry};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::resolve;
 
 /// The longest a check may take.
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,7 +84,7 @@ pub(crate) async fn check_destination(
     let driver = registry()
         .get(&destination.kind)
         .ok_or_else(kind_unavailable)?;
-    let credential = credential::load(state, workspace, destination.credential_id).await?;
+    let credential = resolve::load(state, workspace, destination.credential_id).await?;
     let network = DestinationContext::new(
         state.egress_policy().clone(),
         HttpLimits::default(),
