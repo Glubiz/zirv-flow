@@ -7,6 +7,10 @@
 //! back to `unverified` the first time a check finds one that is not; the store appends a decision
 //! whenever the status changes.
 //!
+//! A record whose name is an alias to a non-public name is recorded as a `mismatch` with the fixed
+//! note `PRIVATE_ALIAS_NOTE` and nothing of the target; the domain is then unverified like any
+//! other record that is not `ok`.
+//!
 //! The matching rules are `zirv_flow_core::sending::check_record`. A name server that does not
 //! answer is not a finding: the job fails and is retried with the worker's backoff, and the
 //! domain keeps its last status. A DNS outage therefore never unverifies a domain; only an answer
@@ -16,7 +20,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 use zirv_flow_connectors::dns::{DnsError, DnsResolver};
-use zirv_flow_core::sending::{RecordKind, check_record, record_host, redact_observed};
+use zirv_flow_core::sending::{
+    PRIVATE_ALIAS_NOTE, RecordKind, RecordStatus, check_record, record_host, redact_observed,
+};
 use zirv_flow_store::{
     DomainRecord, RecordFinding, SENDING_DOMAIN_VERIFY_KIND, SendingDomain, find_sending_domain,
     list_domain_records, record_domain_check,
@@ -39,9 +45,21 @@ async fn lookup(
         return Ok(None);
     };
     let host = record_host(kind, &domain.selector, &domain.domain);
-    let observed = tokio::time::timeout(LOOKUP_DEADLINE, resolver.lookup_txt(&host))
+    let answer = tokio::time::timeout(LOOKUP_DEADLINE, resolver.lookup_txt(&host))
         .await
-        .map_err(|_| DnsError::Unavailable)??;
+        .map_err(|_| DnsError::Unavailable)?;
+    let observed = match answer {
+        Ok(observed) => observed,
+        // An answer, not an outage: the record is there but cannot be followed.
+        Err(DnsError::PrivateAlias) => {
+            return Ok(Some(RecordFinding {
+                kind,
+                status: RecordStatus::Mismatch,
+                observed: vec![PRIVATE_ALIAS_NOTE.to_owned()],
+            }));
+        }
+        Err(error) => return Err(error),
+    };
     Ok(Some(RecordFinding {
         kind,
         status: check_record(kind, &record.expected_text, &observed),
@@ -256,21 +274,30 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_dmarc_name_that_is_an_alias_into_a_private_zone_stores_nothing_from_it(
+    async fn a_dmarc_name_that_is_an_alias_into_a_private_zone_is_a_mismatch_with_a_fixed_note(
         pool: PgPool,
     ) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let ws = workspace(&pool).await;
         let id = plant_domain(&pool, ws, "example.com").await.unwrap();
+        let [dkim, spf, _] = expected(&pool, ws, id).await;
         let dns = FixtureResolver::new();
+        dns.set("zirv._domainkey.example.com", &[&dkim]);
+        dns.set("example.com", &[&spf]);
+        dns.set("_dmarc.example.com", &["v=DMARC1; p=none"]);
+        run(&pool, &dns, ws, id).await.0.unwrap();
+        assert_eq!(domain(&pool, ws, id).await.status, "verified");
+
         dns.set_cname("_dmarc.example.com", "dmarc.secret.corp");
         dns.set("dmarc.secret.corp", &["v=DMARC1; p=none"]);
-
         run(&pool, &dns, ws, id).await.0.unwrap();
 
         let records = list_domain_records(&pool, ws, id).await.unwrap();
-        assert_eq!(records[2].status, "missing");
-        assert!(records[2].observed_text.is_empty());
+        assert_eq!(records[2].status, "mismatch");
+        assert_eq!(records[2].observed_text, [PRIVATE_ALIAS_NOTE]);
+        assert!(!records[2].observed_text.concat().contains("secret"));
+        assert_eq!(records[0].status, "ok");
+        assert_eq!(domain(&pool, ws, id).await.status, "unverified");
     }
 
     #[sqlx::test]
