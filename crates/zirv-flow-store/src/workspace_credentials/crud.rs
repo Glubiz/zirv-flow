@@ -368,6 +368,27 @@ pub(crate) mod testing {
         id
     }
 
+    /// Waits until some other backend of this database is blocked on a lock, polling for up to
+    /// five seconds, and fails with a clear message when none ever is, so a test knows a call
+    /// really waited for the transaction it holds open.
+    pub(crate) async fn wait_until_a_backend_waits_on_a_lock(pool: &PgPool) {
+        for _ in 0..100 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                   AND pid <> pg_backend_pid()",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("no backend ever waited on a lock: the call did not block on the held transaction");
+    }
+
     /// A live `api_key` credential named `key`, sealed under a throwaway key.
     pub(crate) async fn credential(
         pool: &PgPool,
@@ -424,7 +445,7 @@ mod tests {
     use sqlx::PgPool;
     use zirv_flow_core::{Keyring, MasterKey, SecretPurpose, seal, secret_aad};
 
-    use super::testing::{credential, secret, workspace};
+    use super::testing::{credential, secret, wait_until_a_backend_waits_on_a_lock, workspace};
     use super::*;
     use crate::{NewSource, begin, commit, create_source, secrets};
 
@@ -740,7 +761,7 @@ mod tests {
             let mut tx = begin(&archiver_pool).await.unwrap();
             archive_credential(&mut tx, ws, id).await.unwrap()
         });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        wait_until_a_backend_waits_on_a_lock(&pool).await;
         assert!(
             !archiver.is_finished(),
             "the archive waits for the linking transaction"
@@ -774,6 +795,49 @@ mod tests {
         assert!(kept.archived_at.is_none());
     }
 
+    /// One rotation as the API makes it: lock the credential, seal and insert a new secret, swap
+    /// it in and delete the old one. `holding` tells the test the lock is taken and then waits for
+    /// `release` before swapping, so a second rotation provably queues behind it.
+    async fn rotate_once(
+        pool: PgPool,
+        keys: std::sync::Arc<Keyring>,
+        ws: WorkspaceId,
+        id: Uuid,
+        round: u8,
+        gate: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    ) {
+        let mut tx = begin(&pool).await.unwrap();
+        find_credential_for_update(&mut tx, ws, id)
+            .await
+            .unwrap()
+            .unwrap();
+        if let Some((holding, release)) = gate {
+            holding.send(()).unwrap();
+            release.await.unwrap();
+        }
+        let new_id = SecretId::new();
+        let purpose = SecretPurpose::WorkspaceCredential;
+        let plaintext = format!("{{\"api_key\":\"round-{round}\"}}");
+        let sealed = seal(
+            &keys,
+            plaintext.as_bytes(),
+            &secret_aad(ws, new_id, purpose),
+        );
+        secrets::insert_unchecked(&mut *tx, ws, purpose, new_id, &sealed)
+            .await
+            .unwrap();
+        let old =
+            swap_credential_secret(&mut tx, ws, id, new_id, &json!({"api_key": ""}), None, None)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(secrets::delete(&mut *tx, ws, old).await.unwrap());
+        commit(tx).await.unwrap();
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn two_concurrent_rotations_leave_one_secret_row_and_a_credential_that_opens(
@@ -782,46 +846,34 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let keys = std::sync::Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
         let before = credential(&pool, ws, "mail").await;
-        let mut rotations = Vec::new();
-        for round in 0..2_u8 {
-            let (pool, keys, id) = (pool.clone(), keys.clone(), before.id);
-            rotations.push(tokio::spawn(async move {
-                let mut tx = begin(&pool).await.unwrap();
-                find_credential_for_update(&mut tx, ws, id)
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let new_id = SecretId::new();
-                let purpose = SecretPurpose::WorkspaceCredential;
-                let plaintext = format!("{{\"api_key\":\"round-{round}\"}}");
-                let sealed = seal(
-                    &keys,
-                    plaintext.as_bytes(),
-                    &secret_aad(ws, new_id, purpose),
-                );
-                secrets::insert_unchecked(&mut *tx, ws, purpose, new_id, &sealed)
-                    .await
-                    .unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let old = swap_credential_secret(
-                    &mut tx,
-                    ws,
-                    id,
-                    new_id,
-                    &json!({"api_key": ""}),
-                    None,
-                    None,
-                )
-                .await
-                .unwrap()
-                .unwrap();
-                assert!(secrets::delete(&mut *tx, ws, old).await.unwrap());
-                commit(tx).await.unwrap();
-            }));
-        }
-        for rotation in rotations {
-            rotation.await.unwrap();
-        }
+        let (holding_tx, holding_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let first = tokio::spawn(rotate_once(
+            pool.clone(),
+            keys.clone(),
+            ws,
+            before.id,
+            0,
+            Some((holding_tx, release_rx)),
+        ));
+        holding_rx.await.unwrap();
+        let second = tokio::spawn(rotate_once(
+            pool.clone(),
+            keys.clone(),
+            ws,
+            before.id,
+            1,
+            None,
+        ));
+        wait_until_a_backend_waits_on_a_lock(&pool).await;
+        assert!(
+            !second.is_finished(),
+            "the second rotation waits for the first"
+        );
+        release_tx.send(()).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
 
         let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM encrypted_secrets")
             .fetch_one(&pool)
@@ -832,7 +884,10 @@ mod tests {
             .await
             .unwrap();
         let text = String::from_utf8(opened.secret.expose().to_vec()).unwrap();
-        assert!(text.contains("round-"), "{text}");
+        assert!(
+            text.contains("round-1"),
+            "the second rotation won last: {text}"
+        );
     }
 
     #[sqlx::test]
