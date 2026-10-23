@@ -310,14 +310,17 @@ pub(crate) async fn publish_policy(
             return Err(ApiError::consent_policy_revision_mismatch());
         }
         None => {
-            // Nothing was ever saved: publishing makes the default policy explicit.
-            zirv_flow_store::save_consent_policy_draft(
+            // Nothing was ever saved: publishing makes the default policy explicit. A first draft
+            // saved since the lock found no row is not overwritten: it is a revision mismatch.
+            zirv_flow_store::save_consent_policy_draft_at(
                 &mut tx,
                 workspace,
                 &default_rules(),
                 published_by,
+                0,
             )
-            .await?;
+            .await?
+            .ok_or_else(ApiError::consent_policy_revision_mismatch)?;
             zirv_flow_store::lock_consent_policy(&mut tx, workspace)
                 .await?
                 .ok_or_else(ApiError::internal)?
