@@ -178,7 +178,7 @@ pub struct Message {
     pub completed_at: Option<OffsetDateTime>,
 }
 
-const COLUMNS: &str = "id, workspace_id, person_id, enrollment_id, flow_id, flow_version, \
+pub(crate) const COLUMNS: &str = "id, workspace_id, person_id, enrollment_id, flow_id, flow_version, \
     node_id, template_id, template_version, destination_id, sender_identity_id, category, \
     channel, topic_id, dimensions, status, reason, deciding_rule, gate_results, test, attempts, \
     created_at, completed_at";

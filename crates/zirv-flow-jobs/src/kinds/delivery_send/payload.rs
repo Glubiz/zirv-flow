@@ -100,7 +100,8 @@ impl SendJob {
             .iter()
             .map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
             .collect::<Option<Dimensions>>()?;
-        OffsetDateTime::parse(text("queued_at")?, &Rfc3339).ok()?;
+        let queued_at = OffsetDateTime::parse(text("queued_at")?, &Rfc3339).ok()?;
+        let deferrals = u32::try_from(payload.get("deferrals")?.as_u64()?).ok()?;
         Some(Self {
             workspace: text("workspace_id")?.parse().ok()?,
             message: id("message_id")?,
@@ -114,9 +115,11 @@ impl SendJob {
             destination: id("destination_id")?,
             topic,
             dimensions,
-            deferrals: u32::try_from(payload.get("deferrals")?.as_u64()?).ok()?,
+            deferrals,
             first_wait: match payload.get("first_wait") {
-                None | Some(Value::Null) => None,
+                // A payload queued again before the first wait was stored: it waited since it was
+                // queued.
+                None | Some(Value::Null) => (deferrals > 0).then_some(queued_at),
                 Some(value) => Some(OffsetDateTime::parse(value.as_str()?, &Rfc3339).ok()?),
             },
             attempt_base: i32::try_from(payload.get("attempt_base")?.as_i64()?).ok()?,

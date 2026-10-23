@@ -62,6 +62,13 @@ CREATE INDEX messages_template_idx ON messages (workspace_id, template_id, creat
 CREATE INDEX jobs_delivery_send_idx ON jobs ((payload ->> 'destination_id'), run_at)
     WHERE kind = 'delivery.send' AND state = 'ready';
 
+-- The leader's sweep for open messages whose job is gone finds a message's live job by the id in
+-- its payload (a deferral copy carries it too), and the open messages by status.
+CREATE INDEX jobs_delivery_send_message_idx ON jobs ((payload ->> 'message_id'))
+    WHERE kind = 'delivery.send' AND state IN ('ready', 'running');
+CREATE INDEX messages_open_idx ON messages (created_at, id)
+    WHERE status IN ('pending', 'sending');
+
 -- Suppression scope (OQ-19). A row is per workspace (the default, every existing row) or
 -- organization-wide, which has no workspace: a hard bounce means the address does not exist for
 -- any brand. The primary key (workspace, hash) cannot key a row with no workspace, so it is

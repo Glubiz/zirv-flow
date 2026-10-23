@@ -360,7 +360,7 @@ pub async fn list_suppressions<'e>(
 ) -> Result<(Vec<Suppression>, bool), StoreError> {
     let mut query = QueryBuilder::new(
         "SELECT id, identifier_hash, kind, reason, source, note, created_at, created_by \
-         FROM suppressions WHERE workspace_id = ",
+         FROM suppressions WHERE scope = 'workspace' AND workspace_id = ",
     );
     query.push_bind(workspace.as_uuid());
     if let Some(reason) = reason {

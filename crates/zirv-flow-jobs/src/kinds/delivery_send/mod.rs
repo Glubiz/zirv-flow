@@ -56,11 +56,12 @@ use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::TraceContext;
 use zirv_flow_core::consent::Dimensions;
 use zirv_flow_store::{
-    Admission, Destination, FlowState, GateRecord, MessageStatus, NewJob, NewMessage, PgConnection,
-    PgPool, SEND_JOB_KIND, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject, begin, commit,
-    document_sender, find_destination, find_flow, find_template, find_template_version,
-    insert_message, lock_webhook_person, mark_message_sending, message_status,
-    read_template_field_catalog, read_webhook_subject, record_send_outcome, throttle_bucket,
+    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, MessageStatus, NewJob,
+    NewMessage, PgConnection, PgPool, SEND_JOB_KIND, SendOutcome, SubjectKind, WebhookPerson,
+    WebhookSubject, document_sender, find_destination, find_flow, find_template,
+    find_template_version, insert_message, lock_webhook_person, mark_message_sending,
+    message_status, read_template_field_catalog, read_webhook_subject, record_send_outcome,
+    throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -72,10 +73,6 @@ use crate::delivery::{self, Verdict};
 use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct DeliverySend;
-
-/// The reason of a message that may have gone out and cannot be delivered again, because the
-/// template, sender, address or enrollment it needs is gone.
-const REDELIVERY_UNAVAILABLE: &str = "redelivery_unavailable";
 
 /// How long a send waits for a rate-limit token before it fails as `rate_limited`: a destination
 /// that grants none for this long is not coming back for this message.
@@ -164,63 +161,11 @@ impl JobKind for DeliverySend {
         // A message that was being delivered when an earlier run failed may have gone out: it is
         // delivered again under the same key, without judging it by the gates once more.
         let resuming = recorded == Some(MessageStatus::Sending);
-        let result = match decide(ctx, &job, &payload, now, resuming).await {
-            Ok(Step::Over) => Ok(()),
-            Ok(Step::Finished(trail)) => finish(ctx, &job, trail, now).await,
-            Err(error) => Err(error),
-        };
-        match result {
-            Err(error) => give_up(ctx, &job, error, now).await,
-            done => done,
+        match decide(ctx, &job, &payload, now, resuming).await? {
+            Step::Over => Ok(()),
+            Step::Finished(trail) => finish(ctx, &job, trail, now).await,
         }
     }
-}
-
-/// An error ended a run. Until the last attempt it is the worker's to retry. On the last attempt
-/// the job goes dead, and the row its first run wrote must not stay open for ever: the message
-/// ends `failed: internal_error`, with its event and decision, in a transaction of its own (the
-/// transaction of the job may be unusable after a database error). The reason is a fixed code,
-/// never the error's text. If that write fails too, the original error stands.
-async fn give_up(
-    ctx: &mut JobContext<'_>,
-    job: &SendJob,
-    error: JobError,
-    now: OffsetDateTime,
-) -> Result<(), JobError> {
-    if ctx.attempts() < ctx.max_attempts() {
-        return Err(error);
-    }
-    match end_unfinished(ctx, job, now).await {
-        Ok(true) => Ok(()),
-        Ok(false) | Err(_) => Err(error),
-    }
-}
-
-/// Ends a message left open as `failed: internal_error`. False when it has no open row.
-async fn end_unfinished(
-    ctx: &JobContext<'_>,
-    job: &SendJob,
-    now: OffsetDateTime,
-) -> Result<bool, JobError> {
-    let Some(pool) = ctx.pool() else {
-        return Ok(false);
-    };
-    let open = message_status(pool, job.workspace, job.message).await?;
-    if open.is_none_or(MessageStatus::has_ended) {
-        return Ok(false);
-    }
-    let mut trail = Trail::new(job.attempt_base + ctx.attempts() - 1);
-    trail
-        .gates
-        .push(GateRecord::blocked("job", "internal_error"));
-    trail.status = MessageStatus::Failed;
-    trail.reason = Some("internal_error");
-    let mut tx = begin(pool).await?;
-    let trace = ctx.trace().clone();
-    let job_ref = (ctx.job_id(), ctx.attempts());
-    write_end(&mut tx, &trace, job_ref, job, trail, now).await?;
-    commit(tx).await?;
-    Ok(true)
 }
 
 /// Runs the gates and, when they let the message through, delivers it.
@@ -289,7 +234,7 @@ async fn decide(
     // The sender.
     let sender = match gates::sender(&pool, workspace, document_sender(&version.document)).await? {
         Ok(sender) => sender,
-        Err(_) if resuming => return Ok(trail.fail("sender", REDELIVERY_UNAVAILABLE)),
+        Err(_) if resuming => return Ok(trail.fail("sender", DELIVERY_UNCONFIRMED)),
         Err(blocked) => return Ok(trail.skip(blocked)),
     };
     trail.sender = Some(sender.identity_id);
@@ -298,7 +243,7 @@ async fn decide(
     // Gate 2: the address.
     let address = match gates::address(ctx.conn(), workspace, person).await? {
         Ok(address) => address,
-        Err(_) if resuming => return Ok(trail.fail("address", REDELIVERY_UNAVAILABLE)),
+        Err(_) if resuming => return Ok(trail.fail("address", DELIVERY_UNCONFIRMED)),
         Err(blocked) => return Ok(trail.skip(blocked)),
     };
     trail.pass(GateRecord::passed("address"));
@@ -328,7 +273,13 @@ async fn decide(
         .first_wait
         .is_some_and(|first| now - first > MAX_RATE_WAIT)
     {
-        return Ok(trail.fail("rate_limit", "rate_limited"));
+        // A resumed message may have gone out on an earlier call: it is not `rate_limited`.
+        let reason = if resuming {
+            DELIVERY_UNCONFIRMED
+        } else {
+            "rate_limited"
+        };
+        return Ok(trail.fail("rate_limit", reason));
     }
     let Some(destination) = find_destination(ctx.conn(), workspace, job.destination)
         .await?
@@ -454,7 +405,7 @@ async fn stopped(
     let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
     if recorded == Some(MessageStatus::Sending) {
         // It may have gone out already: it is not skipped, which would say it was not sent.
-        return Ok(trail.fail("enrollment", REDELIVERY_UNAVAILABLE));
+        return Ok(trail.fail("enrollment", DELIVERY_UNCONFIRMED));
     }
     if recorded == Some(MessageStatus::Pending) {
         return Ok(trail.skip(Blocked::new("enrollment", reason)));
@@ -609,7 +560,7 @@ async fn write_end(
         &SendOutcome {
             message,
             trace,
-            job: job_ref,
+            job: Some(job_ref),
         },
     )
     .await?;
@@ -638,7 +589,7 @@ mod tests {
         ClaimedJob, Clock, ConsentChange, EnrollRequest, Enrolled, ManualClock, NewDestination,
         NewFlow, NewSuppression, NewTemplate, Occurrence, ProfileRecord,
         add_organization_suppression, add_suppression, create_destination, create_template,
-        lock_template, publish_template, set_consent,
+        end_orphaned_messages, lock_template, publish_template, set_consent,
     };
 
     use super::*;
@@ -1700,7 +1651,7 @@ mod tests {
         let message = env.message(queued.message).await;
         assert_eq!(
             (message.status.as_str(), message.reason.as_deref()),
-            ("failed", Some("redelivery_unavailable"))
+            ("failed", Some("delivery_unconfirmed"))
         );
         assert_eq!(
             fake_ledger_calls(&env.ledger).len(),
@@ -1819,29 +1770,34 @@ mod tests {
         );
     }
 
+    /// Makes every `delivery.send` job dead, as the reaper does after its last lease expiry.
+    async fn bury_the_jobs(env: &Env) {
+        sqlx::query("UPDATE jobs SET state = 'dead' WHERE kind = 'delivery.send'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_pending_message_is_ended_as_an_internal_error_when_the_last_attempt_fails(
-        pool: PgPool,
-    ) {
+    async fn the_sweep_ends_a_pending_message_whose_job_is_dead_as_an_internal_error(pool: PgPool) {
         let mut env = Env::new(pool, "one").await;
         env.render = Some(start_pool("serve", "").await);
         env.no_key = true;
         let template = env.plain_template("transactional").await;
         let person = env.person("ada@example.com").await;
         env.subscribe(person).await;
-        let retried = env.queue(person, template, 2).await;
+        let queued = env.queue(person, template, 1).await;
+        env.attempt().await.unwrap_err();
+        bury_the_jobs(&env).await;
+        assert_eq!(env.message(queued.message).await.status, "pending");
 
-        // The first attempt fails after the row was written: the worker will try again.
-        let error = env.attempt().await.unwrap_err();
-        assert_eq!(error.message(), "the worker has no identifier key");
-        assert_eq!(env.message(retried.message).await.status, "pending");
-        assert_eq!(env.events("email.failed").await.len(), 0);
+        let ended = end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
 
-        // The last attempt fails the same way: the message ends, and the job is done.
-        env.attempt().await.unwrap();
-
-        let message = env.message(retried.message).await;
+        assert_eq!(ended, [queued.message]);
+        let message = env.message(queued.message).await;
         assert_eq!(
             (message.status.as_str(), message.reason.as_deref()),
             ("failed", Some("internal_error"))
@@ -1850,10 +1806,6 @@ mod tests {
         let events = env.events("email.failed").await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["reason"], "internal_error");
-        assert!(
-            !events[0].to_string().contains("identifier"),
-            "no error text is stored"
-        );
         assert_eq!(
             env.decisions(&["message.send"]).await.last().unwrap(),
             &(
@@ -1863,6 +1815,172 @@ mod tests {
             )
         );
         assert!(env.sent().is_empty());
+        let again = end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+        assert!(again.is_empty(), "an ended message is not ended twice");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_sending_message_whose_job_is_dead_as_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        bury_the_jobs(&env).await;
+
+        let ended = end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        assert_eq!(ended, [queued.message]);
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_leaves_a_message_open_while_its_job_is_ready_or_running(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.no_key = true;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap_err();
+        let now = env.clock.now();
+
+        // Ready, waiting for its retry.
+        assert!(
+            end_orphaned_messages(&env.pool, now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Running with a lease that has expired: live until the reaper buries it.
+        sqlx::query(
+            "UPDATE jobs SET state = 'running', lease_token = gen_random_uuid(), \
+                lease_expires_at = now() - interval '1 hour' WHERE kind = 'delivery.send'",
+        )
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        assert!(
+            end_orphaned_messages(&env.pool, now)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(env.message(queued.message).await.status, "pending");
+        assert_eq!(env.events("email.failed").await.len(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_leaves_a_message_open_while_a_deferral_copy_is_ready(pool: PgPool) {
+        let mut env = Env::with(pool, "one", json!({"mode": "ok"}), 1, 1).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let first = env.person("first@example.com").await;
+        let second = env.person("second@example.com").await;
+        assert_eq!(env.send(first, template).await.status, "sent");
+        let queued = env.queue(second, template, 5).await;
+        env.attempt().await.unwrap();
+        let copy: Value =
+            sqlx::query_scalar("SELECT payload FROM jobs WHERE kind = 'delivery.send'")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(copy["deferrals"], 1);
+
+        let ended = end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        assert!(ended.is_empty());
+        assert_eq!(env.message(queued.message).await.status, "pending");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resumed_message_past_the_rate_wait_ends_delivery_unconfirmed_not_rate_limited(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        let long_ago = (env.clock.now() - Span::hours(7))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        sqlx::query(
+            "UPDATE jobs SET run_at = now(), \
+                payload = jsonb_set(payload, '{first_wait}', to_jsonb($1::text)) \
+             WHERE kind = 'delivery.send'",
+        )
+        .bind(long_ago)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(fake_ledger_calls(&env.ledger).len(), 1, "no second call");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_payload_queued_again_before_first_wait_existed_counts_its_wait_from_queued_at(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 5).await;
+        // One deferral already, no `first_wait`, queued seven hours ago.
+        sqlx::query(
+            "UPDATE jobs SET payload = jsonb_set(payload, '{deferrals}', '1'::jsonb) \
+             WHERE kind = 'delivery.send'",
+        )
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        age_queued(&env, 7).await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("rate_limited"))
+        );
+        let copies: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'delivery.send'")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(copies, 0, "no fresh deferral");
     }
 
     /// The `queued_at` of the job in the queue, moved to `hours` before the clock.

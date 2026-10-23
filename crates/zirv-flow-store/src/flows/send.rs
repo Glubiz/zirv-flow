@@ -8,14 +8,19 @@
 //! Nothing here carries an address: the event holds ids and codes, and so do the decisions.
 
 use serde_json::json;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
+use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::TraceContext;
+use zirv_flow_core::consent::Dimensions;
 use zirv_flow_core::events::{EMAIL_FAILED_EVENT, EMAIL_SENT_EVENT, EMAIL_SKIPPED_EVENT};
+use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::arrivals::{Arrival, enqueue_arrivals};
-use crate::messages::{MessageStatus, NewMessage, insert_message};
+use super::delivery::{WebhookPerson, lock_webhook_person};
+use super::runtime::find_enrollment;
+use crate::messages::{COLUMNS, GateRecord, Message, MessageStatus, NewMessage, insert_message};
 use crate::{GraphPoint, NewDecision, StoreError, append_decisions};
+use crate::{begin, commit};
 
 /// The kind of the job that sends one message.
 pub const SEND_JOB_KIND: &str = "delivery.send";
@@ -49,8 +54,9 @@ pub struct SendOutcome<'a> {
     pub message: NewMessage<'a>,
     /// The trace of the enrollment.
     pub trace: &'a TraceContext,
-    /// The job and attempt that decided it.
-    pub job: (Uuid, i32),
+    /// The job and attempt that decided it; none for a message the leader ended because its job
+    /// was gone.
+    pub job: Option<(Uuid, i32)>,
 }
 
 /// Ends the message: writes its outcome over the row the job started, and its event and its
@@ -127,7 +133,7 @@ pub async fn record_send_outcome(
             outcome: if gate.passed { "passed" } else { "blocked" },
             reason: Some(gate.gate),
             subject_ids: subject_ids(gate.detail),
-            job: Some(outcome.job),
+            job: outcome.job,
         })
         .collect();
     decisions.push(NewDecision {
@@ -138,7 +144,7 @@ pub async fn record_send_outcome(
         outcome: result,
         reason: message.reason,
         subject_ids: subject_ids(None),
-        job: Some(outcome.job),
+        job: outcome.job,
     });
     append_decisions(&mut *connection, &decisions).await?;
     enqueue_arrivals(
@@ -154,6 +160,137 @@ pub async fn record_send_outcome(
     Ok(Some(event))
 }
 
+/// Why a message the leader ended had no job left to end it: it never reached the destination.
+pub const INTERNAL_ERROR: &str = "internal_error";
+/// Why a `sending` message ended without its job: the first call may have been accepted.
+pub const DELIVERY_UNCONFIRMED: &str = "delivery_unconfirmed";
+
+/// How many open messages one sweep ends.
+const SWEEP_BATCH: i64 = 100;
+
+/// A message the sweep found open.
+#[derive(sqlx::FromRow)]
+struct OpenMessage {
+    id: Uuid,
+    workspace_id: Uuid,
+    person_id: Uuid,
+    enrollment_id: Uuid,
+}
+
+/// The `messages` row that is open and has no live `delivery.send` job. A running job counts as
+/// live, even with an expired lease, until the reaper buries it, so the sweep never races a
+/// retry. The job is found by the message id in its payload, which a deferral copy carries.
+const NO_LIVE_JOB: &str = "m.status IN ('pending', 'sending') AND NOT EXISTS ( \
+    SELECT 1 FROM jobs j WHERE j.kind = 'delivery.send' AND j.state IN ('ready', 'running') \
+    AND j.payload ->> 'message_id' = m.id::text)";
+
+/// Ends the open messages whose `delivery.send` job is dead or gone: a `pending` one `failed:
+/// internal_error`, a `sending` one `failed: delivery_unconfirmed`, each with its event and
+/// decisions through [`record_send_outcome`]. Returns the ids it ended, at most one batch.
+///
+/// Each message is ended in a transaction of its own: the person is locked first and then the
+/// message row, the order of the job's outcome write, and both the open status and the absence of
+/// a live job are checked again under the locks.
+pub async fn end_orphaned_messages(
+    pool: &PgPool,
+    now: OffsetDateTime,
+) -> Result<Vec<Uuid>, StoreError> {
+    let found: Vec<OpenMessage> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT m.id, m.workspace_id, m.person_id, m.enrollment_id FROM messages m \
+         WHERE {NO_LIVE_JOB} ORDER BY m.created_at, m.id LIMIT $1"
+    )))
+    .bind(SWEEP_BATCH)
+    .fetch_all(pool)
+    .await
+    .map_err(StoreError::query)?;
+    let mut ended = Vec::new();
+    for open in found {
+        if end_orphan(pool, &open, now).await? {
+            ended.push(open.id);
+        }
+    }
+    Ok(ended)
+}
+
+async fn end_orphan(
+    pool: &PgPool,
+    open: &OpenMessage,
+    now: OffsetDateTime,
+) -> Result<bool, StoreError> {
+    let workspace = WorkspaceId::from_uuid(open.workspace_id);
+    let mut tx = begin(pool).await?;
+    let held =
+        match lock_webhook_person(&mut tx, workspace, open.enrollment_id, open.person_id).await? {
+            WebhookPerson::Held => true,
+            WebhookPerson::Moved => false,
+            WebhookPerson::Gone => return Ok(false),
+        };
+    let locked: Option<Message> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM messages m WHERE m.workspace_id = $1 AND m.id = $2 AND {NO_LIVE_JOB} \
+         FOR UPDATE OF m"
+    )))
+    .bind(open.workspace_id)
+    .bind(open.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let Some(stored) = locked else {
+        return Ok(false);
+    };
+    let Some(enrollment) = find_enrollment(&mut tx, workspace, open.enrollment_id).await? else {
+        return Ok(false);
+    };
+    let reason = if stored.status == "sending" {
+        DELIVERY_UNCONFIRMED
+    } else {
+        INTERNAL_ERROR
+    };
+    let dimensions: Dimensions =
+        serde_json::from_value(stored.dimensions.clone()).unwrap_or_default();
+    let gates = [GateRecord::blocked("job", reason)];
+    let message = NewMessage {
+        id: stored.id,
+        workspace,
+        person: stored.person_id,
+        enrollment: stored.enrollment_id,
+        flow: stored.flow_id,
+        flow_version: stored.flow_version,
+        node: &stored.node_id,
+        template: stored.template_id,
+        template_version: stored.template_version,
+        destination: stored.destination_id,
+        sender_identity: stored.sender_identity_id,
+        category: stored.category.as_deref(),
+        topic: stored.topic_id,
+        dimensions: &dimensions,
+        status: MessageStatus::Failed,
+        reason: Some(reason),
+        deciding_rule: match stored.deciding_rule.as_deref() {
+            Some("recorded_consent") => Some("recorded_consent"),
+            Some("topic_default") => Some("topic_default"),
+            Some("none") => Some("none"),
+            _ => None,
+        },
+        gates: &gates,
+        attempts: stored.attempts,
+        now,
+    };
+    if held {
+        record_send_outcome(
+            &mut tx,
+            &SendOutcome {
+                message,
+                trace: &enrollment.trace,
+                job: None,
+            },
+        )
+        .await?;
+    } else {
+        insert_message(&mut *tx, &message).await?;
+    }
+    commit(tx).await?;
+    Ok(true)
+}
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -238,7 +375,7 @@ mod tests {
         let outcome = SendOutcome {
             message: new,
             trace: &trace,
-            job: (Uuid::from_u128(9), 1),
+            job: Some((Uuid::from_u128(9), 1)),
         };
         let mut connection = pool.acquire().await.unwrap();
 

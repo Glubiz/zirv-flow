@@ -54,7 +54,10 @@ pub use runtime::{
     count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps, register_wait,
     save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
-pub use send::{SEND_JOB_KIND, SendOutcome, record_send_outcome};
+pub use send::{
+    DELIVERY_UNCONFIRMED, INTERNAL_ERROR, SEND_JOB_KIND, SendOutcome, end_orphaned_messages,
+    record_send_outcome,
+};
 pub use signing::{
     Rotation, SigningKey, SigningKeys, create_signing_key, live_signing_keys, rotate_signing_key,
 };
