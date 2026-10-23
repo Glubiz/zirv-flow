@@ -410,19 +410,19 @@ async fn dropped(
     job: &SendJob,
     reason: &'static str,
 ) -> Result<Step, JobError> {
-    ctx.record_decision(
-        "message.send",
-        "dropped",
-        Some(reason),
-        vec![
-            ("message", job.message),
-            ("enrollment", job.enrollment),
-            ("template", job.template),
-            ("destination", job.destination),
-        ],
-    )
-    .await?;
+    ctx.record_decision("message.send", "dropped", Some(reason), decision_ids(job))
+        .await?;
     Ok(Step::Over)
+}
+
+/// The ids a send decision names, and nothing else.
+fn decision_ids(job: &SendJob) -> Vec<(&'static str, Uuid)> {
+    vec![
+        ("message", job.message),
+        ("enrollment", job.enrollment),
+        ("template", job.template),
+        ("destination", job.destination),
+    ]
 }
 
 /// No token yet: this job ends and a copy of it runs at the instant the bucket will hold one. The
@@ -448,12 +448,7 @@ async fn defer(
         "message.send",
         "deferred",
         Some("rate_limit"),
-        vec![
-            ("message", job.message),
-            ("enrollment", job.enrollment),
-            ("template", job.template),
-            ("destination", job.destination),
-        ],
+        decision_ids(job),
     )
     .await?;
     Ok(Step::Over)

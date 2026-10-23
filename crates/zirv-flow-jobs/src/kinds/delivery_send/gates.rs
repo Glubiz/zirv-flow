@@ -88,10 +88,9 @@ pub(super) async fn address(
     workspace: WorkspaceId,
     person: Uuid,
 ) -> Result<Result<String, Blocked>, JobError> {
-    match read_send_address(connection, workspace, person).await? {
-        Some(address) => Ok(Ok(address)),
-        None => Ok(Err(Blocked::new("address", NO_ADDRESS))),
-    }
+    Ok(read_send_address(connection, workspace, person)
+        .await?
+        .ok_or_else(|| Blocked::new("address", NO_ADDRESS)))
 }
 
 /// Consent for the message (gate 3), by the recorded consent and the topic's policy.
