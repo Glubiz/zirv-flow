@@ -59,6 +59,23 @@ mod tests {
     }
 
     #[test]
+    fn smtp_is_registered_in_every_build_and_signs() {
+        let registry = Registry::built_in();
+
+        let smtp = registry.get("smtp").unwrap().spec();
+
+        assert!(smtp.capabilities.signs_dkim);
+        assert!(smtp.capabilities.channels.contains(&"email"));
+        assert!(
+            Registry::built_in()
+                .specs()
+                .iter()
+                .filter(|spec| spec.kind != "smtp")
+                .all(|spec| !spec.capabilities.signs_dkim)
+        );
+    }
+
+    #[test]
     fn an_unknown_kind_is_not_found() {
         assert!(Registry::built_in().get("no-such-kind").is_none());
     }
@@ -74,14 +91,14 @@ mod tests {
 
     #[cfg(not(feature = "test-support"))]
     #[test]
-    fn only_the_webhook_is_registered_in_a_production_build() {
+    fn only_the_webhook_and_smtp_are_registered_in_a_production_build() {
         let kinds: Vec<_> = Registry::built_in()
             .specs()
             .iter()
             .map(|spec| spec.kind)
             .collect();
 
-        assert_eq!(kinds, ["webhook"]);
+        assert_eq!(kinds, ["webhook", "smtp"]);
         assert!(Registry::built_in().get("fake").is_none());
     }
 
@@ -91,6 +108,7 @@ mod tests {
 
         assert_eq!(production.matches("fake::Fake").count(), 1);
         assert_eq!(production.matches("webhook::Webhook").count(), 1);
+        assert_eq!(production.matches("smtp::Smtp").count(), 1);
     }
 
     #[test]
@@ -99,10 +117,12 @@ mod tests {
         for module in [
             "context",
             "destination",
+            "dkim",
             "error",
             "fake",
             "registry",
             "retry_after",
+            "smtp",
             "spec",
             "validate",
             "webhook",

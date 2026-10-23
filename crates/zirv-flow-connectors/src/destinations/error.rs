@@ -28,10 +28,28 @@ pub enum DestinationError {
     },
     /// The remote system asked for fewer requests (HTTP 429), optionally for how long.
     RateLimited { retry_after: Option<Duration> },
+    /// A mail server refused the message or asked to try later, as a classified verdict
+    /// (architecture 10.2, OQ-12). Only a mail destination returns it.
+    Refused(Refusal),
     /// The type does not do this (an erase call on a type without the capability).
     Unsupported,
     /// Any other failure. The text must not contain a credential, an address or a URL.
     Other(String),
+}
+
+/// What a mail server's refusal means for the message (OQ-12). The reply text is not kept: it can
+/// name the recipient.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Refusal {
+    /// A permanent failure of the recipient's address, at `RCPT` or `DATA`: the message bounces
+    /// hard and the address is suppressed.
+    HardBounce,
+    /// A permanent failure that is not about the recipient (authentication, relay policy, content,
+    /// size): the message fails and nobody is suppressed.
+    Rejected,
+    /// A temporary failure (a 4xx reply): try again; when the attempts run out the message is a
+    /// soft bounce, with no suppression.
+    Deferred,
 }
 
 /// What the delivery pipeline does with a failed call.
@@ -59,6 +77,8 @@ impl DestinationError {
             | Self::Unsupported
             | Self::Egress(HttpError::EgressDenied { .. }) => Disposition::Terminal,
             Self::Egress(_) | Self::Unreachable | Self::Other(_) => Disposition::Retryable,
+            Self::Refused(Refusal::Deferred) => Disposition::Retryable,
+            Self::Refused(Refusal::HardBounce | Refusal::Rejected) => Disposition::Terminal,
             Self::RateLimited { retry_after } => Disposition::Throttled {
                 retry_after: *retry_after,
             },
@@ -82,6 +102,15 @@ impl fmt::Display for DestinationError {
                 write!(f, "the destination answered with status {status}")
             }
             Self::RateLimited { .. } => f.write_str("the destination asked for a slower rate"),
+            Self::Refused(Refusal::HardBounce) => {
+                f.write_str("the mail server refused the recipient for good")
+            }
+            Self::Refused(Refusal::Rejected) => {
+                f.write_str("the mail server refused the message for good")
+            }
+            Self::Refused(Refusal::Deferred) => {
+                f.write_str("the mail server asked to try again later")
+            }
             Self::Unsupported => f.write_str("the destination type does not support this"),
             Self::Other(reason) => f.write_str(reason),
         }
@@ -178,6 +207,26 @@ mod tests {
         assert_eq!(
             answered.to_string(),
             "the destination answered with status 503"
+        );
+    }
+
+    #[test]
+    fn a_mail_servers_refusal_is_terminal_unless_it_is_temporary_and_reads_without_the_reply() {
+        assert_eq!(
+            DestinationError::Refused(Refusal::HardBounce).disposition(),
+            Disposition::Terminal
+        );
+        assert_eq!(
+            DestinationError::Refused(Refusal::Rejected).disposition(),
+            Disposition::Terminal
+        );
+        assert_eq!(
+            DestinationError::Refused(Refusal::Deferred).disposition(),
+            Disposition::Retryable
+        );
+        assert_eq!(
+            DestinationError::Refused(Refusal::HardBounce).to_string(),
+            "the mail server refused the recipient for good"
         );
     }
 

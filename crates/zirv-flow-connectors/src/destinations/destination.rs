@@ -6,6 +6,7 @@ use std::pin::Pin;
 use serde_json::Value;
 
 use super::context::DestinationContext;
+use super::dkim::DkimSigner;
 use super::error::DestinationError;
 use super::spec::DestinationSpec;
 use crate::sources::Credential;
@@ -21,6 +22,9 @@ pub struct Outbound<'a> {
     pub to: &'a str,
     /// The rendered content, in the shape the type's channel expects.
     pub payload: &'a Value,
+    /// The sender domain's DKIM key, for a type whose capabilities say it signs; none for the
+    /// others, and none when the sender has no key. The destination never decrypts anything.
+    pub dkim: Option<&'a DkimSigner>,
 }
 
 /// A delivery the remote system accepted.
@@ -164,6 +168,7 @@ mod tests {
                 batching: false,
                 rate_limit: false,
                 erase: false,
+                signs_dkim: false,
             },
             config_check: None,
         };
@@ -209,6 +214,7 @@ mod tests {
             channel: "email",
             to: "a@example.test",
             payload: &payload,
+            dkim: None,
         };
 
         assert_eq!(destination.spec().kind, "empty");

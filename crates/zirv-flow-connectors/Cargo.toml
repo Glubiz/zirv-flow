@@ -16,6 +16,7 @@ hickory-resolver.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
 rand.workspace = true
+ring.workspace = true
 rskafka.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
@@ -27,15 +28,20 @@ sha2.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 url.workspace = true
 webpki-roots.workspace = true
 zeroize.workspace = true
 zirv-flow-core.workspace = true
+# Only for the SMTP sink behind `test-support`: its certificate authority.
+rcgen = { workspace = true, optional = true }
+# Only for the DKIM signature check behind `test-support`.
+rsa = { workspace = true, optional = true }
 
 [features]
 # The in-memory fake source, registered for tests of this crate and of crates that use it.
-test-support = []
+test-support = ["dep:rcgen", "dep:rsa"]
 
 [dev-dependencies]
 axum.workspace = true
@@ -43,5 +49,5 @@ futures-util = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus.workspace = true
 rcgen.workspace = true
 tracing-subscriber.workspace = true
-tokio-rustls.workspace = true
+rsa.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
