@@ -303,7 +303,6 @@ mod tests {
                 rate: Some(20),
                 burst: Some(30),
                 credential_id: Some(credential.id),
-                ..DestinationUpdate::default()
             },
         )
         .await
