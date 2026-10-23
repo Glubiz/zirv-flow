@@ -33,12 +33,19 @@ pub fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
         issues.push(Issue::new(code::UNSUPPORTED_SCHEMA, "/schema"));
         return issues;
     }
+    if doc.is_ambiguous() {
+        issues.push(Issue::new(code::AMBIGUOUS_CONTENT, "/"));
+        return issues;
+    }
     match doc.channel {
         Channel::Email | Channel::Webhook => {}
         Channel::Sms | Channel::Push | Channel::InApp => {
             issues.push(Issue::new(code::UNSUPPORTED_CHANNEL, "/channel"));
             return issues;
         }
+    }
+    if doc.channel == Channel::Email && doc.mode == Mode::Blocks && doc.blocks.is_some() {
+        return crate::content::blocks::validate(doc, catalog);
     }
     if doc.mode != Mode::Code {
         issues.push(Issue::new(code::UNSUPPORTED_MODE, "/mode"));
@@ -60,28 +67,28 @@ pub fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
 }
 
 /// The outcome of checking one template field.
-struct Checked {
+pub(crate) struct Checked {
     /// Whether the field added no issue.
-    clean: bool,
+    pub(crate) clean: bool,
     /// The field rendered against the sample context; `None` when the render failed.
-    sample: Option<String>,
+    pub(crate) sample: Option<String>,
     /// Why the sample render failed, when it did.
-    failure: Option<String>,
+    pub(crate) failure: Option<String>,
 }
 
 /// What a field is rendered as in the sample render, and the output limit that applies to it.
 #[derive(Clone, Copy)]
-struct FieldKind {
+pub(crate) struct FieldKind {
     /// The template name; `*.html` is autoescaped.
     name: &'static str,
     limit: usize,
 }
 
-const SUBJECT: FieldKind = FieldKind {
+pub(crate) const SUBJECT: FieldKind = FieldKind {
     name: "subject.txt",
     limit: MAX_SUBJECT_BYTES,
 };
-const HTML: FieldKind = FieldKind {
+pub(crate) const HTML: FieldKind = FieldKind {
     name: "html.html",
     limit: MAX_HTML_BYTES,
 };
@@ -99,7 +106,7 @@ const BODY: FieldKind = FieldKind {
 };
 
 /// The context of the sample render, as the template engine reads it.
-fn sample_context(catalog: &FieldCatalog) -> Value {
+pub(crate) fn sample_context(catalog: &FieldCatalog) -> Value {
     Value::from_serialize(RenderContext::sample(catalog))
 }
 
@@ -351,7 +358,7 @@ fn walk_body(
 /// Parse one template, check the merge fields it reads, and render it against the sample
 /// context. A filter, test or function the sandbox does not have only fails at render time, so
 /// the sample render is what finds it.
-fn check_template(
+pub(crate) fn check_template(
     env: &Environment<'static>,
     catalog: &FieldCatalog,
     sample: &Value,
@@ -935,6 +942,6 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 23);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 37);
     }
 }

@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "h1",
+              "level": 2,
+              "text": "Above"
+            },
+            {
+              "type": "divider",
+              "id": "d1"
+            },
+            {
+              "type": "heading",
+              "id": "h2",
+              "level": 2,
+              "text": "Between"
+            },
+            {
+              "type": "divider",
+              "id": "d2",
+              "color": "#ff0000"
+            },
+            {
+              "type": "heading",
+              "id": "h3",
+              "level": 2,
+              "text": "Below"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

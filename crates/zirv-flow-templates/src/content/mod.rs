@@ -3,10 +3,10 @@
 //!
 //! A content type is one module in this directory and one line in [`REGISTRY`]. Validation and
 //! the choice of render call dispatch through it, so the store and the API carry a document's
-//! content type opaquely and a new type changes neither. `blocks` (#238) is
-//! not registered yet; a document of an unregistered type is refused with
-//! [`ContentError::UnsupportedDocument`], a name with [`ContentError::Unregistered`].
+//! content type opaquely and a new type changes neither. A document of an unregistered type is
+//! refused with [`ContentError::UnsupportedDocument`], a name with [`ContentError::Unregistered`].
 
+pub(crate) mod blocks;
 mod html;
 pub(crate) mod mjml;
 mod webhook;
@@ -43,7 +43,8 @@ pub trait TemplateContent: Sync {
 }
 
 /// Every registered content type. Adding one is a module and a line here.
-const REGISTRY: [&dyn TemplateContent; 3] = [&html::Html, &mjml::Mjml, &webhook::Webhook];
+const REGISTRY: [&dyn TemplateContent; 4] =
+    [&html::Html, &mjml::Mjml, &blocks::Blocks, &webhook::Webhook];
 
 /// A document or a name that no registered content type owns.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -159,8 +160,8 @@ mod tests {
     }
 
     #[test]
-    fn html_mjml_and_webhook_are_the_only_registered_types() {
-        assert_eq!(content_type_ids(), ["html", "mjml", "webhook"]);
+    fn html_mjml_blocks_and_webhook_are_the_only_registered_types() {
+        assert_eq!(content_type_ids(), ["html", "mjml", "blocks", "webhook"]);
         assert_eq!(content_type("html").unwrap().channel(), Channel::Email);
         assert_eq!(
             content_type("webhook").unwrap().render_kind(),
@@ -170,7 +171,7 @@ mod tests {
 
     #[test]
     fn an_unregistered_name_is_a_typed_error() {
-        for id in ["blocks", "", "HTML", "MJML"] {
+        for id in ["snippet", "", "HTML", "MJML", "Blocks"] {
             assert_eq!(
                 content_type(id).err(),
                 Some(ContentError::Unregistered(id.to_owned())),
