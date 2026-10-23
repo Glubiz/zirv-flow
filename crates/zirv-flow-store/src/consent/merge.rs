@@ -102,6 +102,7 @@ pub(crate) async fn move_on_merge(
                 workspace,
                 survivor,
                 &StateWrite {
+                    change_id: Uuid::now_v7(),
                     channel,
                     topic: row.topic_id,
                     dimensions: &dimensions_of(&row.dimensions),
