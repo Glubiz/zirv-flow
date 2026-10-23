@@ -55,7 +55,8 @@ impl FixtureResolver {
     }
 
     /// Makes `name` an alias of `target`: a lookup of `name` follows the chain and answers with
-    /// what `target` holds, unless a target in the chain is not a public name.
+    /// what `target` holds, unless a target in the chain is not a public name (then the lookup
+    /// fails with `DnsError::PrivateAlias`).
     pub fn set_cname(&self, name: &str, target: &str) {
         self.zone().cnames.insert(key(name), key(target));
     }
@@ -93,10 +94,9 @@ impl DnsResolver for FixtureResolver {
                     None => break,
                 }
             }
-            // As the system resolver does: a chain that leaves the public namespace voids the
-            // answer.
+            // As the system resolver does: a chain that leaves the public namespace is refused.
             if !chain_is_public(&targets) {
-                return Ok(Vec::new());
+                return Err(DnsError::PrivateAlias);
             }
             if zone.failing.contains(&name) {
                 return Err(DnsError::Unavailable);
@@ -182,7 +182,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_alias_chain_into_a_private_zone_is_refused_and_returns_no_records() {
+    async fn a_private_alias_is_reported_whatever_its_target_holds_or_does() {
+        let resolver = FixtureResolver::new();
+        resolver.set_cname("nx.example.com", "gone.secret.corp");
+        resolver.set_cname("failing.example.com", "down.secret.corp");
+        resolver.fail("down.secret.corp");
+        resolver.set_cname("public-nx.example.com", "gone.provider.example.net");
+
+        for name in ["nx.example.com", "failing.example.com"] {
+            assert_eq!(
+                resolver.lookup_txt(name).await,
+                Err(DnsError::PrivateAlias),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            resolver.lookup_txt("public-nx.example.com").await,
+            Ok(Vec::new())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_alias_chain_into_a_private_zone_is_refused_as_a_private_alias() {
         let resolver = FixtureResolver::new();
         resolver.set_cname("_dmarc.attacker.example.com", "hop.provider.example.net");
         resolver.set_cname("hop.provider.example.net", "secret.corp");
@@ -191,8 +212,9 @@ mod tests {
         resolver.set("x.internal", &["v=spf1 -all"]);
 
         for name in ["_dmarc.attacker.example.com", "direct.example.com"] {
-            assert!(
-                resolver.lookup_txt(name).await.unwrap().is_empty(),
+            assert_eq!(
+                resolver.lookup_txt(name).await,
+                Err(DnsError::PrivateAlias),
                 "{name}"
             );
         }
