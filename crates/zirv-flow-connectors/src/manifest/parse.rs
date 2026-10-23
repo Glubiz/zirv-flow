@@ -8,13 +8,14 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 use url::Url;
+use zirv_flow_core::credentials::{CredentialKind, CredentialSchema};
 use zirv_flow_core::mapping::{Header, Mapping, Target, TraitCatalog, TraitState, validate_paths};
 use zirv_flow_core::people::TraitType;
 
 use super::issue::{Issue, MAX_ISSUES, child, code, index};
 use super::model::{
-    Auth, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation, Manifest,
-    PaginationSpec, RateLimitSpec, StreamSpec,
+    Auth, CredentialSpec, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation,
+    Manifest, PaginationSpec, RateLimitSpec, StreamSpec,
 };
 use crate::runtime::ClientAuth;
 use crate::sources::{FieldType, url_problem_https};
@@ -330,11 +331,11 @@ fn manifest(walk: &mut Walk, value: &Value) -> Option<Manifest> {
         Some(_) => walk.add(code::INVALID_TYPE, obj.at("version")),
     }
     let base_url = base_url(walk, &mut obj);
-    let auth = match obj.take("auth") {
+    let (auth, credential) = match obj.take("auth") {
         Some(value) => auth(walk, value, obj.at("auth")),
         None => {
             walk.missing(&obj, "auth");
-            None
+            (None, None)
         }
     };
     let rate_limit = obj
@@ -355,6 +356,7 @@ fn manifest(walk: &mut Walk, value: &Value) -> Option<Manifest> {
     Some(Manifest {
         base_url: base_url?,
         auth: auth?,
+        credential,
         rate_limit,
         headers,
         streams,
@@ -365,8 +367,10 @@ fn base_url(walk: &mut Walk, obj: &mut Obj<'_>) -> Option<Url> {
     walk.url(obj, "base_url", false)
 }
 
-fn auth(walk: &mut Walk, value: &Value, path: String) -> Option<Auth> {
-    let mut obj = walk.object(value, path)?;
+fn auth(walk: &mut Walk, value: &Value, path: String) -> (Option<Auth>, Option<CredentialSpec>) {
+    let Some(mut obj) = walk.object(value, path) else {
+        return (None, None);
+    };
     let kind = walk.choice(
         &mut obj,
         "type",
@@ -380,7 +384,14 @@ fn auth(walk: &mut Walk, value: &Value, path: String) -> Option<Auth> {
             "oauth2_authorization_code",
         ],
     );
-    let auth = match kind? {
+    let Some(kind) = kind else {
+        return (None, None);
+    };
+    let auth_path = obj.path.clone();
+    let credential = obj
+        .take("credential")
+        .and_then(|value| credential_spec(walk, value, obj.at("credential")));
+    let auth = match kind {
         "none" => Some(Auth::None),
         "basic" => Some(Auth::Basic),
         "bearer" => Some(Auth::Bearer),
@@ -441,7 +452,99 @@ fn auth(walk: &mut Walk, value: &Value, path: String) -> Option<Auth> {
         }
     };
     walk.finish(obj);
-    auth
+    if let (Some(auth), Some(spec)) = (&auth, &credential) {
+        let schema = spec.schema();
+        let optional: &[&str] = match auth {
+            Auth::OAuth2AuthorizationCode { .. } => &["client_secret"],
+            _ => &[],
+        };
+        let reads = super::credential_fields_of(auth);
+        if reads
+            .iter()
+            .any(|name| !optional.contains(name) && schema.field(name).is_none())
+        {
+            walk.add(
+                code::CREDENTIAL_FIELD_MISSING,
+                child(&auth_path, "credential"),
+            );
+        }
+    }
+    if let (Some(auth), Some(spec)) = (&auth, &credential) {
+        let schema = spec.schema();
+        let exposed = super::credential_fields_of(auth).iter().any(|name| {
+            SECRET_READS.contains(name) && schema.field(name).is_some_and(|field| !field.secret)
+        });
+        if exposed {
+            walk.add(
+                code::CREDENTIAL_FIELD_NOT_SECRET,
+                child(&auth_path, "credential"),
+            );
+        }
+    }
+    (auth, credential)
+}
+
+/// The credential fields an auth type reads that hold a secret and so must be sealed.
+const SECRET_READS: &[&str] = &["api_key", "password", "token", "client_secret"];
+
+/// `auth.credential`: `{"kind": "<built-in kind>"}` or `{"fields": [...]}`, one of the two.
+fn credential_spec(walk: &mut Walk, value: &Value, path: String) -> Option<CredentialSpec> {
+    let mut obj = walk.object(value, path)?;
+    let kind = obj.take("kind");
+    let fields = obj.take("fields");
+    let spec = match (kind, fields) {
+        (Some(Value::String(name)), None) => match CredentialKind::parse(name) {
+            Some(kind) => Some(CredentialSpec::Kind(kind)),
+            None => {
+                walk.add(code::INVALID_VALUE, obj.at("kind"));
+                None
+            }
+        },
+        (Some(_), None) => {
+            walk.add(code::INVALID_TYPE, obj.at("kind"));
+            None
+        }
+        (None, Some(fields)) => {
+            let parsed: Result<Vec<_>, _> = fields
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .map(|item| serde_json::from_value(item.clone()))
+                        .collect()
+                })
+                .unwrap_or_else(|| Ok(Vec::new()));
+            match (fields.is_array(), parsed) {
+                (true, Ok(fields)) => {
+                    let schema = CredentialSchema { fields };
+                    if schema.check().is_ok() {
+                        Some(CredentialSpec::Schema(schema))
+                    } else {
+                        walk.add(code::INVALID_CREDENTIAL_SCHEMA, obj.at("fields"));
+                        None
+                    }
+                }
+                (false, _) => {
+                    walk.add(code::INVALID_TYPE, obj.at("fields"));
+                    None
+                }
+                (true, Err(_)) => {
+                    walk.add(code::INVALID_CREDENTIAL_SCHEMA, obj.at("fields"));
+                    None
+                }
+            }
+        }
+        (Some(_), Some(_)) => {
+            walk.add(code::INVALID_VALUE, obj.at("fields"));
+            None
+        }
+        (None, None) => {
+            walk.missing(&obj, "kind");
+            None
+        }
+    };
+    walk.finish(obj);
+    spec
 }
 
 fn rate_limit(walk: &mut Walk, value: &Value, path: String) -> Option<RateLimitSpec> {
@@ -1853,5 +1956,152 @@ mod tests {
             json!("deleted")
         );
         assert!(stream.mapping.is_some());
+    }
+
+    #[test]
+    fn a_manifest_names_a_built_in_credential_kind_or_declares_its_own_fields() {
+        use zirv_flow_core::credentials::CredentialKind;
+
+        let named = validate(&with(|v| {
+            v["auth"] = json!({"type": "basic", "credential": {"kind": "basic"}});
+        }))
+        .unwrap();
+        assert_eq!(
+            named.credential,
+            Some(CredentialSpec::Kind(CredentialKind::Basic))
+        );
+
+        let declared = validate(&with(|v| {
+            v["auth"] = json!({"type": "bearer", "credential": {"fields": [
+                {"key": "token", "label": "Token", "type": "string", "required": true, "secret": true},
+                {"key": "region", "label": "Region", "type": "enum", "options": ["eu", "us"]}
+            ]}});
+        }))
+        .unwrap();
+        let schema = declared.credential.unwrap().schema();
+        assert_eq!(schema.fields.len(), 2);
+        assert!(schema.field("token").unwrap().secret);
+        assert_eq!(schema.field("region").unwrap().options, ["eu", "us"]);
+
+        assert!(
+            validate(&with(|v| v["auth"] = json!({"type": "none"})))
+                .unwrap()
+                .credential
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_declared_credential_schema_survives_a_round_trip_through_json() {
+        let spec = json!({"fields": [
+            {"key": "token", "label": "Token", "type": "string", "required": true, "secret": true}
+        ]});
+        let manifest = validate(&with(|v| {
+            v["auth"] = json!({"type": "bearer", "credential": spec});
+        }))
+        .unwrap();
+
+        let schema = manifest.credential.unwrap().schema();
+
+        assert_eq!(
+            serde_json::to_value(&schema).unwrap(),
+            json!({"fields": [
+                {"key": "token", "label": "Token", "type": "string", "required": true, "secret": true}
+            ]})
+        );
+    }
+
+    #[test]
+    fn a_bad_credential_section_names_the_key() {
+        let field = json!({"key": "token", "label": "T", "type": "string", "secret": true});
+        let cases = [
+            (
+                json!({"kind": "nope"}),
+                "/auth/credential/kind",
+                code::INVALID_VALUE,
+            ),
+            (
+                json!({"kind": 3}),
+                "/auth/credential/kind",
+                code::INVALID_TYPE,
+            ),
+            (json!({}), "/auth/credential/kind", code::REQUIRED),
+            (
+                json!({"kind": "basic", "fields": [field.clone()]}),
+                "/auth/credential/fields",
+                code::INVALID_VALUE,
+            ),
+            (
+                json!({"fields": "x"}),
+                "/auth/credential/fields",
+                code::INVALID_TYPE,
+            ),
+            (
+                json!({"fields": [{"key": "Bad Key", "label": "T", "type": "string"}]}),
+                "/auth/credential/fields",
+                code::INVALID_CREDENTIAL_SCHEMA,
+            ),
+            (
+                json!({"fields": [{"key": "a", "label": "T", "type": "string", "extra": 1}]}),
+                "/auth/credential/fields",
+                code::INVALID_CREDENTIAL_SCHEMA,
+            ),
+            (
+                json!({"fields": [{"key": "other", "label": "T", "type": "string"}]}),
+                "/auth/credential",
+                code::CREDENTIAL_FIELD_MISSING,
+            ),
+            (
+                json!({"kind": "api_key", "zzz": 1}),
+                "/auth/credential/zzz",
+                code::UNKNOWN_FIELD,
+            ),
+        ];
+        for (credential, path, issue_code) in cases {
+            assert_issue(
+                &with(|v| v["auth"] = json!({"type": "bearer", "credential": credential.clone()})),
+                issue_code,
+                path,
+            );
+        }
+    }
+
+    #[test]
+    fn a_secret_the_auth_reads_must_be_a_secret_field_of_the_credential_schema() {
+        let field = |key: &str, secret: bool| json!({"key": key, "label": "L", "type": "string", "required": true, "secret": secret});
+        let exposed = [
+            ("bearer", vec![field("token", false)]),
+            (
+                "basic",
+                vec![field("username", false), field("password", false)],
+            ),
+            ("api_key", vec![field("api_key", false)]),
+        ];
+        for (kind, fields) in exposed {
+            let auth = match kind {
+                "api_key" => json!({"type": "api_key", "in": "header", "name": "X-Key",
+                                    "credential": {"fields": fields}}),
+                other => json!({"type": other, "credential": {"fields": fields}}),
+            };
+            assert_issue(
+                &with(|v| v["auth"] = auth.clone()),
+                code::CREDENTIAL_FIELD_NOT_SECRET,
+                "/auth/credential",
+            );
+        }
+        let oauth = json!({"type": "oauth2_client_credentials", "token_url": "https://a.test/t",
+                           "credential": {"fields": [field("client_id", false), field("client_secret", false)]}});
+        assert_issue(
+            &with(|v| v["auth"] = oauth.clone()),
+            code::CREDENTIAL_FIELD_NOT_SECRET,
+            "/auth/credential",
+        );
+        // Identifiers may be plain; the secrets sealed; and a built-in kind is already right.
+        assert_valid(&with(|v| {
+            v["auth"] = json!({"type": "basic", "credential": {"fields": [field("username", false), field("password", true)]}});
+        }));
+        assert_valid(&with(|v| {
+            v["auth"] = json!({"type": "basic", "credential": {"kind": "basic"}});
+        }));
     }
 }

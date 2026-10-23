@@ -1,12 +1,12 @@
 //! Checks a destination's settings against its spec before anything is stored. Reasons name the
 //! field and never repeat a value. The rules are the sources' (`sources::validate`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
 use super::spec::DestinationSpec;
-use crate::sources::{FieldError, check_config, check_credential};
+use crate::sources::{FieldError, check_config, check_credential, check_credential_names};
 
 /// Checks the configuration object: required fields are present, values have the declared type
 /// and select values are among the options, and no undeclared key is set.
@@ -22,6 +22,15 @@ pub fn validate_credential<V: AsRef<str>>(
     complete: bool,
 ) -> Result<(), Vec<FieldError>> {
     check_credential(spec.credential_fields, "destination", values, complete)
+}
+
+/// Checks that a stored credential, which has the fields named in `present`, holds every
+/// required credential field of the destination type.
+pub fn validate_credential_names(
+    spec: &DestinationSpec,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_names(spec.credential_fields, "destination", present)
 }
 
 #[cfg(test)]
@@ -89,5 +98,17 @@ mod tests {
 
         assert_eq!(errors.len(), 2);
         assert!(validate_credential(&SPEC, &BTreeMap::<String, String>::new(), false).is_ok());
+    }
+
+    #[test]
+    fn a_stored_credential_must_hold_every_required_field_of_the_destination_type() {
+        let present = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect();
+
+        assert!(validate_credential_names(&SPEC, &present(&["token", "extra"])).is_ok());
+        let errors = validate_credential_names(&SPEC, &present(&["extra"])).unwrap_err();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "token");
+        assert!(errors[0].reason.contains("destination"));
     }
 }

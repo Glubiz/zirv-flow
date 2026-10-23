@@ -20,6 +20,7 @@ use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::schema::SchemaBody;
 
 /// The records a sample shows when it is not asked for a number.
 const DEFAULT_LIMIT: u32 = 10;
@@ -67,6 +68,10 @@ pub(crate) struct ValidateBody {
     issues: Vec<IssueBody>,
     /// The streams the manifest declares, for a stream picker; empty when it is invalid.
     streams: Vec<ManifestStreamBody>,
+    /// The credential schema the manifest declares in `auth.credential` (a built-in kind it names,
+    /// or its own fields), so the credential form can be drawn from it; null when it declares
+    /// none or the manifest is invalid. Create the credential as kind `custom` with this schema.
+    credential_schema: Option<SchemaBody>,
 }
 
 fn field_type_name(field_type: zirv_flow_connectors::sources::FieldType) -> String {
@@ -97,6 +102,10 @@ pub(crate) fn validated(draft: &Value) -> ValidateBody {
                         .collect(),
                 })
                 .collect(),
+            credential_schema: manifest
+                .credential
+                .as_ref()
+                .map(|spec| SchemaBody::from(&spec.schema())),
         },
         Err(issues) => ValidateBody {
             valid: false,
@@ -108,6 +117,7 @@ pub(crate) fn validated(draft: &Value) -> ValidateBody {
                 })
                 .collect(),
             streams: Vec::new(),
+            credential_schema: None,
         },
     }
 }

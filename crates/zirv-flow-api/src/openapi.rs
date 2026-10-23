@@ -37,6 +37,7 @@ use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
 use crate::webhooks;
+use crate::workspace_credentials;
 use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, WorkspaceBody};
 
 #[derive(OpenApi)]
@@ -179,6 +180,14 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::update,
         destinations::crud::remove,
         destinations::actions::check,
+        workspace_credentials::schema::list_kinds,
+        workspace_credentials::crud::list,
+        workspace_credentials::crud::create,
+        workspace_credentials::crud::get,
+        workspace_credentials::crud::update,
+        workspace_credentials::crud::rotate,
+        workspace_credentials::crud::remove,
+        workspace_credentials::check::test,
         sending::domains::list,
         sending::domains::create,
         sending::domains::get,
@@ -485,6 +494,17 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::CreateDestinationRequest,
         destinations::crud::UpdateDestinationRequest,
         destinations::actions::DestinationCheckBody,
+        workspace_credentials::schema::KindBody,
+        workspace_credentials::schema::SchemaBody,
+        workspace_credentials::schema::SchemaFieldBody,
+        workspace_credentials::schema::FieldTypeBody,
+        workspace_credentials::crud::CredentialBody,
+        workspace_credentials::crud::UsedByBody,
+        workspace_credentials::crud::CreateCredentialRequest,
+        workspace_credentials::crud::UpdateCredentialRequest,
+        workspace_credentials::crud::RotateCredentialRequest,
+        workspace_credentials::check::TestCredentialRequest,
+        workspace_credentials::check::CredentialTestBody,
         sending::domains::SendingDomainBody,
         sending::domains::DomainRecordBody,
         sending::domains::CreateSendingDomainRequest,

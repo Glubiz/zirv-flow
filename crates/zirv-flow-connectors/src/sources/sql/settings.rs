@@ -252,18 +252,24 @@ pub(crate) struct Login<'a> {
     pub(crate) password: &'a str,
 }
 
+/// The credential key of the user, the one the built-in "Username and password" kind holds.
+const USER_KEY: &str = "username";
+/// The key credentials sealed before the user was called `username` hold.
+const LEGACY_USER_KEY: &str = "user";
+
 impl<'a> Login<'a> {
     pub(crate) fn from_credential(credential: &'a Credential) -> Result<Self, SourceError> {
-        let field = |key: &str| {
+        let value = |key: &str| {
             credential
                 .get(key)
                 .map(|secret| secret.expose())
                 .filter(|value| !value.is_empty())
-                .ok_or_else(|| config_error(key, "is required"))
         };
         Ok(Self {
-            user: field("user")?,
-            password: field("password")?,
+            user: value(USER_KEY)
+                .or_else(|| value(LEGACY_USER_KEY))
+                .ok_or_else(|| config_error(USER_KEY, "is required"))?,
+            password: value("password").ok_or_else(|| config_error("password", "is required"))?,
         })
     }
 }
@@ -565,7 +571,7 @@ mod tests {
     #[test]
     fn a_login_needs_both_fields_and_the_error_names_the_missing_one_only() {
         let mut credential = Credential::new();
-        credential.insert("user", SecretString::new("reader".into()));
+        credential.insert("username", SecretString::new("reader".into()));
 
         let error = Login::from_credential(&credential).err().unwrap();
         assert_eq!(error, config_error("password", "is required"));
@@ -573,5 +579,29 @@ mod tests {
         credential.insert("password", SecretString::new("pw".into()));
         let login = Login::from_credential(&credential).unwrap();
         assert_eq!((login.user, login.password), ("reader", "pw"));
+    }
+
+    #[test]
+    fn the_user_is_read_from_username_and_from_a_legacy_user_when_username_is_absent() {
+        let mut legacy = Credential::new();
+        legacy.insert("user", SecretString::new("old".into()));
+        legacy.insert("password", SecretString::new("pw".into()));
+        assert_eq!(Login::from_credential(&legacy).unwrap().user, "old");
+
+        let mut both = Credential::new();
+        both.insert("user", SecretString::new("old".into()));
+        both.insert("username", SecretString::new("new".into()));
+        both.insert("password", SecretString::new("pw".into()));
+        assert_eq!(Login::from_credential(&both).unwrap().user, "new");
+    }
+
+    #[test]
+    fn a_login_without_any_user_is_refused_naming_username() {
+        let mut credential = Credential::new();
+        credential.insert("password", SecretString::new("pw".into()));
+
+        let error = Login::from_credential(&credential).err().unwrap();
+
+        assert_eq!(error, config_error("username", "is required"));
     }
 }

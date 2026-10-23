@@ -506,7 +506,7 @@ async fn slice(
     };
 
     // The credential is opened right before the read and dropped with it.
-    let credential = open_credential(ctx, pool, ids.workspace, source.credential_secret_id).await?;
+    let credential = open_credential(ctx, pool, ids.workspace, source.credential_id).await?;
     let mut batches = driver.read(
         context,
         &source.config,
@@ -855,8 +855,7 @@ mod broker_tests {
                 kind: "kafka",
                 name: "events",
                 config: &full,
-                credential_secret_id: None,
-                credential_fields: &[],
+                credential_id: None,
                 schedule: None,
                 created_by: None,
             },

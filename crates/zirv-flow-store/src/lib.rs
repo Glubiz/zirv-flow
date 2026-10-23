@@ -34,6 +34,7 @@ mod suppressions;
 mod sync_runs;
 mod templates;
 mod webhooks;
+mod workspace_credentials;
 mod workspaces;
 
 use std::error::Error;
@@ -269,6 +270,15 @@ pub use templates::{
 pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,
     find_for_receive, find_webhook, list_webhooks, replace_webhook_secret, update_webhook,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use workspace_credentials::import_secret_as_credential;
+pub use workspace_credentials::{
+    ArchiveOutcome, CredentialUpdate, CredentialUse, CredentialUser, NewWorkspaceCredential,
+    OpenedCredential, WorkspaceCredential, archive_credential, create_credential,
+    credential_use_counts, credential_users, credential_uses, find_credential,
+    find_credential_for_update, list_credentials, lock_credential_for_use, open_credential,
+    record_credential_test, swap_credential_secret, update_credential,
 };
 pub use workspaces::{
     Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,

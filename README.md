@@ -152,6 +152,52 @@ the id of the wrapping master key. A database dump without the master key
 reveals no credential, and the API never returns one. A lost master key means
 the stored credentials must be entered again.
 
+#### Workspace credentials
+
+A **credential** is a named object that holds the keys and secrets of one external account. It is
+entered once, sealed, shared by any number of sources and destinations, rotated in one place, tested,
+and shows where it is used. Under `/api/v1/workspaces/{ws}`, all for workspace admins (no access is
+404):
+
+| Request | What it does |
+|---------|--------------|
+| `GET /credential-kinds` | the kinds and their schemas (fields, types, which are secret), so a form can be drawn from data; never a value |
+| `GET /credentials`, `POST /credentials` | list the live credentials; create one |
+| `GET`, `PATCH`, `DELETE /credentials/{id}` | read it with its `used_by` list; change its name or non-secret `fields`; archive it |
+| `PUT /credentials/{id}/secret` | rotate: seal the new secret values, swap them in and delete the old secret in one transaction |
+| `POST /credentials/{id}/test` | run the check of the source or destination named in the body (`source_id` or `destination_id`, which must use the credential); answers `{ok, message, code}` with a fixed sentence that names no host, URL or value, and records `last_tested_at` and the outcome |
+
+A schema is a list of fields; each has a `key`, a `label`, a `type` (`string`, `integer`, `enum` or
+`url`), `required` and `secret`. The built-in kinds are `api_key` (a key sent as a named header or as
+a bearer token), `basic` (username and password), `smtp` (host, port, TLS mode, username and
+password), `oauth2_client` (client id, client secret and token URL) and `signing_secret`. A
+credential of kind `custom` carries its own schema in the create request, which is how an
+implementation described by a manifest gets the same form (see The HTTP manifest source). Create
+with `{"kind", "name", "fields", "secret"}`: the non-secret values go in `fields`, every secret value
+in `secret`, and a secret value given in `fields` (or the reverse) is refused. All secret fields are
+sealed together as one JSON object (purpose `workspace_credential`); the non-secret ones are stored
+as plain JSON.
+
+Nothing secret comes back. A credential shows its `fields`, a **hint** per secret field (its last
+four characters when the value has at least 16 characters, otherwise nothing, so it is fully masked),
+and a **fingerprint**, the redaction HMAC of the sealed object, which the UI uses to warn when the
+same secret is entered twice (`same_secret_as`). The audit trail records `credential.created`,
+`credential.updated`, `credential.rotated`, `credential.tested` and `credential.archived` with field
+names only.
+
+A source or destination takes a `credential_id` instead of inline credential fields, and must use a
+credential that holds every credential field its type requires. It opens the current secret right
+before each use, so a rotation reaches all of them on their next call and nothing else changes.
+Deleting a source does not delete the credential. Archiving is refused with 409 `credential_in_use`
+while a live source or destination uses the credential, and an archived credential cannot be
+referenced (409 `credential_archived`). Credentials a source or destination had sealed on its own
+before this existed became credentials of kind `imported` when the database was migrated: they point
+at the same encrypted row, are never re-sealed by the migration, keep working, and are re-sealed as
+`workspace_credential` on their next rotation (which must give the same field names). OAuth access
+and refresh tokens stay per source, because they are runtime state. In the web UI, **Credentials**
+(in the workspace menu) lists, creates, edits, rotates, tests and archives them, and a source's
+credential field is a picker with **New credential**.
+
 The identifier, suppression and redaction hashes derive from a stable HMAC root,
 not from the master key. The first `serve` or `worker` start stores that root,
 sealed like any secret, made from the master key it starts with (the key the
@@ -410,6 +456,7 @@ Passwords are 12 to 1024 characters.
 | `GET /api/v1/workspaces/{ws}`, `.../members` | members, admins, owner, `read` keys |
 | `PUT/DELETE /api/v1/workspaces/{ws}/members/{user_id}` | workspace admins, owner, `admin` keys |
 | `GET/POST /api/v1/workspaces/{ws}/api-keys`, `DELETE .../api-keys/{id}` | workspace admins, owner, `admin` keys |
+| `/api/v1/workspaces/{ws}/credentials`, `.../credential-kinds` (see Workspace credentials) | workspace admins, owner, `admin` keys |
 
 ## Sign in with Keycloak
 
@@ -1383,13 +1430,12 @@ workspace admin, the owner, or an `admin` key. Every such change is audited (`so
 `source.updated`, `source.deleted`, `source.tested`, `source.discovered`, `stream.configured`)
 with ids, names and field names, never a value.
 
-**Credentials.** A source's credential fields (a token or a password) are sealed as a secret
-in the same transaction that stores the source, and are never returned: a source shows only
-the names of the credential fields that are set. To change a credential, send the whole
-credential again with `PATCH .../sources/{id}`; the web UI does this with **Replace the
-credential**. Deleting a source deletes its streams and its secret together. A server started
-without a master key answers 503 where a credential has to be sealed or opened. A source that
-calls out does so through the guarded HTTP client and the egress policy (see Egress).
+**Credentials.** A source uses a workspace credential (see Workspace credentials) by
+`credential_id`, and shows the id and only the names of the fields the credential holds, never a
+value. To use another credential, send a new `credential_id` with `PATCH .../sources/{id}`; to change
+a secret, rotate the credential. Deleting a source deletes its streams and its account tokens, and
+leaves the credential. A server started without a master key answers 503 where a credential has to
+be sealed or opened. A source that calls out does so through the guarded HTTP client and the egress policy (see Egress).
 
 **API.** Under `/api/v1/workspaces/{ws}/sources`: `GET` and `POST`; `GET`, `PATCH` and `DELETE`
 on `/{id}`; `POST /{id}/test` (returns `{ok, error}`; a failed test is a 200); `POST
@@ -1672,6 +1718,17 @@ naming `credential.<name>`. Auth headers cannot be set in `headers`: `Authorizat
 be `Authorization`. Changing the `auth` section of a manifest disconnects an account
 connected earlier, because a refresh token belongs to one client and scope set.
 
+**Credential schema.** `auth.credential` is optional and declares the shape of the credential the API
+needs, so a manifest source gets the same form, storage and rotation as a built-in one. It holds
+either `{"kind": "<built-in kind>"}` (`api_key`, `basic`, `smtp`, `oauth2_client` or
+`signing_secret`) or `{"fields": [{"key", "label", "type", "required", "secret", "options"}]}` with
+the field rules of Workspace credentials (1 to 32 fields, unique lowercase keys, `options` only on an
+`enum`, and only a `string` can be `secret`), never both. The schema must contain every credential
+field the auth type reads (above; `client_secret` of the authorization-code grant is optional), or
+the manifest is refused with `credential_field_missing`. A field the auth type reads that holds a secret (`api_key`, `password`, `token`, `client_secret`) must be `secret: true`, or the manifest is refused with `credential_field_not_secret`, because a non-secret field is stored in plaintext. A manifest holds no value: the validate
+response returns the schema as `credential_schema`, and the credential is created from it as kind
+`custom`.
+
 **Pagination.** `none`; `cursor` (`param`, `next`: a JSON pointer in the response); `offset`
 (`param`, `limit_param`, `limit` 1-1000); `page` (`param`, `first`, and optionally `size_param` with
 `size`); `link_header`. They are the runtime's drivers (see Connector runtime).
@@ -1693,7 +1750,8 @@ unmapped); it never replaces a mapping and is not used on a later discovery. A m
 people to a list.
 
 **Validation.** `POST /api/v1/workspaces/{ws}/source-manifests/validate` with `{"manifest": ...}`
-(an admin; a body up to 65 KiB) answers 200 with `{valid, issues: [{code, path}], streams}` and
+(an admin; a body up to 65 KiB) answers 200 with `{valid, issues: [{code, path}], streams,
+credential_schema}` and
 writes nothing; saving a source with the same manifest answers 422 with the same codes under
 `config.manifest<path>`. An issue holds a code and a JSON pointer, never a value. The codes:
 `required`, `invalid_type`, `invalid_value`, `out_of_range`, `invalid_length`, `invalid_url`,
@@ -1703,6 +1761,7 @@ holding `{{`, `${`, `{%` or `<%`), `unsupported_version`, `manifest_too_large` (
 `forbidden_header`, `invalid_header`, `too_many_query`, `path_invalid`, `invalid_pointer`,
 `duplicate_stream`, `duplicate_field`, `invalid_field_name`, `primary_key_empty`,
 `primary_key_unknown_field`, `cursor_field_unknown`, `invalid_mapping`, `list_target_not_allowed`,
+`invalid_credential_schema`, `credential_field_missing`, `credential_field_not_secret`,
 and the mapping codes of the Mapping reference.
 
 **Sample.** `POST .../sources/{id}/manifest/sample` with `{"stream": "...", "limit": 1-20,

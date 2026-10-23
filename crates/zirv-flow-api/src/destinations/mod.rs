@@ -5,7 +5,6 @@
 //! or a log line.
 
 pub(crate) mod actions;
-pub(crate) mod credential;
 pub(crate) mod crud;
 
 #[cfg(test)]

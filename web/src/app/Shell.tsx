@@ -24,6 +24,7 @@ const TITLES: Record<string, string> = {
   privacy: "Privacy",
   ai: "AI assistant",
   "api-keys": "API keys",
+  credentials: "Credentials",
   traces: "Traces",
   jobs: "Jobs",
   health: "Health",
@@ -108,6 +109,7 @@ export function Shell() {
             <WorkspaceItem base={base} segment="suppressions">Suppressions</WorkspaceItem>
             {current ? <PrivacyNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="ai">AI</WorkspaceItem>
+            <WorkspaceItem base={base} segment="credentials">Credentials</WorkspaceItem>
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
             <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}

@@ -23,7 +23,7 @@ pub use error::{DestinationError, Disposition};
 pub use registry::Registry;
 pub use retry_after::parse_retry_after;
 pub use spec::{Capabilities, DestinationSpec};
-pub use validate::{validate_config, validate_credential};
+pub use validate::{validate_config, validate_credential, validate_credential_names};
 
 /// The token the fake destination's check accepts.
 #[cfg(feature = "test-support")]

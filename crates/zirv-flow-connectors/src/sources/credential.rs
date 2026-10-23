@@ -50,6 +50,31 @@ impl Credential {
         Ok(credential)
     }
 
+    /// Builds a credential from a workspace credential: the plaintext of its sealed secret
+    /// (a JSON object of text values) and its non-secret `fields` (a JSON object whose text
+    /// and integer values are read as text). A secret value wins over a field of the same name.
+    pub fn from_parts(
+        secret: &SecretBytes,
+        public: &serde_json::Value,
+    ) -> Result<Self, CredentialFormatError> {
+        let mut credential = Self::new();
+        if let Some(public) = public.as_object() {
+            for (key, value) in public {
+                let text = match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Number(number) => number.to_string(),
+                    serde_json::Value::Bool(flag) => flag.to_string(),
+                    _ => continue,
+                };
+                credential.insert(key.clone(), SecretString::new(text));
+            }
+        }
+        for (key, value) in Self::from_json(secret)?.fields {
+            credential.insert(key, value);
+        }
+        Ok(credential)
+    }
+
     pub fn len(&self) -> usize {
         self.fields.len()
     }
@@ -106,5 +131,20 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_credential_merges_the_non_secret_fields_with_the_sealed_secret() {
+        let secret = SecretBytes::new(br#"{"password":"p","host":"sealed"}"#.to_vec());
+        let public = serde_json::json!({"username": "u", "port": 587, "host": "plain", "n": null});
+
+        let credential = Credential::from_parts(&secret, &public).unwrap();
+
+        assert_eq!(credential.get("username").unwrap().expose(), "u");
+        assert_eq!(credential.get("port").unwrap().expose(), "587");
+        assert_eq!(credential.get("password").unwrap().expose(), "p");
+        assert_eq!(credential.get("host").unwrap().expose(), "sealed");
+        assert!(credential.get("n").is_none());
+        assert_eq!(credential.len(), 4);
     }
 }

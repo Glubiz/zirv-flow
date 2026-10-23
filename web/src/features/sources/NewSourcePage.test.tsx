@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { NewSourcePage } from "./NewSourcePage";
-import { aSource, aStream, FAKE_KIND, HTTP_KIND, POSTGRES_KIND } from "./testData";
+import { aCredentialHolding, aSource, aStream, FAKE_KIND, HTTP_KIND, POSTGRES_KIND } from "./testData";
 
 function members(role: "admin" | "member", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -15,17 +15,24 @@ function mount() {
   return renderRoute("/w/ws1/sources/new", "/w/:ws/sources/new", <NewSourcePage />);
 }
 
+const CREDENTIALS = [
+  aCredentialHolding("cred-1", "CRM token", ["token"]),
+  aCredentialHolding("cred-2", "Other CRM token", ["token"]),
+  aCredentialHolding("cred-pg", "Warehouse login", ["username", "password"]),
+];
+
 const BASE = {
   "GET /api/v1/session": () => json(session(OWNER, "csrf-sources")),
   "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
   "GET /api/v1/source-kinds": () => json([FAKE_KIND]),
+  "GET /api/v1/workspaces/ws1/credentials": () => json(CREDENTIALS),
 };
 
-async function fillSettings(user: ReturnType<typeof userEvent.setup>, token = "ok") {
+async function fillSettings(user: ReturnType<typeof userEvent.setup>, credential = "cred-1") {
   await user.click(await screen.findByRole("button", { name: "Choose Fake source" }));
   await user.type(screen.getByLabelText("Name"), "CRM");
   await user.type(screen.getByLabelText("Streams (optional)"), "2");
-  await user.type(screen.getByLabelText("Token"), token);
+  await user.selectOptions(await screen.findByLabelText("Credential"), credential);
 }
 
 describe("the source wizard", () => {
@@ -50,7 +57,7 @@ describe("the source wizard", () => {
 
     expect(await screen.findByText("The connection to CRM works.")).toBeInTheDocument();
     const created = calls.find((call) => call.method === "POST" && call.path.endsWith("/sources"));
-    expect(created?.body).toEqual({ kind: "fake", name: "CRM", config: { streams: 2 }, credential: { token: "ok" } });
+    expect(created?.body).toEqual({ kind: "fake", name: "CRM", config: { streams: 2 }, credential_id: "cred-1" });
     expect(created?.headers.get("x-csrf-token")).toBe("csrf-sources");
 
     await user.click(screen.getByRole("button", { name: "Continue to streams" }));
@@ -79,17 +86,24 @@ describe("the source wizard", () => {
     expect(screen.getByRole("link", { name: "Finish" })).toHaveAttribute("href", "/w/ws1/sources/src-1");
   });
 
-  it("renders the credential as a password input that is never filled in", async () => {
+  it("offers only the credentials that hold the fields the type needs, and a new one opens a password input that is never filled in", async () => {
     mockApi(BASE);
     const user = userEvent.setup();
     mount();
 
     await user.click(await screen.findByRole("button", { name: "Choose Fake source" }));
 
-    const token = screen.getByLabelText("Token");
+    const picker = await screen.findByLabelText("Credential");
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Choose a credential",
+      "CRM token (Custom)",
+      "Other CRM token (Custom)",
+    ]);
+    await user.click(screen.getByRole("button", { name: "New credential" }));
+    const dialog = within(screen.getByRole("dialog", { name: "New credential for Fake source" }));
+    const token = dialog.getByLabelText("Token");
     expect(token).toHaveAttribute("type", "password");
     expect(token).toHaveValue("");
-    expect(screen.getByText("Stored encrypted. It cannot be read back.")).toBeInTheDocument();
   });
 
   it("will not save before the name and the required credential are filled in", async () => {
@@ -102,11 +116,11 @@ describe("the source wizard", () => {
     expect(save).toBeDisabled();
     await user.type(screen.getByLabelText("Name"), "CRM");
     expect(save).toBeDisabled();
-    await user.type(screen.getByLabelText("Token"), "x");
+    await user.selectOptions(await screen.findByLabelText("Credential"), "cred-1");
     expect(save).toBeEnabled();
   });
 
-  it("shows a failed test and lets the person go back, retype the credential and retry", async () => {
+  it("shows a failed test and lets the person go back, choose another credential and retry", async () => {
     let tests = 0;
     const calls = mockApi({
       ...BASE,
@@ -122,7 +136,7 @@ describe("the source wizard", () => {
     const user = userEvent.setup();
     mount();
 
-    await fillSettings(user, "wrong");
+    await fillSettings(user, "cred-1");
     await user.click(screen.getByRole("button", { name: "Save and test" }));
 
     expect(await screen.findByText("The connection test failed")).toBeInTheDocument();
@@ -131,17 +145,16 @@ describe("the source wizard", () => {
     await user.click(screen.getByRole("button", { name: "Back to settings" }));
 
     expect(screen.getByLabelText("Name")).toHaveValue("CRM");
-    expect(screen.getByLabelText("Token")).toHaveValue("");
-    await user.type(screen.getByLabelText("Token"), "ok");
+    await user.selectOptions(await screen.findByLabelText("Credential"), "cred-2");
     await user.click(screen.getByRole("button", { name: "Save and test" }));
 
     expect(await screen.findByText("The connection to CRM works.")).toBeInTheDocument();
     const patch = calls.find((call) => call.method === "PATCH");
-    expect(patch?.body).toEqual({ name: "CRM", config: { streams: 2 }, credential: { token: "ok" } });
+    expect(patch?.body).toEqual({ name: "CRM", config: { streams: 2 }, credential_id: "cred-2" });
     expect(calls.filter((call) => call.method === "POST" && call.path.endsWith("/sources"))).toHaveLength(1);
   });
 
-  it("keeps the stored credential on a retry when none is typed", async () => {
+  it("keeps the chosen credential on a retry", async () => {
     let tests = 0;
     const calls = mockApi({
       ...BASE,
@@ -162,7 +175,7 @@ describe("the source wizard", () => {
 
     expect(await screen.findByText("The connection to CRM works.")).toBeInTheDocument();
     const patch = calls.find((call) => call.method === "PATCH");
-    expect(patch?.body).toEqual({ name: "CRM", config: { streams: 2 } });
+    expect(patch?.body).toEqual({ name: "CRM", config: { streams: 2 }, credential_id: "cred-1" });
   });
 
   it("offers the database types and creates a PostgreSQL source with a CA and a query", async () => {
@@ -190,8 +203,7 @@ describe("the source wizard", () => {
     await user.click(screen.getByRole("button", { name: "Add query" }));
     await user.type(screen.getByLabelText("Query 1 name"), "vip");
     const save = screen.getByRole("button", { name: "Save and test" });
-    await user.type(screen.getByLabelText("User"), "reader");
-    await user.type(screen.getByLabelText("Password"), "pw");
+    await user.selectOptions(await screen.findByLabelText("Credential"), "cred-pg");
     // An unfinished query keeps the form from being saved.
     expect(save).toBeDisabled();
     await user.type(screen.getByLabelText("Query 1 SQL"), "SELECT id, email FROM customers");
@@ -210,7 +222,7 @@ describe("the source wizard", () => {
         ca_certificate: "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----",
         queries: [{ name: "vip", sql: "SELECT id, email FROM customers" }],
       },
-      credential: { user: "reader", password: "pw" },
+      credential_id: "cred-pg",
     });
   });
 
@@ -231,8 +243,7 @@ describe("the source wizard", () => {
     await user.click(screen.getByRole("button", { name: "Add query" }));
     await user.type(screen.getByLabelText("Query 1 name"), "vip");
     await user.type(screen.getByLabelText("Query 1 SQL"), "SELECT 1");
-    await user.type(screen.getByLabelText("User"), "reader");
-    await user.type(screen.getByLabelText("Password"), "pw");
+    await user.selectOptions(await screen.findByLabelText("Credential"), "cred-pg");
     await user.click(screen.getByRole("button", { name: "Save and test" }));
 
     await user.click(await screen.findByRole("button", { name: "Back to settings" }));
@@ -245,6 +256,7 @@ describe("the source wizard", () => {
     expect(patch?.body).toEqual({
       name: "Warehouse",
       config: { host: "db.example.com", database: "shop", queries: [{ name: "vip", sql: "SELECT 1" }] },
+      credential_id: "cred-pg",
     });
   });
 

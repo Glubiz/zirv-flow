@@ -288,6 +288,8 @@ pub enum SecretPurpose {
     DestinationCredential,
     /// The private half of a sending domain DKIM key, as PKCS#8 DER.
     DkimKey,
+    /// The secret fields of a workspace credential, sealed as one JSON object.
+    WorkspaceCredential,
 }
 
 impl SecretPurpose {
@@ -301,6 +303,7 @@ impl SecretPurpose {
             Self::WebhookSigning => "webhook_signing",
             Self::DestinationCredential => "destination_credential",
             Self::DkimKey => "dkim_key",
+            Self::WorkspaceCredential => "workspace_credential",
         }
     }
 
@@ -314,6 +317,7 @@ impl SecretPurpose {
             Self::WebhookSigning,
             Self::DestinationCredential,
             Self::DkimKey,
+            Self::WorkspaceCredential,
         ]
         .into_iter()
         .find(|purpose| purpose.as_str() == text)
@@ -918,6 +922,7 @@ mod tests {
             SecretPurpose::WebhookSigning,
             SecretPurpose::DestinationCredential,
             SecretPurpose::DkimKey,
+            SecretPurpose::WorkspaceCredential,
         ] {
             assert_eq!(SecretPurpose::parse(purpose.as_str()), Some(purpose));
         }

@@ -37,6 +37,7 @@ mod tests {
         csrf: String,
     }
 
+    #[derive(Clone, Copy)]
     enum Auth<'a> {
         Anonymous,
         Key(&'a str),
@@ -57,7 +58,36 @@ mod tests {
         seen: std::sync::Mutex<Vec<String>>,
     }
 
+    /// Sends a request. A body that still carries an inline credential for a source or
+    /// destination is expanded to a workspace credential first (`expand_inline_credential`).
     async fn call(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        auth: Auth<'_>,
+    ) -> Reply {
+        let sent = crate::test_support::expand_inline_credential(
+            |method, uri, body| async move {
+                let reply = call_once(router, &method, &uri, body, auth).await;
+                (reply.status, reply.body)
+            },
+            method,
+            uri,
+            body,
+        )
+        .await;
+        match sent {
+            Ok(body) => call_once(router, method, uri, body, auth).await,
+            Err((status, body)) => Reply {
+                status,
+                headers: Default::default(),
+                body,
+            },
+        }
+    }
+
+    async fn call_once(
         router: &Router,
         method: &str,
         uri: &str,
@@ -455,7 +485,8 @@ mod tests {
                 "secret.created",
                 "destination.created",
                 "destination.checked",
-                "secret.replaced",
+                "secret.created",
+                "secret.deleted",
                 "destination.updated",
                 "destination.checked",
                 "destination.archived",
@@ -571,7 +602,7 @@ mod tests {
             .fetch_all(&pool)
             .await
             .unwrap();
-        assert_eq!(purposes, ["destination_credential"]);
+        assert_eq!(purposes, ["workspace_credential"]);
         let seen = fx.seen.lock().unwrap().join("\n");
         assert!(
             !seen.contains(MARKER) && !seen.contains(REPLACED_MARKER),
@@ -590,7 +621,13 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(row.contains("token") && !row.contains(MARKER));
+        // The field names now live on the credential the destination uses.
+        let credential: String = sqlx::query_scalar("SELECT c::text FROM credentials c")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(credential.contains("token") && !credential.contains(MARKER));
+        assert!(!row.contains(MARKER));
         tables_hold_no(&pool, &[MARKER, REPLACED_MARKER]).await;
         the_scan_finds_a_planted(&pool, &[MARKER]).await;
     }

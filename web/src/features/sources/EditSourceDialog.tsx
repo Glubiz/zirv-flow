@@ -2,10 +2,10 @@ import { useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, TextField } from "../../ui";
+import { CredentialPicker } from "../credentials";
 import { FieldInputs } from "./FieldInputs";
 import {
   configFrom,
-  credentialFrom,
   filled,
   initialValues,
   shapesValid,
@@ -23,17 +23,17 @@ interface EditSourceDialogProps {
 }
 
 /**
- * Changes a source. The credential is never shown: a person who wants a new one turns on
- * "Replace the credential" and types every credential field again.
+ * Changes a source. The credential is a workspace credential, chosen by id and never shown; its
+ * secret values are replaced on the Credentials page, in one place.
  */
 export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }: EditSourceDialogProps) {
   const [name, setName] = useState(source.name);
   const [enabled, setEnabled] = useState(source.enabled);
   const [schedule, setSchedule] = useState(source.schedule ?? "");
   const [values, setValues] = useState<Values>(() =>
-    initialValues([...kind.config_fields, ...kind.credential_fields], source.config),
+    initialValues(kind.config_fields, source.config),
   );
-  const [replacing, setReplacing] = useState(false);
+  const [credentialId, setCredentialId] = useState(source.credential_id ?? "");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
@@ -42,7 +42,7 @@ export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }
     name.trim() !== "" &&
     filled(kind.config_fields, values) &&
     shapesValid(kind.config_fields, values) &&
-    (!replacing || filled(kind.credential_fields, values));
+    (credentialId !== "" || !kind.credential_fields.some((field) => field.required));
 
   async function submit(event: SyntheticEvent) {
     event.preventDefault();
@@ -57,7 +57,7 @@ export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }
             config: configFrom(kind.config_fields, values),
             enabled,
             schedule: schedule.trim(),
-            ...(replacing ? { credential: credentialFrom(kind.credential_fields, values) } : {}),
+            ...(credentialId !== "" && credentialId !== source.credential_id ? { credential_id: credentialId } : {}),
           },
         }),
       );
@@ -101,15 +101,14 @@ export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }
         {kind.credential_fields.length > 0 ? (
           <fieldset className="stack">
             <legend className="strong">Credential</legend>
-            <label className="check">
-              <input type="checkbox" checked={replacing} onChange={(event) => setReplacing(event.target.checked)} />
-              <span>Replace the credential</span>
-            </label>
-            {replacing ? (
-              <FieldInputs fields={kind.credential_fields} values={values} onChange={change} disabled={busy} />
-            ) : (
-              <p className="muted">The stored credential stays as it is.</p>
-            )}
+            <CredentialPicker
+              workspaceId={workspaceId}
+              fields={kind.credential_fields}
+              value={credentialId}
+              onChange={setCredentialId}
+              purpose={kind.label}
+              disabled={busy}
+            />
           </fieldset>
         ) : null}
         {failure ? <InlineError {...failure} /> : null}

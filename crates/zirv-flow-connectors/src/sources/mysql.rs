@@ -48,7 +48,7 @@ impl Source for Mysql {
         ],
         credential_fields: &[
             fields::credential(
-                "user",
+                "username",
                 "User",
                 "A user that can only SELECT what should be read.",
             ),

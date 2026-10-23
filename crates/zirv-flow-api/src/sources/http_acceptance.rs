@@ -172,6 +172,7 @@ mod tests {
         csrf: String,
     }
 
+    #[derive(Clone, Copy)]
     enum Auth<'a> {
         Anonymous,
         Key(&'a str),
@@ -181,7 +182,36 @@ mod tests {
         Cookie(&'a Login),
     }
 
+    /// Sends a request. A body that still carries an inline credential for a source or
+    /// destination is expanded to a workspace credential first (`expand_inline_credential`).
     async fn call(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        auth: Auth<'_>,
+    ) -> Reply {
+        let sent = crate::test_support::expand_inline_credential(
+            |method, uri, body| async move {
+                let reply = call_once(router, &method, &uri, body, auth).await;
+                (reply.status, reply.body)
+            },
+            method,
+            uri,
+            body,
+        )
+        .await;
+        match sent {
+            Ok(body) => call_once(router, method, uri, body, auth).await,
+            Err((status, body)) => Reply {
+                status,
+                headers: Default::default(),
+                body,
+            },
+        }
+    }
+
+    async fn call_once(
         router: &Router,
         method: &str,
         uri: &str,
@@ -220,6 +250,7 @@ mod tests {
     }
 
     struct Fixture {
+        keyring: Arc<Keyring>,
         pool: PgPool,
         router: Router,
         ws: WorkspaceId,
@@ -283,7 +314,7 @@ mod tests {
         .await
         .unwrap();
         let state = AppState::new(pool.clone(), Arc::new(String::new))
-            .with_keyring(keyring)
+            .with_keyring(keyring.clone())
             .with_cookie_secure(false)
             .with_public_url(public_url.map(str::to_owned))
             .with_egress_policy(Arc::new(
@@ -314,6 +345,7 @@ mod tests {
                 .unwrap();
         }
         Fixture {
+            keyring,
             pool: pool.clone(),
             admin: login(&router, "admin@example.com").await,
             other_admin: login(&router, "other@example.com").await,
@@ -665,6 +697,129 @@ mod tests {
                 .iter()
                 .all(|f| f["secret"] == true)
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_between_the_start_and_the_callback_keeps_the_consent_unless_the_client_changed(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let rotate = |id: &str, client: &'static str| {
+            let id = id.to_owned();
+            let fx = &fx;
+            async move {
+                let source = fx.as_key("GET", &format!("/sources/{id}"), None).await;
+                let credential = source.body["credential_id"].as_str().unwrap().to_owned();
+                let reply = fx
+                    .as_key(
+                        "PUT",
+                        &format!("/credentials/{credential}/secret"),
+                        Some(json!({"secret": {"client_id": client, "client_secret": "rotated"}})),
+                    )
+                    .await;
+                assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            }
+        };
+
+        // Same client id, new secret: the callback still stores the tokens.
+        let kept = fx.create_source(fx.manifest()).await;
+        let state = fx.state_of(&fx.admin, &kept).await;
+        rotate(&kept, "client").await;
+        let reply = fx
+            .callback(Some(&fx.admin), &format!("code={CODE}&state={state}"))
+            .await;
+        assert!(
+            location(&reply).ends_with("?oauth=connected"),
+            "{}",
+            location(&reply)
+        );
+        let linked = fx
+            .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
+            .await;
+        assert_eq!(linked, 1);
+
+        // Another client id: the tokens were issued to a client the credential no longer names.
+        let dropped = fx.create_source(fx.manifest()).await;
+        let state = fx.state_of(&fx.admin, &dropped).await;
+        rotate(&dropped, "another-client").await;
+        let reply = fx
+            .callback(Some(&fx.admin), &format!("code={CODE}&state={state}"))
+            .await;
+        assert!(
+            location(&reply).ends_with("&reason=state_mismatch"),
+            "{}",
+            location(&reply)
+        );
+        let linked = fx
+            .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
+            .await;
+        assert_eq!(linked, 1, "no tokens were stored for the second source");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_token_write_reads_the_client_id_from_the_locked_credential_row(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.create_source(fx.manifest()).await;
+        let source = fx.as_key("GET", &format!("/sources/{id}"), None).await;
+        let credential = source.body["credential_id"].as_str().unwrap().to_owned();
+        let state = fx.state_of(&fx.admin, &id).await;
+
+        // Another transaction holds the credential's write lock and points it at a secret that
+        // names another client.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM credentials WHERE id = $1::uuid FOR UPDATE")
+            .bind(&credential)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let replacement = zirv_flow_core::SecretId::new();
+        let purpose = zirv_flow_core::SecretPurpose::WorkspaceCredential;
+        let sealed = seal(
+            &fx.keyring,
+            br#"{"client_id":"another-client","client_secret":"x"}"#,
+            &zirv_flow_core::secret_aad(fx.ws, replacement, purpose),
+        );
+        secrets::insert_unchecked(&mut *holder, fx.ws, purpose, replacement, &sealed)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE credentials SET secret_id = $2 WHERE id = $1::uuid")
+            .bind(&credential)
+            .bind(replacement.as_uuid())
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let router = fx.router.clone();
+        let query = format!("code={CODE}&state={state}");
+        let cookie = fx.admin.cookie.clone();
+        let callback = tokio::spawn(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/oauth/callback?{query}"))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap();
+            router.oneshot(request).await.unwrap()
+        });
+        crate::test_support::wait_until_a_backend_waits_on_a_lock(&pool).await;
+        assert!(
+            !callback.is_finished(),
+            "the token write waits for the credential's writer"
+        );
+        holder.commit().await.unwrap();
+
+        // The write then reads the committed client id and refuses the tokens.
+        let reply = callback.await.unwrap();
+        let place = reply.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(place.ends_with("&reason=state_mismatch"), "{place}");
+        let linked = fx
+            .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
+            .await;
+        assert_eq!(linked, 0);
     }
 
     // ---- the consent --------------------------------------------------------------------
@@ -1286,14 +1441,15 @@ mod tests {
         let deleted = fx.as_key("DELETE", &format!("/sources/{id}"), None).await;
 
         assert_eq!(deleted.status, StatusCode::NO_CONTENT);
-        assert_eq!(fx.count("SELECT count(*) FROM encrypted_secrets").await, 0);
+        // The workspace credential stays; the account tokens go with the source.
+        assert_eq!(fx.count("SELECT count(*) FROM encrypted_secrets").await, 1);
         let deletions = fx
             .actions()
             .await
             .iter()
             .filter(|a| *a == "secret.deleted")
             .count();
-        assert_eq!(deletions, 2, "the credential and the account tokens");
+        assert_eq!(deletions, 1, "the account tokens");
     }
 
     #[sqlx::test]

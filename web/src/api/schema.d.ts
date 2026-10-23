@@ -728,6 +728,117 @@ export interface paths {
         patch: operations["patch_contact"];
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/credential-kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The credential kinds and their schemas, so a form can be drawn from data. A kind named
+         *     `custom` takes its schema in the create request. Never holds a value. Workspace admins only.
+         */
+        get: operations["list_credential_kinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's live credentials, ordered by name. Workspace admins only. */
+        get: operations["list_credentials"];
+        put?: never;
+        /**
+         * Creates a credential and seals its secret fields. Workspace admins only. Audited as
+         *     `credential.created`.
+         */
+        post: operations["create_credential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/credentials/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One credential, archived or not, with the sources and destinations that use it. Workspace
+         *     admins only.
+         */
+        get: operations["get_credential"];
+        put?: never;
+        post?: never;
+        /**
+         * Archives a credential. Refused with `credential_in_use` while a live source or destination
+         *     uses it. Workspace admins only. Audited as `credential.archived`.
+         */
+        delete: operations["archive_credential"];
+        options?: never;
+        head?: never;
+        /**
+         * Changes the name or the non-secret values of a credential. Secret values change only through
+         *     the rotate endpoint. Workspace admins only. Audited as `credential.updated`.
+         */
+        patch: operations["update_credential"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/credentials/{id}/secret": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Rotates the secret: seals the new values, swaps them in and deletes the old secret in one
+         *     transaction. Every source and destination that uses the credential opens the new value on its
+         *     next call. Workspace admins only. Audited as `credential.rotated`, with field names only.
+         */
+        put: operations["rotate_credential"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/credentials/{id}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Tests a credential by running the check of a source or destination that uses it. A failed
+         *     check is a 200 with `ok` false, a fixed `message` and a `code`. Records `last_tested_at` and the
+         *     outcome. Workspace admins only. Audited as `credential.tested`.
+         */
+        post: operations["test_credential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/debugger/stream": {
         parameters: {
             query?: never;
@@ -3831,6 +3942,33 @@ export interface components {
              */
             key: string;
         };
+        CreateCredentialRequest: {
+            /** @description The non-secret values by field key. */
+            fields?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description A stable identifier of 1 to 64 lowercase letters, digits, `_` and `-`. Default: made from
+             *     the name.
+             */
+            key?: string | null;
+            /**
+             * @description A built-in kind from `GET .../credential-kinds`, or `custom` with its own `schema`.
+             * @example smtp
+             */
+            kind: string;
+            /**
+             * @description 1 to 128 characters after trimming; unique among the workspace's live credentials,
+             *     ignoring case.
+             * @example Mail account
+             */
+            name: string;
+            schema?: null | components["schemas"]["SchemaBody"];
+            /** @description The secret values by field key. Sealed on arrival and never returned. */
+            secret?: {
+                [key: string]: string;
+            };
+        };
         CreateDestinationRequest: {
             /**
              * Format: int32
@@ -3841,10 +3979,12 @@ export interface components {
             config: {
                 [key: string]: unknown;
             };
-            /** @description The credential fields by name. Sealed on arrival and never returned. */
-            credential?: {
-                [key: string]: string;
-            };
+            /**
+             * Format: uuid
+             * @description The workspace credential the destination uses (`/credentials`). Required when the
+             *     destination type has required credential fields, which the credential must hold.
+             */
+            credential_id?: string | null;
             /**
              * @description A destination type this build ships.
              * @example smtp
@@ -3960,10 +4100,12 @@ export interface components {
             config: {
                 [key: string]: unknown;
             };
-            /** @description The credential fields by name. Sealed on arrival and never returned. */
-            credential?: {
-                [key: string]: string;
-            };
+            /**
+             * Format: uuid
+             * @description The workspace credential the source uses (`/credentials`). Required when the source type
+             *     has required credential fields, which the credential must hold.
+             */
+            credential_id?: string | null;
             /**
              * @description A source type from `GET /api/v1/source-kinds`.
              * @example fake
@@ -4096,6 +4238,81 @@ export interface components {
         CreatedWebhookBody: components["schemas"]["WebhookBody"] & {
             /** @description The shared secret. Shown only in this response; keep it. */
             secret: string;
+        };
+        CredentialBody: {
+            /** @description An archived credential is read-only history. */
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            created_by?: string | null;
+            /** @description The non-secret values. */
+            fields: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description The redaction HMAC of the sealed secret, equal for equal secrets; null for an imported
+             *     credential until it is rotated.
+             */
+            fingerprint?: string | null;
+            /**
+             * @description Per secret field that is set: its last four characters when the value has at least 16
+             *     characters, else an empty string (fully masked). The values are never returned.
+             */
+            hints: {
+                [key: string]: string;
+            };
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description A short stable identifier, unique among the workspace's live credentials.
+             * @example mail-account
+             */
+            key: string;
+            /**
+             * @description A built-in kind (`GET .../credential-kinds`), `custom` (its own schema) or `imported` (a
+             *     credential a source or destination sealed before credentials existed).
+             * @example smtp
+             */
+            kind: string;
+            /** @description `ok` or `failed`; null when never tested. */
+            last_test_outcome?: string | null;
+            /** Format: date-time */
+            last_tested_at?: string | null;
+            /** @example Mail account */
+            name: string;
+            /** Format: date-time */
+            rotated_at: string;
+            /**
+             * Format: uuid
+             * @description The user who last rotated it; null when an API key did, or it was never rotated by a user.
+             */
+            rotated_by?: string | null;
+            /** @description The other live credentials sealed with the same secret. */
+            same_secret_as: string[];
+            /** @description The fields of the credential and which are secret. Draw the form from this. */
+            schema: components["schemas"]["SchemaBody"];
+            /** Format: int32 */
+            schema_version: number;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description The live sources and destinations that use it. */
+            used_by: components["schemas"]["UsedByBody"][];
+        };
+        CredentialTestBody: {
+            /**
+             * @description A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,
+             *     `egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or
+             *     `failed`. Null when the check passed.
+             */
+            code?: string | null;
+            /**
+             * @description A fixed sentence for `code`. Never holds a credential, a host, an address or a URL; null
+             *     when the check passed.
+             */
+            message?: string | null;
+            /** @description Whether the check passed. */
+            ok: boolean;
         };
         /** @description An import: its file, mapping, state and counters. */
         CsvImportBody: {
@@ -4336,8 +4553,13 @@ export interface components {
              * @description The user who created it; null when an API key did.
              */
             created_by?: string | null;
-            /** @description The names of the credential fields that are set. Their values are never returned. */
+            /** @description The names of the fields the credential holds. Their values are never returned. */
             credential_fields_set: string[];
+            /**
+             * Format: uuid
+             * @description The workspace credential the destination uses.
+             */
+            credential_id?: string | null;
             /** Format: uuid */
             id: string;
             /**
@@ -5020,6 +5242,11 @@ export interface components {
             /** @description True for a credential field: render a password input and never prefill it. */
             secret: boolean;
         };
+        /**
+         * @description The value type of a credential field.
+         * @enum {string}
+         */
+        FieldTypeBody: "string" | "integer" | "enum" | "url";
         /** @description Where the enrollment ended up. */
         FinalStateBody: {
             awaiting?: string | null;
@@ -5810,6 +6037,17 @@ export interface components {
              */
             workspace_id?: string | null;
         };
+        /** @description One credential kind with its schema. */
+        KindBody: {
+            /**
+             * @description The id stored in `credential.kind`.
+             * @example api_key
+             */
+            id: string;
+            /** @example API key */
+            label: string;
+            schema: components["schemas"]["SchemaBody"];
+        };
         KindDepthBody: {
             /** Format: int64 */
             dead: number;
@@ -6559,6 +6797,15 @@ export interface components {
             /** Format: uuid */
             user_id: string;
         };
+        RotateCredentialRequest: {
+            /**
+             * @description Every secret field of the credential, with its new value. Sealed on arrival and never
+             *     returned.
+             */
+            secret: {
+                [key: string]: string;
+            };
+        };
         /** @description A new shared secret, shown once. */
         RotatedSecretBody: {
             /** @description The new shared secret. The old one stopped working when this was issued. */
@@ -6699,6 +6946,26 @@ export interface components {
         SaveTemplateDraftRequest: {
             /** @description The content document. */
             document: Record<string, never>;
+        };
+        /** @description A list of fields: the shape of one credential. */
+        SchemaBody: {
+            fields: components["schemas"]["SchemaFieldBody"][];
+        };
+        /** @description One field of a credential schema. */
+        SchemaFieldBody: {
+            /**
+             * @description Lowercase letters, digits and underscores, starting with a letter.
+             * @example api_key
+             */
+            key: string;
+            /** @example API key */
+            label: string;
+            /** @description The allowed values of an `enum` field. */
+            options?: string[];
+            required?: boolean;
+            /** @description A secret field is sealed and never returned. Only a `string` can be secret. */
+            secret?: boolean;
+            type: components["schemas"]["FieldTypeBody"];
         };
         SchemaVersionBody: {
             properties: components["schemas"]["PropertyBody"][];
@@ -7276,8 +7543,13 @@ export interface components {
              * @description The user who created it; null when an API key did.
              */
             created_by?: string | null;
-            /** @description The names of the credential fields that are set. Their values are never returned. */
+            /** @description The names of the fields the credential holds. Their values are never returned. */
             credential_fields_set: string[];
+            /**
+             * Format: uuid
+             * @description The workspace credential the source uses.
+             */
+            credential_id?: string | null;
             enabled: boolean;
             /**
              * @description The worst freshness among the source's enabled streams (`failing`, then `stale`, then
@@ -7677,6 +7949,19 @@ export interface components {
             /** @description Whether the connection works. */
             ok: boolean;
         };
+        /** @description Which source or destination runs the check. Exactly one id. */
+        TestCredentialRequest: {
+            /**
+             * Format: uuid
+             * @description A destination that uses this credential.
+             */
+            destination_id?: string | null;
+            /**
+             * Format: uuid
+             * @description A source that uses this credential.
+             */
+            source_id?: string | null;
+        };
         TimelineBody: {
             /** @description Newest first. */
             entries: components["schemas"]["TimelineEntryBody"][];
@@ -7870,16 +8155,24 @@ export interface components {
              */
             row: number;
         };
+        UpdateCredentialRequest: {
+            /** @description Replaces the whole object of non-secret values. */
+            fields?: {
+                [key: string]: unknown;
+            } | null;
+            name?: string | null;
+        };
         UpdateDestinationRequest: {
             /** Format: int32 */
             burst?: number | null;
             config?: {
                 [key: string]: unknown;
             } | null;
-            /** @description Replaces the whole credential: every required credential field must be given. */
-            credential?: {
-                [key: string]: string;
-            } | null;
+            /**
+             * Format: uuid
+             * @description Uses another workspace credential, which must hold every required credential field.
+             */
+            credential_id?: string | null;
             name?: string | null;
             /** Format: int32 */
             rate?: number | null;
@@ -7928,10 +8221,11 @@ export interface components {
             config?: {
                 [key: string]: unknown;
             } | null;
-            /** @description Replaces the whole credential: every required credential field must be given. */
-            credential?: {
-                [key: string]: string;
-            } | null;
+            /**
+             * Format: uuid
+             * @description Uses another workspace credential, which must hold every required credential field.
+             */
+            credential_id?: string | null;
             enabled?: boolean | null;
             name?: string | null;
             /** @description A cron expression in UTC; an empty string clears the schedule. */
@@ -7973,6 +8267,17 @@ export interface components {
              */
             timezone: string;
         };
+        /** @description A live source or destination that uses a credential. */
+        UsedByBody: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description `source` or `destination`.
+             * @example destination
+             */
+            kind: string;
+            name: string;
+        };
         /** @description A user as shown to API callers; never includes the password hash. */
         UserBody: {
             email: string;
@@ -7992,6 +8297,7 @@ export interface components {
             user_id?: string | null;
         };
         ValidateBody: {
+            credential_schema?: null | components["schemas"]["SchemaBody"];
             /** @description At most 50, in the order found; empty when the manifest is valid. */
             issues: components["schemas"]["IssueBody"][];
             /** @description The streams the manifest declares, for a stream picker; empty when it is invalid. */
@@ -11017,6 +11323,547 @@ export interface operations {
             };
             /** @description The contact changed at the same moment; try again */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_credential_kinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The built-in kinds with their schemas */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KindBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_credentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The live credentials */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description The new credential */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live credential has that name or key, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, key, kind, schema, field or secret */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the secret */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Credential id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The credential */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or credential, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Credential id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Archived */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or credential, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live source or destination uses it (`code` is `credential_in_use`), or it is already archived (`credential_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Credential id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated credential */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or credential, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live credential has that name, or the credential is archived (`code` is `credential_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name or field, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    rotate_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Credential id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RotateCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description The rotated credential */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or credential, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credential is archived (`code` is `credential_archived`), or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A missing, unknown or empty secret field */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the secret */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_credential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Credential id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description The outcome of the check */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialTestBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or credential, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credential or the destination is archived, or the owner's type is not in this build */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not exactly one of source_id and destination_id, or one that does not use this credential */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The source or destination did not answer in time */
+            504: {
                 headers: {
                     [name: string]: unknown;
                 };
