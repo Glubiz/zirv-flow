@@ -1045,8 +1045,11 @@ mod tests {
         );
         let query = rule.members_sql();
 
-        let expected = "(SELECT count(*) FROM messages m WHERE m.workspace_id = p.workspace_id \
-             AND m.person_id = p.id AND m.status = 'sent' AND NOT m.test AND m.channel = $2::text \
+        let expected = "(SELECT count(*) FROM (WITH RECURSIVE who(id) AS (SELECT p.id UNION \
+             SELECT g.merged_person_id FROM person_merges g JOIN who \
+             ON g.survivor_person_id = who.id WHERE g.workspace_id = p.workspace_id) \
+             SELECT id FROM who) w JOIN messages m ON m.person_id = w.id \
+             WHERE m.workspace_id = p.workspace_id AND m.status = 'sent' AND NOT m.test AND m.channel = $2::text \
              AND m.dimensions @> $3::jsonb AND m.completed_at > $4::timestamptz \
              AND m.completed_at <= $5::timestamptz)::float8 >= $6::float8";
         assert!(query.sql.contains(expected), "{}", query.sql);
@@ -1066,7 +1069,7 @@ mod tests {
 
         assert!(sql.contains("COALESCE("), "{sql}");
         assert!(
-            sql.contains("(SELECT max(m.completed_at) FROM messages m"),
+            sql.contains("(SELECT max(m.completed_at) FROM (WITH RECURSIVE who(id)"),
             "{sql}"
         );
         assert!(sql.contains("m.dimensions @> $3::jsonb"), "{sql}");

@@ -51,3 +51,8 @@ $$;
 CREATE TRIGGER consent_policy_versions_immutable
     BEFORE UPDATE ON consent_policy_versions
     FOR EACH ROW EXECUTE FUNCTION consent_policy_versions_immutable();
+
+-- The cooldown reads of the policy `messages` leaf: the sent, non-test messages of a person on a
+-- channel by the time they ended (the leaf reads the person and everyone merged into them).
+CREATE INDEX messages_cooldown_idx ON messages (workspace_id, person_id, channel, completed_at)
+    WHERE status = 'sent' AND NOT test;

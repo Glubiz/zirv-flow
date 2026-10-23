@@ -35,7 +35,8 @@ pub struct SnapshotMessage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyFacts {
     pub send: SendContext,
-    /// The person's sent messages, test sends excluded.
+    /// The sent messages of the person and of every person merged into them (a merge keeps a
+    /// message on the id it was written for), test sends excluded.
     pub messages: Vec<SnapshotMessage>,
 }
 

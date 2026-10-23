@@ -199,6 +199,8 @@ mod tests {
             json!({"last": "P1D"}),
             json!({"last": "PT3H"}),
             json!({"between": ["2030-12-31T00:00:00Z", "2031-01-01T10:00:00Z"]}),
+            // The bounds sit on two messages: the start is in the window, the end is not.
+            json!({"between": ["2026-01-01T07:00:00Z", "2026-01-01T09:00:00Z"]}),
         ];
         let dimensions = [
             json!({}),
@@ -253,6 +255,100 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cooldown_counts_the_messages_of_a_person_merged_away(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &zirv_flow_core::WorkspaceName::parse("cooldown").unwrap(),
+            &zirv_flow_core::Slug::parse("cooldown").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let mut people = Vec::new();
+        for key in ["a", "b"] {
+            let outcome = zirv_flow_store::apply_profile_batch(
+                &pool,
+                ws,
+                &[zirv_flow_store::ProfileRecord {
+                    source: "crm".into(),
+                    stream: "contacts".into(),
+                    record_key: key.into(),
+                    identifiers: vec![("email".into(), format!("{key}@example.com"))],
+                    traits: serde_json::Map::new(),
+                    observed_at: NOW - time::Duration::days(3),
+                    trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+                }],
+            )
+            .await
+            .unwrap();
+            people.push(match &outcome[0] {
+                zirv_flow_store::ProfileOutcome::Applied { person_id, .. }
+                | zirv_flow_store::ProfileOutcome::Unchanged { person_id, .. } => *person_id,
+                zirv_flow_store::ProfileOutcome::Rejected { reason } => {
+                    panic!("rejected: {reason}")
+                }
+            });
+        }
+        let [a, b] = people[..] else { panic!("two") };
+        // A was emailed an hour ago and then merged into B.
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id,                 template_id, destination_id, category, status, test, created_at, completed_at)              VALUES ($1, $2, $3, $4, 'mail', $5, $6, 'marketing', 'sent', false, $7, $7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(a)
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(NOW - time::Duration::hours(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO person_merges (id, workspace_id, survivor_person_id, merged_person_id,                 trace_id) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(b)
+        .bind(a)
+        .bind(Uuid::now_v7())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(b)
+            .bind(a)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let cooldown = Definition::from_value(&json!({"v": 1, "messages": {"channel": "email",
+            "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}))
+        .unwrap();
+        let compiled = compile_policy(
+            &cooldown,
+            &Catalog::default(),
+            &TraitStorage::default(),
+            NOW,
+            &send(),
+        )
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let selected = zirv_flow_store::run_person_batch(
+            &mut connection,
+            ws,
+            &sql_query(compiled.batch_sql()),
+            &[b],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(selected.len(), 1, "the survivor is inside the cooldown");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_reference_evaluator_agrees_with_the_compiled_sql_on_a_generated_corpus(
         pool: PgPool,
     ) {
@@ -265,44 +361,82 @@ mod tests {
         .await
         .unwrap()
         .id;
-        let person = match &zirv_flow_store::apply_profile_batch(
-            &pool,
-            ws,
-            &[zirv_flow_store::ProfileRecord {
-                source: "crm".into(),
-                stream: "contacts".into(),
-                record_key: "k".into(),
-                identifiers: vec![("email".into(), "ada@example.com".into())],
-                traits: serde_json::Map::new(),
-                observed_at: NOW - time::Duration::days(3),
-                trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
-            }],
-        )
-        .await
-        .unwrap()[0]
-        {
-            zirv_flow_store::ProfileOutcome::Applied { person_id, .. }
-            | zirv_flow_store::ProfileOutcome::Unchanged { person_id, .. } => *person_id,
-            zirv_flow_store::ProfileOutcome::Rejected { reason } => panic!("rejected: {reason}"),
+        let mut people = Vec::new();
+        for key in ["k", "old", "older", "empty"] {
+            let outcome = zirv_flow_store::apply_profile_batch(
+                &pool,
+                ws,
+                &[zirv_flow_store::ProfileRecord {
+                    source: "crm".into(),
+                    stream: "contacts".into(),
+                    record_key: key.into(),
+                    identifiers: vec![("email".into(), format!("{key}@example.com"))],
+                    traits: serde_json::Map::new(),
+                    observed_at: NOW - time::Duration::days(3),
+                    trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+                }],
+            )
+            .await
+            .unwrap();
+            people.push(match &outcome[0] {
+                zirv_flow_store::ProfileOutcome::Applied { person_id, .. }
+                | zirv_flow_store::ProfileOutcome::Unchanged { person_id, .. } => *person_id,
+                zirv_flow_store::ProfileOutcome::Rejected { reason } => {
+                    panic!("rejected: {reason}")
+                }
+            });
+        }
+        let [person, old, older, empty] = people[..] else {
+            panic!("four people");
         };
-        // (status, test, hours ago it ended, dimensions): only sent, non-test rows count.
-        let history: [(&str, bool, i64, serde_json::Value); 8] = [
-            ("sent", false, 1, json!({"vertical": "retail"})),
+        // `older` was merged into `old`, which was merged into `person`: a chain. The messages
+        // stay on the id they were written for, as a merge leaves them.
+        for (survivor, merged) in [(person, old), (old, older)] {
+            sqlx::query(
+                "INSERT INTO person_merges (id, workspace_id, survivor_person_id,                     merged_person_id, trace_id) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(survivor)
+            .bind(merged)
+            .bind(Uuid::now_v7())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(merged)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // (owner, status, test, hours ago it ended, dimensions): only sent, non-test rows count,
+        // and a person's count includes the rows of the people merged into them.
+        let history: [(Uuid, &str, bool, i64, serde_json::Value); 13] = [
+            (person, "sent", false, 1, json!({"vertical": "retail"})),
             (
+                person,
                 "sent",
                 false,
                 2,
                 json!({"vertical": "retail", "brand": "x"}),
             ),
-            ("sent", false, 5, json!({"vertical": "b2b"})),
-            ("sent", false, 30, json!({})),
-            ("sent", false, 60, json!({"vertical": "retail"})),
-            ("skipped", false, 1, json!({"vertical": "retail"})),
-            ("failed", false, 2, json!({"vertical": "b2b"})),
-            ("sent", true, 1, json!({"vertical": "b2b"})),
+            (person, "sent", false, 5, json!({"vertical": "b2b"})),
+            (person, "sent", false, 30, json!({})),
+            (person, "sent", false, 60, json!({"vertical": "retail"})),
+            (person, "skipped", false, 1, json!({"vertical": "retail"})),
+            (person, "failed", false, 2, json!({"vertical": "b2b"})),
+            (person, "sent", true, 1, json!({"vertical": "b2b"})),
+            // On the window edges: ended exactly 3 and 24 hours ago.
+            (person, "sent", false, 3, json!({"vertical": "retail"})),
+            (person, "sent", false, 24, json!({"vertical": "retail"})),
+            // Merged away, directly and through a chain.
+            (old, "sent", false, 4, json!({"vertical": "retail"})),
+            (older, "sent", false, 6, json!({"vertical": "b2b"})),
+            (older, "sent", true, 1, json!({"vertical": "b2b"})),
         ];
         let mut sent = Vec::new();
-        for (status, test, hours, dims) in &history {
+        for (owner, status, test, hours, dims) in &history {
             let at = NOW - time::Duration::hours(*hours);
             sqlx::query(
                 "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
@@ -313,7 +447,7 @@ mod tests {
             )
             .bind(Uuid::now_v7())
             .bind(ws.as_uuid())
-            .bind(person)
+            .bind(*owner)
             .bind(Uuid::now_v7())
             .bind(Uuid::now_v7())
             .bind(Uuid::now_v7())
@@ -341,44 +475,47 @@ mod tests {
         let storage = TraitStorage::default();
         let mut connection = pool.acquire().await.unwrap();
         let mut compared = 0;
-        for consent in RecordedConsent::ALL {
-            let send = SendContext {
-                channel: Channel::Email,
-                dimensions: Dimensions::new(),
-                consent,
-            };
-            let facts = zirv_flow_segments::PolicyFacts {
-                send: send.clone(),
-                messages: sent.clone(),
-            };
-            for condition in corpus() {
-                let mut value = condition.clone();
-                value["v"] = json!(1);
-                let definition = Definition::from_value(&value).unwrap();
-                let compiled = compile_policy(&definition, &catalog, &storage, NOW, &send)
-                    .unwrap_or_else(|issues| panic!("{condition}: {issues:?}"));
-                let selected = zirv_flow_store::run_person_batch(
-                    &mut connection,
-                    ws,
-                    &sql_query(compiled.batch_sql()),
-                    &[person],
-                )
-                .await
-                .unwrap();
-                let expected = zirv_flow_segments::evaluate_policy(
-                    &definition,
-                    &catalog,
-                    &zirv_flow_segments::PersonSnapshot::default(),
-                    &facts,
-                    NOW,
-                )
-                .outcome;
-                assert_eq!(
-                    !selected.is_empty(),
-                    expected == zirv_flow_segments::Outcome::Pass,
-                    "{consent:?} {condition}"
-                );
-                compared += 1;
+        // The person with the history and, for the NULL of the last send, one with none.
+        for (subject, messages) in [(person, sent.clone()), (empty, Vec::new())] {
+            for consent in RecordedConsent::ALL {
+                let send = SendContext {
+                    channel: Channel::Email,
+                    dimensions: Dimensions::new(),
+                    consent,
+                };
+                let facts = zirv_flow_segments::PolicyFacts {
+                    send: send.clone(),
+                    messages: messages.clone(),
+                };
+                for condition in corpus() {
+                    let mut value = condition.clone();
+                    value["v"] = json!(1);
+                    let definition = Definition::from_value(&value).unwrap();
+                    let compiled = compile_policy(&definition, &catalog, &storage, NOW, &send)
+                        .unwrap_or_else(|issues| panic!("{condition}: {issues:?}"));
+                    let selected = zirv_flow_store::run_person_batch(
+                        &mut connection,
+                        ws,
+                        &sql_query(compiled.batch_sql()),
+                        &[subject],
+                    )
+                    .await
+                    .unwrap();
+                    let expected = zirv_flow_segments::evaluate_policy(
+                        &definition,
+                        &catalog,
+                        &zirv_flow_segments::PersonSnapshot::default(),
+                        &facts,
+                        NOW,
+                    )
+                    .outcome;
+                    assert_eq!(
+                        !selected.is_empty(),
+                        expected == zirv_flow_segments::Outcome::Pass,
+                        "{consent:?} {condition}"
+                    );
+                    compared += 1;
+                }
             }
         }
         assert!(compared > 3000, "{compared}");

@@ -291,7 +291,11 @@ impl Lowerer<'_> {
             Some(Window::SinceTrait(_)) => return self.fail(code::VALUE_NOT_ALLOWED),
         };
         let rows = format!(
-            "FROM messages m WHERE m.workspace_id = p.workspace_id AND m.person_id = p.id \
+            "FROM (WITH RECURSIVE who(id) AS (SELECT p.id UNION \
+                SELECT g.merged_person_id FROM person_merges g JOIN who \
+                ON g.survivor_person_id = who.id WHERE g.workspace_id = p.workspace_id) \
+                SELECT id FROM who) w \
+             JOIN messages m ON m.person_id = w.id WHERE m.workspace_id = p.workspace_id \
              AND m.status = 'sent' AND NOT m.test AND m.channel = {channel} \
              AND m.dimensions @> {dimensions}{window}"
         );
