@@ -2,14 +2,24 @@
 //! topic policies, the send-time `allowed` check and the merge of two people's states.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::ValidationError;
 
 const MAX_TOPIC_KEY_CHARS: usize = 64;
+
+/// The built-in dimension whose values are the workspace's topics. A scope holds its topic
+/// under this key; the store resolves it from the `topics` rows, so nothing is copied.
+pub const TOPIC_DIMENSION: &str = "topic";
+
+/// A consent scope or a message's coordinates: dimension key to value key. An omitted
+/// dimension means all values. Sorted by key, so two equal maps iterate alike.
+pub type Dimensions = BTreeMap<String, String>;
 
 /// A channel consent is held for. Webhooks need no consent; SMS and push come later.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -221,6 +231,9 @@ pub struct State {
 /// Whether a send on a channel is permitted for a topic. A channel-wide `unsubscribed` blocks
 /// every topic; otherwise the topic's own state is judged under its policy. A state nobody
 /// recorded is [`ConsentStatus::Unknown`].
+///
+/// This is the two-state check of one channel and one topic. Sends read consent with
+/// [`read`], which also handles dimension-scoped records and lets the latest change win.
 pub const fn allowed(
     channel_wide: ConsentStatus,
     topic: ConsentStatus,
@@ -233,6 +246,116 @@ pub const fn allowed(
         TopicPolicy::OptIn => matches!(topic, ConsentStatus::Subscribed),
         TopicPolicy::OptOut => !matches!(topic, ConsentStatus::Unsubscribed),
     }
+}
+
+/// The canonical text of a dimension map: `key=value` pairs sorted bytewise by key and
+/// joined by `;`, empty for the empty map. Keys and values are `[a-z0-9_-]` only, so the
+/// form is unambiguous. The store's `consent_dimensions_canonical` SQL function produces
+/// the same text for the generated unique-key column.
+pub fn canonical_dimensions(dimensions: &Dimensions) -> String {
+    let mut text = String::new();
+    for (key, value) in dimensions {
+        if !text.is_empty() {
+            text.push(';');
+        }
+        text.push_str(key);
+        text.push('=');
+        text.push_str(value);
+    }
+    text
+}
+
+/// Whether a record scoped to `scope` covers a message with the coordinates `message`: every
+/// dimension the scope names must carry the same value in the message. An empty scope covers
+/// every message.
+pub fn covers(scope: &Dimensions, message: &Dimensions) -> bool {
+    scope
+        .iter()
+        .all(|(key, value)| message.get(key) == Some(value))
+}
+
+/// One consent record of a person for one channel: the scope it covers, its state, and the id
+/// of the change that last set it (the tie-break between equal times).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Record {
+    pub scope: Dimensions,
+    pub state: State,
+    pub change_id: Uuid,
+}
+
+impl Record {
+    /// What orders two records: when the change happened, then the change id.
+    fn order(&self) -> (OffsetDateTime, Uuid) {
+        (self.state.changed_at, self.change_id)
+    }
+}
+
+/// What [`read`] decided.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Read {
+    pub allowed: bool,
+    /// The change that decided it; `None` when no record covers the message and the topic
+    /// policy's default applies.
+    pub deciding_change: Option<Uuid>,
+}
+
+/// The read rule (OQ-32, architecture 10.1): whether a send whose message has the coordinates
+/// `message` is permitted, given the person's records for the channel. Among the records
+/// that cover the message the latest change wins, ordered by (`changed_at`, change id). A
+/// winner of `subscribed` allows and `unsubscribed` blocks; any other status, and no covering
+/// record at all, falls back to the topic policy's default: an opt-in topic blocks and an
+/// opt-out topic allows.
+pub fn read(message: &Dimensions, records: &[Record], policy: TopicPolicy) -> Read {
+    let winner = records
+        .iter()
+        .filter(|record| covers(&record.scope, message))
+        .max_by_key(|record| record.order());
+    let default = matches!(policy, TopicPolicy::OptOut);
+    match winner {
+        None => Read {
+            allowed: default,
+            deciding_change: None,
+        },
+        Some(record) => Read {
+            allowed: match record.state.status {
+                ConsentStatus::Subscribed => true,
+                ConsentStatus::Unsubscribed => false,
+                ConsentStatus::PendingConfirmation | ConsentStatus::Unknown => default,
+            },
+            deciding_change: Some(record.change_id),
+        },
+    }
+}
+
+/// Combines the records two people hold when they become one. Records of the same scope are
+/// resolved by [`merge`]; at the same instant and status the later change id is kept. A scope
+/// only one side holds is kept as it is. The result is ordered by canonical scope.
+pub fn merge_records(a: Vec<Record>, b: Vec<Record>) -> Vec<Record> {
+    let mut merged: BTreeMap<String, Record> = BTreeMap::new();
+    for record in a.into_iter().chain(b) {
+        let slot = canonical_dimensions(&record.scope);
+        match merged.remove(&slot) {
+            None => {
+                merged.insert(slot, record);
+            }
+            Some(held) => {
+                let winner = merge(Some(held.state), Some(record.state));
+                let keep = match winner {
+                    Some(state) if state == held.state && state == record.state => {
+                        if record.order() > held.order() {
+                            record
+                        } else {
+                            held
+                        }
+                    }
+                    Some(state) if state == held.state => held,
+                    _ => record,
+                };
+                merged.insert(slot, keep);
+            }
+        }
+    }
+    merged.into_values().collect()
 }
 
 /// Combines the states two people hold for one channel and topic when they become one.
@@ -279,6 +402,20 @@ pub fn validate_topic_key(key: &str) -> Result<(), ValidationError> {
             "must be 1 to 64 lowercase letters, digits, underscores or hyphens",
         ))
     }
+}
+
+/// Checks a dimension key: the topic key charset, and not the reserved `topic`.
+pub fn validate_dimension_key(key: &str) -> Result<(), ValidationError> {
+    validate_topic_key(key)?;
+    if key == TOPIC_DIMENSION {
+        return Err(ValidationError::new("key", "topic is a built-in dimension"));
+    }
+    Ok(())
+}
+
+/// Checks a dimension value key: the topic key charset.
+pub fn validate_dimension_value_key(key: &str) -> Result<(), ValidationError> {
+    validate_topic_key(key)
 }
 
 #[cfg(test)]
@@ -416,5 +553,228 @@ mod tests {
         for bad in ["", "News", "a b", "a.b", "\u{e9}", &"x".repeat(65)] {
             assert!(validate_topic_key(bad).is_err(), "{bad}");
         }
+    }
+
+    fn dims(pairs: &[(&str, &str)]) -> Dimensions {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    fn id(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    fn record(
+        scope: &[(&str, &str)],
+        status: ConsentStatus,
+        at: OffsetDateTime,
+        change: u128,
+    ) -> Record {
+        Record {
+            scope: dims(scope),
+            state: State {
+                status,
+                changed_at: at,
+            },
+            change_id: id(change),
+        }
+    }
+
+    #[test]
+    fn the_latest_change_among_the_covering_records_wins() {
+        let message = dims(&[("topic", "news"), ("vertical", "retail")]);
+        let records = [
+            record(&[], Unsubscribed, T1, 1),
+            record(&[("topic", "news")], Subscribed, T2, 2),
+        ];
+
+        let verdict = read(&message, &records, OptIn);
+
+        assert_eq!(
+            verdict,
+            Read {
+                allowed: true,
+                deciding_change: Some(id(2))
+            }
+        );
+        let older = [
+            record(&[], Subscribed, T1, 1),
+            record(&[("topic", "news")], Unsubscribed, T2, 2),
+        ];
+        assert!(!read(&message, &older, OptOut).allowed);
+    }
+
+    #[test]
+    fn equal_timestamps_are_ordered_by_change_id_whatever_the_input_order() {
+        let message = dims(&[("vertical", "retail")]);
+        let mut records = vec![
+            record(&[], Subscribed, T1, 9),
+            record(&[("vertical", "retail")], Unsubscribed, T1, 5),
+        ];
+
+        let forward = read(&message, &records, OptOut);
+        records.reverse();
+        let backward = read(&message, &records, OptOut);
+
+        assert_eq!(forward, backward);
+        assert_eq!(forward.deciding_change, Some(id(9)));
+        assert!(forward.allowed);
+        records[0].change_id = id(10);
+        let flipped = read(&message, &records, OptOut);
+        assert_eq!(flipped.deciding_change, Some(id(10)));
+        assert!(!flipped.allowed);
+    }
+
+    #[test]
+    fn no_covering_record_means_the_topic_policy_default() {
+        let message = dims(&[("vertical", "retail")]);
+        let elsewhere = [record(&[("vertical", "b2b")], Unsubscribed, T1, 1)];
+
+        for records in [&[][..], &elsewhere[..]] {
+            let opt_in = read(&message, records, OptIn);
+            let opt_out = read(&message, records, OptOut);
+
+            assert_eq!((opt_in.allowed, opt_in.deciding_change), (false, None));
+            assert_eq!((opt_out.allowed, opt_out.deciding_change), (true, None));
+        }
+    }
+
+    #[test]
+    fn a_status_that_is_not_a_decision_falls_back_to_the_default() {
+        let message = dims(&[]);
+        for status in [PendingConfirmation, Unknown] {
+            let records = [record(&[], status, T1, 1)];
+
+            assert!(!read(&message, &records, OptIn).allowed, "{status}");
+            assert!(read(&message, &records, OptOut).allowed, "{status}");
+            assert_eq!(read(&message, &records, OptIn).deciding_change, Some(id(1)));
+        }
+    }
+
+    #[test]
+    fn a_vertical_scoped_unsubscribe_blocks_only_that_vertical() {
+        let records = [
+            record(&[("topic", "news")], Subscribed, T1, 1),
+            record(
+                &[("topic", "news"), ("vertical", "retail")],
+                Unsubscribed,
+                T2,
+                2,
+            ),
+        ];
+        let retail = dims(&[("topic", "news"), ("vertical", "retail")]);
+        let b2b = dims(&[("topic", "news"), ("vertical", "b2b")]);
+        let unscoped = dims(&[("topic", "news")]);
+
+        assert!(!read(&retail, &records, OptIn).allowed);
+        assert!(read(&b2b, &records, OptIn).allowed);
+        assert!(read(&unscoped, &records, OptIn).allowed);
+        assert!(read(&b2b, &records, OptOut).allowed);
+    }
+
+    #[test]
+    fn an_all_values_unsubscribe_blocks_every_value() {
+        let records = [
+            record(&[("vertical", "retail")], Subscribed, T1, 1),
+            record(&[], Unsubscribed, T2, 2),
+        ];
+
+        for vertical in ["retail", "b2b", "other"] {
+            let message = dims(&[("topic", "news"), ("vertical", vertical)]);
+            assert!(!read(&message, &records, OptOut).allowed, "{vertical}");
+        }
+        assert!(!read(&dims(&[]), &records, OptOut).allowed);
+    }
+
+    #[test]
+    fn a_scope_covers_a_message_that_carries_all_its_values() {
+        let scope = dims(&[("vertical", "retail"), ("topic", "news")]);
+
+        assert!(covers(
+            &scope,
+            &dims(&[("topic", "news"), ("vertical", "retail"), ("x", "y")])
+        ));
+        assert!(!covers(&scope, &dims(&[("topic", "news")])));
+        assert!(!covers(
+            &scope,
+            &dims(&[("topic", "news"), ("vertical", "b2b")])
+        ));
+        assert!(covers(&dims(&[]), &dims(&[])));
+    }
+
+    #[test]
+    fn equal_maps_have_one_canonical_text_sorted_by_key() {
+        let a = dims(&[("vertical", "retail"), ("region", "eu")]);
+        let b = dims(&[("region", "eu"), ("vertical", "retail")]);
+
+        assert_eq!(canonical_dimensions(&a), "region=eu;vertical=retail");
+        assert_eq!(canonical_dimensions(&a), canonical_dimensions(&b));
+        assert_eq!(canonical_dimensions(&dims(&[])), "");
+        assert_ne!(
+            canonical_dimensions(&dims(&[("a", "b-c")])),
+            canonical_dimensions(&dims(&[("a-b", "c")]))
+        );
+    }
+
+    #[test]
+    fn merging_records_keeps_the_latest_per_scope_and_both_sides_own_scopes() {
+        let a = vec![
+            record(&[], Unsubscribed, T1, 1),
+            record(&[("vertical", "retail")], Subscribed, T1, 2),
+        ];
+        let b = vec![
+            record(&[], Subscribed, T2, 3),
+            record(&[("vertical", "b2b")], Unsubscribed, T1, 4),
+        ];
+
+        let merged = merge_records(a.clone(), b.clone());
+
+        let shown: Vec<(String, ConsentStatus, u128)> = merged
+            .iter()
+            .map(|r| {
+                (
+                    canonical_dimensions(&r.scope),
+                    r.state.status,
+                    r.change_id.as_u128(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (String::new(), Subscribed, 3),
+                ("vertical=b2b".to_owned(), Unsubscribed, 4),
+                ("vertical=retail".to_owned(), Subscribed, 2),
+            ]
+        );
+        assert_eq!(merge_records(b, a), merged);
+    }
+
+    #[test]
+    fn merging_records_of_one_instant_prefers_unsubscribed_then_the_later_change_id() {
+        let yes = record(&[("vertical", "retail")], Subscribed, T1, 8);
+        let no = record(&[("vertical", "retail")], Unsubscribed, T1, 3);
+        let later_yes = record(&[("vertical", "retail")], Subscribed, T1, 9);
+
+        let against = merge_records(vec![yes.clone()], vec![no.clone()]);
+        let reversed = merge_records(vec![no.clone()], vec![yes.clone()]);
+        assert_eq!((against, reversed), (vec![no.clone()], vec![no]));
+        assert_eq!(
+            merge_records(vec![yes], vec![later_yes.clone()]),
+            [later_yes]
+        );
+        assert!(merge_records(vec![], vec![]).is_empty());
+    }
+
+    #[test]
+    fn a_dimension_key_is_a_topic_key_that_is_not_the_reserved_topic() {
+        assert!(validate_dimension_key("vertical").is_ok());
+        assert!(validate_dimension_key("topic").is_err());
+        assert!(validate_dimension_key("Vertical").is_err());
+        assert!(validate_dimension_value_key("retail-eu").is_ok());
+        assert!(validate_dimension_value_key("topic").is_ok());
+        assert!(validate_dimension_value_key("a b").is_err());
     }
 }

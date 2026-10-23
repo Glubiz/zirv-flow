@@ -732,7 +732,11 @@ async fn apply_effect(
             decisions.push(walk.decision("flow.goal", "converted", None, step, Some(&effect.node)));
             Ok(None)
         }
-        EffectKind::Webhook { url, trait_keys } => {
+        EffectKind::Webhook {
+            url,
+            trait_keys,
+            template,
+        } => {
             let label = input_freshness(conn, walk).await?;
             let key = effect
                 .effect_key
@@ -758,6 +762,10 @@ async fn apply_effect(
                 "url": url,
                 "trait_keys": trait_keys,
             });
+            // Only a templated node names one, so the payload of every other node is unchanged.
+            if let (Some(template), Some(payload)) = (template, job.payload.as_object_mut()) {
+                payload.insert("template".to_owned(), json!(template));
+            }
             enqueue(&mut *conn, &job).await?;
             Ok(Some(label))
         }

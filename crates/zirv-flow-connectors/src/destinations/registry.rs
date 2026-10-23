@@ -52,6 +52,13 @@ mod tests {
     }
 
     #[test]
+    fn the_webhook_is_registered_in_every_build() {
+        let registry = Registry::built_in();
+
+        assert_eq!(registry.get("webhook").unwrap().spec().kind, "webhook");
+    }
+
+    #[test]
     fn an_unknown_kind_is_not_found() {
         assert!(Registry::built_in().get("no-such-kind").is_none());
     }
@@ -67,8 +74,14 @@ mod tests {
 
     #[cfg(not(feature = "test-support"))]
     #[test]
-    fn no_destination_is_registered_in_a_production_build() {
-        assert!(Registry::built_in().specs().is_empty());
+    fn only_the_webhook_is_registered_in_a_production_build() {
+        let kinds: Vec<_> = Registry::built_in()
+            .specs()
+            .iter()
+            .map(|spec| spec.kind)
+            .collect();
+
+        assert_eq!(kinds, ["webhook"]);
         assert!(Registry::built_in().get("fake").is_none());
     }
 
@@ -77,6 +90,7 @@ mod tests {
         let production = include_str!("mod.rs");
 
         assert_eq!(production.matches("fake::Fake").count(), 1);
+        assert_eq!(production.matches("webhook::Webhook").count(), 1);
     }
 
     #[test]
@@ -91,6 +105,7 @@ mod tests {
             "retry_after",
             "spec",
             "validate",
+            "webhook",
         ] {
             assert_eq!(
                 production.matches(&format!("mod {module};")).count(),

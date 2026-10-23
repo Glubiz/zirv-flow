@@ -256,6 +256,25 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dmarc_name_that_is_an_alias_into_a_private_zone_stores_nothing_from_it(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        let id = plant_domain(&pool, ws, "example.com").await.unwrap();
+        let dns = FixtureResolver::new();
+        dns.set_cname("_dmarc.example.com", "dmarc.secret.corp");
+        dns.set("dmarc.secret.corp", &["v=DMARC1; p=none"]);
+
+        run(&pool, &dns, ws, id).await.0.unwrap();
+
+        let records = list_domain_records(&pool, ws, id).await.unwrap();
+        assert_eq!(records[2].status, "missing");
+        assert!(records[2].observed_text.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_txt_record_of_another_type_is_reported_as_present_and_never_stored(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let ws = workspace(&pool).await;

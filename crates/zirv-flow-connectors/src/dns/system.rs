@@ -5,7 +5,7 @@ use std::time::Duration;
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
 
-use super::{DnsError, DnsResolver, Lookup};
+use super::{DnsError, DnsResolver, Lookup, chain_is_public};
 
 /// How long one name server gets to answer, and how many tries a lookup makes. A verification
 /// run makes three lookups, so a dead server delays it by well under a minute.
@@ -61,20 +61,30 @@ impl DnsResolver for SystemResolver {
                 format!("{name}.")
             };
             match self.resolver.txt_lookup(absolute.as_str()).await {
-                Ok(lookup) => Ok(lookup
-                    .answers()
-                    .iter()
-                    .filter_map(|record| match &record.data {
-                        RData::TXT(txt) => Some(
-                            txt.txt_data
-                                .iter()
-                                .map(|part| String::from_utf8_lossy(part))
-                                .collect::<String>(),
-                        ),
+                Ok(lookup) => {
+                    let answers = lookup.answers();
+                    // A CNAME in the chain that leaves the public namespace voids the answer.
+                    let targets = answers.iter().filter_map(|record| match &record.data {
+                        RData::CNAME(cname) => Some(cname.0.to_string()),
                         _ => None,
-                    })
-                    .take(MAX_RECORDS)
-                    .collect()),
+                    });
+                    if !chain_is_public(targets) {
+                        return Ok(Vec::new());
+                    }
+                    Ok(answers
+                        .iter()
+                        .filter_map(|record| match &record.data {
+                            RData::TXT(txt) => Some(
+                                txt.txt_data
+                                    .iter()
+                                    .map(|part| String::from_utf8_lossy(part))
+                                    .collect::<String>(),
+                            ),
+                            _ => None,
+                        })
+                        .take(MAX_RECORDS)
+                        .collect())
+                }
                 Err(error) if error.is_no_records_found() => Ok(Vec::new()),
                 Err(_) => Err(DnsError::Unavailable),
             }

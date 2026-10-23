@@ -41,7 +41,7 @@ fn email_of(doc: &TemplateDocument) -> Result<&EmailContent, RenderError> {
         return Err(RenderError::UnsupportedSchema);
     }
     match (&doc.email, doc.channel, doc.mode) {
-        (Some(email), Channel::Email, Mode::Code) => Ok(email),
+        (Some(email), Channel::Email, Mode::Code) if !doc.is_ambiguous() => Ok(email),
         _ => Err(RenderError::WrongDocument),
     }
 }
@@ -51,7 +51,7 @@ fn webhook_of(doc: &TemplateDocument) -> Result<&WebhookContent, RenderError> {
         return Err(RenderError::UnsupportedSchema);
     }
     match (&doc.webhook, doc.channel, doc.mode) {
-        (Some(webhook), Channel::Webhook, Mode::Code) => Ok(webhook),
+        (Some(webhook), Channel::Webhook, Mode::Code) if !doc.is_ambiguous() => Ok(webhook),
         _ => Err(RenderError::WrongDocument),
     }
 }
@@ -66,14 +66,19 @@ pub(crate) fn one_line(text: &str) -> String {
         .to_owned()
 }
 
-/// The MJML stage of an `mjml` email: `mrml` over the MiniJinja output. The result is held to the
-/// same cap as any rendered HTML.
-fn mjml_to_html(rendered: &str) -> Result<String, RenderError> {
-    let compiled = compile(rendered).map_err(|error| match error {
+/// The render error for MJML that did not become HTML.
+pub(crate) fn map_mjml_error(error: MjmlError) -> RenderError {
+    match error {
         MjmlError::Include => RenderError::MjmlInclude,
         MjmlError::TooDeep => RenderError::MjmlTooDeep,
         MjmlError::Parse { .. } | MjmlError::Render => RenderError::Mjml,
-    })?;
+    }
+}
+
+/// The MJML stage of an `mjml` email: `mrml` over the MiniJinja output. The result is held to the
+/// same cap as any rendered HTML.
+fn mjml_to_html(rendered: &str) -> Result<String, RenderError> {
+    let compiled = compile(rendered).map_err(map_mjml_error)?;
     if compiled.html.len() > MAX_HTML_BYTES {
         return Err(RenderError::OutputTooLarge { field: "html" });
     }
@@ -88,6 +93,17 @@ pub fn render_email(
     context: &RenderContext,
     hooks: &Hooks<'_>,
 ) -> Result<Rendered, RenderError> {
+    if doc.mode == Mode::Blocks && doc.blocks.is_some() {
+        let parts = crate::content::blocks::render(doc, context)?;
+        return finish_email(
+            parts.subject,
+            parts.html,
+            parts.text,
+            parts.category,
+            context,
+            hooks,
+        );
+    }
     let email = email_of(doc)?;
     let env = environment();
     let values = Value::from_serialize(context);
@@ -123,8 +139,21 @@ pub fn render_email(
         MAX_TEXT_BYTES,
     )?;
 
+    finish_email(subject, html, text, email.category, context, hooks)
+}
+
+/// The post-render steps every email gets: marketing mail must link to the message's
+/// unsubscribe URL and carries the `List-Unsubscribe` headers, then links are tracked.
+fn finish_email(
+    subject: String,
+    html: String,
+    text: String,
+    category: Category,
+    context: &RenderContext,
+    hooks: &Hooks<'_>,
+) -> Result<Rendered, RenderError> {
     let system = &context.system;
-    let headers = match email.category {
+    let headers = match category {
         Category::Marketing => {
             let headers = unsubscribe_headers(&system.unsubscribe_url)?;
             if !links_to(&html, &system.unsubscribe_url) {

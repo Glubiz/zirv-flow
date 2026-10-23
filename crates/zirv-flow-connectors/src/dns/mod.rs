@@ -10,10 +10,14 @@
 //! name to the name servers the operator configured for the host. What a tenant can learn through
 //! it is bounded by the callers: a sending domain must be a public name (`parse_domain` refuses
 //! internal and special-use suffixes), and only TXT text of the expected record type is stored or
-//! returned (`redact_observed`). Architecture 16.2 records the reasoning.
+//! returned, rebuilt from its parsed fields (`redact_observed`). A CNAME in an answer's chain whose target is not a public name
+//! (the same rule, `is_public_name`) voids the answer, which is then empty: a public name cannot be
+//! made to answer from a private zone. Architecture 16.2 records the reasoning.
 
 use std::future::Future;
 use std::pin::Pin;
+
+use zirv_flow_core::sending::is_public_name;
 
 mod system;
 
@@ -46,6 +50,14 @@ impl std::fmt::Display for DnsError {
 }
 
 impl std::error::Error for DnsError {}
+
+/// Whether every CNAME target in an answer's chain is a public name. A resolver returns no records
+/// from an answer for which this is false.
+pub(crate) fn chain_is_public<S: AsRef<str>>(targets: impl IntoIterator<Item = S>) -> bool {
+    targets
+        .into_iter()
+        .all(|target| is_public_name(target.as_ref()))
+}
 
 /// A boxed lookup, so a resolver can be used as a trait object.
 pub type Lookup<'a> = Pin<Box<dyn Future<Output = Result<Vec<String>, DnsError>> + Send + 'a>>;

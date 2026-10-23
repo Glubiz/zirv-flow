@@ -46,6 +46,8 @@ pub enum RenderError {
     Mjml,
     /// The MJML nests deeper than `mrml` is given.
     MjmlTooDeep,
+    /// A block document the checks refuse, or a rendered URL a link may not use.
+    InvalidBlocks,
 }
 
 impl RenderError {
@@ -72,6 +74,7 @@ impl RenderError {
             Self::MjmlInclude => "mjml_include",
             Self::Mjml => "mjml_error",
             Self::MjmlTooDeep => "mjml_too_deep",
+            Self::InvalidBlocks => "invalid_blocks",
         }
     }
 
@@ -107,6 +110,7 @@ impl RenderError {
             "mjml_include" => Self::MjmlInclude,
             "mjml_error" => Self::Mjml,
             "mjml_too_deep" => Self::MjmlTooDeep,
+            "invalid_blocks" => Self::InvalidBlocks,
             _ => return None,
         })
     }
@@ -174,6 +178,7 @@ mod tests {
             RenderError::MjmlInclude,
             RenderError::Mjml,
             RenderError::MjmlTooDeep,
+            RenderError::InvalidBlocks,
         ];
         for error in all {
             assert_eq!(

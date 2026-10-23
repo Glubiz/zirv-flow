@@ -192,7 +192,7 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
 
 /// Decode the entities an attribute value is escaped with: the named `amp`, `lt`, `gt`, `quot`
 /// and `apos`, and numeric ones (the sandbox writes `/` as `&#x2f;` inside HTML fields).
-fn unescape(text: &str) -> String {
+pub(crate) fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('&') {
@@ -206,6 +206,8 @@ fn unescape(text: &str) -> String {
                 "gt" => Some('>'),
                 "quot" => Some('"'),
                 "apos" => Some('\''),
+                // The one named entity `ammonia` writes besides the five: a no-break space.
+                "nbsp" => Some(' '),
                 _ => name.strip_prefix('#').and_then(|number| {
                     let code = match number.strip_prefix(['x', 'X']) {
                         Some(hex) => u32::from_str_radix(hex, 16).ok(),
@@ -231,11 +233,17 @@ fn unescape(text: &str) -> String {
     out
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Whether `text` starts with `prefix`, ignoring ASCII case.
+pub(crate) fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
 }
 
 /// Whether a URL is an `http` or `https` link (the only ones that are tracked).

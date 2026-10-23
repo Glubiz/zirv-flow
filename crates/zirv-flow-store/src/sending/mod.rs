@@ -8,6 +8,13 @@
 //! is the one place that changes that, and it appends a decision when the status changes.
 //! [`require_verified_sender`] is the shared refusal template publish and sends use.
 //!
+//! **Lock order.** Every path that holds a domain row and an identity row takes the domain first:
+//! `require_verified_sender` (domain `FOR SHARE`, then identity `FOR SHARE`),
+//! `create_sender_identity_in` and `update_sender_identity` (domain `FOR SHARE`, then the identity
+//! write), `delete_sending_domain` (domain `FOR UPDATE`, then its cascade into the identities) and
+//! `record_domain_check` (domain only). Archiving an identity locks the identity alone. A fixed
+//! order means a publish and a domain delete wait for one another and never deadlock.
+//!
 //! None of these tables is person-scoped: `sender_identities.from_address` is the address of a
 //! sender the workspace owns, never a contact's, so the erasure scan has nothing to look for in
 //! them.

@@ -418,6 +418,30 @@ fn routes() -> Router<AppState> {
             patch(consent::topics::update),
         )
         .route(
+            "/api/v1/workspaces/{ws}/consent/dimensions",
+            get(consent::dimensions::list).post(consent::dimensions::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/dimensions/{key}",
+            patch(consent::dimensions::update),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values",
+            post(consent::dimensions::add_value_handler),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values/{value}",
+            patch(consent::dimensions::update_value_handler),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/import",
+            post(consent::transfer::import_handler),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/export",
+            get(consent::transfer::export),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/people/{id}/consent",
             get(consent::person::get).put(consent::person::set),
         )

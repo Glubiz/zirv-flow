@@ -2,6 +2,7 @@
 //! registry, over the durable queue in `zirv-flow-store` (architecture section 14).
 
 mod context;
+mod delivery;
 mod error;
 mod kinds;
 mod metrics;

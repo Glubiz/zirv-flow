@@ -218,7 +218,9 @@ fn check_node(node: &FlowNode, out: &mut Vec<Issue>) {
                 out.push(issue(id, code::WEIGHTS_NOT_100).at("/arms"));
             }
         }
-        NodeKind::ActionWebhook { url, trait_keys } => {
+        NodeKind::ActionWebhook {
+            url, trait_keys, ..
+        } => {
             if !valid_url(url) {
                 out.push(issue(id, code::INVALID_URL).at("/url"));
             }
@@ -702,6 +704,7 @@ mod tests {
             NodeKind::ActionWebhook {
                 url: "https://example.com/hook".into(),
                 trait_keys: vec!["plan".into(), "country".into()],
+                template: None,
             },
             NodeKind::ActionUpdateTrait {
                 key: "visits".into(),
@@ -1271,6 +1274,7 @@ mod tests {
             let kind = NodeKind::ActionWebhook {
                 url: url.into(),
                 trait_keys: vec![],
+                template: None,
             };
             only(
                 &validate_graph(&around(kind)),
@@ -1283,6 +1287,7 @@ mod tests {
             let kind = NodeKind::ActionWebhook {
                 url: url.into(),
                 trait_keys: vec![],
+                template: None,
             };
             assert_eq!(validate_graph(&around(kind)), [], "{url}");
         }
@@ -1294,6 +1299,7 @@ mod tests {
             let kind = NodeKind::ActionWebhook {
                 url: "https://example.com".into(),
                 trait_keys: keys,
+                template: None,
             };
             only(
                 &validate_graph(&around(kind)),
@@ -1438,6 +1444,7 @@ mod tests {
         let kind = NodeKind::ActionWebhook {
             url: "https://example.com".into(),
             trait_keys: keys,
+            template: None,
         };
         only(
             &validate_graph(&around(kind)),

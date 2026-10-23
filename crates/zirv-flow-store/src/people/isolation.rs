@@ -489,6 +489,7 @@ mod tests {
 
     fn consent_change(person: Uuid, topic: Option<Uuid>, status: ConsentStatus) -> ConsentChange {
         ConsentChange {
+            dimensions: Default::default(),
             person,
             channel: Channel::Email,
             topic,
@@ -517,7 +518,7 @@ mod tests {
         }
         assert!(consent_for(&pool, one, person_two).await.unwrap().is_none());
         assert!(
-            consent_history(&pool, two, person_one, 10, None)
+            consent_history(&pool, two, person_one, 10, None, &Default::default())
                 .await
                 .unwrap()
                 .is_none()
@@ -525,7 +526,7 @@ mod tests {
         for (ws, person) in [(one, person_one), (two, person_two)] {
             let states = consent_for(&pool, ws, person).await.unwrap().unwrap();
             assert_eq!(states.len(), 2);
-            let (history, _) = consent_history(&pool, ws, person, 10, None)
+            let (history, _) = consent_history(&pool, ws, person, 10, None, &Default::default())
                 .await
                 .unwrap()
                 .unwrap();

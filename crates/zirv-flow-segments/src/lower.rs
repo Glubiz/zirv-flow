@@ -221,7 +221,7 @@ impl Lowerer<'_> {
         let wanted = self.text(status.as_str());
         let row = format!(
             "FROM consent c WHERE c.workspace_id = p.workspace_id AND c.person_id = p.id \
-             AND c.channel = {channel} AND {topic}"
+             AND c.channel = {channel} AND {topic} AND c.dimensions_key = ''"
         );
         if status == ConsentStatus::Unknown {
             format!("NOT EXISTS (SELECT 1 {row} AND c.status <> {wanted})")
