@@ -56,7 +56,7 @@ use self::client::{
 };
 use super::context::DestinationContext;
 use super::destination::{Delivered, Destination, Outbound};
-use super::error::DestinationError;
+use super::error::{DestinationError, Refusal};
 use super::spec::{Capabilities, DestinationSpec};
 use crate::http::HttpError;
 use crate::sources::{Credential, FieldError, FieldKind, FieldSpec};
@@ -195,7 +195,7 @@ impl Destination for Smtp {
             })?;
         let wire = built.wire(Some(&signature));
         if wire.len() > MAX_MESSAGE_BYTES {
-            return Err(DestinationError::Refused(super::error::Refusal::Rejected));
+            return Err(DestinationError::Refused(Refusal::Rejected));
         }
         let envelope = Envelope {
             from: &built.from_address,
@@ -582,7 +582,7 @@ async fn send<S: AsyncRead + AsyncWrite + Unpin>(
     envelope: &Envelope<'_>,
 ) -> Result<(), DestinationError> {
     if extensions.size.is_some_and(|limit| envelope.size > limit) {
-        return Err(DestinationError::Refused(super::error::Refusal::Rejected));
+        return Err(DestinationError::Refused(Refusal::Rejected));
     }
     let reply = session
         .command(&format!("MAIL FROM:<{}>", envelope.from), STEP_TIMEOUT)
@@ -616,7 +616,7 @@ mod tests {
 
     use super::super::dkim::DkimSigner;
     use super::super::dkim::tests::{key, signer, verify};
-    use super::super::error::{Disposition, Refusal};
+    use super::super::error::Disposition;
     use super::sink::{SINK_HOST, SinkOptions, SinkStage, SinkTls, SmtpSink};
     use super::*;
     use crate::destinations::validate_config;
