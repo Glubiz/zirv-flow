@@ -617,7 +617,9 @@ mod tests {
     use super::super::dkim::DkimSigner;
     use super::super::dkim::tests::{key, signer, verify};
     use super::super::error::Disposition;
-    use super::sink::{SINK_HOST, SinkOptions, SinkStage, SinkTls, SmtpSink};
+    use super::sink::{
+        SINK_HOST, SINK_PASSWORD, SINK_USER, SinkOptions, SinkStage, SinkTls, SmtpSink,
+    };
     use super::*;
     use crate::destinations::validate_config;
     use crate::http::{HttpLimits, Lookup};
