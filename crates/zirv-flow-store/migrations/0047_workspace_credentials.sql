@@ -77,7 +77,7 @@ CREATE TEMPORARY TABLE imported_credentials AS
 
 INSERT INTO credentials (id, workspace_id, key, name, kind, secret_id, hints, created_by)
 SELECT i.id, i.workspace_id, i.owner || '-' || replace(i.owner_id::text, '-', ''),
-       left(i.owner_name, 100) || ' (' || i.owner || ' ' || substr(i.owner_id::text, 1, 8) || ')',
+       left(i.owner_name, 80) || ' (' || i.owner || ' ' || replace(i.owner_id::text, '-', '') || ')',
        'imported', i.secret_id,
        coalesce((SELECT jsonb_object_agg(f, '') FROM unnest(i.credential_fields) AS f), '{}'),
        i.created_by

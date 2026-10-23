@@ -157,6 +157,62 @@ mod tests {
 
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn owners_whose_names_differ_only_in_case_or_after_the_hundredth_character_and_whose_ids_share_a_prefix_all_get_a_credential(
+        pool: PgPool,
+    ) {
+        migrate_before_credentials(&pool).await;
+        let ws = workspace(&pool, "one").await;
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        let long = "x".repeat(110);
+        // Ids that agree on their first 8 hex characters, as UUIDv7s made together do.
+        let ids = [
+            "01a166e4-0000-7000-8000-000000000001",
+            "01a166e4-0000-7000-8000-000000000002",
+            "01a166e4-0000-7000-8000-000000000003",
+            "01a166e4-0000-7000-8000-000000000004",
+        ];
+        let names = ["CRM", "crm", &format!("{long}a"), &format!("{long}b")];
+        for (id, name) in ids.iter().zip(names) {
+            let secret_id = secret(
+                &pool,
+                &keys,
+                ws,
+                SecretPurpose::ConnectorCredential,
+                b"{\"token\":\"t\"}",
+            )
+            .await;
+            sqlx::query(
+                "INSERT INTO sources (id, workspace_id, kind, name, config,                     credential_secret_id, credential_fields)                  VALUES ($1::uuid, $2, 'fake', $3, '{}', $4, '{token}')",
+            )
+            .bind(id)
+            .bind(ws.as_uuid())
+            .bind(name)
+            .bind(secret_id.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0047_workspace_credentials.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM credentials")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(names.len(), 4);
+        assert!(
+            names.iter().all(|name| name.chars().count() <= 128),
+            "{names:?}"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_old_credential_columns_are_dropped_and_every_workspace_gets_its_own_credentials(
         pool: PgPool,
     ) {
