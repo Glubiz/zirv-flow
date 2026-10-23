@@ -12,5 +12,5 @@ mod log;
 pub use address::read_send_address;
 pub use log::{
     GateRecord, Message, MessageStatus, NewMessage, find_message, insert_message,
-    list_person_messages, message_exists,
+    list_person_messages, message_status,
 };

@@ -268,7 +268,7 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'flow.step', \n            jsonb_build_object('enrollment_id', $3::text), 'seed:step', 'api', 't', \n            gen_random_uuid())",
         "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'webhook.call', \n            jsonb_build_object('person_id', $4::text, 'enrollment_id', $3::text), \n            'seed:hook', 'api', 't', gen_random_uuid())",
         "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'delivery.send', \n            jsonb_build_object('person_id', $4::text, 'enrollment_id', $3::text), \n            'seed:send', 'api', 't', gen_random_uuid())",
-        "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, template_id, \n            destination_id, status, reason) \n         VALUES (gen_random_uuid(), $2, $4, $3, 'n', gen_random_uuid(), gen_random_uuid(), \n            'skipped', 'no_consent')",
+        "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, template_id, \n            destination_id, status, reason, completed_at) \n         VALUES (gen_random_uuid(), $2, $4, $3, 'n', gen_random_uuid(), gen_random_uuid(), \n            'skipped', 'no_consent', now())",
         "INSERT INTO jobs (id, workspace_id, kind, payload, state, lease_token, lease_expires_at, \n            attempts, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'flow.step', \n            jsonb_build_object('enrollment_id', $3::text), 'running', gen_random_uuid(), \n            now() + interval '1 hour', 1, 'seed:running', 'api', 't', gen_random_uuid())",
     ] {
         sqlx::query(statement)
@@ -294,9 +294,9 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         "INSERT INTO flow_entries (workspace_id, flow_id, person_id, entries, last_entered_at) \
          VALUES ($2, $1, $4, 1, now())",
         "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, template_id, \
-            destination_id, status, reason) \
+            destination_id, status, reason, completed_at) \
          VALUES (gen_random_uuid(), $2, $4, $3, 'n', gen_random_uuid(), gen_random_uuid(), \
-            'skipped', 'suppressed')",
+            'skipped', 'suppressed', now())",
     ] {
         sqlx::query(statement)
             .bind(flow)

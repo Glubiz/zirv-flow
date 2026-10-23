@@ -28,11 +28,13 @@
 //!    instant the bucket will hold one.
 //! 10. `delivery`: the destination is called with the message id as idempotency key.
 //!
-//! **Idempotency.** A job that finds its message recorded does nothing. Otherwise it reads, renders
-//! and calls the destination holding no lock, then locks the person (`FOR KEY SHARE`, skipped when
-//! the person was erased or merged in the meantime) and writes the row, the event and the
-//! decisions in one go. A retry, a lost lease or a crash before that commit sends again with the
-//! same key, which a destination that honours keys treats as the same message.
+//! **Idempotency.** The first run writes the `messages` row, `pending`, in a statement of its own
+//! (so a retry that rolls the job's transaction back leaves it), and the message id is the
+//! idempotency key on every attempt. A job that finds its message ended does nothing. Otherwise it
+//! reads, renders and calls the destination holding no lock, then locks the person (`FOR KEY
+//! SHARE`, skipped when the person was erased or merged in the meantime) and ends the row, with the
+//! event and the decisions, in one go. A retry, a lost lease or a crash before that commit sends
+//! again with the same key, which a destination that honours keys treats as the same message.
 //!
 //! **Retries.** A 408, a 429, a 5xx, a timeout or a transport error is retried with the worker's
 //! backoff, or after the `Retry-After` the destination named when that is longer; on the job's
@@ -55,9 +57,9 @@ use zirv_flow_core::consent::Dimensions;
 use zirv_flow_store::{
     Admission, Destination, FlowState, GateRecord, MessageStatus, NewJob, NewMessage, PgPool,
     SEND_JOB_KIND, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject, document_sender,
-    find_destination, find_flow, find_template, find_template_version, lock_webhook_person,
-    message_exists, read_template_field_catalog, read_webhook_subject, record_send_outcome,
-    throttle_bucket,
+    find_destination, find_flow, find_template, find_template_version, insert_message,
+    lock_webhook_person, message_status, read_template_field_catalog, read_webhook_subject,
+    record_send_outcome, throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -150,7 +152,8 @@ impl JobKind for DeliverySend {
         let now = clock.now(ctx.conn()).await?;
         // A message that ended and committed, and whose job ran again (a lease lost between the
         // commit and the acknowledgement): there is nothing left to do.
-        if message_exists(ctx.conn(), job.workspace, job.message).await? {
+        let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
+        if recorded.is_some_and(|status| status != MessageStatus::Pending) {
             return Ok(());
         }
         match decide(ctx, &job, &payload, now).await? {
@@ -180,8 +183,10 @@ async fn decide(
         .await?
         .map(|flow| flow.state)
     {
-        Some(FlowState::Paused) => return dropped(ctx, job, "flow_paused").await,
-        Some(FlowState::Archived) | None => return dropped(ctx, job, "flow_inactive").await,
+        Some(FlowState::Paused) => return stopped(ctx, job, trail, "flow_paused").await,
+        Some(FlowState::Archived) | None => {
+            return stopped(ctx, job, trail, "flow_inactive").await;
+        }
         Some(FlowState::Draft | FlowState::Published) => {}
     }
     let catalog = read_template_field_catalog(ctx.conn(), workspace).await?;
@@ -190,12 +195,15 @@ async fn decide(
         read_webhook_subject(ctx.conn(), workspace, job.enrollment, &keys).await?
     else {
         // Erased, exited (a goal, an operator, a merge) or merged away: nobody to send to.
-        return dropped(ctx, job, "enrollment_ended").await;
+        return stopped(ctx, job, trail, "enrollment_ended").await;
     };
     if person != job.person {
-        return dropped(ctx, job, "enrollment_ended").await;
+        return stopped(ctx, job, trail, "enrollment_ended").await;
     }
     trail.pass(GateRecord::passed("enrollment"));
+    // The first run writes the row, pending, in a statement of its own: it stays whatever this
+    // attempt comes to (a retry, a wait for a token), and shows the message in the log meanwhile.
+    start_message(&pool, job, now).await?;
 
     // The template, as published now.
     let template = find_template(ctx.conn(), workspace, job.template).await?;
@@ -350,8 +358,53 @@ async fn slow_down(
     }
 }
 
-/// Gate 1 stopped the message: nobody is waiting for it. A decision says so (ids only) and no
-/// row, event or attempt is written.
+/// Gate 1 stopped the message. On the first run nobody is waiting for it: it is dropped, and a
+/// decision says so (ids only) with no row, event or attempt. A later run finds the row the first
+/// one wrote, pending: that message ends as skipped, for the same reason, so no row stays pending.
+async fn stopped(
+    ctx: &mut JobContext<'_>,
+    job: &SendJob,
+    trail: Trail,
+    reason: &'static str,
+) -> Result<Step, JobError> {
+    let recorded = message_status(ctx.conn(), job.workspace, job.message).await?;
+    if recorded == Some(MessageStatus::Pending) {
+        return Ok(trail.skip(Blocked::new("enrollment", reason)));
+    }
+    dropped(ctx, job, reason).await
+}
+
+/// Writes the message `pending`, if it has no row yet. The statement is its own transaction on the
+/// worker's pool, so the row outlives a job transaction that rolls back.
+async fn start_message(pool: &PgPool, job: &SendJob, now: OffsetDateTime) -> Result<(), JobError> {
+    let started = NewMessage {
+        id: job.message,
+        workspace: job.workspace,
+        person: job.person,
+        enrollment: job.enrollment,
+        flow: Some(job.flow),
+        flow_version: Some(job.version),
+        node: &job.node,
+        template: job.template,
+        template_version: None,
+        destination: job.destination,
+        sender_identity: None,
+        category: None,
+        topic: job.topic,
+        dimensions: &job.dimensions,
+        status: MessageStatus::Pending,
+        reason: None,
+        deciding_rule: None,
+        gates: &[],
+        attempts: 0,
+        now,
+    };
+    insert_message(pool, &started).await?;
+    Ok(())
+}
+
+/// Gate 1 stopped the first run of the message: nobody is waiting for it. A decision says so (ids
+/// only) and no row, event or attempt is written.
 async fn dropped(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
@@ -1212,11 +1265,13 @@ mod tests {
             first.message(),
             "the destination answered with a server error"
         );
+        let pending = env.message(queued.message).await;
         assert_eq!(
-            env.count("SELECT count(*) FROM messages").await,
-            0,
-            "nothing is recorded yet"
+            (pending.status.as_str(), pending.completed_at),
+            ("pending", None),
+            "the first run wrote the row and the retry left it"
         );
+        assert_eq!(env.events("email.sent").await.len(), 0);
         // The retry sends again, under the same key, and succeeds.
         env.attempt().await.unwrap();
 
@@ -1429,8 +1484,11 @@ mod tests {
 
         env.attempt().await.unwrap();
 
-        // No row, no event, no call: the job was replaced by one that runs after the wait.
-        assert_eq!(env.count("SELECT count(*) FROM messages").await, 1);
+        // No event, no call: the job was replaced by one that runs after the wait, and the message
+        // waits, pending.
+        assert_eq!(env.count("SELECT count(*) FROM messages").await, 2);
+        assert_eq!(env.message(queued.message).await.status, "pending");
+        assert_eq!(env.events("email.sent").await.len(), 1);
         assert_eq!(env.sent().len(), 1);
         let next: Vec<(Option<String>, Value, bool)> = sqlx::query_as(
             "SELECT unique_key, payload, run_at > $1 FROM jobs WHERE kind = 'delivery.send'",
@@ -1507,6 +1565,39 @@ mod tests {
                 Some("flow_paused".to_owned())
             )]
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pending_message_whose_flow_is_paused_before_its_retry_ends_skipped_unsent(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "pending");
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(env.flow)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("skipped", Some("flow_paused"))
+        );
+        assert_eq!(
+            fake_ledger_calls(&env.ledger).len(),
+            1,
+            "no second call was made"
+        );
+        assert_eq!(env.events("email.skipped").await.len(), 1);
     }
 
     #[sqlx::test]

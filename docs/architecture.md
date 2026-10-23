@@ -1217,10 +1217,12 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 
 - **Message id.** `flow.step` mints the v7 message id when it enqueues the job, in the step's
   transaction, so the id is the idempotency key at the destination on every attempt, deferral and
-  retry. The `messages` row is written when the message ends (`sent`, `skipped` or `failed`),
-  together with the event and the decisions, under a short `FOR KEY SHARE` lock on the person
-  (skipped when the person was erased or merged away meanwhile). A job that finds its message
-  recorded does nothing. Migration `0048_messages.sql`.
+  retry. The job writes the `messages` row, `pending`, on its first run once gate 1 passed, in a
+  statement of its own so a retry that rolls the job's transaction back leaves it. The message
+  ends as `sent`, `skipped` or `failed`: the row is updated, and the event and the decisions are
+  written with it, under a short `FOR KEY SHARE` lock on the person (skipped when the person was
+  erased or merged away meanwhile). A job that finds its message ended does nothing. Migration
+  `0048_messages.sql`.
 - **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
   enrollment ended or the flow is paused or archived: a decision, no row), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared

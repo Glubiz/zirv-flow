@@ -1419,7 +1419,9 @@ mod tests {
         let ended = enroll_in(&pool, ws, loser, "completed").await;
         let message = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id,                 template_id, destination_id, status)              VALUES ($1, $2, $3, $4, 'n', gen_random_uuid(), gen_random_uuid(), 'sent')",
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, completed_at) \
+             VALUES ($1, $2, $3, $4, 'n', gen_random_uuid(), gen_random_uuid(), 'sent', now())",
         )
         .bind(message)
         .bind(ws.as_uuid())

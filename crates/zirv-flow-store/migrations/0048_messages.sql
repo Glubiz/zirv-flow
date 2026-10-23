@@ -8,7 +8,8 @@
 
 CREATE TABLE messages (
     -- A v7 id minted when `flow.step` enqueues the send. It is the idempotency key passed to the
-    -- destination on every attempt of the message, so a retried job never sends twice.
+    -- destination on every attempt of the message, so a retried job never sends twice. The job
+    -- writes the row `pending` on its first run and ends it as `sent`, `skipped` or `failed`.
     id                 uuid PRIMARY KEY,
     workspace_id       uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
     person_id          uuid NOT NULL REFERENCES people (id) ON DELETE CASCADE,
@@ -28,7 +29,8 @@ CREATE TABLE messages (
     topic_id           uuid,
     -- The message's consent coordinates besides the topic: dimension key to value key.
     dimensions         jsonb NOT NULL DEFAULT '{}'::jsonb,
-    status             text NOT NULL CHECK (status IN ('sent', 'skipped', 'failed')),
+    status             text NOT NULL
+                       CHECK (status IN ('pending', 'sent', 'skipped', 'failed')),
     -- Why a message was skipped or failed: a fixed code, never a value from the person or the
     -- destination's answer.
     reason             text,
@@ -42,9 +44,11 @@ CREATE TABLE messages (
     -- How many delivery attempts the destination saw.
     attempts           integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     created_at         timestamptz NOT NULL DEFAULT now(),
+    -- When the message ended; null while it is pending.
     completed_at       timestamptz,
     UNIQUE (workspace_id, id),
-    CHECK ((status = 'sent') = (reason IS NULL))
+    CHECK ((status IN ('pending', 'sent')) = (reason IS NULL)),
+    CHECK ((status = 'pending') = (completed_at IS NULL))
 );
 
 -- The message log of a person and the cooldown reads: newest first.

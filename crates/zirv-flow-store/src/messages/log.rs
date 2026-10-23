@@ -3,8 +3,8 @@
 use std::str::FromStr;
 
 use serde_json::{Value, json};
+use sqlx::PgExecutor;
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -12,9 +12,12 @@ use zirv_flow_core::consent::Dimensions;
 
 use crate::StoreError;
 
-/// How a message ended.
+/// Where a message is: in the pipeline, or how it ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageStatus {
+    /// The job has started on it and it has not ended: it may be waiting for a rate-limit token or
+    /// for a retry.
+    Pending,
     /// Handed to the destination, which accepted it.
     Sent,
     /// A gate stopped it before anything was rendered or sent.
@@ -26,6 +29,7 @@ pub enum MessageStatus {
 impl MessageStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Sent => "sent",
             Self::Skipped => "skipped",
             Self::Failed => "failed",
@@ -38,6 +42,7 @@ impl FromStr for MessageStatus {
 
     fn from_str(text: &str) -> Result<Self, StoreError> {
         match text {
+            "pending" => Ok(Self::Pending),
             "sent" => Ok(Self::Sent),
             "skipped" => Ok(Self::Skipped),
             "failed" => Ok(Self::Failed),
@@ -166,23 +171,22 @@ const COLUMNS: &str = "id, workspace_id, person_id, enrollment_id, flow_id, flow
     channel, topic_id, dimensions, status, reason, deciding_rule, gate_results, test, attempts, \
     created_at, completed_at";
 
-/// Writes the message. False when a message of this id exists already, which is the retry of a
-/// send whose outcome had committed: nothing changes.
-pub async fn insert_message(
-    connection: &mut PgConnection,
+/// Writes the message and says whether this call changed it.
+///
+/// A message is written twice: `pending` when the send job first runs, and again with how it
+/// ended. So a row that does not exist is inserted, a `pending` one is ended by an ended `new`,
+/// and anything else is left alone, which is false: a pending row is not touched by a second
+/// start, and an ended one is never changed, so the job that committed its outcome and ran again
+/// changes nothing.
+pub async fn insert_message<'e>(
+    executor: impl PgExecutor<'e>,
     new: &NewMessage<'_>,
 ) -> Result<bool, StoreError> {
     let gates: Vec<Value> = new.gates.iter().map(|gate| gate.to_value()).collect();
     let dimensions = json!(new.dimensions);
-    let inserted = sqlx::query(
-        "INSERT INTO messages \
-            (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, \
-             template_id, template_version, destination_id, sender_identity_id, category, \
-             topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts, \
-             created_at, completed_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
-                 $18, $19, $20, $20) \
-         ON CONFLICT (id) DO NOTHING",
+    let completed = (new.status != MessageStatus::Pending).then_some(new.now);
+    let written = sqlx::query(
+        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule, gate_results = EXCLUDED.gate_results,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status = 'pending' AND EXCLUDED.status <> 'pending'",
     )
     .bind(new.id)
     .bind(new.workspace.as_uuid())
@@ -204,11 +208,12 @@ pub async fn insert_message(
     .bind(Value::Array(gates))
     .bind(new.attempts)
     .bind(new.now)
-    .execute(&mut *connection)
+    .bind(completed)
+    .execute(executor)
     .await
     .map_err(StoreError::query)?
     .rows_affected();
-    Ok(inserted == 1)
+    Ok(written == 1)
 }
 
 /// The message with this id in the workspace.
@@ -227,18 +232,20 @@ pub async fn find_message<'e>(
     .map_err(StoreError::query)
 }
 
-/// Whether a message of this id is recorded: the send ended, whatever way.
-pub async fn message_exists<'e>(
+/// Where the message with this id is, or none when no row was written for it yet.
+pub async fn message_status<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     id: Uuid,
-) -> Result<bool, StoreError> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages WHERE workspace_id = $1 AND id = $2)")
-        .bind(workspace.as_uuid())
-        .bind(id)
-        .fetch_one(executor)
-        .await
-        .map_err(StoreError::query)
+) -> Result<Option<MessageStatus>, StoreError> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM messages WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .fetch_optional(executor)
+            .await
+            .map_err(StoreError::query)?;
+    status.as_deref().map(str::parse).transpose()
 }
 
 /// A person's messages, newest first, at most `limit`. Messages stay on the id they were written
@@ -275,6 +282,7 @@ mod tests {
     #[test]
     fn a_status_round_trips_through_its_text_and_an_unknown_one_is_refused() {
         for status in [
+            MessageStatus::Pending,
             MessageStatus::Sent,
             MessageStatus::Skipped,
             MessageStatus::Failed,
@@ -335,14 +343,20 @@ mod tests {
                 attempts: 1,
                 now: OffsetDateTime::now_utc() + time::Duration::seconds(index as i64),
             };
-            assert!(insert_message(&mut connection, &new).await.unwrap());
+            assert!(insert_message(&mut *connection, &new).await.unwrap());
             assert!(
-                !insert_message(&mut connection, &new).await.unwrap(),
+                !insert_message(&mut *connection, &new).await.unwrap(),
                 "the same id is not written twice"
             );
         }
-        assert!(message_exists(&pool, ws, ids[0]).await.unwrap());
-        assert!(!message_exists(&pool, ws, Uuid::now_v7()).await.unwrap());
+        assert_eq!(
+            message_status(&pool, ws, ids[0]).await.unwrap(),
+            Some(MessageStatus::Sent)
+        );
+        assert_eq!(
+            message_status(&pool, ws, Uuid::now_v7()).await.unwrap(),
+            None
+        );
         // people[0] was merged into people[1], which was merged into people[2].
         for (survivor, merged) in [(people[1], people[0]), (people[2], people[1])] {
             sqlx::query(
@@ -377,6 +391,84 @@ mod tests {
         );
         assert_eq!(middle.len(), 2);
         assert_eq!(limited.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pending_message_is_ended_once_and_an_ended_one_never_changes(pool: sqlx::PgPool) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        let ws = crate::create_workspace(
+            &pool,
+            &WorkspaceName::parse("one").unwrap(),
+            &Slug::parse("one").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        let message = |status, reason, attempts| NewMessage {
+            id,
+            workspace: ws,
+            person,
+            enrollment: Uuid::now_v7(),
+            flow: None,
+            flow_version: None,
+            node: "mail",
+            template: Uuid::from_u128(1),
+            template_version: None,
+            destination: Uuid::from_u128(2),
+            sender_identity: None,
+            category: None,
+            topic: None,
+            dimensions: &dimensions,
+            status,
+            reason,
+            deciding_rule: None,
+            gates: &[],
+            attempts,
+            now: OffsetDateTime::now_utc(),
+        };
+
+        let started = insert_message(&pool, &message(MessageStatus::Pending, None, 0)).await;
+        let again = insert_message(&pool, &message(MessageStatus::Pending, None, 0)).await;
+        let pending = find_message(&pool, ws, id).await.unwrap().unwrap();
+        let ended = insert_message(
+            &pool,
+            &message(MessageStatus::Failed, Some("render_error"), 2),
+        )
+        .await;
+        let late = insert_message(&pool, &message(MessageStatus::Sent, None, 3)).await;
+        let found = find_message(&pool, ws, id).await.unwrap().unwrap();
+
+        assert!(started.unwrap(), "the first run writes it");
+        assert!(!again.unwrap(), "a second start changes nothing");
+        assert_eq!(
+            (pending.status.as_str(), pending.completed_at),
+            ("pending", None)
+        );
+        assert!(ended.unwrap(), "the end is written over the pending row");
+        assert!(!late.unwrap(), "an ended message never changes");
+        assert_eq!(
+            (
+                found.status.as_str(),
+                found.reason.as_deref(),
+                found.attempts
+            ),
+            ("failed", Some("render_error"), 2)
+        );
+        assert!(found.completed_at.is_some());
+        assert_eq!(
+            found.created_at, pending.created_at,
+            "the row keeps its start"
+        );
     }
 
     #[test]

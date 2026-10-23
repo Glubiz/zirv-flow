@@ -23,19 +23,23 @@ pub const SEND_JOB_KIND: &str = "delivery.send";
 /// The source of the events a flow writes.
 const FLOWS_SOURCE: &str = "flows";
 
-const fn event_of(status: MessageStatus) -> &'static str {
+/// The event an ended message writes; none for a message that has not ended.
+const fn event_of(status: MessageStatus) -> Option<&'static str> {
     match status {
-        MessageStatus::Sent => EMAIL_SENT_EVENT,
-        MessageStatus::Skipped => EMAIL_SKIPPED_EVENT,
-        MessageStatus::Failed => EMAIL_FAILED_EVENT,
+        MessageStatus::Pending => None,
+        MessageStatus::Sent => Some(EMAIL_SENT_EVENT),
+        MessageStatus::Skipped => Some(EMAIL_SKIPPED_EVENT),
+        MessageStatus::Failed => Some(EMAIL_FAILED_EVENT),
     }
 }
 
-const fn outcome_of(status: MessageStatus) -> &'static str {
+/// The outcome of the `message.send` decision; none for a message that has not ended.
+const fn outcome_of(status: MessageStatus) -> Option<&'static str> {
     match status {
-        MessageStatus::Sent => "sent",
-        MessageStatus::Skipped => "skipped",
-        MessageStatus::Failed => "failed",
+        MessageStatus::Pending => None,
+        MessageStatus::Sent => Some("sent"),
+        MessageStatus::Skipped => Some("skipped"),
+        MessageStatus::Failed => Some("failed"),
     }
 }
 
@@ -49,9 +53,10 @@ pub struct SendOutcome<'a> {
     pub job: (Uuid, i32),
 }
 
-/// Records the message, its event and its decisions. Returns the event's id, or none when a
-/// message of this id was recorded already, in which case nothing else is written: the job that
-/// committed its outcome and was run again changes nothing.
+/// Ends the message: writes its outcome over the row the job started, and its event and its
+/// decisions. Returns the event's id, or none when the message had ended already (or `outcome` is
+/// not an end), in which case nothing is written: the job that committed its outcome and was run
+/// again changes nothing.
 ///
 /// The decisions are one `send.gate` per gate that ran (`passed` or `blocked`, the gate as the
 /// reason) and the `message.send` decision (`sent`, `skipped` or `failed`, with the skip or
@@ -62,10 +67,12 @@ pub async fn record_send_outcome(
     outcome: &SendOutcome<'_>,
 ) -> Result<Option<Uuid>, StoreError> {
     let message = &outcome.message;
-    if !insert_message(connection, message).await? {
+    let (Some(name), Some(result)) = (event_of(message.status), outcome_of(message.status)) else {
+        return Ok(None);
+    };
+    if !insert_message(&mut *connection, message).await? {
         return Ok(None);
     }
-    let name = event_of(message.status);
     let event = Uuid::now_v7();
     let properties = json!({
         "message_id": message.id,
@@ -128,7 +135,7 @@ pub async fn record_send_outcome(
         workspace_id: message.workspace,
         trace: outcome.trace.clone(),
         action: "message.send",
-        outcome: outcome_of(message.status),
+        outcome: result,
         reason: message.reason,
         subject_ids: subject_ids(None),
         job: Some(outcome.job),
@@ -160,20 +167,22 @@ mod tests {
 
     #[test]
     fn each_status_has_its_own_event_name_and_outcome() {
-        assert_eq!(event_of(MessageStatus::Sent), "email.sent");
-        assert_eq!(event_of(MessageStatus::Skipped), "email.skipped");
-        assert_eq!(event_of(MessageStatus::Failed), "email.failed");
-        assert_eq!(outcome_of(MessageStatus::Sent), "sent");
-        assert_eq!(outcome_of(MessageStatus::Skipped), "skipped");
-        assert_eq!(outcome_of(MessageStatus::Failed), "failed");
+        assert_eq!(event_of(MessageStatus::Sent), Some("email.sent"));
+        assert_eq!(event_of(MessageStatus::Skipped), Some("email.skipped"));
+        assert_eq!(event_of(MessageStatus::Failed), Some("email.failed"));
+        assert_eq!(outcome_of(MessageStatus::Sent), Some("sent"));
+        assert_eq!(outcome_of(MessageStatus::Skipped), Some("skipped"));
+        assert_eq!(outcome_of(MessageStatus::Failed), Some("failed"));
+        assert_eq!(event_of(MessageStatus::Pending), None);
+        assert_eq!(outcome_of(MessageStatus::Pending), None);
         for status in [
             MessageStatus::Sent,
             MessageStatus::Skipped,
             MessageStatus::Failed,
         ] {
-            assert!(zirv_flow_core::events::is_reserved_event_name(event_of(
-                status
-            )));
+            assert!(zirv_flow_core::events::is_reserved_event_name(
+                event_of(status).unwrap()
+            ));
         }
     }
 

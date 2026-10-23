@@ -161,7 +161,7 @@ pub use lists::{
 };
 pub use messages::{
     GateRecord, Message, MessageStatus, NewMessage, find_message, insert_message,
-    list_person_messages, message_exists, read_send_address,
+    list_person_messages, message_status, read_send_address,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{

@@ -40,7 +40,7 @@ pub(super) struct Blocked {
 }
 
 impl Blocked {
-    fn new(gate: &'static str, reason: &'static str) -> Self {
+    pub(super) fn new(gate: &'static str, reason: &'static str) -> Self {
         Self {
             gate: GateRecord::blocked(gate, reason),
             rule: None,

@@ -1189,7 +1189,10 @@ mod tests {
         } = seed_everything(&pool).await;
         let kept = Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id,                 template_id, destination_id, status)              VALUES ($1, $2, $3, gen_random_uuid(), 'n', gen_random_uuid(), gen_random_uuid(),                 'sent')",
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, completed_at) \
+             VALUES ($1, $2, $3, gen_random_uuid(), 'n', gen_random_uuid(), gen_random_uuid(), \
+                'sent', now())",
         )
         .bind(kept)
         .bind(ws.as_uuid())
