@@ -1,0 +1,19 @@
+Spring collection: https://shop.example/spring
+
+Hello Ann <b>O'Neil</b>
+
+Our spring collection is here. Take a look at what is new this season.
+
+Fresh
+
+New arrivals every week.
+
+Fair
+
+Prices that stay put.
+
+See the collection: https://shop.example/spring
+
+----------
+
+You get this because you signed up. Unsubscribe: https://u.example/u/1?s=a&t=b or change your preferences: https://u.example/p/1.

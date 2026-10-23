@@ -1,0 +1,5 @@
+Shop now, Ann <b>O'Neil</b>: https://shop.example/offer?a=1&b=2
+
+Write to us: mailto:help@example.com
+
+Account: https://u.example/p/1

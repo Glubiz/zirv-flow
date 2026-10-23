@@ -16,7 +16,7 @@ impl TemplateContent for Webhook {
     }
 
     fn handles(&self, doc: &TemplateDocument) -> bool {
-        doc.channel == Channel::Webhook && doc.mode == Mode::Code
+        !doc.is_ambiguous() && doc.channel == Channel::Webhook && doc.mode == Mode::Code
     }
 
     fn validate(&self, doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {

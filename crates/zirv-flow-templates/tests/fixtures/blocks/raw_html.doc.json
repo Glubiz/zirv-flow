@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "raw_html",
+              "id": "r1",
+              "html": "<table role=\"presentation\"><tr><td style=\"padding:8px\">Raw for {{ person.name }} &amp; <b>co</b></td></tr></table>"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

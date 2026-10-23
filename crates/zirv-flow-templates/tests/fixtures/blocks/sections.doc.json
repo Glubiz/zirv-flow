@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "one",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "a1",
+              "level": 2,
+              "text": "One column"
+            }
+          ]
+        ]
+      },
+      {
+        "id": "two",
+        "background_color": "#f0f0f0",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "b1",
+              "level": 3,
+              "text": "Left"
+            }
+          ],
+          [
+            {
+              "type": "heading",
+              "id": "b2",
+              "level": 3,
+              "text": "Right"
+            }
+          ]
+        ]
+      },
+      {
+        "id": "three",
+        "padding": "30px 10px",
+        "columns": [
+          [
+            {
+              "type": "text",
+              "id": "c1",
+              "content": "<p>First</p>"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "id": "c2",
+              "content": "<p>Second</p>"
+            }
+          ],
+          [
+            {
+              "type": "text",
+              "id": "c3",
+              "content": "<p>Third</p>"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+Hello Ann <b>O'Neil</b>, welcome and enjoy.
+Second line with a link: https://shop.example/a?x=1&y=2.
+
+- One
+- Two pro
+
+1. First
+2. Second
+
+Centered and mail us: mailto:help@example.com
