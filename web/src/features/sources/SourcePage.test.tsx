@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { SourcePage } from "./SourcePage";
-import { aFreshness, aSource, aStream, FAKE_KIND, HTTP_KIND } from "./testData";
+import { aCredentialHolding, aFreshness, aSource, aStream, FAKE_KIND, HTTP_KIND } from "./testData";
 
 function members(role: "admin" | "member", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
@@ -32,6 +32,8 @@ const ADMIN = {
   "GET /api/v1/session": () => json(session(OWNER, "csrf-source")),
   "GET /api/v1/workspaces/ws1/members": () => json(members("admin", OWNER.id)),
   "GET /api/v1/source-kinds": () => json([FAKE_KIND]),
+  "GET /api/v1/workspaces/ws1/credentials": () =>
+    json([aCredentialHolding("cred-1", "CRM token", ["token"]), aCredentialHolding("cred-2", "Other CRM token", ["token"])]),
   "GET /api/v1/workspaces/ws1/sources/src-1": () => json(aSource()),
   "GET /api/v1/workspaces/ws1/sources/src-1/streams": () => json([aStream()]),
   "GET /api/v1/workspaces/ws1/sources/src-1/runs": () => json({ runs: [], next_cursor: null }),
@@ -232,7 +234,7 @@ describe("a source", () => {
     expect(await screen.findByText("stream_2")).toBeInTheDocument();
   });
 
-  it("never prefills the credential, and replaces it only when asked to", async () => {
+  it("shows the credential the source uses, never its secret, and changes it only when another is chosen", async () => {
     const calls = mockApi({
       ...ADMIN,
       "PATCH /api/v1/workspaces/ws1/sources/src-1": () => json(aSource({ name: "CRM 2" })),
@@ -244,12 +246,8 @@ describe("a source", () => {
     const dialog = within(screen.getByRole("dialog", { name: "Edit CRM" }));
     expect(dialog.queryByLabelText("Token")).not.toBeInTheDocument();
     expect(dialog.getByLabelText("Streams (optional)")).toHaveValue(2);
-    await user.click(dialog.getByLabelText("Replace the credential"));
-    const token = dialog.getByLabelText("Token");
-    expect(token).toHaveAttribute("type", "password");
-    expect(token).toHaveValue("");
-    expect(dialog.getByRole("button", { name: "Save changes" })).toBeDisabled();
-    await user.type(token, "new-token");
+    expect(await dialog.findByLabelText("Credential")).toHaveValue("cred-1");
+    await user.selectOptions(dialog.getByLabelText("Credential"), "cred-2");
     await user.clear(dialog.getByLabelText("Name"));
     await user.type(dialog.getByLabelText("Name"), "CRM 2");
     await user.click(dialog.getByRole("button", { name: "Save changes" }));
@@ -261,11 +259,11 @@ describe("a source", () => {
       config: { streams: 2 },
       enabled: true,
       schedule: "",
-      credential: { token: "new-token" },
+      credential_id: "cred-2",
     });
   });
 
-  it("leaves the credential out of the change when it is not being replaced", async () => {
+  it("leaves the credential out of the change when the same one stays chosen", async () => {
     const calls = mockApi({
       ...ADMIN,
       "PATCH /api/v1/workspaces/ws1/sources/src-1": () => json(aSource()),
@@ -278,7 +276,7 @@ describe("a source", () => {
 
     await screen.findByText("Saved CRM.");
     const patch = calls.find((call) => call.method === "PATCH");
-    expect(patch?.body).not.toHaveProperty("credential");
+    expect(patch?.body).not.toHaveProperty("credential_id");
   });
 
   it("deletes only after a confirmation, and returns to the list", async () => {

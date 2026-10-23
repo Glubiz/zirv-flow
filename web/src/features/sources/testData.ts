@@ -91,12 +91,39 @@ export const HTTP_KIND: SourceKind = {
   capabilities: { incremental: true, full_refresh: true, emits_deletes: true, push: false },
 };
 
+/** A workspace credential as `GET /credentials` lists it, holding the secret fields named in `names`. */
+export function aCredentialHolding(id: string, name: string, names: string[]) {
+  return {
+    id,
+    key: id,
+    name,
+    kind: "custom",
+    schema_version: 1,
+    schema: {
+      fields: names.map((key) => ({ key, label: key, type: "string", required: true, secret: true, options: [] })),
+    },
+    fields: {},
+    hints: Object.fromEntries(names.map((key) => [key, ""])),
+    fingerprint: null,
+    same_secret_as: [],
+    used_by: [],
+    rotated_at: "2026-10-01T09:00:00Z",
+    last_tested_at: null,
+    last_test_outcome: null,
+    archived: false,
+    created_by: null,
+    created_at: "2026-10-01T09:00:00Z",
+    updated_at: "2026-10-01T09:00:00Z",
+  };
+}
+
 export function aSource(change: Partial<Source> = {}): Source {
   return {
     id: "src-1",
     kind: "fake",
     name: "CRM",
     config: { streams: 2 },
+    credential_id: "cred-1",
     credential_fields_set: ["token"],
     oauth: { required: false, connected: false, connected_at: null },
     schedule: null,
