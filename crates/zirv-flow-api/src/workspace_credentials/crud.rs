@@ -22,6 +22,7 @@ use zirv_flow_store::{
     PgPool, StoreError, WorkspaceCredential,
 };
 
+use super::resolve::check_owners;
 use super::schema::{SchemaBody, issue_problems, resolved_schema};
 use super::{archived, in_use};
 use crate::AppState;
@@ -447,6 +448,14 @@ pub(crate) async fn update_credential(
         }
         None => None,
     };
+    // A change that drops a field a live source or destination requires is refused.
+    if let Some(fields) = &fields {
+        let after = WorkspaceCredential {
+            fields: fields.clone(),
+            ..locked.clone()
+        };
+        check_owners(&mut tx, workspace, &after).await?;
+    }
     let credential = zirv_flow_store::update_credential(
         &mut *tx,
         workspace,
@@ -494,6 +503,12 @@ pub(crate) async fn rotate_credential(
     resolved_schema(&locked)?
         .validate_secrets(&request.secret, true)
         .map_err(|issues| issue_problems("secret", issues))?;
+    // A rotation that drops a secret field a live source or destination requires is refused.
+    let after = WorkspaceCredential {
+        hints: hints_of(&request.secret),
+        ..locked.clone()
+    };
+    check_owners(&mut tx, workspace, &after).await?;
     let plaintext = to_plaintext(&request.secret)?;
     let new_secret = admin::create_secret_in(
         &mut tx,

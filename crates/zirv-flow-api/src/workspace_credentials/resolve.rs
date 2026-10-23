@@ -107,6 +107,53 @@ pub(crate) fn check_manifest_credential(
     }
 }
 
+/// Checks that a credential as it will be after a change (`after`) still holds every field the
+/// live sources and destinations that use it require, with the same field problems the link
+/// check gives. The caller holds the credential's row lock, and linking takes a share lock on it,
+/// so no owner appears between this check and the commit.
+pub(crate) async fn check_owners(
+    tx: &mut PgConnection,
+    workspace: WorkspaceId,
+    after: &WorkspaceCredential,
+) -> Result<(), ApiError> {
+    let present = field_names(after);
+    for user in zirv_flow_store::credential_users(&mut *tx, workspace, after.id).await? {
+        let errors = match user.kind.as_str() {
+            "source" => {
+                let Some(source) =
+                    zirv_flow_store::find_source(&mut *tx, workspace, user.id).await?
+                else {
+                    continue;
+                };
+                let Some(driver) = crate::sources::registry().get(&source.kind) else {
+                    continue;
+                };
+                if source.kind == "http" {
+                    check_manifest_credential(&source.config, Some(after))?;
+                }
+                zirv_flow_connectors::sources::validate_credential_names(driver.spec(), &present)
+            }
+            _ => {
+                let Some(destination) =
+                    zirv_flow_store::find_destination(&mut *tx, workspace, user.id).await?
+                else {
+                    continue;
+                };
+                let registry = crate::destinations::registry();
+                let Some(driver) = registry.get(&destination.kind) else {
+                    continue;
+                };
+                zirv_flow_connectors::destinations::validate_credential_names(
+                    driver.spec(),
+                    &present,
+                )
+            }
+        };
+        errors.map_err(|errors| field_problems("credential", errors))?;
+    }
+    Ok(())
+}
+
 /// Locks a live credential of the workspace `FOR SHARE` for the rest of the transaction and checks
 /// that it holds every credential field the owner requires (`check` is the owner type's rule).
 /// An archive waits for the owner's transaction, so an archived credential is never referenced.

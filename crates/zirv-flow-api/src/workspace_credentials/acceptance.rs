@@ -1299,6 +1299,100 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_or_a_patch_cannot_drop_a_field_a_live_owner_requires(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        // `token` is optional in both credentials, but the fake destination requires it.
+        let secret_token = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Optional secret", "schema": {"fields": [
+                    {"key": "token", "label": "T", "type": "string", "secret": true},
+                    {"key": "extra", "label": "E", "type": "string", "required": true, "secret": true}]},
+                    "secret": {"token": "ok", "extra": "e"}})),
+            )
+            .await;
+        let plain_token = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Optional plain", "schema": {"fields": [
+                    {"key": "token", "label": "T", "type": "string"},
+                    {"key": "extra", "label": "E", "type": "string", "required": true, "secret": true}]},
+                    "fields": {"token": "ok"}, "secret": {"extra": "e"}})),
+            )
+            .await;
+        let (secret_id, plain_id) = (
+            secret_token.body["id"].as_str().unwrap().to_owned(),
+            plain_token.body["id"].as_str().unwrap().to_owned(),
+        );
+        fx.destination("One", &secret_id, json!({})).await;
+        fx.destination("Two", &plain_id, json!({})).await;
+
+        let rotate = fx
+            .as_admin(
+                "PUT",
+                &format!("/credentials/{secret_id}/secret"),
+                Some(json!({"secret": {"extra": "new"}})),
+            )
+            .await;
+        let patch = fx
+            .as_admin(
+                "PATCH",
+                &format!("/credentials/{plain_id}"),
+                Some(json!({"fields": {}})),
+            )
+            .await;
+        let fine = fx
+            .as_admin(
+                "PUT",
+                &format!("/credentials/{secret_id}/secret"),
+                Some(json!({"secret": {"token": "ok", "extra": "new"}})),
+            )
+            .await;
+
+        assert_eq!(
+            rotate.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            rotate.body
+        );
+        assert!(
+            rotate.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("credential.token")
+        );
+        assert_eq!(
+            patch.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            patch.body
+        );
+        assert!(
+            patch.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("credential.token")
+        );
+        assert_eq!(fine.status, StatusCode::OK, "{:?}", fine.body);
+        let kept = fx
+            .as_admin("GET", &format!("/credentials/{plain_id}"), None)
+            .await;
+        assert_eq!(
+            kept.body["fields"],
+            json!({"token": "ok"}),
+            "a refused change stores nothing"
+        );
+        let secrets: i64 = sqlx::query_scalar("SELECT count(*) FROM encrypted_secrets")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(secrets, 2, "a refused rotation sealed nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_credential_needs_the_master_key(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let name = WorkspaceName::parse("ours").unwrap();
