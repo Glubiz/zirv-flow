@@ -63,6 +63,27 @@ where
     false
 }
 
+/// The outcome of a TXT lookup (`txt`, already started) at `absolute`, with `cname_of` giving the
+/// alias target at a name. When the answer carries no records (no TXT, a missing name or a failed
+/// lookup), the alias chain is read on its own, so a private alias gives the same outcome whatever
+/// the private target holds or does. Otherwise the target would be an oracle.
+async fn resolve_txt<F, CFut>(
+    absolute: &str,
+    txt: impl std::future::Future<Output = Result<Vec<String>, DnsError>>,
+    cname_of: F,
+) -> Result<Vec<String>, DnsError>
+where
+    F: FnMut(String) -> CFut,
+    CFut: std::future::Future<Output = Option<String>>,
+{
+    let outcome = txt.await;
+    let without_records = outcome.as_ref().is_ok_and(Vec::is_empty) || outcome.is_err();
+    if without_records && chain_leaves_public(absolute, cname_of).await {
+        return Err(DnsError::PrivateAlias);
+    }
+    outcome
+}
+
 /// Whether `name` is made of labels of 1 to 63 bytes and is at most 253 bytes, so a malformed name
 /// is refused before it reaches the wire.
 fn is_dns_name(name: &str) -> bool {
@@ -84,17 +105,7 @@ impl DnsResolver for SystemResolver {
             } else {
                 format!("{name}.")
             };
-            let outcome = self.txt(&absolute).await;
-            // When the answer carries no records (no TXT, a missing name or a failed lookup), the
-            // alias chain is read on its own, so a private alias gives the same outcome whatever
-            // the private target holds or does. Otherwise the target would be an oracle.
-            if outcome.as_ref().is_ok_and(Vec::is_empty) || outcome.is_err() {
-                let leaves = chain_leaves_public(&absolute, |at| self.cname_of(at)).await;
-                if leaves {
-                    return Err(DnsError::PrivateAlias);
-                }
-            }
-            outcome
+            resolve_txt(&absolute, self.txt(&absolute), |at| self.cname_of(at)).await
         })
     }
 }
@@ -198,5 +209,51 @@ mod tests {
             ("b.example.net.", "a.example.com."),
         ]);
         assert!(!chain_leaves_public("a.example.com.", looping).await);
+    }
+
+    async fn resolved(
+        txt: Result<Vec<String>, DnsError>,
+        pairs: &[(&str, &str)],
+    ) -> Result<Vec<String>, DnsError> {
+        resolve_txt("a.example.com.", std::future::ready(txt), aliases(pairs)).await
+    }
+
+    #[tokio::test]
+    async fn a_private_alias_is_reported_when_the_txt_lookup_finds_nothing() {
+        let private = [("a.example.com.", "dmarc.secret.corp.")];
+
+        assert_eq!(
+            resolved(Ok(Vec::new()), &private).await,
+            Err(DnsError::PrivateAlias)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_private_alias_is_reported_when_the_txt_lookup_fails() {
+        let private = [("a.example.com.", "dmarc.secret.corp.")];
+
+        assert_eq!(
+            resolved(Err(DnsError::Unavailable), &private).await,
+            Err(DnsError::PrivateAlias)
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_private_alias_the_txt_outcome_stands() {
+        let public = [("a.example.com.", "dmarc.provider.example.net.")];
+        assert_eq!(resolved(Ok(Vec::new()), &public).await, Ok(Vec::new()));
+        assert_eq!(resolved(Ok(Vec::new()), &[]).await, Ok(Vec::new()));
+        assert_eq!(
+            resolved(Err(DnsError::Unavailable), &[]).await,
+            Err(DnsError::Unavailable)
+        );
+        assert_eq!(
+            resolved(Err(DnsError::Unavailable), &public).await,
+            Err(DnsError::Unavailable)
+        );
+        assert_eq!(
+            resolved(Ok(vec!["x".to_owned()]), &[]).await,
+            Ok(vec!["x".to_owned()])
+        );
     }
 }
