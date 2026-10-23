@@ -13,8 +13,8 @@ use super::graph::{
 };
 use super::issue::{Issue, code};
 use super::settings::{ExitCriterion, FlowSettings, Goal, Reentry, Trigger};
-use crate::schedule;
 use crate::segment;
+use crate::{consent, schedule};
 
 /// The most nodes in one graph.
 pub const MAX_NODES: usize = 200;
@@ -27,6 +27,8 @@ pub const MAX_ARMS: usize = 10;
 pub const MAX_DURATION_SECONDS: u64 = 365 * 24 * 60 * 60;
 /// The longest node or edge id.
 pub const MAX_ID_CHARS: usize = 64;
+/// The most dimension values one send may name.
+pub const MAX_SEND_DIMENSIONS: usize = 20;
 /// The most trait keys a webhook may send.
 pub const MAX_TRAIT_KEYS: usize = 20;
 /// The most exit criteria of one flow.
@@ -231,6 +233,19 @@ fn check_node(node: &FlowNode, out: &mut Vec<Issue>) {
             for (index, key) in trait_keys.iter().enumerate().take(MAX_TRAIT_KEYS) {
                 if !valid_key(key) || !seen.insert(key.as_str()) {
                     out.push(issue(id, code::INVALID_TRAIT_KEY).at(format!("/trait_keys/{index}")));
+                }
+            }
+        }
+        NodeKind::ActionSend { dimensions, .. } => {
+            if dimensions.len() > MAX_SEND_DIMENSIONS {
+                out.push(issue(id, code::TOO_MANY_DIMENSIONS).at("/dimensions"));
+            }
+            for (key, value) in dimensions.iter().take(MAX_SEND_DIMENSIONS) {
+                if consent::validate_dimension_key(key).is_err()
+                    || consent::validate_dimension_value_key(value).is_err()
+                {
+                    // Neither the key nor the value is echoed.
+                    out.push(issue(id, code::INVALID_DIMENSION).at("/dimensions"));
                 }
             }
         }
@@ -705,6 +720,12 @@ mod tests {
                 url: "https://example.com/hook".into(),
                 trait_keys: vec!["plan".into(), "country".into()],
                 template: None,
+            },
+            NodeKind::ActionSend {
+                template: Uuid::nil(),
+                destination: Uuid::nil(),
+                topic: Some(Uuid::nil()),
+                dimensions: [("vertical".to_owned(), "sports".to_owned())].into(),
             },
             NodeKind::ActionUpdateTrait {
                 key: "visits".into(),
@@ -1291,6 +1312,57 @@ mod tests {
             };
             assert_eq!(validate_graph(&around(kind)), [], "{url}");
         }
+    }
+
+    fn send_with(dimensions: &[(&str, &str)]) -> NodeKind {
+        NodeKind::ActionSend {
+            template: Uuid::from_u128(1),
+            destination: Uuid::from_u128(2),
+            topic: None,
+            dimensions: dimensions
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_send_names_dimension_keys_and_values_that_are_keys() {
+        assert_eq!(validate_graph(&around(send_with(&[]))), []);
+        assert_eq!(
+            validate_graph(&around(send_with(&[
+                ("vertical", "sports"),
+                ("tier", "gold")
+            ]))),
+            []
+        );
+        for bad in [
+            ("", "x"),
+            ("Vertical", "x"),
+            ("topic", "x"),
+            ("vertical", ""),
+            ("vertical", "Sports"),
+            ("vertical", "a b"),
+        ] {
+            only(
+                &validate_graph(&around(send_with(&[bad]))),
+                code::INVALID_DIMENSION,
+                Some("m"),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn a_send_names_at_most_the_limit_of_dimensions() {
+        let keys: Vec<String> = (0..=MAX_SEND_DIMENSIONS).map(|i| format!("d{i}")).collect();
+        let pairs: Vec<(&str, &str)> = keys.iter().map(|key| (key.as_str(), "v")).collect();
+        only(
+            &validate_graph(&around(send_with(&pairs))),
+            code::TOO_MANY_DIMENSIONS,
+            Some("m"),
+            None,
+        );
     }
 
     #[test]

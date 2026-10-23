@@ -9,8 +9,9 @@ mod validate;
 
 pub use mask::{Masked, mask, mask_event, mask_sample};
 pub use property::{
-    EventMode, PropertyType, RESERVED_EVENT_CODE, RESERVED_EVENT_PREFIX, SchemaProperty,
-    UnplannedPolicy, WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT, is_reserved_event_name,
+    EMAIL_EVENT_PREFIX, EMAIL_FAILED_EVENT, EMAIL_SENT_EVENT, EMAIL_SKIPPED_EVENT, EventMode,
+    PropertyType, RESERVED_EVENT_CODE, RESERVED_EVENT_PREFIX, SchemaProperty, UnplannedPolicy,
+    WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT, is_reserved_event_name,
     validate_client_event_name, validate_event_name, validate_properties, validate_property_name,
 };
 pub use redact::{RedactionRules, redact, validate_rules};

@@ -1,5 +1,7 @@
 //! The flow graph and its wire form (architecture section 9.1): nodes with stable ids, edges
-//! typed by output port, and the node kinds of M5. Send and sync nodes arrive with M6.
+//! typed by output port, and the node kinds (the send node arrives with M6; sync nodes later).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -11,13 +13,14 @@ use crate::segment::{self, EventCondition, Node as Condition};
 pub const GRAPH_VERSION: u64 = 1;
 
 /// The `type` of every node kind.
-pub const NODE_TYPES: [&str; 10] = [
+pub const NODE_TYPES: [&str; 11] = [
     "wait.duration",
     "wait.until_time",
     "wait.until_event",
     "branch",
     "split.random",
     "action.webhook",
+    "action.send",
     "action.update_trait",
     "action.list",
     "goal",
@@ -115,6 +118,20 @@ pub enum NodeKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         template: Option<Uuid>,
     },
+    /// Sends a person a message: the published `template` through the `destination`, with the
+    /// message's consent coordinates in `topic` (a topic id) and `dimensions` (dimension key to
+    /// value key). The send passes the gates of architecture 10.1 when it runs, so consent and
+    /// suppression are read at send time. Port `next`.
+    #[serde(rename = "action.send")]
+    ActionSend {
+        template: Uuid,
+        destination: Uuid,
+        /// The topic the message belongs to. Absent: consent is judged with no topic.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        topic: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        dimensions: BTreeMap<String, String>,
+    },
     #[serde(rename = "action.update_trait")]
     ActionUpdateTrait { key: String, change: TraitChange },
     #[serde(rename = "action.list")]
@@ -164,6 +181,7 @@ impl NodeKind {
             Self::Branch { .. } => "branch",
             Self::SplitRandom { .. } => "split.random",
             Self::ActionWebhook { .. } => "action.webhook",
+            Self::ActionSend { .. } => "action.send",
             Self::ActionUpdateTrait { .. } => "action.update_trait",
             Self::ActionList { .. } => "action.list",
             Self::Goal { .. } => "goal",
@@ -177,6 +195,7 @@ impl NodeKind {
             Self::WaitDuration { .. }
             | Self::WaitUntilTime { .. }
             | Self::ActionWebhook { .. }
+            | Self::ActionSend { .. }
             | Self::ActionUpdateTrait { .. }
             | Self::ActionList { .. }
             | Self::Goal { exit: false } => vec![PORT_NEXT.to_owned()],
@@ -337,6 +356,18 @@ mod tests {
                 url: "https://example.com/hook".into(),
                 trait_keys: vec!["plan".into()],
                 template: None,
+            },
+            NodeKind::ActionSend {
+                template: Uuid::from_u128(7),
+                destination: Uuid::from_u128(8),
+                topic: None,
+                dimensions: BTreeMap::new(),
+            },
+            NodeKind::ActionSend {
+                template: Uuid::from_u128(7),
+                destination: Uuid::from_u128(8),
+                topic: Some(Uuid::from_u128(9)),
+                dimensions: BTreeMap::from([("vertical".to_owned(), "sports".to_owned())]),
             },
             NodeKind::ActionUpdateTrait {
                 key: "plan".into(),

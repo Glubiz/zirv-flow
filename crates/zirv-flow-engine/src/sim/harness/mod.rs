@@ -320,7 +320,7 @@ mod tests {
     /// runs twice: a job redelivered after its commit, and two workers racing on one state.
     #[test]
     fn a_runtime_without_idempotency_fails_an_invariant() {
-        let mut config = Config::new(0xbad0_0001, SMALL);
+        let mut config = Config::new(0xbad0_0005, SMALL);
         config.defect = Some(Defect::NoIdempotency);
         let report = simulate(&config);
         assert!(

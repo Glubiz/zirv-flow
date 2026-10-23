@@ -54,6 +54,8 @@ pub(super) struct OutboxRow {
     pub(super) key: String,
     pub(super) enrollment: Uuid,
     pub(super) node: String,
+    /// The effect kind in its key: `webhook` or `send`.
+    pub(super) kind: &'static str,
     pub(super) url: String,
     pub(super) trait_keys: Vec<String>,
 }
@@ -244,13 +246,17 @@ impl Db {
         defect: Option<Defect>,
         journal: &mut Vec<Undo>,
     ) {
-        let (
-            EffectKind::Webhook {
-                url, trait_keys, ..
-            },
-            Some(key),
-        ) = (&effect.kind, &effect.effect_key)
-        else {
+        let external = match (&effect.kind, &effect.effect_key) {
+            (
+                EffectKind::Webhook {
+                    url, trait_keys, ..
+                },
+                Some(key),
+            ) => Some((key, "webhook", url.clone(), trait_keys.clone())),
+            (EffectKind::Send { .. }, Some(key)) => Some((key, "send", String::new(), Vec::new())),
+            _ => None,
+        };
+        let Some((key, kind, url, trait_keys)) = external else {
             self.applied.push(effect.step_key.clone());
             journal.push(Undo::Applied);
             return;
@@ -266,8 +272,9 @@ impl Db {
             key: key.clone(),
             enrollment,
             node: effect.node.clone(),
-            url: url.clone(),
-            trait_keys: trait_keys.clone(),
+            kind,
+            url,
+            trait_keys,
         });
         journal.push(Undo::Outbox(key.clone()));
     }
