@@ -47,6 +47,7 @@ fn collect(
         | Node::List(_)
         | Node::Segment(_)
         | Node::Consent(_)
+        | Node::Messages(_)
         | Node::Identifier(_) => {}
     }
 }

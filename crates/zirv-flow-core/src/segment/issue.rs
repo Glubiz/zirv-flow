@@ -28,9 +28,11 @@ pub mod code {
     pub const TOO_MANY_NODES: &str = "too_many_nodes";
     pub const TOO_MANY_VALUES: &str = "too_many_values";
     pub const VALUE_TOO_LONG: &str = "value_too_long";
+    /// A leaf that reads the message being sent, which only a consent policy has.
+    pub const POLICY_ONLY: &str = "policy_only";
 
     /// Every code.
-    pub const ALL: [&str; 22] = [
+    pub const ALL: [&str; 23] = [
         UNSUPPORTED_VERSION,
         MALFORMED,
         UNKNOWN_KEY,
@@ -53,6 +55,7 @@ pub mod code {
         TOO_MANY_NODES,
         TOO_MANY_VALUES,
         VALUE_TOO_LONG,
+        POLICY_ONLY,
     ];
 }
 

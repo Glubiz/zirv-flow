@@ -327,6 +327,51 @@ pub fn read(message: &Dimensions, records: &[Record], policy: TopicPolicy) -> Re
     }
 }
 
+/// What the person's records say about a message, for a consent policy (architecture 10.1): the
+/// status of the record that decides it, apart from the topic default the read falls back to.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RecordedConsent {
+    /// The deciding record is `subscribed`.
+    Granted,
+    /// The deciding record is `unsubscribed`.
+    Denied,
+    /// No record covers the message, or the one that decides it is `pending_confirmation` or
+    /// `unknown`.
+    None,
+}
+
+impl RecordedConsent {
+    pub const ALL: [RecordedConsent; 3] = [Self::Granted, Self::Denied, Self::None];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Granted => "granted",
+            Self::Denied => "denied",
+            Self::None => "none",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|status| status.as_str() == name)
+    }
+}
+
+/// The [`RecordedConsent`] of a message with the coordinates `message`: among the records that
+/// cover it the latest change decides, as in [`read`].
+pub fn recorded_consent(message: &Dimensions, records: &[Record]) -> RecordedConsent {
+    let winner = records
+        .iter()
+        .filter(|record| covers(&record.scope, message))
+        .max_by_key(|record| record.order());
+    match winner.map(|record| record.state.status) {
+        Some(ConsentStatus::Subscribed) => RecordedConsent::Granted,
+        Some(ConsentStatus::Unsubscribed) => RecordedConsent::Denied,
+        Some(ConsentStatus::PendingConfirmation | ConsentStatus::Unknown) | None => {
+            RecordedConsent::None
+        }
+    }
+}
+
 /// Combines the records two people hold when they become one. Records of the same scope are
 /// resolved by [`merge`]; at the same instant and status the later change id is kept. A scope
 /// only one side holds is kept as it is. The result is ordered by canonical scope.
@@ -672,6 +717,28 @@ mod tests {
         assert!(read(&b2b, &records, OptIn).allowed);
         assert!(read(&unscoped, &records, OptIn).allowed);
         assert!(read(&b2b, &records, OptOut).allowed);
+    }
+
+    #[test]
+    fn the_recorded_status_is_the_deciding_record_apart_from_any_default() {
+        let retail = dims(&[("topic", "news"), ("vertical", "retail")]);
+        let b2b = dims(&[("topic", "news"), ("vertical", "b2b")]);
+        let records = [
+            record(&[("topic", "news")], Subscribed, T1, 1),
+            record(&[("vertical", "retail")], Unsubscribed, T2, 2),
+        ];
+
+        assert_eq!(recorded_consent(&retail, &records), RecordedConsent::Denied);
+        assert_eq!(recorded_consent(&b2b, &records), RecordedConsent::Granted);
+        assert_eq!(recorded_consent(&b2b, &[]), RecordedConsent::None);
+        for status in [PendingConfirmation, Unknown] {
+            let pending = [record(&[], status, T1, 1)];
+            assert_eq!(recorded_consent(&b2b, &pending), RecordedConsent::None);
+        }
+        for status in RecordedConsent::ALL {
+            assert_eq!(RecordedConsent::from_name(status.as_str()), Some(status));
+        }
+        assert_eq!(RecordedConsent::from_name("subscribed"), None);
     }
 
     #[test]

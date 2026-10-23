@@ -315,7 +315,7 @@ fn consent_leaf() -> BoxedStrategy<Node> {
     (topic, status)
         .prop_map(|(topic, status)| {
             Node::Consent(ConsentCondition {
-                channel: Channel::Email.as_str().to_owned(),
+                channel: Some(Channel::Email.as_str().to_owned()),
                 topic,
                 status: status.as_str().to_owned(),
             })
@@ -931,7 +931,11 @@ mod tests {
             facts(&definition.root, &catalog, &mut reached);
         }
         let mut required = BTreeSet::new();
-        for key in zirv_flow_core::segment::NODE_KEYS {
+        // `messages` is policy-only and has no segment form.
+        for key in zirv_flow_core::segment::NODE_KEYS
+            .into_iter()
+            .filter(|key| *key != "messages")
+        {
             required.insert(format!("node:{key}"));
         }
         required.insert("not:not".to_owned());

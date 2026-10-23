@@ -2,12 +2,14 @@
 //! the depth and node limits are checked before descending, so a hostile definition cannot
 //! exhaust the stack.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::ast::{
-    AggFn, Aggregate, ConsentCondition, Definition, EventCondition, NODE_KEYS, Node, Op,
-    PropertyFilter, TraitCondition, Window,
+    AggFn, Aggregate, ConsentCondition, Definition, EventCondition, MessagesCondition, NODE_KEYS,
+    Node, Op, PropertyFilter, TraitCondition, Window,
 };
 use super::issue::{Issue, code, pointer_push};
 
@@ -211,6 +213,7 @@ impl Parser {
             "list" => self.uuid(body, &at).map(Node::List),
             "segment" => self.uuid(body, &at).map(Node::Segment),
             "consent" => self.consent(body, &at),
+            "messages" => self.messages(body, &at),
             _ => self.string(body, &at).map(Node::Identifier),
         }
     }
@@ -256,13 +259,65 @@ impl Parser {
             return None;
         };
         self.unknown_keys(map, pointer, &["channel", "topic", "status"]);
-        let channel = self.required_string(map, "channel", pointer);
+        let channel = self.optional_string(map, "channel", pointer);
         let status = self.required_string(map, "status", pointer);
         let topic = self.optional_string(map, "topic", pointer);
         Some(Node::Consent(ConsentCondition {
             channel: channel?,
             topic: topic?,
             status: status?,
+        }))
+    }
+
+    fn messages(&mut self, body: &Value, pointer: &str) -> Option<Node> {
+        let Some(map) = body.as_object() else {
+            self.report(pointer, code::MALFORMED);
+            return None;
+        };
+        self.unknown_keys(map, pointer, &["channel", "dimensions", "agg", "window"]);
+        let channel = self.required_string(map, "channel", pointer);
+        let mut complete = true;
+        let mut dimensions = BTreeMap::new();
+        if let Some(value) = map.get("dimensions") {
+            let at = pointer_push(pointer, "dimensions");
+            match value.as_object() {
+                None => {
+                    self.report(&at, code::MALFORMED);
+                    complete = false;
+                }
+                Some(entries) => {
+                    for (key, entry) in entries {
+                        match entry.as_str() {
+                            Some(text) => {
+                                dimensions.insert(key.clone(), text.to_owned());
+                            }
+                            None => {
+                                self.report(&pointer_push(&at, key), code::MALFORMED);
+                                complete = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let agg = match map.get("agg") {
+            Some(value) => self.aggregate(value, &pointer_push(pointer, "agg")),
+            None => {
+                self.report(&pointer_push(pointer, "agg"), code::MALFORMED);
+                None
+            }
+        };
+        let mut window = None;
+        if let Some(value) = map.get("window") {
+            window = self.window(value, &pointer_push(pointer, "window"));
+            complete &= window.is_some();
+        }
+        complete.then_some(())?;
+        Some(Node::Messages(MessagesCondition {
+            channel: channel?,
+            dimensions,
+            agg: agg?,
+            window,
         }))
     }
 
@@ -480,6 +535,38 @@ mod tests {
         assert_eq!(
             issues(json!({"v": 1, "event": "e", "window": {"last": "P1D", "x": 1}})),
             [pair("/window/x", code::UNKNOWN_KEY),]
+        );
+    }
+
+    #[test]
+    fn the_policy_leaves_round_trip_and_a_consent_leaf_may_leave_out_its_channel() {
+        let value = json!({"v": 1, "all": [
+            {"consent": {"status": "none"}},
+            {"messages": {"channel": "email", "dimensions": {"vertical": "sports"},
+                "agg": {"fn": "count", "op": "gte", "value": 3}, "window": {"last": "P7D"}}},
+            {"messages": {"channel": "email",
+                "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}
+        ]});
+        let definition = parse(&value).expect("the definition should parse");
+        assert_eq!(definition.to_value(), value);
+    }
+
+    #[test]
+    fn a_messages_leaf_needs_a_channel_and_an_aggregate_and_is_closed() {
+        assert_eq!(
+            issues(json!({"v": 1, "messages": {"x": 1}})),
+            [
+                pair("/messages/x", code::UNKNOWN_KEY),
+                pair("/messages/channel", code::MALFORMED),
+                pair("/messages/agg", code::MALFORMED),
+            ]
+        );
+        assert_eq!(
+            issues(
+                json!({"v": 1, "messages": {"channel": "email", "dimensions": {"a": 1},
+                "agg": {"fn": "count", "op": "gt", "value": 1}}})
+            ),
+            [pair("/messages/dimensions/a", code::MALFORMED)]
         );
     }
 

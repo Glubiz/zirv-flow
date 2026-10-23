@@ -2,6 +2,8 @@
 //! validator checks them.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -9,7 +11,7 @@ use super::issue::Issue;
 use super::parse::parse;
 
 /// The key that names each node kind on the wire.
-pub const NODE_KEYS: [&str; 9] = [
+pub const NODE_KEYS: [&str; 10] = [
     "all",
     "any",
     "not",
@@ -19,6 +21,7 @@ pub const NODE_KEYS: [&str; 9] = [
     "segment",
     "consent",
     "identifier",
+    "messages",
 ];
 
 /// A comparison operator. Which ones a value type accepts is the validator's concern.
@@ -168,6 +171,8 @@ pub enum Node {
     Consent(ConsentCondition),
     /// `email`, `phone`, `anonymous_id` or `external:<namespace>`.
     Identifier(String),
+    /// A consent policy leaf: the messages already sent. Refused in a segment.
+    Messages(MessagesCondition),
 }
 
 impl Node {
@@ -183,6 +188,7 @@ impl Node {
             Self::Segment(_) => "segment",
             Self::Consent(_) => "consent",
             Self::Identifier(_) => "identifier",
+            Self::Messages(_) => "messages",
         }
     }
 }
@@ -229,9 +235,24 @@ pub struct EventCondition {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConsentCondition {
-    pub channel: String,
+    /// A segment names the channel. A consent policy leaf leaves it out and means the message's
+    /// own channel and dimension values, with a `granted`, `denied` or `none` status.
+    pub channel: Option<String>,
     pub topic: Option<String>,
     pub status: String,
+}
+
+/// The messages a person was sent (architecture 10.1): a count, or the time of the last one, on a
+/// channel within a window, counting only messages that were sent. Valid in a consent policy only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessagesCondition {
+    pub channel: String,
+    /// Dimension key to value key; a message must carry all of them.
+    pub dimensions: BTreeMap<String, String>,
+    /// `count` or `last_time`, with `prop` unset.
+    pub agg: Aggregate,
+    /// Only `last` and `between` are valid.
+    pub window: Option<Window>,
 }
 
 fn put_condition(map: &mut Map<String, Value>, op: Op, value: &Option<Value>) {
@@ -308,7 +329,9 @@ impl Node {
             }
             Self::Consent(condition) => {
                 let mut item = Map::new();
-                item.insert("channel".to_owned(), condition.channel.clone().into());
+                if let Some(channel) = &condition.channel {
+                    item.insert("channel".to_owned(), channel.clone().into());
+                }
                 if let Some(topic) = &condition.topic {
                     item.insert("topic".to_owned(), topic.clone().into());
                 }
@@ -317,6 +340,26 @@ impl Node {
             }
             Self::Identifier(kind) => {
                 map.insert("identifier".to_owned(), kind.clone().into());
+            }
+            Self::Messages(condition) => {
+                let mut item = Map::new();
+                item.insert("channel".to_owned(), condition.channel.clone().into());
+                if !condition.dimensions.is_empty() {
+                    let dimensions = condition
+                        .dimensions
+                        .iter()
+                        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                        .collect();
+                    item.insert("dimensions".to_owned(), Value::Object(dimensions));
+                }
+                let mut agg = Map::new();
+                agg.insert("fn".to_owned(), condition.agg.func.as_str().into());
+                put_condition(&mut agg, condition.agg.op, &condition.agg.value);
+                item.insert("agg".to_owned(), Value::Object(agg));
+                if let Some(window) = &condition.window {
+                    item.insert("window".to_owned(), window.to_value());
+                }
+                map.insert("messages".to_owned(), Value::Object(item));
             }
         }
         Value::Object(map)
@@ -398,11 +441,22 @@ mod tests {
             Node::List(id),
             Node::Segment(id),
             Node::Consent(ConsentCondition {
-                channel: "email".into(),
+                channel: Some("email".into()),
                 topic: None,
                 status: "subscribed".into(),
             }),
             Node::Identifier("email".into()),
+            Node::Messages(MessagesCondition {
+                channel: "email".into(),
+                dimensions: BTreeMap::new(),
+                agg: Aggregate {
+                    func: AggFn::Count,
+                    prop: None,
+                    op: Op::Gte,
+                    value: Some(Value::from(1)),
+                },
+                window: None,
+            }),
         ];
         let keys: Vec<&str> = nodes.iter().map(Node::key).collect();
         assert_eq!(keys, NODE_KEYS);

@@ -175,7 +175,8 @@ impl Masking<'_> {
     /// The status recorded for a consent condition's channel and topic.
     fn consent_status(&self, condition: &ConsentCondition) -> String {
         let unknown = || "unknown".to_owned();
-        let Ok(channel) = Channel::from_str(&condition.channel) else {
+        // A segment's consent leaf always names its channel.
+        let Some(Ok(channel)) = condition.channel.as_deref().map(Channel::from_str) else {
             return unknown();
         };
         let topic = match &condition.topic {

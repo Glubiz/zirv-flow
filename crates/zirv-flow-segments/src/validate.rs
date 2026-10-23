@@ -5,16 +5,25 @@ use std::str::FromStr;
 
 use hashbrown::HashMap;
 use serde_json::Value;
-use zirv_flow_core::consent::{Channel, ConsentStatus};
+use zirv_flow_core::consent::{Channel, ConsentStatus, RecordedConsent, TOPIC_DIMENSION};
 use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::{IdentifierKind, TraitType};
 use zirv_flow_core::segment::{
     AggFn, Aggregate, ConsentCondition, Definition, EventCondition, Issue, MAX_DEPTH, MAX_ISSUES,
-    MAX_NODES, Node, Op, PropertyFilter, TraitCondition, Window, code, parse, pointer_push,
+    MAX_NODES, MessagesCondition, Node, Op, PropertyFilter, TraitCondition, Window, code, parse,
+    pointer_push,
 };
 
 use crate::catalog::Catalog;
 use crate::time_value::{DurationError, parse_date, parse_duration, parse_timestamp};
+
+/// Whether the text has the form of a dimension key or value key (`[a-z0-9_-]{1,64}`).
+fn is_dimension_key(text: &str) -> bool {
+    (1..=64).contains(&text.len())
+        && text.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
+        })
+}
 
 const MAX_IN_VALUES: usize = 1_000;
 const MAX_STRING_CHARS: usize = 1_024;
@@ -22,18 +31,45 @@ const MAX_STRING_CHARS: usize = 1_024;
 /// Parses the wire form, then validates it. The parse issues and the validation issues are never
 /// mixed: a definition that does not parse is not checked against the catalog.
 pub fn parse_and_validate(value: &Value, catalog: &Catalog) -> Result<Definition, Vec<Issue>> {
+    parse_and_validate_in(value, catalog, Context::Segment)
+}
+
+/// [`parse_and_validate`] for the given context.
+pub fn parse_and_validate_in(
+    value: &Value,
+    catalog: &Catalog,
+    context: Context,
+) -> Result<Definition, Vec<Issue>> {
     let definition = parse(value)?;
-    validate(&definition, catalog)?;
+    validate_in(&definition, catalog, context)?;
     Ok(definition)
 }
 
-/// Validates a definition against the catalog, collecting every issue.
+/// Where a definition is used. A consent policy rule reads the message being sent, so it may
+/// hold the leaves that need one; a segment may not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Context {
+    Segment,
+    Policy,
+}
+
+/// Validates a segment definition against the catalog, collecting every issue.
 pub fn validate(definition: &Definition, catalog: &Catalog) -> Result<(), Vec<Issue>> {
+    validate_in(definition, catalog, Context::Segment)
+}
+
+/// Validates a definition for the context that will use it.
+pub fn validate_in(
+    definition: &Definition,
+    catalog: &Catalog,
+    context: Context,
+) -> Result<(), Vec<Issue>> {
     if definition.v != 1 {
         return Err(vec![Issue::new("/v", code::UNSUPPORTED_VERSION)]);
     }
     let mut checker = Checker {
         catalog,
+        context,
         issues: Vec::new(),
         nodes: 0,
     };
@@ -141,6 +177,7 @@ pub(crate) const fn ops_for(kind: Kind) -> &'static [Op] {
 
 struct Checker<'a> {
     catalog: &'a Catalog,
+    context: Context,
     issues: Vec<Issue>,
     nodes: usize,
 }
@@ -190,6 +227,7 @@ impl Checker<'_> {
                     }
                 }
                 Node::Consent(condition) => self.consent(condition, &pointer),
+                Node::Messages(condition) => self.messages(condition, &pointer),
                 Node::Identifier(kind) => {
                     if self.has_nul(kind, &pointer_push(&pointer, "identifier")) {
                         continue;
@@ -242,7 +280,11 @@ impl Checker<'_> {
 
     fn consent(&mut self, condition: &ConsentCondition, pointer: &str) {
         let base = pointer_push(pointer, "consent");
-        let channel = Channel::from_str(&condition.channel).ok();
+        let Some(channel_text) = &condition.channel else {
+            self.message_consent(condition, &base);
+            return;
+        };
+        let channel = Channel::from_str(channel_text).ok();
         if channel.is_none() {
             self.report(&pointer_push(&base, "channel"), code::VALUE_NOT_ALLOWED);
         }
@@ -258,6 +300,62 @@ impl Checker<'_> {
             if !known {
                 self.report(&pointer_push(&base, "topic"), code::UNKNOWN_TOPIC);
             }
+        }
+    }
+
+    /// A consent leaf without a channel reads the consent of the message being sent: a policy
+    /// leaf with a `granted`, `denied` or `none` status and no topic of its own.
+    fn message_consent(&mut self, condition: &ConsentCondition, base: &str) {
+        if self.context != Context::Policy {
+            self.report(base, code::POLICY_ONLY);
+            return;
+        }
+        if RecordedConsent::from_name(&condition.status).is_none() {
+            self.report(&pointer_push(base, "status"), code::VALUE_NOT_ALLOWED);
+        }
+        if condition.topic.is_some() {
+            self.report(&pointer_push(base, "topic"), code::VALUE_NOT_ALLOWED);
+        }
+    }
+
+    /// The messages leaf: a count or the time of the last send, counting only sent messages.
+    fn messages(&mut self, condition: &MessagesCondition, pointer: &str) {
+        let base = pointer_push(pointer, "messages");
+        if self.context != Context::Policy {
+            self.report(&base, code::POLICY_ONLY);
+            return;
+        }
+        if Channel::from_str(&condition.channel).is_err() {
+            self.report(&pointer_push(&base, "channel"), code::VALUE_NOT_ALLOWED);
+        }
+        let dimensions = pointer_push(&base, "dimensions");
+        for (key, value) in &condition.dimensions {
+            if !is_dimension_key(key) || key == TOPIC_DIMENSION {
+                self.report(&pointer_push(&dimensions, key), code::VALUE_NOT_ALLOWED);
+            } else if !is_dimension_key(value) {
+                self.report(&pointer_push(&dimensions, key), code::VALUE_NOT_ALLOWED);
+            }
+        }
+        let agg_at = pointer_push(&base, "agg");
+        let agg = &condition.agg;
+        if agg.prop.is_some() {
+            self.report(&pointer_push(&agg_at, "prop"), code::VALUE_NOT_ALLOWED);
+        }
+        match agg.func {
+            AggFn::Count => {
+                self.condition(Kind::Number, agg.op, agg.value.as_ref(), &agg_at, false)
+            }
+            AggFn::LastTime => {
+                self.condition(Kind::Timestamp, agg.op, agg.value.as_ref(), &agg_at, false);
+            }
+            _ => self.report(&pointer_push(&agg_at, "fn"), code::AGGREGATE_NOT_ALLOWED),
+        }
+        match &condition.window {
+            Some(Window::SinceTrait(_)) => {
+                self.report(&pointer_push(&base, "window"), code::VALUE_NOT_ALLOWED);
+            }
+            Some(window) => self.window(window, &pointer_push(&base, "window")),
+            None => {}
         }
     }
 
@@ -1360,6 +1458,126 @@ mod tests {
             json!({"identifier": format!("external:{nul}")}),
             "/identifier",
             code::VALUE_NOT_ALLOWED,
+        );
+    }
+
+    fn check_policy(mut value: Value) -> Result<(), Vec<(String, &'static str)>> {
+        value["v"] = json!(1);
+        let definition = parse(&value).expect("the fixture should parse");
+        validate_in(&definition, &catalog(), Context::Policy).map_err(|issues| {
+            issues
+                .into_iter()
+                .map(|issue| (issue.pointer, issue.code))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn the_policy_leaves_are_refused_in_a_segment_with_a_clear_code() {
+        for value in [
+            json!({"consent": {"status": "granted"}}),
+            json!({"messages": {"channel": "email",
+                "agg": {"fn": "count", "op": "gte", "value": 1}}}),
+        ] {
+            let key = if value.get("consent").is_some() {
+                "consent"
+            } else {
+                "messages"
+            };
+            refused(value, &format!("/{key}"), code::POLICY_ONLY);
+        }
+    }
+
+    #[test]
+    fn the_policy_leaves_are_accepted_in_a_policy() {
+        let accepted = [
+            json!({"consent": {"status": "none"}}),
+            json!({"consent": {"channel": "email", "status": "subscribed"}}),
+            json!({"messages": {"channel": "email", "dimensions": {"vertical": "sports"},
+                "agg": {"fn": "count", "op": "gte", "value": 3}, "window": {"last": "P7D"}}}),
+            json!({"messages": {"channel": "email",
+                "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}),
+        ];
+        for value in accepted {
+            assert_eq!(check_policy(value.clone()), Ok(()), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_policy_consent_leaf_takes_only_the_three_message_statuses_and_no_topic() {
+        let issues = check_policy(json!({"consent": {"status": "subscribed"}})).unwrap_err();
+        assert_eq!(
+            issues,
+            [("/consent/status".to_owned(), code::VALUE_NOT_ALLOWED)]
+        );
+        let issues =
+            check_policy(json!({"consent": {"status": "denied", "topic": "news"}})).unwrap_err();
+        assert_eq!(
+            issues,
+            [("/consent/topic".to_owned(), code::VALUE_NOT_ALLOWED)]
+        );
+        let issues = check_policy(json!({"consent": {"channel": "email", "status": "granted"}}))
+            .unwrap_err();
+        assert_eq!(
+            issues,
+            [("/consent/status".to_owned(), code::VALUE_NOT_ALLOWED)]
+        );
+    }
+
+    #[test]
+    fn a_messages_leaf_is_checked_for_channel_dimensions_function_and_window() {
+        let bad = |value: Value| check_policy(value).unwrap_err();
+        assert_eq!(
+            bad(json!({"messages": {"channel": "fax",
+                "agg": {"fn": "count", "op": "gte", "value": 1}}})),
+            [("/messages/channel".to_owned(), code::VALUE_NOT_ALLOWED)]
+        );
+        assert_eq!(
+            bad(
+                json!({"messages": {"channel": "email", "dimensions": {"topic": "news"},
+                "agg": {"fn": "count", "op": "gte", "value": 1}}})
+            ),
+            [(
+                "/messages/dimensions/topic".to_owned(),
+                code::VALUE_NOT_ALLOWED
+            )]
+        );
+        assert_eq!(
+            bad(
+                json!({"messages": {"channel": "email", "dimensions": {"Vertical": "x"},
+                "agg": {"fn": "count", "op": "gte", "value": 1}}})
+            ),
+            [(
+                "/messages/dimensions/Vertical".to_owned(),
+                code::VALUE_NOT_ALLOWED
+            )]
+        );
+        assert_eq!(
+            bad(json!({"messages": {"channel": "email",
+                "agg": {"fn": "sum", "prop": "x", "op": "gte", "value": 1}}})),
+            [
+                ("/messages/agg/prop".to_owned(), code::VALUE_NOT_ALLOWED),
+                ("/messages/agg/fn".to_owned(), code::AGGREGATE_NOT_ALLOWED),
+            ]
+        );
+        assert_eq!(
+            bad(
+                json!({"messages": {"channel": "email", "window": {"since_trait": "signed_up"},
+                "agg": {"fn": "count", "op": "gte", "value": 1}}})
+            ),
+            [("/messages/window".to_owned(), code::VALUE_NOT_ALLOWED)]
+        );
+        assert_eq!(
+            bad(
+                json!({"messages": {"channel": "email", "window": {"last": "P5000D"},
+                "agg": {"fn": "count", "op": "gte", "value": 1}}})
+            ),
+            [("/messages/window/last".to_owned(), code::WINDOW_TOO_LONG)]
+        );
+        assert_eq!(
+            bad(json!({"messages": {"channel": "email",
+                "agg": {"fn": "count", "op": "within_last", "value": "P1D"}}})),
+            [("/messages/agg/op".to_owned(), code::OPERATOR_NOT_ALLOWED)]
         );
     }
 }

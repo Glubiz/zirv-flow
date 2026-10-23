@@ -9,9 +9,10 @@ use crate::catalog::Catalog;
 use crate::deps::Deps;
 use crate::lower::{SCOPE, lower};
 use crate::normalize::normalize;
+use crate::policy::SendContext;
 use crate::query::{Param, Query};
 use crate::storage::TraitStorage;
-use crate::validate::validate;
+use crate::validate::{Context, validate_in};
 
 /// A definition lowered to SQL. `now` was fixed at compile time, so the same inputs always give
 /// the same text and values.
@@ -32,9 +33,36 @@ pub fn compile(
     storage: &TraitStorage,
     now: OffsetDateTime,
 ) -> Result<CompiledSegment, Vec<Issue>> {
-    validate(definition, catalog)?;
+    compile_in(definition, catalog, storage, now, None)
+}
+
+/// Validates, normalizes and lowers a consent policy rule for one send. The leaves that read the
+/// message being sent are bound to `send`. The result is evaluated like a segment, for one person.
+pub fn compile_policy(
+    definition: &Definition,
+    catalog: &Catalog,
+    storage: &TraitStorage,
+    now: OffsetDateTime,
+    send: &SendContext,
+) -> Result<CompiledSegment, Vec<Issue>> {
+    compile_in(definition, catalog, storage, now, Some(send))
+}
+
+fn compile_in(
+    definition: &Definition,
+    catalog: &Catalog,
+    storage: &TraitStorage,
+    now: OffsetDateTime,
+    send: Option<&SendContext>,
+) -> Result<CompiledSegment, Vec<Issue>> {
+    let context = if send.is_some() {
+        Context::Policy
+    } else {
+        Context::Segment
+    };
+    validate_in(definition, catalog, context)?;
     let normalized = normalize(definition.clone());
-    let lowered = lower(&normalized.root, catalog, storage, now)?;
+    let lowered = lower(&normalized.root, catalog, storage, now, send)?;
     Ok(CompiledSegment {
         predicate: lowered.predicate,
         joins: lowered.joins,
@@ -100,7 +128,7 @@ mod tests {
     use serde_json::{Value, json};
     use time::macros::datetime;
     use uuid::Uuid;
-    use zirv_flow_core::consent::Channel;
+    use zirv_flow_core::consent::{Channel, RecordedConsent};
     use zirv_flow_core::events::PropertyType;
     use zirv_flow_core::people::TraitType;
     use zirv_flow_core::segment::{AggFn, ChangeClasses, NODE_KEYS, Node, Op, Window, code};
@@ -301,7 +329,8 @@ mod tests {
 
     fn required() -> BTreeSet<String> {
         let mut required = BTreeSet::new();
-        for key in NODE_KEYS {
+        // `messages` is policy-only and has no segment form.
+        for key in NODE_KEYS.into_iter().filter(|key| *key != "messages") {
             required.insert(format!("node:{key}"));
         }
         for key in ["trait", "event", "list", "segment", "consent", "identifier"] {
@@ -955,5 +984,103 @@ mod tests {
         assert!(
             sql.contains("EXISTS (SELECT 1 FROM events e WHERE e.workspace_id = p.workspace_id")
         );
+    }
+
+    fn send(consent: RecordedConsent) -> SendContext {
+        SendContext {
+            channel: Channel::Email,
+            dimensions: zirv_flow_core::consent::Dimensions::new(),
+            consent,
+        }
+    }
+
+    fn policy_rule(value: Value, consent: RecordedConsent) -> CompiledSegment {
+        compile_policy(
+            &definition(value),
+            &catalog(),
+            &TraitStorage::default(),
+            NOW,
+            &send(consent),
+        )
+        .expect("the rule should compile")
+    }
+
+    #[test]
+    fn a_segment_refuses_the_policy_leaves_with_a_clear_code() {
+        for value in [
+            json!({"consent": {"status": "none"}}),
+            json!({"messages": {"channel": "email",
+                "agg": {"fn": "count", "op": "gte", "value": 1}}}),
+        ] {
+            let issues = compile(
+                &definition(value),
+                &catalog(),
+                &TraitStorage::default(),
+                NOW,
+            )
+            .expect_err("a segment has no send");
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].code, code::POLICY_ONLY);
+        }
+    }
+
+    #[test]
+    fn the_message_consent_leaf_is_a_constant_of_the_send() {
+        let rule = json!({"consent": {"status": "none"}});
+
+        let granted = policy_rule(rule.clone(), RecordedConsent::Granted).members_sql();
+        let none = policy_rule(rule, RecordedConsent::None).members_sql();
+
+        assert!(granted.sql.ends_with("AND (false)"), "{}", granted.sql);
+        assert!(none.sql.ends_with("AND (true)"), "{}", none.sql);
+        assert!(granted.params.is_empty() && none.params.is_empty());
+    }
+
+    #[test]
+    fn the_messages_count_reads_only_sent_messages_of_the_person_and_channel_in_the_window() {
+        let rule = policy_rule(
+            json!({"messages": {"channel": "email", "dimensions": {"vertical": "sports"},
+                "agg": {"fn": "count", "op": "gte", "value": 3}, "window": {"last": "P7D"}}}),
+            RecordedConsent::None,
+        );
+        let query = rule.members_sql();
+
+        let expected = "(SELECT count(*) FROM messages m WHERE m.workspace_id = p.workspace_id \
+             AND m.person_id = p.id AND m.status = 'sent' AND NOT m.test AND m.channel = $2::text \
+             AND m.dimensions @> $3::jsonb AND m.completed_at > $4::timestamptz \
+             AND m.completed_at <= $5::timestamptz)::float8 >= $6::float8";
+        assert!(query.sql.contains(expected), "{}", query.sql);
+        assert_eq!(query.params[0], Param::Text("email".into()));
+        assert_eq!(query.params[1], Param::Jsonb(json!({"vertical": "sports"})));
+        assert!(rule.time_sensitive);
+    }
+
+    #[test]
+    fn the_last_send_is_a_guarded_maximum_of_the_completion_times() {
+        let rule = policy_rule(
+            json!({"messages": {"channel": "email",
+                "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}),
+            RecordedConsent::None,
+        );
+        let sql = rule.members_sql().sql;
+
+        assert!(sql.contains("COALESCE("), "{sql}");
+        assert!(
+            sql.contains("(SELECT max(m.completed_at) FROM messages m"),
+            "{sql}"
+        );
+        assert!(sql.contains("m.dimensions @> $3::jsonb"), "{sql}");
+    }
+
+    #[test]
+    fn a_policy_rule_runs_for_one_person_through_the_batch_form() {
+        let rule = policy_rule(
+            json!({"consent": {"status": "denied"}}),
+            RecordedConsent::Denied,
+        );
+
+        let sql = rule.batch_sql().sql;
+
+        assert!(sql.contains("p.id = ANY("), "{sql}");
     }
 }

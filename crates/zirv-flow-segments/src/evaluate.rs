@@ -17,15 +17,17 @@ use std::str::FromStr;
 
 use serde_json::Value;
 use time::OffsetDateTime;
-use zirv_flow_core::consent::{Channel, ConsentStatus};
+use zirv_flow_core::consent::{Channel, ConsentStatus, RecordedConsent};
 use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::TraitType;
 use zirv_flow_core::segment::{
-    AggFn, ConsentCondition, Definition, EventCondition, Node, Window, pointer_push,
+    AggFn, ConsentCondition, Definition, EventCondition, MessagesCondition, Node, Window,
+    pointer_push,
 };
 
 use crate::catalog::Catalog;
 use crate::leaf::{absolute, leaf, number, span_of, stored_number, stored_time_of, time};
+use crate::policy::PolicyFacts;
 use crate::snapshot::{PersonSnapshot, SnapshotEvent};
 use crate::stored_time;
 use crate::validate::Kind;
@@ -91,9 +93,32 @@ pub fn evaluate(
     person: &PersonSnapshot,
     now: OffsetDateTime,
 ) -> Evaluation {
+    run(definition, catalog, person, None, now)
+}
+
+/// Evaluates a validated consent policy rule for one person and one send. The policy-only
+/// leaves read `facts`; the compiled SQL of [`crate::compile_policy`] is its oracle.
+pub fn evaluate_policy(
+    definition: &Definition,
+    catalog: &Catalog,
+    person: &PersonSnapshot,
+    facts: &PolicyFacts,
+    now: OffsetDateTime,
+) -> Evaluation {
+    run(definition, catalog, person, Some(facts), now)
+}
+
+fn run(
+    definition: &Definition,
+    catalog: &Catalog,
+    person: &PersonSnapshot,
+    policy: Option<&PolicyFacts>,
+    now: OffsetDateTime,
+) -> Evaluation {
     let evaluator = Evaluator {
         catalog,
         person,
+        policy,
         now: stored_time::micros(now),
     };
     let tree = evaluator.node(&definition.root, String::new());
@@ -106,6 +131,8 @@ pub fn evaluate(
 struct Evaluator<'a> {
     catalog: &'a Catalog,
     person: &'a PersonSnapshot,
+    /// The send and the sent messages; none when a segment is evaluated.
+    policy: Option<&'a PolicyFacts>,
     /// Microseconds since the epoch.
     now: i64,
 }
@@ -154,6 +181,67 @@ impl Evaluator<'_> {
             Node::Identifier(kind) => {
                 self.held(pointer, self.person.identifier_kinds.contains(kind))
             }
+            Node::Messages(condition) => self.messages(condition, pointer),
+        }
+    }
+
+    /// The messages leaf: the sent messages on the channel that carry the dimension values and
+    /// fall in the window, counted or reduced to the latest.
+    fn messages(&self, condition: &MessagesCondition, pointer: String) -> EvalNode {
+        let (Some(facts), Ok(channel)) = (self.policy, Channel::from_str(&condition.channel))
+        else {
+            return self.leaf(pointer, Outcome::Fail, Observed::Missing);
+        };
+        let matching: Vec<i64> = facts
+            .messages
+            .iter()
+            .filter(|message| message.channel == channel)
+            .filter(|message| {
+                condition
+                    .dimensions
+                    .iter()
+                    .all(|(key, value)| message.dimensions.get(key) == Some(value))
+            })
+            .map(|message| stored_time::micros(message.sent_at))
+            .filter(|at| self.message_in_window(condition.window.as_ref(), *at))
+            .collect();
+        let events = matching.len();
+        let agg = &condition.agg;
+        let (passed, value) = match agg.func {
+            AggFn::Count => (
+                number(Some(events as f64), agg.op, agg.value.as_ref()),
+                Some(Value::from(events)),
+            ),
+            AggFn::LastTime => {
+                let at = matching.iter().copied().max();
+                (
+                    time(at, Kind::Timestamp, agg.op, agg.value.as_ref(), self.now),
+                    at.and_then(rfc3339),
+                )
+            }
+            _ => (false, None),
+        };
+        self.leaf(
+            pointer,
+            Outcome::of(passed),
+            Observed::Aggregate { value, events },
+        )
+    }
+
+    fn message_in_window(&self, window: Option<&Window>, at: i64) -> bool {
+        match window {
+            None => true,
+            Some(Window::Last(text)) => {
+                span_of(text).is_some_and(|span| self.now - span < at && at <= self.now)
+            }
+            Some(Window::Between(start, end)) => {
+                let bound = |text: &String| absolute(Kind::Timestamp, &Value::String(text.clone()));
+                match (bound(start), bound(end)) {
+                    (Some(start), Some(end)) => start <= at && at < end,
+                    _ => false,
+                }
+            }
+            Some(Window::SinceTrait(_)) => false,
         }
     }
 
@@ -200,8 +288,14 @@ impl Evaluator<'_> {
     /// A consent row for the channel and topic, or none. `unknown` is what no row means, and
     /// what a stored `unknown` row means too.
     fn consent(&self, condition: &ConsentCondition) -> bool {
+        let Some(channel) = &condition.channel else {
+            // The consent of the message being sent, read before the rule ran.
+            return self.policy.is_some_and(|facts| {
+                RecordedConsent::from_name(&condition.status) == Some(facts.send.consent)
+            });
+        };
         let (Ok(channel), Ok(status)) = (
-            Channel::from_str(&condition.channel),
+            Channel::from_str(channel),
             ConsentStatus::from_str(&condition.status),
         ) else {
             return false;
@@ -414,6 +508,7 @@ mod tests {
     use zirv_flow_core::consent::Channel;
 
     use super::*;
+    use crate::policy::{SendContext, SnapshotMessage};
     use crate::snapshot::SnapshotConsent;
 
     const NOW: OffsetDateTime = datetime!(2025-06-15 12:00:00 UTC);
@@ -837,5 +932,122 @@ mod tests {
         assert_eq!(outcome(without_window, &cut_at(boundary)), Outcome::Unknown);
         assert_eq!(outcome(day, &no_boundary), Outcome::Unknown);
         assert_eq!(outcome(unreadable, &cut_at(boundary)), Outcome::Fail);
+    }
+
+    fn facts(consent: RecordedConsent, messages: Vec<SnapshotMessage>) -> PolicyFacts {
+        PolicyFacts {
+            send: SendContext {
+                channel: Channel::Email,
+                dimensions: Default::default(),
+                consent,
+            },
+            messages,
+        }
+    }
+
+    fn sent(hours_ago: i64, dimensions: &[(&str, &str)]) -> SnapshotMessage {
+        SnapshotMessage {
+            channel: Channel::Email,
+            dimensions: dimensions
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect(),
+            sent_at: NOW - time::Duration::hours(hours_ago),
+        }
+    }
+
+    fn rule(value: Value, facts: &PolicyFacts) -> Outcome {
+        evaluate_policy(
+            &definition(value),
+            &catalog(),
+            &PersonSnapshot::default(),
+            facts,
+            NOW,
+        )
+        .outcome
+    }
+
+    #[test]
+    fn the_message_consent_leaf_compares_the_recorded_status() {
+        let denied = facts(RecordedConsent::Denied, Vec::new());
+
+        assert_eq!(
+            rule(json!({"consent": {"status": "denied"}}), &denied),
+            Outcome::Pass
+        );
+        assert_eq!(
+            rule(json!({"consent": {"status": "none"}}), &denied),
+            Outcome::Fail
+        );
+        // Without a send there is nothing to read.
+        assert_eq!(
+            outcome(
+                json!({"consent": {"status": "denied"}}),
+                &PersonSnapshot::default()
+            ),
+            Outcome::Fail
+        );
+    }
+
+    #[test]
+    fn the_messages_count_filters_by_channel_dimensions_and_window() {
+        let facts = facts(
+            RecordedConsent::None,
+            vec![
+                sent(1, &[("vertical", "sports")]),
+                sent(24, &[("vertical", "sports"), ("brand", "a")]),
+                sent(24 * 8, &[("vertical", "sports")]),
+                sent(2, &[("vertical", "retail")]),
+            ],
+        );
+        let count = |dimensions: Value, window: Value, op: &str, value: i64| {
+            let mut leaf = json!({"channel": "email", "dimensions": dimensions,
+                "agg": {"fn": "count", "op": op, "value": value}});
+            if !window.is_null() {
+                leaf["window"] = window;
+            }
+            rule(json!({"messages": leaf}), &facts)
+        };
+        let week = json!({"last": "P7D"});
+
+        assert_eq!(
+            count(json!({"vertical": "sports"}), week.clone(), "eq", 2),
+            Outcome::Pass
+        );
+        assert_eq!(
+            count(json!({"vertical": "sports"}), Value::Null, "eq", 3),
+            Outcome::Pass
+        );
+        assert_eq!(count(json!({}), week.clone(), "eq", 3), Outcome::Pass);
+        assert_eq!(
+            count(json!({"vertical": "sports", "brand": "a"}), week, "eq", 1),
+            Outcome::Pass
+        );
+        assert_eq!(
+            count(json!({"vertical": "none"}), Value::Null, "gte", 1),
+            Outcome::Fail
+        );
+    }
+
+    #[test]
+    fn the_last_send_is_missing_when_nothing_was_sent_and_so_every_comparison_is_false() {
+        let none = facts(RecordedConsent::None, Vec::new());
+        let one = facts(RecordedConsent::None, vec![sent(30, &[])]);
+        let within = |duration: &str| {
+            json!({"messages": {"channel": "email",
+                "agg": {"fn": "last_time", "op": "within_last", "value": duration}}})
+        };
+
+        assert_eq!(rule(within("P1D"), &none), Outcome::Fail);
+        assert_eq!(rule(within("P1D"), &one), Outcome::Fail);
+        assert_eq!(rule(within("P2D"), &one), Outcome::Pass);
+        assert_eq!(
+            rule(
+                json!({"not": {"messages": {"channel": "email",
+                    "agg": {"fn": "last_time", "op": "more_than_ago", "value": "PT1H"}}}}),
+                &none
+            ),
+            Outcome::Pass
+        );
     }
 }
