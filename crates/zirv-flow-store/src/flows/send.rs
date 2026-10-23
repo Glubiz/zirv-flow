@@ -26,7 +26,7 @@ const FLOWS_SOURCE: &str = "flows";
 /// The event an ended message writes; none for a message that has not ended.
 const fn event_of(status: MessageStatus) -> Option<&'static str> {
     match status {
-        MessageStatus::Pending => None,
+        MessageStatus::Pending | MessageStatus::Sending => None,
         MessageStatus::Sent => Some(EMAIL_SENT_EVENT),
         MessageStatus::Skipped => Some(EMAIL_SKIPPED_EVENT),
         MessageStatus::Failed => Some(EMAIL_FAILED_EVENT),
@@ -36,7 +36,7 @@ const fn event_of(status: MessageStatus) -> Option<&'static str> {
 /// The outcome of the `message.send` decision; none for a message that has not ended.
 const fn outcome_of(status: MessageStatus) -> Option<&'static str> {
     match status {
-        MessageStatus::Pending => None,
+        MessageStatus::Pending | MessageStatus::Sending => None,
         MessageStatus::Sent => Some("sent"),
         MessageStatus::Skipped => Some("skipped"),
         MessageStatus::Failed => Some("failed"),

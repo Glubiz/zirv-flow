@@ -75,9 +75,12 @@ pub(super) struct SendJob {
     pub(super) destination: Uuid,
     pub(super) topic: Option<Uuid>,
     pub(super) dimensions: Dimensions,
-    pub(super) queued_at: OffsetDateTime,
     /// How many times the send waited for a rate-limit token and was queued again.
     pub(super) deferrals: u32,
+    /// When the send first waited for a token; none before its first deferral. The six hours a
+    /// send may wait are counted from here, not from when it was queued: a backed-up queue is
+    /// not the destination's fault.
+    pub(super) first_wait: Option<OffsetDateTime>,
     /// The delivery attempts earlier runs of this send made, which an attempt number continues
     /// from: a deferral starts a new job whose own attempts count from one.
     pub(super) attempt_base: i32,
@@ -97,6 +100,7 @@ impl SendJob {
             .iter()
             .map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
             .collect::<Option<Dimensions>>()?;
+        OffsetDateTime::parse(text("queued_at")?, &Rfc3339).ok()?;
         Some(Self {
             workspace: text("workspace_id")?.parse().ok()?,
             message: id("message_id")?,
@@ -110,18 +114,25 @@ impl SendJob {
             destination: id("destination_id")?,
             topic,
             dimensions,
-            queued_at: OffsetDateTime::parse(text("queued_at")?, &Rfc3339).ok()?,
             deferrals: u32::try_from(payload.get("deferrals")?.as_u64()?).ok()?,
+            first_wait: match payload.get("first_wait") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(OffsetDateTime::parse(value.as_str()?, &Rfc3339).ok()?),
+            },
             attempt_base: i32::try_from(payload.get("attempt_base")?.as_i64()?).ok()?,
         })
     }
 
     /// The payload of the job that carries this send on after a deferral in attempt `attempts` of
-    /// the job holding `payload`: one deferral more, and the attempts the delivery has made so far.
-    pub(super) fn deferred(&self, payload: &Value, attempts: i32) -> Value {
+    /// the job holding `payload`: one deferral more, the attempts the delivery has made so far, and
+    /// the time of the first wait (`now` on the first deferral, carried over after).
+    pub(super) fn deferred(&self, payload: &Value, attempts: i32, now: OffsetDateTime) -> Value {
         let mut next = payload.clone();
         if let Some(map) = next.as_object_mut() {
             map.insert("deferrals".to_owned(), json!(self.deferrals + 1));
+            if let Ok(first) = self.first_wait.unwrap_or(now).format(&Rfc3339) {
+                map.insert("first_wait".to_owned(), json!(first));
+            }
             map.insert(
                 "attempt_base".to_owned(),
                 json!(self.attempt_base + attempts - 1),
@@ -169,7 +180,6 @@ mod tests {
         assert_eq!(parsed.person, Uuid::from_u128(6));
         assert_eq!(parsed.topic, Some(topic));
         assert_eq!(parsed.dimensions, dimensions);
-        assert_eq!(parsed.queued_at, datetime!(2031-05-06 07:08:09 UTC));
         assert_eq!((parsed.deferrals, parsed.attempt_base), (0, 0));
         assert!(!payload.to_string().contains('@'));
         assert!(
@@ -219,11 +229,20 @@ mod tests {
         let payload = queued(None, &dimensions).payload().unwrap();
         let job = SendJob::parse(&payload).unwrap();
 
-        let first = job.deferred(&payload, 3);
-        let second = SendJob::parse(&first).unwrap().deferred(&first, 1);
+        let t1 = datetime!(2031-05-07 00:00:00 UTC);
+        let t2 = datetime!(2031-05-07 03:00:00 UTC);
+        let first = job.deferred(&payload, 3, t1);
+        let second = SendJob::parse(&first).unwrap().deferred(&first, 1, t2);
 
         let first_job = SendJob::parse(&first).unwrap();
         assert_eq!((first_job.deferrals, first_job.attempt_base), (1, 2));
+        assert_eq!(job.first_wait, None);
+        assert_eq!(first_job.first_wait, Some(t1));
+        assert_eq!(
+            SendJob::parse(&second).unwrap().first_wait,
+            Some(t1),
+            "the first wait is carried over, not moved"
+        );
         let second_job = SendJob::parse(&second).unwrap();
         assert_eq!((second_job.deferrals, second_job.attempt_base), (2, 2));
         assert_eq!(

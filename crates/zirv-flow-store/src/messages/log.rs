@@ -18,6 +18,9 @@ pub enum MessageStatus {
     /// The job has started on it and it has not ended: it may be waiting for a rate-limit token or
     /// for a retry.
     Pending,
+    /// The destination is being called, or was: a retry must not judge the message again by the
+    /// gates, since it may have gone out.
+    Sending,
     /// Handed to the destination, which accepted it.
     Sent,
     /// A gate stopped it before anything was rendered or sent.
@@ -30,10 +33,18 @@ impl MessageStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Sending => "sending",
             Self::Sent => "sent",
             Self::Skipped => "skipped",
             Self::Failed => "failed",
         }
+    }
+}
+
+impl MessageStatus {
+    /// Whether the message has ended: sent, skipped or failed.
+    pub const fn has_ended(self) -> bool {
+        !matches!(self, Self::Pending | Self::Sending)
     }
 }
 
@@ -43,6 +54,7 @@ impl FromStr for MessageStatus {
     fn from_str(text: &str) -> Result<Self, StoreError> {
         match text {
             "pending" => Ok(Self::Pending),
+            "sending" => Ok(Self::Sending),
             "sent" => Ok(Self::Sent),
             "skipped" => Ok(Self::Skipped),
             "failed" => Ok(Self::Failed),
@@ -184,9 +196,9 @@ pub async fn insert_message<'e>(
 ) -> Result<bool, StoreError> {
     let gates: Vec<Value> = new.gates.iter().map(|gate| gate.to_value()).collect();
     let dimensions = json!(new.dimensions);
-    let completed = (new.status != MessageStatus::Pending).then_some(new.now);
+    let completed = new.status.has_ended().then_some(new.now);
     let written = sqlx::query(
-        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule, gate_results = EXCLUDED.gate_results,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status = 'pending' AND EXCLUDED.status <> 'pending'",
+        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule, gate_results = EXCLUDED.gate_results,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status IN ('pending', 'sending') \n            AND EXCLUDED.status NOT IN ('pending', 'sending')",
     )
     .bind(new.id)
     .bind(new.workspace.as_uuid())
@@ -214,6 +226,28 @@ pub async fn insert_message<'e>(
     .map_err(StoreError::query)?
     .rows_affected();
     Ok(written == 1)
+}
+
+/// Marks the message `sending` before the destination is called, in a statement of its own, so
+/// the mark survives a job transaction that rolls back. A message that has ended is left alone;
+/// false then.
+pub async fn mark_message_sending<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+    attempts: i32,
+) -> Result<bool, StoreError> {
+    let marked = sqlx::query(
+        "UPDATE messages SET status = 'sending', attempts = $3          WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'sending')",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(attempts)
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(marked == 1)
 }
 
 /// The message with this id in the workspace.
@@ -440,6 +474,8 @@ mod tests {
         let started = insert_message(&pool, &message(MessageStatus::Pending, None, 0)).await;
         let again = insert_message(&pool, &message(MessageStatus::Pending, None, 0)).await;
         let pending = find_message(&pool, ws, id).await.unwrap().unwrap();
+        let marked = mark_message_sending(&pool, ws, id, 1).await;
+        let sending = find_message(&pool, ws, id).await.unwrap().unwrap();
         let ended = insert_message(
             &pool,
             &message(MessageStatus::Failed, Some("render_error"), 2),
@@ -454,8 +490,18 @@ mod tests {
             (pending.status.as_str(), pending.completed_at),
             ("pending", None)
         );
-        assert!(ended.unwrap(), "the end is written over the pending row");
+        assert!(
+            marked.unwrap(),
+            "a pending message is marked before the call"
+        );
+        assert_eq!((sending.status.as_str(), sending.attempts), ("sending", 1));
+        assert!(sending.completed_at.is_none());
+        assert!(ended.unwrap(), "the end is written over the sending row");
         assert!(!late.unwrap(), "an ended message never changes");
+        assert!(
+            !mark_message_sending(&pool, ws, id, 9).await.unwrap(),
+            "an ended message is never marked again"
+        );
         assert_eq!(
             (
                 found.status.as_str(),
