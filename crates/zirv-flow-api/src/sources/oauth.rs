@@ -461,7 +461,26 @@ async fn store_tokens(
     {
         return Ok(false);
     }
-    let current = resolve::load(state, workspace, locked.credential_id).await?;
+    // Read the client id from the credential's locked row, in this transaction: a rotation or a
+    // patch waits for this write, so the tokens are never stored for a client the credential no
+    // longer names.
+    let Some(credential_id) = locked.credential_id else {
+        return Ok(false);
+    };
+    if zirv_flow_store::lock_credential_for_use(&mut tx, workspace, credential_id)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let opened = zirv_flow_store::open_credential(&mut *tx, keyring, workspace, credential_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "a workspace credential could not be opened");
+            ApiError::internal()
+        })?;
+    let current =
+        Credential::from_parts(&opened.secret, &opened.fields).map_err(|_| ApiError::internal())?;
     if active_binding(&locked.config, &current).as_deref() != Some(tokens.binding.as_str()) {
         return Ok(false);
     }

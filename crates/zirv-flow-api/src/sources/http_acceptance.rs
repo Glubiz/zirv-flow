@@ -250,6 +250,7 @@ mod tests {
     }
 
     struct Fixture {
+        keyring: Arc<Keyring>,
         pool: PgPool,
         router: Router,
         ws: WorkspaceId,
@@ -313,7 +314,7 @@ mod tests {
         .await
         .unwrap();
         let state = AppState::new(pool.clone(), Arc::new(String::new))
-            .with_keyring(keyring)
+            .with_keyring(keyring.clone())
             .with_cookie_secure(false)
             .with_public_url(public_url.map(str::to_owned))
             .with_egress_policy(Arc::new(
@@ -344,6 +345,7 @@ mod tests {
                 .unwrap();
         }
         Fixture {
+            keyring,
             pool: pool.clone(),
             admin: login(&router, "admin@example.com").await,
             other_admin: login(&router, "other@example.com").await,
@@ -753,6 +755,71 @@ mod tests {
             .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
             .await;
         assert_eq!(linked, 1, "no tokens were stored for the second source");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_token_write_reads_the_client_id_from_the_locked_credential_row(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.create_source(fx.manifest()).await;
+        let source = fx.as_key("GET", &format!("/sources/{id}"), None).await;
+        let credential = source.body["credential_id"].as_str().unwrap().to_owned();
+        let state = fx.state_of(&fx.admin, &id).await;
+
+        // Another transaction holds the credential's write lock and points it at a secret that
+        // names another client.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM credentials WHERE id = $1::uuid FOR UPDATE")
+            .bind(&credential)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let replacement = zirv_flow_core::SecretId::new();
+        let purpose = zirv_flow_core::SecretPurpose::WorkspaceCredential;
+        let sealed = seal(
+            &fx.keyring,
+            br#"{"client_id":"another-client","client_secret":"x"}"#,
+            &zirv_flow_core::secret_aad(fx.ws, replacement, purpose),
+        );
+        secrets::insert_unchecked(&mut *holder, fx.ws, purpose, replacement, &sealed)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE credentials SET secret_id = $2 WHERE id = $1::uuid")
+            .bind(&credential)
+            .bind(replacement.as_uuid())
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let router = fx.router.clone();
+        let query = format!("code={CODE}&state={state}");
+        let cookie = fx.admin.cookie.clone();
+        let callback = tokio::spawn(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/oauth/callback?{query}"))
+                .header(header::COOKIE, cookie)
+                .body(Body::empty())
+                .unwrap();
+            router.oneshot(request).await.unwrap()
+        });
+        crate::test_support::wait_until_a_backend_waits_on_a_lock(&pool).await;
+        assert!(
+            !callback.is_finished(),
+            "the token write waits for the credential's writer"
+        );
+        holder.commit().await.unwrap();
+
+        // The write then reads the committed client id and refuses the tokens.
+        let reply = callback.await.unwrap();
+        let place = reply.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(place.ends_with("&reason=state_mismatch"), "{place}");
+        let linked = fx
+            .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
+            .await;
+        assert_eq!(linked, 0);
     }
 
     // ---- the consent --------------------------------------------------------------------
