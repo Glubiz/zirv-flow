@@ -598,13 +598,13 @@ fn dmarc_uri(uri: &str) -> Option<String> {
     let (scheme, rest) = uri.split_once(':')?;
     match scheme.to_ascii_lowercase().as_str() {
         "mailto" => {
-            let literal_ok = rest.chars().all(|c| {
+            let literal = |c: char| {
                 c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
-            });
-            let mailbox = (rest.len() <= 254 && literal_ok)
-                .then(|| dmarc_mailbox(rest))
-                .flatten()?;
-            Some(format!("mailto:{mailbox}"))
+            };
+            if rest.len() > 254 || !rest.chars().all(literal) {
+                return None;
+            }
+            Some(format!("mailto:{}", dmarc_mailbox(rest)?))
         }
         "https" => {
             let authority_and_path = rest.strip_prefix("//")?;
