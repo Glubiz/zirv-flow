@@ -1200,6 +1200,103 @@ mod tests {
         assert_eq!(created.body["fields"], json!({"account": "acme"}));
     }
 
+    fn declared_manifest() -> Value {
+        json!({
+            "version": "v1",
+            "base_url": "https://api.example.test/v1",
+            "auth": {"type": "bearer", "credential": {"fields": [
+                {"key": "token", "label": "Access token", "type": "string",
+                 "required": true, "secret": true},
+                {"key": "account", "label": "Account", "type": "string", "required": true}
+            ]}},
+            "streams": [{"name": "people", "path": "/people", "records_path": "/data",
+                         "fields": [{"name": "id", "type": "string"}], "primary_key": ["id"]}]
+        })
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_http_source_must_use_a_credential_that_fits_the_schema_its_manifest_declares(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let body = |credential: Option<&str>| {
+            let mut body = json!({"kind": "http", "name": format!("API {}", Uuid::new_v4()),
+                                  "config": {"manifest": declared_manifest()}});
+            if let Some(id) = credential {
+                body["credential_id"] = json!(id);
+            }
+            body
+        };
+        let complete = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Complete", "fields": {"account": "acme"},
+                            "schema": {"fields": [
+                                {"key": "token", "label": "T", "type": "string", "required": true, "secret": true},
+                                {"key": "account", "label": "A", "type": "string", "required": true}]},
+                            "secret": {"token": "tok"}})),
+            )
+            .await;
+        let partial = fx.create_ok("Token only", "tok").await;
+
+        let none = fx.as_admin("POST", "/sources", Some(body(None))).await;
+        let wrong = fx
+            .as_admin("POST", "/sources", Some(body(Some(&partial))))
+            .await;
+        let fitting = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(body(Some(complete.body["id"].as_str().unwrap()))),
+            )
+            .await;
+
+        assert_eq!(
+            none.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            none.body
+        );
+        assert!(
+            none.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("credential.token")
+        );
+        assert_eq!(
+            wrong.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            wrong.body
+        );
+        assert!(
+            wrong.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("credential.account")
+        );
+        assert_eq!(fitting.status, StatusCode::CREATED, "{:?}", fitting.body);
+        // An update that moves the source to the incomplete credential is refused too.
+        let id = fitting.body["id"].as_str().unwrap();
+        let moved = fx
+            .as_admin(
+                "PATCH",
+                &format!("/sources/{id}"),
+                Some(json!({"credential_id": partial})),
+            )
+            .await;
+        assert_eq!(
+            moved.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            moved.body
+        );
+        let kept = fx.as_admin("GET", &format!("/sources/{id}"), None).await;
+        assert_eq!(kept.body["credential_id"], complete.body["id"]);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_credential_needs_the_master_key(pool: PgPool) {

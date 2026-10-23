@@ -23,7 +23,7 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
-use crate::workspace_credentials::resolve::lock_for_use;
+use crate::workspace_credentials::resolve::{check_manifest_credential, lock_for_use};
 
 const MAX_NAME_CHARS: usize = 128;
 /// The schedules of sources are cron expressions in UTC.
@@ -229,6 +229,9 @@ pub(crate) async fn create_source(
         ),
         None => None,
     };
+    if spec.kind == "http" {
+        check_manifest_credential(&request.config, linked.as_ref())?;
+    }
     let source = zirv_flow_store::create_source(
         &mut *tx,
         workspace,
@@ -332,6 +335,21 @@ pub(crate) async fn update_source(
         ),
         None => None,
     };
+    // An HTTP source's manifest may declare the credential it needs: check the state this save
+    // leaves, a new manifest or a new credential, against it.
+    if spec.kind == "http" && (request.config.is_some() || linked.is_some()) {
+        let effective = match (&linked, locked.credential_id) {
+            (Some(credential), _) => Some(credential.clone()),
+            (None, Some(current)) => {
+                zirv_flow_store::find_credential(&mut *tx, workspace, current).await?
+            }
+            (None, None) => None,
+        };
+        check_manifest_credential(
+            request.config.as_ref().unwrap_or(&locked.config),
+            effective.as_ref(),
+        )?;
+    }
     // A refresh token belongs to one client: a source that now uses another credential drops the
     // connected account too.
     let disconnect = disconnect

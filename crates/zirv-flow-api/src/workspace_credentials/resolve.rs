@@ -50,6 +50,63 @@ pub(crate) fn field_names(credential: &WorkspaceCredential) -> BTreeSet<String> 
         .collect()
 }
 
+/// Checks the credential an `http` source uses against the credential schema its saved manifest
+/// declares in `auth.credential`, if it declares one: every required field must be present, a
+/// secret field among the credential's secrets and a plain one among its `fields`. With no
+/// credential the check runs against nothing, so a manifest that requires a secret refuses a
+/// source that has none. A manifest that declares no schema, or is not valid (the config check
+/// reports that), asks nothing more.
+pub(crate) fn check_manifest_credential(
+    config: &serde_json::Value,
+    credential: Option<&WorkspaceCredential>,
+) -> Result<(), ApiError> {
+    let Some(manifest) = config.get("manifest") else {
+        return Ok(());
+    };
+    let Some(spec) = zirv_flow_connectors::manifest::validate(manifest)
+        .ok()
+        .and_then(|manifest| manifest.credential)
+    else {
+        return Ok(());
+    };
+    let keys = |value: Option<&serde_json::Value>| -> BTreeSet<String> {
+        value
+            .and_then(serde_json::Value::as_object)
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let plain = keys(credential.map(|stored| &stored.fields));
+    let sealed = keys(credential.map(|stored| &stored.hints));
+    let mut errors = Vec::new();
+    for field in spec.schema().fields {
+        let (here, there) = if field.secret {
+            (&sealed, &plain)
+        } else {
+            (&plain, &sealed)
+        };
+        let reason = if there.contains(&field.key) {
+            Some(
+                "is in the wrong group for this manifest: it is secret in one place and plain in the other",
+            )
+        } else if field.required && !here.contains(&field.key) {
+            Some("is required by the manifest and the credential has no such field")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            errors.push(FieldError {
+                field: field.key,
+                reason: reason.to_owned(),
+            });
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(field_problems("credential", errors))
+    }
+}
+
 /// Locks a live credential of the workspace `FOR SHARE` for the rest of the transaction and checks
 /// that it holds every credential field the owner requires (`check` is the owner type's rule).
 /// An archive waits for the owner's transaction, so an archived credential is never referenced.
