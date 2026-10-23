@@ -1299,6 +1299,86 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_source_update_share_locks_the_credential_it_keeps_so_a_concurrent_change_is_seen(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let credential = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Complete", "fields": {"account": "acme"},
+                            "schema": {"fields": [
+                                {"key": "token", "label": "T", "type": "string", "required": true, "secret": true},
+                                {"key": "account", "label": "A", "type": "string", "required": true}]},
+                            "secret": {"token": "tok"}})),
+            )
+            .await;
+        let credential_id = credential.body["id"].as_str().unwrap().to_owned();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({"kind": "http", "name": "API", "config": {"manifest": declared_manifest()},
+                            "credential_id": credential_id})),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let source = created.body["id"].as_str().unwrap().to_owned();
+
+        // Another transaction holds the credential's write lock and has dropped the token.
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM credentials WHERE id = $1::uuid FOR UPDATE")
+            .bind(&credential_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE credentials SET hints = '{}' WHERE id = $1::uuid")
+            .bind(&credential_id)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        // A save of the source's manifest, which keeps the credential, must wait for it.
+        let mut manifest = declared_manifest();
+        manifest["rate_limit"] = json!({"requests": 10, "per_seconds": 1});
+        let router = fx.router.clone();
+        let uri = fx.path(&format!("/sources/{source}"));
+        let key = fx.admin.clone();
+        let update = tokio::spawn(async move {
+            call(
+                &router,
+                "PATCH",
+                &uri,
+                Some(json!({"config": {"manifest": manifest}})),
+                Auth::Key(&key),
+            )
+            .await
+        });
+        crate::test_support::wait_until_a_backend_waits_on_a_lock(&pool).await;
+        assert!(
+            !update.is_finished(),
+            "the save waits for the credential's writer"
+        );
+        holder.commit().await.unwrap();
+
+        // It then sees the credential without its token and refuses the manifest that needs it.
+        let refused = update.await.unwrap();
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert!(
+            refused.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("credential.token")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_rotation_or_a_patch_cannot_drop_a_field_a_live_owner_requires(pool: PgPool) {
         let fx = fixture(&pool).await;
         // `token` is optional in both credentials, but the fake destination requires it.

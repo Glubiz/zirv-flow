@@ -340,8 +340,10 @@ pub(crate) async fn update_source(
     if spec.kind == "http" && (request.config.is_some() || linked.is_some()) {
         let effective = match (&linked, locked.credential_id) {
             (Some(credential), _) => Some(credential.clone()),
+            // The credential it keeps is share-locked until commit, like a newly linked one, so a
+            // rotation or a patch of it waits for this save and then checks the new manifest.
             (None, Some(current)) => {
-                zirv_flow_store::find_credential(&mut *tx, workspace, current).await?
+                zirv_flow_store::lock_credential_for_use(&mut tx, workspace, current).await?
             }
             (None, None) => None,
         };

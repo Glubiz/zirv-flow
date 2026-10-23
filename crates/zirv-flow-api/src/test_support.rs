@@ -133,6 +133,27 @@ pub(crate) async fn tables_hold_no(pool: &PgPool, markers: &[&str]) {
     }
 }
 
+/// Waits until some other backend of this database is blocked on a lock, polling for up to five
+/// seconds, and fails with a clear message when none ever is. A test uses it to know that a
+/// request really waited for the transaction it holds open, instead of guessing with a sleep.
+pub(crate) async fn wait_until_a_backend_waits_on_a_lock(pool: &PgPool) {
+    for _ in 0..100 {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock' \
+               AND pid <> pg_backend_pid()",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no backend ever waited on a lock: the request did not block on the held transaction");
+}
+
 /// Plants each marker in a table in turn and shows `tables_hold_no` reports it.
 pub(crate) async fn the_scan_finds_a_planted(pool: &PgPool, markers: &[&str]) {
     sqlx::query("CREATE TABLE scan_control (note text)")
