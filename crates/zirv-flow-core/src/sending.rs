@@ -561,8 +561,9 @@ fn dmarc_size(size: &str) -> Option<String> {
 }
 
 /// The `mailto:` address of a `dmarc-uri`: every `%` must start two hex digits, the decoded text
-/// must be UTF-8 and parse as an email, and it is re-encoded by one rule: ASCII letters, digits
-/// and `. _ - + @` stay literal, every other byte becomes an upper-case `%XX`.
+/// must be UTF-8 with no whitespace or control character (which `Email::parse` would trim) and
+/// parse as an email, and it is re-encoded by one rule: ASCII letters, digits and `. _ - + @` stay
+/// literal, every other byte becomes an upper-case `%XX`.
 fn dmarc_mailbox(rest: &str) -> Option<String> {
     let bytes = rest.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -579,6 +580,12 @@ fn dmarc_mailbox(rest: &str) -> Option<String> {
             decoded.push(bytes[at]);
             at += 1;
         }
+    }
+    if decoded
+        .iter()
+        .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return None;
     }
     let email = Email::parse(std::str::from_utf8(&decoded).ok()?).ok()?;
     let mut out = String::new();
@@ -1065,6 +1072,15 @@ mod tests {
         );
         let max = "v=DMARC1; p=none; rua=mailto:a@example.com!18446744073709551615k";
         assert_eq!(shown(max), [max.replace('K', "k")]);
+        for trimmed in [
+            "%0Aa@example.com",
+            "a@example.com%20",
+            "%09a@example.com",
+            "a%00@example.com",
+        ] {
+            let text = format!("v=DMARC1; p=none; rua=mailto:{trimmed}");
+            assert_eq!(shown(&text), [OTHER_TXT], "{text}");
+        }
     }
 
     #[test]
