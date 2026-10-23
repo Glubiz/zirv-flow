@@ -2226,6 +2226,719 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/consent/dimensions": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "The workspace's consent dimensions: the built-in `topic` first, then the declared ones by\nkey. Archived dimensions and values are included with `archived=true`.",
+        "operationId": "list_consent_dimensions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived dimensions and values; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The dimensions, `topic` first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DimensionBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Declares a dimension, optionally with its first values.",
+        "operationId": "create_consent_dimension",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDimensionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new dimension",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DimensionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The key already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid key or name, `topic` as the key, or a bad value",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/consent/dimensions/{key}": {
+      "patch": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Renames a dimension or archives it. The key never changes, and the built-in `topic`\ndimension is not found here.",
+        "operationId": "update_consent_dimension",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Dimension key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDimensionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated dimension",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DimensionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or dimension, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values": {
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Adds a value to a declared dimension.",
+        "operationId": "add_consent_dimension_value",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Dimension key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewValueRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DimensionValueBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or dimension, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The value key already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid key or name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values/{value}": {
+      "patch": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Renames a value or archives it. The key never changes.",
+        "operationId": "update_consent_dimension_value",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Dimension key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "value",
+            "in": "path",
+            "description": "Value key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDimensionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DimensionValueBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, dimension or value, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/consent/export": {
+      "get": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Every consent state as CSV, `person_id,channel,topic,status` and one `dimension:<key>`\ncolumn per declared dimension, streamed page by page. The file imports back as it is.",
+        "operationId": "export_consent",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The consent states as CSV, ordered by person",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/consent/import": {
+      "post": {
+        "tags": [
+          "consent"
+        ],
+        "summary": "Imports consent states from a CSV body (`text/csv`, at most 10 MiB and 10,000 rows) with\nthe header `person_id,channel,topic,status`, optionally followed by `dimension:<key>`\ncolumns. A row without dimension values is an unscoped state. With `dry_run=true` nothing\nis written and the answer says what a commit would do. Invalid rows are reported by line\nnumber and code, never by value. Audited as `consent.imported` with counts only.",
+        "operationId": "import_consent",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "description": "Only report what an import would do; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "person_id,channel,topic,status[,dimension:<key>...] rows",
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What was, or on a dry run would be, imported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsentImportBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "dry_run is not true or false, or the body is not UTF-8",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 10 MiB",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The content type is not text/csv",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A wrong header, or more than 10,000 rows",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/contact-definition": {
       "get": {
         "tags": [
@@ -10323,7 +11036,7 @@
         "tags": [
           "consent"
         ],
-        "summary": "A person's consent: the channel-wide state and the state of each topic.",
+        "summary": "A person's consent: the channel-wide state and the state of each topic, with the dimension\nvalues each is scoped to. Naming a message with `channel`, `topic_key` and\n`dimension.<key>=<value>` query parameters adds `read`: whether a send to it is permitted,\nby the latest change among the states that cover it.",
         "operationId": "get_person_consent",
         "parameters": [
           {
@@ -10344,6 +11057,33 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "The message channel; default email",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "topic_key",
+            "in": "query",
+            "description": "The message topic",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dimension.{key}",
+            "in": "query",
+            "description": "The message value of the dimension `key`; repeat for several dimensions",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -10380,6 +11120,16 @@
           },
           "404": {
             "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown channel, topic, dimension or value in the message",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10478,7 +11228,7 @@
             }
           },
           "422": {
-            "description": "An unknown channel, status or topic, `unknown` as the status, or bad evidence",
+            "description": "An unknown channel, status, topic, dimension or value, `unknown` as the status, or bad evidence",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10545,6 +11295,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "dimension.{key}",
+            "in": "query",
+            "description": "Only changes scoped to at least this value of the dimension `key`; repeat for several dimensions",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -10590,6 +11349,16 @@
           },
           "404": {
             "description": "No such workspace or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A malformed dimension key or value in the filter",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -19499,12 +20268,71 @@
             "format": "uuid",
             "description": "The person the states belong to: the survivor when the requested person was merged."
           },
+          "read": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ReadBody",
+                "description": "Whether a send is permitted, present when the request names a message with `channel`,\n`topic_key` or `dimension.<key>` query parameters."
+              }
+            ]
+          },
           "states": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ConsentStateBody"
             },
-            "description": "The channel-wide state first, then topics by key."
+            "description": "The channel-wide state first, then topics by key, and within a topic the unscoped state\nbefore the dimension-scoped ones."
+          }
+        }
+      },
+      "ConsentImportBody": {
+        "type": "object",
+        "required": [
+          "dry_run",
+          "changed",
+          "unchanged",
+          "invalid"
+        ],
+        "properties": {
+          "changed": {
+            "type": "integer",
+            "description": "Rows that changed a state (or, on a dry run, would).",
+            "minimum": 0
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "invalid": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConsentImportRowBody"
+            }
+          },
+          "unchanged": {
+            "type": "integer",
+            "description": "Rows that repeated the status already held, or were older than the state they scope.",
+            "minimum": 0
+          }
+        }
+      },
+      "ConsentImportRowBody": {
+        "type": "object",
+        "required": [
+          "row",
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "`malformed_row`, `invalid_person_id`, `invalid_channel`, `invalid_status`,\n`invalid_dimension`, `unknown_topic`, `unknown_dimension`, `unknown_dimension_value`\nor `no_such_person`. Never the value."
+          },
+          "row": {
+            "type": "integer",
+            "description": "The line of the file, the header being line 1.",
+            "minimum": 0
           }
         }
       },
@@ -19512,6 +20340,7 @@
         "type": "object",
         "required": [
           "channel",
+          "dimensions",
           "status",
           "explicit",
           "changed_at"
@@ -19525,6 +20354,16 @@
             "type": "string",
             "description": "`email`.",
             "example": "email"
+          },
+          "dimensions": {
+            "type": "object",
+            "description": "The workspace dimension values the state is scoped to, dimension key to value key. A\ndimension that is left out means all its values.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "explicit": {
             "type": "boolean",
@@ -19811,6 +20650,31 @@
             ],
             "format": "int32",
             "description": "Deliveries per second, 1 to 100000. Default 10."
+          }
+        }
+      },
+      "CreateDimensionRequest": {
+        "type": "object",
+        "required": [
+          "key",
+          "name"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "1 to 64 lowercase letters, digits, underscores or hyphens, and not `topic`. It cannot\nbe changed.",
+            "example": "vertical"
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters."
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NewValueRequest"
+            },
+            "description": "The first values, at most 200. More can be added later."
           }
         }
       },
@@ -20861,6 +21725,61 @@
           "ok": {
             "type": "boolean",
             "description": "Whether the settings and the credential work."
+          }
+        }
+      },
+      "DimensionBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "builtin",
+          "archived",
+          "values"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "builtin": {
+            "type": "boolean",
+            "description": "True for the `topic` dimension, whose values are the workspace's topics."
+          },
+          "key": {
+            "type": "string",
+            "description": "Lowercase letters, digits, underscores and hyphens; unique in the workspace.",
+            "example": "vertical"
+          },
+          "name": {
+            "type": "string"
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DimensionValueBody"
+            },
+            "description": "By key. Archived values are left out of a listing unless `archived=true`."
+          }
+        }
+      },
+      "DimensionValueBody": {
+        "type": "object",
+        "required": [
+          "key",
+          "name",
+          "archived"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string",
+            "description": "Lowercase letters, digits, underscores and hyphens; unique in the dimension.",
+            "example": "retail"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -23825,6 +24744,7 @@
         "required": [
           "id",
           "channel",
+          "dimensions",
           "to_status",
           "source",
           "masked",
@@ -23841,6 +24761,16 @@
           "channel": {
             "type": "string",
             "example": "email"
+          },
+          "dimensions": {
+            "type": "object",
+            "description": "The dimension values the change is scoped to.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "evidence": {
             "type": [
@@ -24931,6 +25861,24 @@
           }
         }
       },
+      "NewValueRequest": {
+        "type": "object",
+        "required": [
+          "key",
+          "name"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "1 to 64 lowercase letters, digits, underscores or hyphens. It cannot be changed.",
+            "example": "retail"
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters."
+          }
+        }
+      },
       "NodeCountBody": {
         "type": "object",
         "required": [
@@ -25999,6 +26947,32 @@
             "type": "string",
             "format": "uuid",
             "description": "The occurrence the enrollment is idempotent on."
+          }
+        }
+      },
+      "ReadBody": {
+        "type": "object",
+        "required": [
+          "allowed",
+          "default_policy"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean",
+            "description": "The read rule answer: among the states that cover the message the latest change wins;\nwith none, the topic policy default applies."
+          },
+          "deciding_change": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The change that decided it; null when the default applied."
+          },
+          "default_policy": {
+            "type": "string",
+            "description": "The policy whose default applies when no state decides: `opt_in` or `opt_out`. A message\nwithout a topic is judged as `opt_in`.",
+            "example": "opt_out"
           }
         }
       },
@@ -27770,6 +28744,16 @@
             "type": "string",
             "description": "`email`.",
             "example": "email"
+          },
+          "dimensions": {
+            "type": "object",
+            "description": "Scopes the decision to dimension values, dimension key to value key, such as\n`{\"vertical\": \"retail\"}`. A dimension that is left out means all its values. `topic` is\nnot a dimension key here: use `topic_key`.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "evidence": {
             "type": [
@@ -29747,6 +30731,23 @@
               "null"
             ],
             "format": "int32"
+          }
+        }
+      },
+      "UpdateDimensionRequest": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

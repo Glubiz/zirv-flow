@@ -2,9 +2,11 @@
 //! history, the topic catalog, and identifier suppressions.
 
 pub(crate) mod csv;
+pub(crate) mod dimensions;
 pub(crate) mod person;
 pub(crate) mod suppressions;
 pub(crate) mod topics;
+pub(crate) mod transfer;
 
 use uuid::Uuid;
 use zirv_flow_core::ValidationError;
