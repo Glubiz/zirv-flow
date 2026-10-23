@@ -357,7 +357,9 @@ async fn decide(
     let carried = resuming
         && (message_unconfirmed(&pool, workspace, job.message).await?
             || message_in_flight(&pool, workspace, job.message).await?);
-    mark_message_sending(&pool, workspace, job.message, number - 1).await?;
+    // The attempt number fences the mark: a stale attempt clears only its own.
+    let mark = number - 1;
+    mark_message_sending(&pool, workspace, job.message, mark).await?;
     let call = deliver::Call {
         workspace,
         destination: &destination,
@@ -367,7 +369,15 @@ async fn decide(
         address: &address,
         payload: &email,
     };
-    let done = deliver::deliver(ctx, &call, now).await?;
+    let done = match deliver::deliver(ctx, &call, now).await {
+        Ok(done) => done,
+        Err(error) => {
+            // An error here comes before the destination is called: nothing was sent, so this
+            // attempt no longer counts as in flight. A failed clear leaves the original error.
+            let _ = clear_message_in_flight(&pool, workspace, job.message, mark).await;
+            return Err(error);
+        }
+    };
     // A reply lost after the final dot leaves the message possibly accepted. The mark is written
     // before the attempt is settled, so a settle that fails or a lease that is lost cannot skip it.
     let lost_reply = matches!(
@@ -379,7 +389,7 @@ async fn decide(
     } else if !matches!(done.verdict, Verdict::Succeeded { .. }) {
         // The outcome proves this call was not accepted: it no longer counts as in flight. A
         // success ends the message, and the ending write replaces the marks.
-        clear_message_in_flight(&pool, workspace, job.message).await?;
+        clear_message_in_flight(&pool, workspace, job.message, mark).await?;
     }
     let target = AttemptTarget {
         destination_id: destination.id,

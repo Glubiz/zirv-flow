@@ -248,10 +248,16 @@ fn in_flight_note() -> Value {
     json!([{"gate": "delivery", "result": "in_flight"}])
 }
 
+/// The in-flight entry one attempt writes: its number fences who may clear it.
+fn in_flight_entry(attempt: i32) -> Value {
+    json!([{"gate": "delivery", "result": "in_flight", "attempt": attempt}])
+}
+
 /// Marks the message `sending` before the destination is called, in a statement of its own, so
 /// the mark survives a job transaction that rolls back. The same write notes that a call is in
-/// flight (see [`clear_message_in_flight`]), so the mark is committed before the call starts. A
-/// message that has ended is left alone; false then.
+/// flight (see [`clear_message_in_flight`]), so the mark is committed before the call starts. The
+/// entry records `attempts` and replaces any older in-flight entry. A message that has ended is
+/// left alone; false then.
 pub async fn mark_message_sending<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -260,12 +266,15 @@ pub async fn mark_message_sending<'e>(
 ) -> Result<bool, StoreError> {
     let marked = sqlx::query(
         "UPDATE messages SET status = 'sending', attempts = $3,
-             gate_results = CASE WHEN gate_results @> $4 THEN gate_results ELSE gate_results || $4 END
+             gate_results = COALESCE(
+                 (SELECT jsonb_agg(entry) FROM jsonb_array_elements(gate_results) AS entry
+                  WHERE NOT entry @> ($5::jsonb -> 0)), '[]'::jsonb) || $4::jsonb
          WHERE workspace_id = $1 AND id = $2 AND status IN ('pending', 'sending')",
     )
     .bind(workspace.as_uuid())
     .bind(id)
     .bind(attempts)
+    .bind(in_flight_entry(attempts))
     .bind(in_flight_note())
     .execute(executor)
     .await
@@ -277,11 +286,13 @@ pub async fn mark_message_sending<'e>(
 /// Clears the in-flight note of a `sending` message: the call is known not to have been accepted
 /// (a 4xx or 5xx reply, an auth, config or egress error, or a transport failure before the final
 /// dot). A call that is not known to have failed leaves the note, so a crash between the call and
-/// this write counts as a call that may have been accepted. False when there was nothing to clear.
+/// this write counts as a call that may have been accepted. Only the entry written by `attempts` is removed, so
+/// a stale attempt cannot clear a newer attempt's mark. False when there was nothing to clear.
 pub async fn clear_message_in_flight<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     id: Uuid,
+    attempts: i32,
 ) -> Result<bool, StoreError> {
     let cleared = sqlx::query(
         "UPDATE messages SET gate_results = COALESCE(
@@ -291,7 +302,7 @@ pub async fn clear_message_in_flight<'e>(
     )
     .bind(workspace.as_uuid())
     .bind(id)
-    .bind(in_flight_note())
+    .bind(in_flight_entry(attempts))
     .execute(executor)
     .await
     .map_err(StoreError::query)?
@@ -755,12 +766,15 @@ mod tests {
         mark_message_sending(&pool, ws, id, 2).await.unwrap();
         let marked = message_in_flight(&pool, ws, id).await.unwrap();
         mark_message_unconfirmed(&pool, ws, id).await.unwrap();
-        let cleared = clear_message_in_flight(&pool, ws, id).await.unwrap();
-        let again = clear_message_in_flight(&pool, ws, id).await.unwrap();
+        let stale = clear_message_in_flight(&pool, ws, id, 1).await.unwrap();
+        let kept = message_in_flight(&pool, ws, id).await.unwrap();
+        let cleared = clear_message_in_flight(&pool, ws, id, 2).await.unwrap();
+        let again = clear_message_in_flight(&pool, ws, id, 2).await.unwrap();
         let after = message_in_flight(&pool, ws, id).await.unwrap();
         let unconfirmed = message_unconfirmed(&pool, ws, id).await.unwrap();
 
         assert!(!pending && marked, "the sending write notes the call");
+        assert!(!stale && kept, "a stale attempt cannot clear a newer mark");
         assert!(cleared && !again && !after, "cleared once");
         assert!(unconfirmed, "clearing leaves the unconfirmed note");
     }
