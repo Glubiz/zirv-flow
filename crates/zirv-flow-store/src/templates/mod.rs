@@ -17,8 +17,8 @@ mod where_used;
 pub use catalog::{TemplateFieldCatalog, read_template_field_catalog};
 pub use crud::{
     NewTemplate, Template, TemplateDraft, TemplateError, TemplatePatch, archive_template,
-    create_template, find_template, find_template_draft, list_templates, save_template_draft,
-    update_template,
+    create_template, document_sender, find_template, find_template_draft, list_templates,
+    save_template_draft, update_template,
 };
 pub use publish::{
     LockedTemplate, TemplateVersion, TemplateVersionSummary, find_template_version,
@@ -58,7 +58,6 @@ pub(crate) mod tests_support {
             name: name.to_owned(),
             channel: "email".to_owned(),
             category: "marketing".to_owned(),
-            sender_identity_id: None,
             document: document("draft"),
         }
     }

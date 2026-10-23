@@ -719,6 +719,30 @@ impl ApiError {
         }
     }
 
+    /// A document whose `schema` is not the one this server reads.
+    pub(crate) fn template_unsupported_schema() -> Self {
+        Self {
+            code: Some("template_unsupported_schema"),
+            ..Self::unprocessable("the document schema is not supported by this server")
+        }
+    }
+
+    /// A block document with a block `type` that is not part of the v1 block set.
+    pub(crate) fn template_unknown_block() -> Self {
+        Self {
+            code: Some("template_unknown_block"),
+            ..Self::unprocessable("a block has a type that is not part of the v1 block set")
+        }
+    }
+
+    /// A document with a field the schema does not define.
+    pub(crate) fn template_unknown_field() -> Self {
+        Self {
+            code: Some("template_unknown_field"),
+            ..Self::unprocessable("an object has a field the document schema does not define")
+        }
+    }
+
     /// A document whose channel or category differs from the template's, which are fixed when the
     /// template is made.
     pub(crate) fn template_mismatch(detail: impl Into<String>) -> Self {
@@ -743,6 +767,27 @@ impl ApiError {
             ..Self::new(
                 StatusCode::CONFLICT,
                 "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
+    /// A publish (or, later, a send) whose sender identity may not send: it is unknown, archived,
+    /// or on a domain whose DKIM, SPF and DMARC records are not all verified.
+    pub(crate) fn sender_unverified(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("sender_unverified"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A sending domain that still has live sender identities, or identities that a template
+    /// names.
+    pub(crate) fn sending_domain_in_use() -> Self {
+        Self {
+            code: Some("sending_domain_in_use"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the sending domain still has sender identities in use; archive them, and remove them from templates, first",
             )
         }
     }

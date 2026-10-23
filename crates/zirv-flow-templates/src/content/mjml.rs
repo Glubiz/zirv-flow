@@ -30,7 +30,8 @@ impl TemplateContent for Mjml {
     }
 
     fn handles(&self, doc: &TemplateDocument) -> bool {
-        doc.channel == Channel::Email
+        !doc.is_ambiguous()
+            && doc.channel == Channel::Email
             && doc.mode == Mode::Code
             && doc
                 .email
@@ -86,6 +87,12 @@ pub(crate) const MAX_DEPTH: usize = 128;
 thread_local! {
     /// How many times `compile` reached `mrml`, so a test can show that a refusal came first.
     static PARSER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times `compile` reached `mrml` on this thread, for a test of a refusal that comes first.
+#[cfg(test)]
+pub(crate) fn parser_call_count() -> usize {
+    PARSER_CALLS.with(std::cell::Cell::get)
 }
 
 /// Whether `source` has an `mj-include` element, in any letter case and under any namespace
@@ -543,7 +550,7 @@ mod tests {
     fn mjml_doc(category: Category, source: &str) -> TemplateDocument {
         TemplateDocument::email_code(EmailContent {
             subject: "Hi {{ person.name }}".into(),
-            sender: Some("snd_1".into()),
+            sender: Some("00000000-0000-7000-8000-000000000001".into()),
             lang: None,
             category,
             syntax: Syntax::Mjml,

@@ -12,11 +12,11 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, delete_expired_import_data, destination_report, dirty_backlog, dirty_heads,
-    disable_schedule, due_schedules, enqueue, enqueue_drain, enqueue_reevaluate,
-    ensure_decision_partitions, ensure_event_partitions, expire_contact_idempotency,
-    expire_exports, fail_orphaned_runs, inbox_heads, prune_debugger_feed, queue_depths,
-    reap_expired, reconcile_flow_schedules, reconcile_segment_schedules, stream_freshness,
-    try_lead,
+    disable_schedule, due_schedules, due_sending_domains, enqueue, enqueue_domain_verify,
+    enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
+    expire_contact_idempotency, expire_exports, fail_orphaned_runs, inbox_heads,
+    prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
+    reconcile_segment_schedules, stream_freshness, try_lead,
 };
 
 use crate::metrics::{
@@ -42,6 +42,16 @@ const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the destination gauges and counters are refreshed.
 const DESTINATION_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the leader looks for sending domains that are due a DNS check.
+const SENDING_DOMAIN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// Domains queued per scan; more than this carry over to the next one.
+const SENDING_DOMAIN_BATCH: i64 = 100;
+/// How long after a check was queued for a domain the scan leaves it alone, whether or not the
+/// check finished: a failing check (a DNS outage) is not re-queued, and a batch not refilled with
+/// the same domains, until this has passed.
+const SENDING_DOMAIN_RETRY_BACKOFF: Duration = Duration::from_secs(30 * 60);
+/// How old a sending domain last DNS check may be before the leader queues another: 6 hours.
+pub const DEFAULT_SENDING_DOMAIN_RECHECK: Duration = Duration::from_secs(6 * 3600);
 
 /// How long an inbox row waits before the leader enqueues a drain for its workspace.
 const STALE_INBOX: Duration = Duration::from_secs(2);
@@ -56,6 +66,8 @@ pub struct SchedulerConfig {
     pub tick_interval: Duration,
     /// Between attempts of a non-leader to take over.
     pub standby_interval: Duration,
+    /// How long a sending domain may go without a DNS check before the leader queues one.
+    pub sending_domain_recheck: Duration,
 }
 
 impl Default for SchedulerConfig {
@@ -63,6 +75,7 @@ impl Default for SchedulerConfig {
         Self {
             tick_interval: Duration::from_secs(1),
             standby_interval: Duration::from_secs(5),
+            sending_domain_recheck: DEFAULT_SENDING_DOMAIN_RECHECK,
         }
     }
 }
@@ -112,6 +125,8 @@ pub struct Scheduler {
     destinations: DestinationGauges,
     /// When the destination gauges were last refreshed; none until this instance leads.
     destinations_checked: Option<Instant>,
+    /// When the sending domains were last scanned for due checks; none until this instance leads.
+    domains_scanned: Option<Instant>,
 }
 
 impl Scheduler {
@@ -129,6 +144,7 @@ impl Scheduler {
             freshness_checked: None,
             destinations: DestinationGauges::default(),
             destinations_checked: None,
+            domains_scanned: None,
         }
     }
 
@@ -172,6 +188,7 @@ impl Scheduler {
         self.keep_sync_runs().await;
         self.keep_freshness(now).await;
         self.keep_destinations().await;
+        self.keep_sending_domains().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -188,6 +205,7 @@ impl Scheduler {
         self.keep_sync_runs().await;
         self.keep_freshness(now).await;
         self.keep_destinations().await;
+        self.keep_sending_domains().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
 
@@ -330,6 +348,49 @@ impl Scheduler {
         }
     }
 
+    /// Queues a DNS check for every sending domain whose last check is older than
+    /// `sending_domain_recheck` (or never happened): on gaining leadership, then at most every
+    /// [`SENDING_DOMAIN_SCAN_INTERVAL`]. A domain with a check already queued or running is left
+    /// alone by the job's unique key. A failure is logged and retried at the next scan.
+    async fn keep_sending_domains(&mut self) {
+        let due = self
+            .domains_scanned
+            .is_none_or(|scanned| scanned.elapsed() >= SENDING_DOMAIN_SCAN_INTERVAL);
+        if !due {
+            return;
+        }
+        self.domains_scanned = Some(Instant::now());
+        let stale = match due_sending_domains(
+            &self.pool,
+            self.config.sending_domain_recheck.as_secs_f64(),
+            SENDING_DOMAIN_RETRY_BACKOFF.as_secs_f64(),
+            SENDING_DOMAIN_BATCH,
+        )
+        .await
+        {
+            Ok(stale) => stale,
+            Err(error) => {
+                warn!("could not look for sending domains due a check: {error}");
+                return;
+            }
+        };
+        let mut connection = match self.pool.acquire().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                warn!("could not queue sending domain checks: {error}");
+                return;
+            }
+        };
+        for (workspace, domain) in stale {
+            let trace = TraceContext::root(Cause::schedule(domain));
+            if let Err(error) =
+                enqueue_domain_verify(&mut connection, workspace, domain, trace).await
+            {
+                warn!("could not queue a sending domain check: {error}");
+            }
+        }
+    }
+
     /// Whether this instance leads after the call. A lock connection that died has lost
     /// the lock, so a leader steps down before it works.
     async fn lead(&mut self) -> Result<bool, StoreError> {
@@ -346,6 +407,7 @@ impl Scheduler {
             self.freshness_checked = None;
             self.freshness.zero_all();
             self.destinations_checked = None;
+            self.domains_scanned = None;
             self.destinations.zero_all();
             self.gauges
                 .get_mut()
@@ -627,6 +689,240 @@ mod tests {
 
         assert_eq!(config.tick_interval, Duration::from_secs(1));
         assert_eq!(config.standby_interval, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sending_domains_are_rechecked_every_six_hours_by_default() {
+        let config = SchedulerConfig::default();
+
+        assert_eq!(config.sending_domain_recheck, Duration::from_secs(6 * 3600));
+        assert_eq!(
+            DEFAULT_SENDING_DOMAIN_RECHECK,
+            config.sending_domain_recheck
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_queues_a_check_for_a_domain_never_checked_or_stale_but_not_a_fresh_one(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::sending_fixtures::plant_domain;
+
+        migrated(&pool).await;
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &zirv_flow_core::WorkspaceName::parse("ours").unwrap(),
+            &zirv_flow_core::Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let never = plant_domain(&pool, ws, "never.example.com").await.unwrap();
+        let stale = plant_domain(&pool, ws, "stale.example.com").await.unwrap();
+        let fresh = plant_domain(&pool, ws, "fresh.example.com").await.unwrap();
+        for (id, age) in [(stale, "7 hours"), (fresh, "5 hours")] {
+            sqlx::query(
+                "UPDATE sending_domains SET last_checked_at = now() - $2::interval WHERE id = $1",
+            )
+            .bind(id)
+            .bind(age)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap();
+
+        leader.tick_at(now).await.unwrap();
+
+        let queued: Vec<String> = sqlx::query_scalar(
+            "SELECT payload->>'domain_id' FROM jobs WHERE kind = 'sending_domain.verify' \
+             ORDER BY payload->>'domain_id'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut expected = vec![never.to_string(), stale.to_string()];
+        expected.sort();
+        assert_eq!(queued, expected);
+
+        // A second scan inside the interval queues nothing, and after it a queued check holds
+        // its unique key, so nothing is queued twice.
+        leader.tick_at(now).await.unwrap();
+        leader.domains_scanned = None;
+        leader.tick_at(now).await.unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'sending_domain.verify'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    async fn domains_due(pool: &PgPool, count: usize) -> (zirv_flow_core::WorkspaceId, Vec<Uuid>) {
+        let ws = zirv_flow_store::create_workspace(
+            pool,
+            &zirv_flow_core::WorkspaceName::parse("ours").unwrap(),
+            &zirv_flow_core::Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let mut ids = Vec::new();
+        for n in 0..count {
+            ids.push(
+                zirv_flow_store::sending_fixtures::plant_domain(
+                    pool,
+                    ws,
+                    &format!("d{n}.example.com"),
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        // Spread the last checks so the order is known: the first domain is the stalest.
+        for (n, id) in ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE sending_domains SET last_checked_at = now() - interval '2 days' + $2 * interval '1 second' WHERE id = $1",
+            )
+            .bind(id)
+            .bind(n as f64)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        (ws, ids)
+    }
+
+    async fn queued_domains(pool: &PgPool) -> usize {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(DISTINCT payload->>'domain_id') FROM jobs \
+             WHERE kind = 'sending_domain.verify'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap() as usize
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn domains_already_queued_do_not_fill_the_batch_so_the_one_hundred_and_first_is_reached(
+        pool: PgPool,
+    ) {
+        migrated(&pool).await;
+        let (ws, ids) = domains_due(&pool, 101).await;
+        let mut connection = pool.acquire().await.unwrap();
+        for id in &ids[..100] {
+            enqueue_domain_verify(
+                &mut connection,
+                ws,
+                *id,
+                TraceContext::root(Cause::schedule(*id)),
+            )
+            .await
+            .unwrap();
+        }
+        // Only the queued-job exclusion is under test: forget the attempt stamps.
+        sqlx::query("UPDATE sending_domains SET last_attempt_at = NULL")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap();
+
+        leader.tick_at(now).await.unwrap();
+
+        assert_eq!(queued_domains(&pool).await, 101);
+        let last: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE payload->>'domain_id' = $1 \
+               AND kind = 'sending_domain.verify'",
+        )
+        .bind(ids[100].to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(last, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_domain_whose_check_failed_is_not_picked_again_within_the_back_off(pool: PgPool) {
+        migrated(&pool).await;
+        let (_, ids) = domains_due(&pool, 2).await;
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap();
+        leader.tick_at(now).await.unwrap();
+        assert_eq!(queued_domains(&pool).await, 2);
+
+        // A DNS outage: both checks ran out of attempts and are dead; no check time was stamped.
+        sqlx::query("UPDATE jobs SET state = 'dead' WHERE kind = 'sending_domain.verify'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        leader.domains_scanned = None;
+        leader.tick_at(now).await.unwrap();
+        let jobs: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE kind = 'sending_domain.verify' AND state = 'ready'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(jobs, 0, "within the back-off nothing is queued again");
+
+        // Past the back-off the stalest domain is due again.
+        sqlx::query("UPDATE sending_domains SET last_attempt_at = now() - interval '31 minutes' WHERE id = $1")
+            .bind(ids[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        leader.domains_scanned = None;
+        leader.tick_at(now).await.unwrap();
+        let ready: Vec<String> = sqlx::query_scalar(
+            "SELECT payload->>'domain_id' FROM jobs \
+             WHERE kind = 'sending_domain.verify' AND state = 'ready'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ready, [ids[0].to_string()]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_shorter_recheck_interval_makes_a_fresh_domain_due(pool: PgPool) {
+        use zirv_flow_store::sending_fixtures::plant_domain;
+
+        migrated(&pool).await;
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &zirv_flow_core::WorkspaceName::parse("ours").unwrap(),
+            &zirv_flow_core::Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let id = plant_domain(&pool, ws, "example.com").await.unwrap();
+        sqlx::query("UPDATE sending_domains SET last_checked_at = now() - interval '2 hours'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let config = SchedulerConfig {
+            sending_domain_recheck: Duration::from_secs(3600),
+            ..SchedulerConfig::default()
+        };
+        let mut leader = Scheduler::new(pool.clone(), config);
+        let now = database_now(&pool).await.unwrap();
+
+        leader.tick_at(now).await.unwrap();
+
+        let queued: Option<String> = sqlx::query_scalar(
+            "SELECT payload->>'domain_id' FROM jobs WHERE kind = 'sending_domain.verify'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queued, Some(id.to_string()));
     }
 
     #[sqlx::test]

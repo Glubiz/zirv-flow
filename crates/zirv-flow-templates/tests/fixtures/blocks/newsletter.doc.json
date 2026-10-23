@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "marketing",
+    "sections": [
+      {
+        "id": "hero",
+        "padding": "0",
+        "columns": [
+          [
+            {
+              "type": "image",
+              "id": "hero_image",
+              "src": "https://img.example/hero.png",
+              "alt": "Spring collection",
+              "href": "https://shop.example/spring"
+            }
+          ]
+        ]
+      },
+      {
+        "id": "intro",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "intro_title",
+              "level": 1,
+              "text": "Hello {{ person.name }}"
+            },
+            {
+              "type": "text",
+              "id": "intro_text",
+              "content": "<p>Our <b>spring</b> collection is here. Take a look at what is new this season.</p>"
+            }
+          ]
+        ]
+      },
+      {
+        "id": "features",
+        "background_color": "#f6f6f6",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "feat_a_title",
+              "level": 3,
+              "text": "Fresh"
+            },
+            {
+              "type": "text",
+              "id": "feat_a_text",
+              "content": "<p>New arrivals every week.</p>"
+            }
+          ],
+          [
+            {
+              "type": "heading",
+              "id": "feat_b_title",
+              "level": 3,
+              "text": "Fair"
+            },
+            {
+              "type": "text",
+              "id": "feat_b_text",
+              "content": "<p>Prices that stay put.</p>"
+            }
+          ]
+        ]
+      },
+      {
+        "id": "cta",
+        "columns": [
+          [
+            {
+              "type": "button",
+              "id": "cta_button",
+              "label": "See the collection",
+              "url": "https://shop.example/spring",
+              "align": "center"
+            },
+            {
+              "type": "divider",
+              "id": "cta_rule"
+            }
+          ]
+        ]
+      },
+      {
+        "id": "footer",
+        "columns": [
+          [
+            {
+              "type": "text",
+              "id": "footer_text",
+              "content": "<p>You get this because you signed up. <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a> or <a href=\"{{ system.preferences_url }}\">change your preferences</a>.</p>",
+              "align": "center"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

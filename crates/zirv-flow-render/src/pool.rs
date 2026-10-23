@@ -784,11 +784,54 @@ mod tests {
             let mut doc = doc(&source);
             if let Some(email) = doc.email.as_mut() {
                 email.syntax = Syntax::Mjml;
-                email.sender = Some("snd_1".into());
+                email.sender = Some("00000000-0000-7000-8000-000000000001".into());
                 if name == "footer_unsubscribe" {
                     email.category = Category::Marketing;
                 }
             }
+            let direct = render_email(&doc, &context, &hooks).unwrap();
+            let pooled = pool.render_email(&doc, &context, &hooks).await.unwrap();
+            assert_eq!(pooled, direct, "{name}");
+            assert_eq!(
+                pool.validate(&doc, &catalog).await.unwrap(),
+                validate(&doc, &catalog),
+                "{name} validate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_blocks_corpus_renders_and_validates_to_the_same_bytes_as_in_process() {
+        use zirv_flow_templates::{FieldCatalog, validate};
+
+        let pool = RenderPool::start(child("serve"), config(1, 20_000))
+            .await
+            .unwrap();
+        let hooks = Hooks {
+            tracking: Tracking::Rewrite {
+                base_url: "https://t.example/c",
+                token: &tok,
+            },
+        };
+        let catalog = FieldCatalog::default();
+        let dir = fixtures().join("blocks");
+        let context: RenderContext =
+            serde_json::from_str(&fs::read_to_string(dir.join("context.json")).unwrap()).unwrap();
+        for name in [
+            "heading",
+            "text",
+            "image",
+            "button",
+            "divider",
+            "spacer",
+            "raw_html",
+            "sections",
+            "newsletter",
+        ] {
+            let doc: TemplateDocument = serde_json::from_str(
+                &fs::read_to_string(dir.join(format!("{name}.doc.json"))).unwrap(),
+            )
+            .unwrap();
             let direct = render_email(&doc, &context, &hooks).unwrap();
             let pooled = pool.render_email(&doc, &context, &hooks).await.unwrap();
             assert_eq!(pooled, direct, "{name}");

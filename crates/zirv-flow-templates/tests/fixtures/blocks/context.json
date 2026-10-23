@@ -1,0 +1,14 @@
+{
+  "person": {
+    "name": "Ann <b>O'Neil</b>",
+    "plan": "pro"
+  },
+  "event": {},
+  "message": {
+    "id": "msg_1"
+  },
+  "system": {
+    "unsubscribe_url": "https://u.example/u/1?s=a&t=b",
+    "preferences_url": "https://u.example/p/1"
+  }
+}

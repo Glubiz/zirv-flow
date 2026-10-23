@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use uuid::Uuid;
+use zirv_flow_connectors::dns::DnsResolver;
 use zirv_flow_connectors::runtime::RateLimits;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{TraceContext, WorkspaceId};
@@ -42,6 +43,7 @@ pub struct JobContext<'a> {
     rate_limits: Arc<RateLimits>,
     clock: Clock,
     render_pool: Option<RenderPool>,
+    dns: Option<Arc<dyn DnsResolver>>,
 }
 
 impl<'a> JobContext<'a> {
@@ -57,7 +59,19 @@ impl<'a> JobContext<'a> {
             rate_limits: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
+            dns: None,
         }
+    }
+
+    /// Gives the handler the DNS resolver.
+    pub(crate) fn with_dns(mut self, dns: Option<Arc<dyn DnsResolver>>) -> Self {
+        self.dns = dns;
+        self
+    }
+
+    /// The resolver DNS checks read through; none when the worker was given none.
+    pub fn dns(&self) -> Option<&Arc<dyn DnsResolver>> {
+        self.dns.as_ref()
     }
 
     /// Gives the handler the isolated renderer.

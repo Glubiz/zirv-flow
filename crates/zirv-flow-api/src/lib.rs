@@ -28,6 +28,7 @@ mod privacy;
 mod problem;
 mod request_id;
 mod segments;
+mod sending;
 mod session;
 mod setup;
 mod sources;
@@ -503,6 +504,28 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/destinations/{id}/check",
             post(destinations::actions::check),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sending-domains",
+            get(sending::domains::list).post(sending::domains::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sending-domains/{id}",
+            get(sending::domains::get).delete(sending::domains::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sending-domains/{id}/verify",
+            post(sending::domains::verify),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sender-identities",
+            get(sending::identities::list).post(sending::identities::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sender-identities/{id}",
+            get(sending::identities::get)
+                .patch(sending::identities::update)
+                .delete(sending::identities::remove),
         )
         .route("/api/v1/source-kinds", get(sources::kinds::list))
         .route(

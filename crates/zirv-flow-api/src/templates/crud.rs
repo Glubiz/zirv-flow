@@ -4,7 +4,7 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -27,15 +27,6 @@ use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
 const MAX_NAME_CHARS: usize = 100;
-
-/// Tells an absent field from a `null` one: absent is `None`, `null` is `Some(None)`.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
-}
 
 /// The channel of a template. Only the two with a registered content type can be made.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
@@ -88,7 +79,8 @@ pub(crate) struct TemplateBody {
     channel: String,
     /// `marketing` or `transactional`; fixed when the template is made.
     category: String,
-    /// The sender identity of an email template.
+    /// The sender identity the draft's document names (`email.sender`), when it is an identity of
+    /// this workspace. Read-only: it follows the draft, which is where the sender is set.
     sender_identity_id: Option<Uuid>,
     /// The newest published version; null before the first publish.
     current_version: Option<i32>,
@@ -180,7 +172,6 @@ pub(crate) struct CreateTemplateRequest {
     channel: TemplateChannelRequest,
     /// Default `marketing` for email and `transactional` for a webhook.
     category: Option<TemplateCategoryRequest>,
-    sender_identity_id: Option<Uuid>,
     /// The first draft. Its channel and category must be the template's. Absent: an empty
     /// code-mode document.
     #[schema(value_type = Option<Object>)]
@@ -190,10 +181,6 @@ pub(crate) struct CreateTemplateRequest {
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct UpdateTemplateRequest {
     name: Option<String>,
-    /// `null` clears it.
-    #[serde(default, deserialize_with = "present")]
-    #[schema(value_type = Option<Uuid>, nullable)]
-    sender_identity_id: Option<Option<Uuid>>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -253,7 +240,6 @@ pub(crate) async fn create_template(
         name,
         channel: request.channel.as_str().to_owned(),
         category: category.as_str().to_owned(),
-        sender_identity_id: request.sender_identity_id,
         document,
     };
     // The same checks a draft save makes, against the template this will be.
@@ -262,7 +248,7 @@ pub(crate) async fn create_template(
         name: new.name.clone(),
         channel: new.channel.clone(),
         category: new.category.clone(),
-        sender_identity_id: new.sender_identity_id,
+        sender_identity_id: None,
         current_version: None,
         archived_at: None,
         created_by: created_by.map(|user| user.as_uuid()),
@@ -305,16 +291,10 @@ pub(crate) async fn update_template(
     if name.is_some() {
         fields.push("name");
     }
-    if request.sender_identity_id.is_some() {
-        fields.push("sender_identity_id");
-    }
     if fields.is_empty() {
         return Err(invalid("body", "must change at least one field"));
     }
-    let patch = TemplatePatch {
-        name,
-        sender_identity_id: request.sender_identity_id,
-    };
+    let patch = TemplatePatch { name };
     let mut tx = zirv_flow_store::begin(pool).await?;
     let template = zirv_flow_store::update_template(&mut tx, workspace, id, &patch)
         .await
@@ -439,7 +419,7 @@ pub(crate) async fn list(
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "A live template has that name", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "An invalid name, a document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "An invalid name, a document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -498,7 +478,7 @@ pub(crate) async fn get(
     Ok(Json(TemplateDetailBody::new(&template, &draft)))
 }
 
-/// Changes a template's name or sender identity. The channel and the category are fixed when the
+/// Changes a template's name. The channel and the category are fixed when the
 /// template is made. Audited as `template.updated`.
 #[utoipa::path(
     put,
@@ -593,7 +573,7 @@ pub(crate) async fn archive(
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The template is archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "A document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "A document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -644,17 +624,122 @@ mod tests {
     }
 
     #[test]
-    fn an_update_tells_a_cleared_sender_from_an_absent_one() {
-        let absent: UpdateTemplateRequest = serde_json::from_str(r#"{"name":"A"}"#).unwrap();
-        let cleared: UpdateTemplateRequest =
-            serde_json::from_str(r#"{"sender_identity_id":null}"#).unwrap();
-        let set: UpdateTemplateRequest =
-            serde_json::from_str(&format!(r#"{{"sender_identity_id":"{}"}}"#, Uuid::nil()))
-                .unwrap();
+    fn a_document_with_two_contents_is_malformed_whatever_its_categories_say() {
+        let template = Template {
+            id: Uuid::nil(),
+            name: "T".into(),
+            channel: "email".into(),
+            category: "marketing".into(),
+            sender_identity_id: None,
+            current_version: None,
+            archived_at: None,
+            created_by: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        // A dummy marketing `email` makes the category check pass; the renderer would read the
+        // transactional `blocks` and send without unsubscribe headers.
+        let both = json!({"schema": 1, "channel": "email", "mode": "blocks",
+            "email": {"subject": "x", "html": "", "category": "marketing"},
+            "blocks": {"subject": "Hi", "category": "transactional"}});
+        assert_eq!(
+            check_draft(&template, &both).unwrap_err().code(),
+            Some("template_malformed")
+        );
+        let mut code_pair = both.clone();
+        code_pair["mode"] = json!("code");
+        assert_eq!(
+            check_draft(&template, &code_pair).unwrap_err().code(),
+            Some("template_malformed")
+        );
+        let with_webhook = json!({"schema": 1, "channel": "email", "mode": "code",
+            "email": {"subject": "x", "html": ""}, "webhook": {"body": "{}"}});
+        assert_eq!(
+            check_draft(&template, &with_webhook).unwrap_err().code(),
+            Some("template_malformed")
+        );
+    }
 
-        assert_eq!(absent.sender_identity_id, None);
-        assert_eq!(cleared.sender_identity_id, Some(None));
-        assert_eq!(set.sender_identity_id, Some(Some(Uuid::nil())));
+    #[test]
+    fn typed_parse_errors_have_their_own_codes() {
+        let template = Template {
+            id: Uuid::nil(),
+            name: "T".into(),
+            channel: "email".into(),
+            category: "marketing".into(),
+            sender_identity_id: None,
+            current_version: None,
+            archived_at: None,
+            created_by: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let blocks = |change: &dyn Fn(&mut Value)| {
+            let mut doc = json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
+                "subject": "Hi", "sections": [{"id": "s", "columns": [[
+                    {"type": "divider", "id": "d"}]]}]}});
+            change(&mut doc);
+            check_draft(&template, &doc).map_err(|error| error.code())
+        };
+        assert_eq!(blocks(&|_| {}), Ok(()));
+        assert_eq!(
+            blocks(&|doc| doc["schema"] = json!(2)),
+            Err(Some("template_unsupported_schema"))
+        );
+        assert_eq!(
+            blocks(
+                &|doc| doc["blocks"]["sections"][0]["columns"][0][0]["type"] = json!("carousel")
+            ),
+            Err(Some("template_unknown_block"))
+        );
+        assert_eq!(
+            blocks(&|doc| doc["blocks"]["sections"][0]["columns"][0][0]["style"] = json!("x")),
+            Err(Some("template_unknown_field"))
+        );
+        assert_eq!(
+            blocks(&|doc| doc["theme"] = json!("dark")),
+            Err(Some("template_unknown_field"))
+        );
+        // A bad enum value is not an unknown block.
+        assert_eq!(
+            blocks(&|doc| doc["channel"] = json!("fax")),
+            Err(Some("template_malformed"))
+        );
+    }
+
+    #[test]
+    fn a_block_document_keeps_its_templates_category() {
+        let template = |category: &str| Template {
+            id: Uuid::nil(),
+            name: "T".into(),
+            channel: "email".into(),
+            category: category.into(),
+            sender_identity_id: None,
+            current_version: None,
+            archived_at: None,
+            created_by: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let blocks = |category: &str| {
+            json!({"schema": 1, "channel": "email", "mode": "blocks",
+                   "blocks": {"subject": "Hi", "category": category}})
+        };
+
+        assert!(check_draft(&template("marketing"), &blocks("marketing")).is_ok());
+        assert!(check_draft(&template("transactional"), &blocks("transactional")).is_ok());
+        assert_eq!(
+            check_draft(&template("marketing"), &blocks("transactional"))
+                .unwrap_err()
+                .code(),
+            Some("template_mismatch")
+        );
+        assert_eq!(
+            check_draft(&template("transactional"), &blocks("marketing"))
+                .unwrap_err()
+                .code(),
+            Some("template_mismatch")
+        );
     }
 
     #[test]

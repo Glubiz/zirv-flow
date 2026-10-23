@@ -2299,6 +2299,121 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/sender-identities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's live sender identities by address; archived ones with `archived=true`, and
+         *     only those of one domain with `domain_id`. Workspace admins only.
+         */
+        get: operations["list_sender_identities"];
+        put?: never;
+        /**
+         * Creates a sender identity on a sending domain of the workspace. The from address must be on
+         *     the domain. Workspace admins only. Audited as `sender_identity.created`.
+         */
+        post: operations["create_sender_identity"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sender-identities/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One sender identity, archived or not. Workspace admins only. */
+        get: operations["get_sender_identity"];
+        put?: never;
+        post?: never;
+        /**
+         * Archives a sender identity: it is no longer listed, changed or accepted at publish, and its
+         *     address is free again. Workspace admins only. Audited as `sender_identity.archived`.
+         */
+        delete: operations["archive_sender_identity"];
+        options?: never;
+        head?: never;
+        /**
+         * Changes a live sender identity: name, from address (on the same domain) or reply-to. Workspace
+         *     admins only. Audited as `sender_identity.updated`.
+         */
+        patch: operations["update_sender_identity"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sending-domains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's sending domains, each with its records. Workspace admins only. */
+        get: operations["list_sending_domains"];
+        put?: never;
+        /**
+         * Registers a sending domain and returns the DNS records to publish. Zirv Flow generates the
+         *     DKIM key; only its public half appears, in the DKIM record text. A DNS check is queued at once.
+         *     Workspace admins only. Audited as `sending_domain.created`.
+         */
+        post: operations["create_sending_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sending-domains/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One sending domain with the status of each record. Workspace admins only. */
+        get: operations["get_sending_domain"];
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a sending domain, its records, its archived sender identities and its DKIM key. It is
+         *     refused while a live sender identity exists on it, or a template names one of its identities.
+         *     Workspace admins only. Audited as `sending_domain.deleted`.
+         */
+        delete: operations["delete_sending_domain"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/sending-domains/{id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Asks for a DNS check of the domain now. The check runs in the background, so the response
+         *     shows the state before it; read the domain again for the result. A check already waiting
+         *     serves this request too. Workspace admins only. Audited as
+         *     `sending_domain.verification_requested`.
+         */
+        post: operations["verify_sending_domain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
         parameters: {
             query?: never;
@@ -2702,7 +2817,7 @@ export interface paths {
         /** One template with its draft. */
         get: operations["get_template"];
         /**
-         * Changes a template's name or sender identity. The channel and the category are fixed when the
+         * Changes a template's name. The channel and the category are fixed when the
          *     template is made. Audited as `template.updated`.
          */
         put: operations["update_template"];
@@ -2774,8 +2889,9 @@ export interface paths {
          * Publishes the draft as the next immutable version. The draft is validated against the
          *     workspace's field registry and event catalog and the reserved `person.email`; a blocking issue
          *     is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
-         *     successful publish are in the response and stored with the version. Audited as
-         *     `template.published`.
+         *     successful publish are in the response and stored with the version. The document's sender must
+         *     be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
+         *     Audited as `template.published`.
          */
         post: operations["publish_template"];
         delete?: never;
@@ -3805,6 +3921,40 @@ export interface components {
              */
             name: string;
         };
+        CreateSenderIdentityRequest: {
+            /**
+             * Format: uuid
+             * @description A sending domain of this workspace.
+             */
+            domain_id: string;
+            /**
+             * @description An address on the sending domain.
+             * @example news@example.com
+             */
+            from_address: string;
+            /**
+             * @description The display name, 1 to 128 characters.
+             * @example Example News
+             */
+            from_name: string;
+            /** @description Where replies go, if not to the from address. May be on any domain. */
+            reply_to?: string | null;
+        };
+        CreateSendingDomainRequest: {
+            /**
+             * @description The domain to send from, such as `example.com`: letters, digits and hyphens in at least two
+             *     labels. Give an internationalized name in punycode.
+             * @example example.com
+             */
+            domain: string;
+            /** @description The DKIM selector, 1 to 63 letters, digits or hyphens. Default `zirv`. */
+            selector?: string | null;
+            /**
+             * @description One SPF mechanism the domain's SPF record must contain, such as `include:spf.relay.example`,
+             *     `ip4:203.0.113.7`, `a` or `mx`. Without one, any `v=spf1` record satisfies the check.
+             */
+            spf_mechanism?: string | null;
+        };
         CreateSourceRequest: {
             /** @description The plain settings, checked against the type's field specs. */
             config: {
@@ -3841,8 +3991,6 @@ export interface components {
              * @example Order shipped
              */
             name: string;
-            /** Format: uuid */
-            sender_identity_id?: string | null;
         };
         CreateTopicRequest: {
             /**
@@ -4254,6 +4402,33 @@ export interface components {
             kind: string;
             masked: boolean;
             value?: string | null;
+        };
+        /** @description One DNS record a domain must publish, and what the last check found. */
+        DomainRecordBody: {
+            /** Format: date-time */
+            checked_at?: string | null;
+            /**
+             * @description The TXT value to publish. The SPF value is a recommendation: a name holds one `v=spf1`
+             *     record, so merge it with the one the domain already has.
+             */
+            expected_text: string;
+            /**
+             * @description The DNS name to publish the TXT record at.
+             * @example zirv._domainkey.example.com
+             */
+            host: string;
+            /**
+             * @description `dkim`, `spf` or `dmarc`.
+             * @example dkim
+             */
+            kind: string;
+            /** @description The TXT records the last check read at `host`, bounded in number and length. */
+            observed_text: string[];
+            /**
+             * @description `pending` (not checked yet), `ok`, `mismatch` (a record is there but does not satisfy the
+             *     rule) or `missing`.
+             */
+            status: string;
         };
         /** @description The result of a draft run. */
         DraftBody: {
@@ -6837,6 +7012,59 @@ export interface components {
         } | {
             since_trait: string;
         };
+        /** @description A sender identity. */
+        SenderIdentityBody: {
+            /** @description An archived identity is read-only history and cannot send. */
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: uuid
+             * @description The sending domain the address is on.
+             */
+            domain_id: string;
+            /** @example news@example.com */
+            from_address: string;
+            /** @example Example News */
+            from_name: string;
+            /** Format: uuid */
+            id: string;
+            reply_to?: string | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description A sending domain. It never carries the private key or the id of its secret. */
+        SendingDomainBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /** @example example.com */
+            domain: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: date-time */
+            last_checked_at?: string | null;
+            /** @description The three records, in the order DKIM, SPF, DMARC. */
+            records: components["schemas"]["DomainRecordBody"][];
+            /** @description The DKIM selector: the record is published at `<selector>._domainkey.<domain>`. */
+            selector: string;
+            /**
+             * @description `verified` only while the DKIM, SPF and DMARC records are all `ok`; otherwise
+             *     `unverified`, and no email template naming a sender on it can be published.
+             */
+            status: string;
+            /** Format: date-time */
+            verified_at?: string | null;
+        };
         SessionBody: {
             /** @description Send this as `x-csrf-token` on every POST, PUT, PATCH and DELETE made with the cookie. */
             csrf_token: string;
@@ -7265,7 +7493,8 @@ export interface components {
             name: string;
             /**
              * Format: uuid
-             * @description The sender identity of an email template.
+             * @description The sender identity the draft's document names (`email.sender`), when it is an identity of
+             *     this workspace. Read-only: it follows the draft, which is where the sender is set.
              */
             sender_identity_id?: string | null;
             /** Format: date-time */
@@ -7660,6 +7889,13 @@ export interface components {
             description?: string | null;
             name?: string | null;
         };
+        UpdateSenderIdentityRequest: {
+            /** @description An address on the identity's domain. */
+            from_address?: string | null;
+            from_name?: string | null;
+            /** @description A new reply-to address; `null` clears it. */
+            reply_to?: string | null;
+        };
         UpdateSourceRequest: {
             config?: {
                 [key: string]: unknown;
@@ -7675,11 +7911,6 @@ export interface components {
         };
         UpdateTemplateRequest: {
             name?: string | null;
-            /**
-             * Format: uuid
-             * @description `null` clears it.
-             */
-            sender_identity_id?: string | null;
         };
         UpdateTopicRequest: {
             archived?: boolean | null;
@@ -17128,6 +17359,621 @@ export interface operations {
             };
         };
     };
+    list_sender_identities: {
+        parameters: {
+            query?: {
+                /** @description Include archived identities; default false */
+                archived?: boolean;
+                /** @description Only identities on this sending domain */
+                domain_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sender identities */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderIdentityBody"][];
+                };
+            };
+            /** @description archived is not true or false, or domain_id is not an id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_sender_identity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSenderIdentityRequest"];
+            };
+        };
+        responses: {
+            /** @description The new identity */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderIdentityBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live identity already has that address */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name or address, an unknown domain, or an address off the domain */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_sender_identity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Sender identity id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The identity */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderIdentityBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or identity, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_sender_identity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Sender identity id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Archived */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or identity, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The identity is already archived (`code` is `sender_identity_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_sender_identity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Sender identity id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSenderIdentityRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated identity */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderIdentityBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or identity, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live identity has that address, or the identity is archived (`code` is `sender_identity_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, an address off the domain, or no field at all */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_sending_domains: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The sending domains by name */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendingDomainBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_sending_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSendingDomainRequest"];
+            };
+        };
+        responses: {
+            /** @description The new domain with its records to publish */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendingDomainBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The workspace already has the domain, or the master key is outdated */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid domain, selector or SPF mechanism */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to seal the DKIM key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_sending_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Sending domain id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The domain and its records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendingDomainBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or domain, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_sending_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Sending domain id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or domain, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The domain still has sender identities in use (`code` is `sending_domain_in_use`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    verify_sending_domain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Sending domain id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The check is queued; the domain as it is now */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendingDomainBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or domain, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     validate_source_manifest: {
         parameters: {
             query?: never;
@@ -18909,7 +19755,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description An invalid name, a document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
+            /** @description An invalid name, a document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -19170,7 +20016,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A document that is not a template document (`template_malformed`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
+            /** @description A document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -19323,7 +20169,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), or no registered content type handles it (`template_content_unsupported`) */
+            /** @description The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`) */
             422: {
                 headers: {
                     [name: string]: unknown;

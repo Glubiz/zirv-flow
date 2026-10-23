@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "snd_1",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "image",
+              "id": "i1",
+              "src": "https://img.example/hero.png",
+              "alt": "A hero",
+              "width": 480
+            },
+            {
+              "type": "image",
+              "id": "i2",
+              "src": "https://img.example/logo.png",
+              "alt": "Logo for {{ person.name }}",
+              "href": "https://example.com/{{ person.plan }}"
+            },
+            {
+              "type": "image",
+              "id": "i3",
+              "src": "https://img.example/plain.png",
+              "alt": ""
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}

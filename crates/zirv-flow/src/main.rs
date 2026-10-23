@@ -459,6 +459,7 @@ async fn run_roles_reporting(
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
         worker_config.egress = config.egress_policy();
         worker_config.render_pool = render_pool.clone();
+        worker_config.dns = system_resolver();
         share_rate_limits(state.as_ref(), &mut worker_config);
         let worker = zirv_flow_jobs::Worker::new(
             pool.clone(),
@@ -475,7 +476,10 @@ async fn run_roles_reporting(
     if roles.scheduler {
         let scheduler = zirv_flow_jobs::Scheduler::new(
             pool.clone(),
-            zirv_flow_jobs::SchedulerConfig::default(),
+            zirv_flow_jobs::SchedulerConfig {
+                sending_domain_recheck: config.sending_domain_recheck(),
+                ..zirv_flow_jobs::SchedulerConfig::default()
+            },
         );
         background.spawn(liveness.track(Role::Scheduler, scheduler.run(stopped.clone())));
         info!(role = "scheduler", "scheduler standing for leadership");
@@ -528,6 +532,18 @@ fn render_host_command(
         .args(["--test-threads", "1", "-q"])
         .env("ZIRV_FLOW_TEST_RENDER_HOST", "1")
         .skip_stdout_until("running 1 test\n")
+}
+
+/// The resolver sending-domain checks read DNS through, from the system's name servers. Without
+/// one the checks fail until the host is fixed and the process restarted; nothing else needs it.
+fn system_resolver() -> Option<Arc<dyn zirv_flow_jobs::DnsResolver>> {
+    match zirv_flow_jobs::SystemResolver::new() {
+        Ok(resolver) => Some(Arc::new(resolver)),
+        Err(error) => {
+            warn!(%error, "no DNS resolver could be built; sending domain checks will fail");
+            None
+        }
+    }
 }
 
 /// Starts the render-host children this process renders through: copies of this executable
