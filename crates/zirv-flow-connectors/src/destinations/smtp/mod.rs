@@ -950,6 +950,17 @@ mod tests {
         let signer = signer("example.com");
         let table = [
             (Rcpt, "550 5.1.1 no such user", Refusal::HardBounce),
+            (
+                Rcpt,
+                "550-prelude\r\n550 5.1.1 unknown",
+                Refusal::HardBounce,
+            ),
+            (
+                Data,
+                "550-prelude\r\n550 5.1.1 unknown",
+                Refusal::HardBounce,
+            ),
+            (Rcpt, "550 relay not permitted", Refusal::Rejected),
             (Rcpt, "554 5.7.1 relay denied", Refusal::Rejected),
             (Rcpt, "451 4.7.1 try later", Refusal::Deferred),
             (Mail, "550 5.7.1 sender refused", Refusal::Rejected),

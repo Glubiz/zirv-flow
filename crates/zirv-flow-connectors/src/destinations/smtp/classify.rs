@@ -26,7 +26,7 @@ pub(super) fn refusal(stage: Stage, reply: &Reply) -> DestinationError {
     match reply.code {
         400..=499 => DestinationError::Refused(Refusal::Deferred),
         500..=599 if stage == Stage::Auth => DestinationError::Auth,
-        500..=599 if recipient_failure(stage, reply.code, reply.enhanced) => {
+        500..=599 if recipient_failure(stage, reply.enhanced) => {
             DestinationError::Refused(Refusal::HardBounce)
         }
         500..=599 => DestinationError::Refused(Refusal::Rejected),
@@ -38,20 +38,16 @@ pub(super) fn refusal(stage: Stage, reply: &Reply) -> DestinationError {
 
 /// Whether a permanent failure at `stage` says the recipient cannot receive mail.
 ///
-/// With an enhanced status code the subject decides: `5.1.x` is an address problem, except
-/// `5.1.7` and `5.1.8`, which name the sender. Anything else (`5.2.x` a full mailbox, `5.3.x`
-/// the system, `5.7.x` policy) leaves the person alone. Without one, only the replies that
-/// every server uses for an unknown or unacceptable mailbox at `RCPT` count: 550, 551 and 553.
-fn recipient_failure(stage: Stage, code: u16, enhanced: Option<Enhanced>) -> bool {
-    if !matches!(stage, Stage::RcptTo | Stage::Data | Stage::DataEnd) {
-        return false;
-    }
-    match enhanced {
-        Some(enhanced) => {
+/// Only an enhanced status code can say so: `5.1.x` is an address problem, except `5.1.7` and
+/// `5.1.8`, which name the sender. Anything else (`5.2.x` a full mailbox, `5.3.x` the system,
+/// `5.7.x` policy) and a permanent reply with no enhanced code at all leave the person alone: a
+/// bare `550` is as often a relay's policy ("relay not permitted") as a missing mailbox, and a
+/// hard bounce suppresses the address in the whole organization.
+fn recipient_failure(stage: Stage, enhanced: Option<Enhanced>) -> bool {
+    matches!(stage, Stage::RcptTo | Stage::Data | Stage::DataEnd)
+        && enhanced.is_some_and(|enhanced| {
             enhanced.class == 5 && enhanced.subject == 1 && !matches!(enhanced.detail, 7 | 8)
-        }
-        None => stage == Stage::RcptTo && matches!(code, 550 | 551 | 553),
-    }
+        })
 }
 
 #[cfg(test)]
@@ -76,7 +72,7 @@ mod tests {
         use Refusal::{Deferred, HardBounce, Rejected};
         use Stage::{Auth, Data, DataEnd, Ehlo, Greeting, MailFrom, RcptTo, StartTls};
         type Row = (Stage, u16, Option<(u8, u16, u16)>, DestinationError);
-        let table: [Row; 22] = [
+        let table: [Row; 23] = [
             // The recipient does not exist: hard bounce.
             (
                 RcptTo,
@@ -84,9 +80,11 @@ mod tests {
                 Some((5, 1, 1)),
                 DestinationError::Refused(HardBounce),
             ),
-            (RcptTo, 550, None, DestinationError::Refused(HardBounce)),
-            (RcptTo, 553, None, DestinationError::Refused(HardBounce)),
-            (RcptTo, 551, None, DestinationError::Refused(HardBounce)),
+            // A permanent reply with no enhanced code never bounces: it may be a relay policy.
+            (RcptTo, 550, None, DestinationError::Refused(Rejected)),
+            (RcptTo, 553, None, DestinationError::Refused(Rejected)),
+            (RcptTo, 551, None, DestinationError::Refused(Rejected)),
+            (Data, 550, None, DestinationError::Refused(Rejected)),
             (
                 RcptTo,
                 550,
@@ -166,6 +164,37 @@ mod tests {
                 "{stage:?} {code} {enhanced:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_bare_550_is_rejected_whatever_its_text_says_and_an_enhanced_5_1_x_bounces() {
+        let with_text = |code, enhanced, text: &str| Reply {
+            code,
+            enhanced,
+            lines: vec![text.to_owned()],
+        };
+        let enhanced = Some(Enhanced {
+            class: 5,
+            subject: 1,
+            detail: 1,
+        });
+
+        for text in ["relay not permitted", "no such user"] {
+            for stage in [Stage::RcptTo, Stage::Data, Stage::DataEnd] {
+                assert_eq!(
+                    refusal(stage, &with_text(550, None, text)),
+                    DestinationError::Refused(Refusal::Rejected),
+                    "{stage:?} {text}"
+                );
+            }
+        }
+        assert_eq!(
+            refusal(
+                Stage::RcptTo,
+                &with_text(550, enhanced, "5.1.1 no such user")
+            ),
+            DestinationError::Refused(Refusal::HardBounce)
+        );
     }
 
     #[test]

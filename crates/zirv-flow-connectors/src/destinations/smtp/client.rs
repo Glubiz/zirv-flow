@@ -165,7 +165,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Session<S> {
             }
         }
         let code = code.ok_or(WireError::Protocol)?;
-        let enhanced = lines.first().and_then(|text| parse_enhanced(text, code));
+        // The last line states the verdict; a server that puts the code only on an earlier line
+        // still has it read.
+        let enhanced = lines
+            .last()
+            .and_then(|text| parse_enhanced(text, code))
+            .or_else(|| lines.iter().find_map(|text| parse_enhanced(text, code)));
         Ok(Reply {
             code,
             enhanced,
@@ -288,7 +293,15 @@ mod tests {
 
         assert_eq!(first.code, 250);
         assert_eq!(first.lines, ["mail.test", "SIZE 1000", "2.0.0 ok"]);
-        assert_eq!(first.enhanced, None, "only the first line is read for it");
+        assert_eq!(
+            first.enhanced,
+            Some(Enhanced {
+                class: 2,
+                subject: 0,
+                detail: 0
+            }),
+            "the last line is read for it"
+        );
         assert_eq!(second.code, 550);
         assert_eq!(
             second.enhanced,
@@ -299,6 +312,38 @@ mod tests {
             })
         );
         assert!(!format!("{second:?}").contains("such user"));
+    }
+
+    #[tokio::test]
+    async fn the_enhanced_code_of_a_multi_line_reply_is_the_final_lines_else_the_first_that_has_one()
+     {
+        let mut session = session_with(
+            b"550-prelude\r\n550 5.1.1 unknown\r\n550-5.7.1 policy\r\n550 closing words\r\n550-none\r\n550 none\r\n",
+        )
+        .await;
+
+        let last = session.reply(Duration::from_secs(1)).await.unwrap();
+        let earlier = session.reply(Duration::from_secs(1)).await.unwrap();
+        let neither = session.reply(Duration::from_secs(1)).await.unwrap();
+
+        assert_eq!(
+            last.enhanced,
+            Some(Enhanced {
+                class: 5,
+                subject: 1,
+                detail: 1
+            })
+        );
+        assert_eq!(
+            earlier.enhanced,
+            Some(Enhanced {
+                class: 5,
+                subject: 7,
+                detail: 1
+            }),
+            "falls back to the first line that carries one"
+        );
+        assert_eq!(neither.enhanced, None);
     }
 
     #[tokio::test]
