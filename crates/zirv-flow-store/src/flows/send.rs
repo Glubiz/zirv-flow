@@ -292,12 +292,7 @@ async fn end_orphan(
         dimensions: &dimensions,
         status: MessageStatus::Failed,
         reason: Some(reason),
-        deciding_rule: match stored.deciding_rule.as_deref() {
-            Some("recorded_consent") => Some("recorded_consent"),
-            Some("topic_default") => Some("topic_default"),
-            Some("none") => Some("none"),
-            _ => None,
-        },
+        deciding_rule: stored.deciding_rule.as_deref(),
         gates: &gates,
         attempts: stored.attempts,
         now,

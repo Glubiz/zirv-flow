@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// The id of the built-in rule that matches when the recorded consent does not allow the send.
 pub const RECORDED_CONSENT_RULE: &str = "recorded_consent";
@@ -19,8 +20,8 @@ pub const MAX_NAME_CHARS: usize = 100;
 /// One rule. The built-in rule has no condition; every other rule has one.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PolicyRule {
-    /// `recorded_consent` for the built-in rule; otherwise 1 to 64 lowercase letters, digits,
-    /// underscores or hyphens.
+    /// `recorded_consent` for the built-in rule; otherwise a UUID, which the gate result and the
+    /// decision name the rule by.
     pub id: String,
     pub name: String,
     /// A segment definition (`{"v": 1, ...}`), valid in a policy.
@@ -55,7 +56,7 @@ pub enum RulesError {
     TooMany,
     /// The built-in rule is not in the list: it can be moved but not removed.
     BuiltinMissing,
-    /// An id is empty, too long, or not of the key form.
+    /// An id is neither `recorded_consent` nor a UUID.
     BadId(usize),
     DuplicateId(usize),
     /// A name is blank or longer than [`MAX_NAME_CHARS`].
@@ -93,15 +94,12 @@ impl RulesError {
     }
 }
 
-fn is_key(text: &str) -> bool {
-    (1..=64).contains(&text.len())
-        && text.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-        })
+fn is_rule_id(text: &str) -> bool {
+    text == RECORDED_CONSENT_RULE || Uuid::parse_str(text).is_ok()
 }
 
 /// Checks the shape of a list of rules: the built-in rule is present once (anywhere in the
-/// order), the ids are unique keys, the names are 1 to 100 characters, and every other rule has a
+/// order), the ids are unique UUIDs (or the built-in id), the names are 1 to 100 characters, and every other rule has a
 /// condition. The conditions themselves are not looked at.
 pub fn check_rules(rules: &[PolicyRule]) -> Result<(), RulesError> {
     if rules.len() > MAX_RULES {
@@ -109,7 +107,7 @@ pub fn check_rules(rules: &[PolicyRule]) -> Result<(), RulesError> {
     }
     let mut seen = BTreeSet::new();
     for (index, rule) in rules.iter().enumerate() {
-        if !is_key(&rule.id) {
+        if !is_rule_id(&rule.id) {
             return Err(RulesError::BadId(index));
         }
         if !seen.insert(rule.id.as_str()) {
@@ -137,6 +135,10 @@ mod tests {
 
     use super::*;
 
+    fn id_of(n: u128) -> String {
+        Uuid::from_u128(n).to_string()
+    }
+
     fn custom(id: &str) -> PolicyRule {
         PolicyRule {
             id: id.to_owned(),
@@ -153,9 +155,16 @@ mod tests {
 
     #[test]
     fn the_built_in_rule_can_be_moved_anywhere_but_not_removed() {
-        let moved = [custom("a"), PolicyRule::recorded_consent(), custom("b")];
+        let moved = [
+            custom(&id_of(1)),
+            PolicyRule::recorded_consent(),
+            custom(&id_of(2)),
+        ];
         assert_eq!(check_rules(&moved), Ok(()));
-        assert_eq!(check_rules(&[custom("a")]), Err(RulesError::BuiltinMissing));
+        assert_eq!(
+            check_rules(&[custom(&id_of(1))]),
+            Err(RulesError::BuiltinMissing)
+        );
         assert_eq!(check_rules(&[]), Err(RulesError::BuiltinMissing));
     }
 
@@ -167,22 +176,22 @@ mod tests {
             Err(RulesError::BadId(1))
         );
         assert_eq!(
-            check_rules(&[builtin.clone(), custom("a"), custom("a")]),
+            check_rules(&[builtin.clone(), custom(&id_of(1)), custom(&id_of(1))]),
             Err(RulesError::DuplicateId(2))
         );
-        let mut blank = custom("a");
+        let mut blank = custom(&id_of(1));
         blank.name = "  ".into();
         assert_eq!(
             check_rules(&[builtin.clone(), blank]),
             Err(RulesError::BadName(1))
         );
-        let mut long = custom("a");
+        let mut long = custom(&id_of(1));
         long.name = "n".repeat(101);
         assert_eq!(
             check_rules(&[builtin.clone(), long]),
             Err(RulesError::BadName(1))
         );
-        let mut bare = custom("a");
+        let mut bare = custom(&id_of(1));
         bare.condition = None;
         assert_eq!(
             check_rules(&[builtin.clone(), bare]),
@@ -199,9 +208,9 @@ mod tests {
     #[test]
     fn a_policy_holds_at_most_fifty_rules() {
         let mut rules = vec![PolicyRule::recorded_consent()];
-        rules.extend((0..MAX_RULES - 1).map(|n| custom(&format!("r{n}"))));
+        rules.extend((0..MAX_RULES - 1).map(|n| custom(&id_of(100 + n as u128))));
         assert_eq!(check_rules(&rules), Ok(()));
-        rules.push(custom("one-more"));
+        rules.push(custom(&id_of(999)));
         assert_eq!(check_rules(&rules), Err(RulesError::TooMany));
     }
 

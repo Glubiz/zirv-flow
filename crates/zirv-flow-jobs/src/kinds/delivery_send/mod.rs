@@ -44,6 +44,7 @@
 mod deliver;
 mod gates;
 mod payload;
+mod policy;
 mod render;
 
 use std::sync::Arc;
@@ -94,7 +95,7 @@ struct Trail {
     gates: Vec<GateRecord>,
     status: MessageStatus,
     reason: Option<&'static str>,
-    rule: Option<&'static str>,
+    rule: Option<String>,
     template_version: Option<i32>,
     sender: Option<Uuid>,
     category: Option<String>,
@@ -129,7 +130,7 @@ impl Trail {
         self.gates.push(blocked.gate);
         self.status = MessageStatus::Skipped;
         self.reason = blocked.gate.reason;
-        self.rule = blocked.rule.or(self.rule);
+        self.rule = blocked.rule.or(self.rule.take());
         Step::Finished(self)
     }
 
@@ -453,7 +454,8 @@ async fn person_gates(
     transactional: bool,
     trail: &mut Trail,
 ) -> Result<Option<Blocked>, JobError> {
-    match gates::consent(pool, job, transactional).await? {
+    let clock = ctx.clock().clone();
+    match gates::consent(pool, &clock, job, transactional).await? {
         Ok(passed) => {
             trail.pass(passed.gate);
             trail.rule = passed.rule;
@@ -639,7 +641,7 @@ async fn write_end(
         dimensions,
         status: trail.status,
         reason: trail.reason,
-        deciding_rule: trail.rule,
+        deciding_rule: trail.rule.as_deref(),
         gates: &trail.gates,
         attempts: trail.attempts,
         now,
@@ -690,6 +692,7 @@ mod tests {
         SMTP_SINK_DROP, SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions,
         SmtpSinkStage, fake_ledger_calls, fake_ledger_sent,
     };
+    use zirv_flow_core::consent::policy::PolicyRule;
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::{
@@ -1045,10 +1048,29 @@ mod tests {
             topic: Option<Uuid>,
             max_attempts: i32,
         ) -> Queued1 {
+            self.queue_dims(
+                person,
+                template,
+                destination,
+                topic,
+                &Dimensions::new(),
+                max_attempts,
+            )
+            .await
+        }
+
+        async fn queue_dims(
+            &self,
+            person: Uuid,
+            template: Uuid,
+            destination: Uuid,
+            topic: Option<Uuid>,
+            dimensions: &Dimensions,
+            max_attempts: i32,
+        ) -> Queued1 {
             let enrolled = self.enroll(person).await;
             let message = Uuid::now_v7();
             let key = format!("{}:mail:send", enrolled.enrollment);
-            let dimensions = Dimensions::new();
             let mut job = NewJob::new(SEND_JOB_KIND, enrolled.trace.clone());
             job.workspace_id = Some(self.ws);
             job.unique_key = Some(key.clone());
@@ -1065,7 +1087,7 @@ mod tests {
                 template,
                 destination,
                 topic,
-                dimensions: &dimensions,
+                dimensions,
                 queued_at: self.clock.now(),
             }
             .payload()
@@ -1138,6 +1160,20 @@ mod tests {
         /// Queues a send and runs it to its end; the message it recorded.
         async fn send(&self, person: Uuid, template: Uuid) -> zirv_flow_store::Message {
             let queued = self.queue(person, template, 5).await;
+            self.attempt().await.unwrap();
+            self.message(queued.message).await
+        }
+
+        /// [`Env::send`] for a message with these dimension values.
+        async fn send_with(
+            &self,
+            person: Uuid,
+            template: Uuid,
+            dimensions: &Dimensions,
+        ) -> zirv_flow_store::Message {
+            let queued = self
+                .queue_dims(person, template, self.destination, None, dimensions, 5)
+                .await;
             self.attempt().await.unwrap();
             self.message(queued.message).await
         }
@@ -3026,5 +3062,321 @@ mod tests {
 
         assert_eq!(sent.status, "sent");
         assert!(env.keyring.is_none());
+    }
+
+    fn rule_id(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    fn policy_rule(n: u128, name: &str, condition: Value) -> PolicyRule {
+        PolicyRule {
+            id: rule_id(n).to_string(),
+            name: name.to_owned(),
+            condition: Some(condition),
+        }
+    }
+
+    /// The cooldown: a message was sent to the person in the last day.
+    fn cooldown() -> PolicyRule {
+        policy_rule(
+            1,
+            "Cooldown",
+            json!({"v": 1, "messages": {"channel": "email",
+                "agg": {"fn": "last_time", "op": "within_last", "value": "P1D"}}}),
+        )
+    }
+
+    /// The account state: the `account` trait says closed.
+    fn closed() -> PolicyRule {
+        policy_rule(
+            2,
+            "Account closed",
+            json!({"v": 1, "trait": "account", "op": "eq", "value": "closed"}),
+        )
+    }
+
+    async fn define_account_trait(env: &Env) {
+        zirv_flow_store::create_trait_definition(
+            &env.pool,
+            env.ws,
+            &zirv_flow_store::NewTraitDefinition {
+                key: "account".into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn person_in_account_state(env: &Env, email: &str, account: &str) -> Uuid {
+        env.profile(ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: email.into(),
+            identifiers: vec![("email".into(), email.into())],
+            traits: json!({"account": account}).as_object().cloned().unwrap(),
+            observed_at: env.clock.now() - Span::days(1),
+            trace: TraceContext::root(Cause::api("t")),
+        })
+        .await
+    }
+
+    /// Saves and publishes the policy with `rules` as the next version.
+    async fn publish_policy(env: &Env, rules: &[PolicyRule]) {
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        zirv_flow_store::save_consent_policy_draft(&mut tx, env.ws, rules, None)
+            .await
+            .unwrap();
+        let locked = zirv_flow_store::lock_consent_policy(&mut tx, env.ws)
+            .await
+            .unwrap()
+            .unwrap();
+        zirv_flow_store::publish_consent_policy(
+            &mut tx,
+            env.ws,
+            &locked,
+            None,
+            &TraceContext::root(Cause::definition_change(locked.id)),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+    }
+
+    /// The `send.gate` decision of the consent gate of a message: the rule id it names, if any.
+    async fn gate_rule(env: &Env, message: Uuid) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT subject_ids ->> 'rule' FROM decision_records \
+             WHERE workspace_id = $1 AND action = 'send.gate' AND reason = 'consent' \
+               AND subject_ids ->> 'message' = $2",
+        )
+        .bind(env.ws.as_uuid())
+        .bind(message.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_policy_of_recorded_consent_a_cooldown_and_an_account_state_decides_sends_and_each_skip_names_its_rule(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        define_account_trait(&env).await;
+        let template = env.plain_template("marketing").await;
+        publish_policy(
+            &env,
+            &[PolicyRule::recorded_consent(), cooldown(), closed()],
+        )
+        .await;
+        let open = person_in_account_state(&env, "open@example.com", "open").await;
+        let shut = person_in_account_state(&env, "shut@example.com", "closed").await;
+        let silent = person_in_account_state(&env, "silent@example.com", "open").await;
+        for person in [open, shut] {
+            env.subscribe(person).await;
+        }
+
+        let first = env.send(open, template).await;
+        let again = env.send(open, template).await;
+        let closed_account = env.send(shut, template).await;
+        let unconsented = env.send(silent, template).await;
+
+        assert_eq!(first.status, "sent");
+        assert_eq!(first.deciding_rule.as_deref(), Some("recorded_consent"));
+        assert_eq!(again.status, "skipped");
+        assert_eq!(again.reason.as_deref(), Some("no_consent"));
+        assert_eq!(again.deciding_rule.as_deref(), Some("Cooldown"));
+        assert_eq!(
+            gate_rule(&env, again.id).await,
+            Some(rule_id(1).to_string())
+        );
+        assert_eq!(closed_account.status, "skipped");
+        assert_eq!(closed_account.reason.as_deref(), Some("no_consent"));
+        assert_eq!(
+            closed_account.deciding_rule.as_deref(),
+            Some("Account closed")
+        );
+        assert_eq!(
+            gate_rule(&env, closed_account.id).await,
+            Some(rule_id(2).to_string())
+        );
+        // The built-in rule is first, so it names the denial of a person who never consented.
+        assert_eq!(unconsented.status, "skipped");
+        assert_eq!(unconsented.deciding_rule.as_deref(), Some("topic_default"));
+        assert_eq!(env.sent().len(), 1);
+        // Once the day has passed the cooldown no longer matches.
+        env.clock.advance(Span::days(2));
+        let later = env.send(open, template).await;
+        assert_eq!(later.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reordering_the_rules_changes_which_rule_is_named_not_whether_the_send_is_denied(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        define_account_trait(&env).await;
+        let template = env.plain_template("marketing").await;
+        // Closed, and never consented: the built-in rule and the account rule both match.
+        let person = person_in_account_state(&env, "both@example.com", "closed").await;
+
+        publish_policy(&env, &[PolicyRule::recorded_consent(), closed()]).await;
+        let builtin_first = env.send(person, template).await;
+        publish_policy(&env, &[closed(), PolicyRule::recorded_consent()]).await;
+        let account_first = env.send(person, template).await;
+
+        assert_eq!(builtin_first.status, "skipped");
+        assert_eq!(account_first.status, "skipped");
+        assert_eq!(builtin_first.reason, account_first.reason);
+        assert_eq!(
+            builtin_first.deciding_rule.as_deref(),
+            Some("topic_default")
+        );
+        assert_eq!(
+            account_first.deciding_rule.as_deref(),
+            Some("Account closed")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_vertical_scoped_unsubscribe_blocks_only_that_vertical_with_a_policy_in_place(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        define_account_trait(&env).await;
+        zirv_flow_store::create_dimension(
+            &env.pool,
+            env.ws,
+            &zirv_flow_store::NewDimension {
+                key: "vertical".into(),
+                name: "Vertical".into(),
+            },
+        )
+        .await
+        .unwrap();
+        for key in ["retail", "b2b"] {
+            zirv_flow_store::create_dimension_value(&env.pool, env.ws, "vertical", key, key)
+                .await
+                .unwrap();
+        }
+        let template = env.plain_template("marketing").await;
+        publish_policy(&env, &[PolicyRule::recorded_consent(), closed()]).await;
+        let person = person_in_account_state(&env, "ada@example.com", "open").await;
+        env.subscribe(person).await;
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        set_consent(
+            &mut tx,
+            env.ws,
+            &ConsentChange {
+                dimensions: [("vertical".to_owned(), "retail".to_owned())]
+                    .into_iter()
+                    .collect(),
+                person,
+                channel: Channel::Email,
+                topic: None,
+                status: ConsentStatus::Unsubscribed,
+                source: ChangeSource::Api,
+                evidence: json!({}),
+                occurred_at: env.clock.now() - Span::minutes(5),
+                actor: None,
+            },
+            &TraceContext::root(Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let vertical = |value: &str| -> Dimensions {
+            [("vertical".to_owned(), value.to_owned())]
+                .into_iter()
+                .collect()
+        };
+
+        let retail = env.send_with(person, template, &vertical("retail")).await;
+        let b2b = env.send_with(person, template, &vertical("b2b")).await;
+
+        assert_eq!(retail.status, "skipped");
+        assert_eq!(retail.deciding_rule.as_deref(), Some("recorded_consent"));
+        assert_eq!(b2b.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rule_that_can_no_longer_be_compiled_denies_the_send_and_is_named(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("marketing").await;
+        // The `ghost` trait does not exist (it was archived since the policy was published).
+        publish_policy(
+            &env,
+            &[
+                PolicyRule::recorded_consent(),
+                policy_rule(
+                    3,
+                    "Ghost",
+                    json!({"v": 1, "trait": "ghost", "op": "exists"}),
+                ),
+            ],
+        )
+        .await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+
+        let message = env.send(person, template).await;
+
+        assert_eq!(message.status, "skipped");
+        assert_eq!(message.deciding_rule.as_deref(), Some("Ghost"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_that_is_not_published_does_not_decide_sends(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        define_account_trait(&env).await;
+        let template = env.plain_template("marketing").await;
+        let person = person_in_account_state(&env, "ada@example.com", "closed").await;
+        env.subscribe(person).await;
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        zirv_flow_store::save_consent_policy_draft(
+            &mut tx,
+            env.ws,
+            &[PolicyRule::recorded_consent(), closed()],
+            None,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let message = env.send(person, template).await;
+
+        assert_eq!(message.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transactional_send_skips_the_policy_with_consent(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        define_account_trait(&env).await;
+        let template = env.plain_template("transactional").await;
+        publish_policy(&env, &[PolicyRule::recorded_consent(), closed()]).await;
+        let person = person_in_account_state(&env, "ada@example.com", "closed").await;
+
+        let message = env.send(person, template).await;
+
+        assert_eq!(message.status, "sent");
+        assert_eq!(message.deciding_rule.as_deref(), Some("transactional"));
     }
 }

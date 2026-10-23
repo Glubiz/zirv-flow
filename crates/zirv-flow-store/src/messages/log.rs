@@ -157,8 +157,9 @@ pub struct NewMessage<'a> {
     pub status: MessageStatus,
     /// A fixed code; required for a skipped or failed message, absent for a sent one.
     pub reason: Option<&'static str>,
-    /// What decided the consent gate: `recorded_consent`, `topic_default` or `none`.
-    pub deciding_rule: Option<&'static str>,
+    /// What decided the consent gate: `recorded_consent`, `topic_default`, `transactional`, a
+    /// suppression's scope, or the name of the consent policy rule that denied the send.
+    pub deciding_rule: Option<&'a str>,
     pub gates: &'a [GateRecord],
     pub attempts: i32,
     pub now: OffsetDateTime,
