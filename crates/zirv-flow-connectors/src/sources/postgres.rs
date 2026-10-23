@@ -60,7 +60,7 @@ impl Source for Postgres {
         ],
         credential_fields: &[
             fields::credential(
-                "user",
+                "username",
                 "User",
                 "A role that can only SELECT what should be read.",
             ),

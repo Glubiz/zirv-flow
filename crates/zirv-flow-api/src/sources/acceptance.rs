@@ -879,7 +879,7 @@ mod tests {
                         "database": options.get_database().unwrap(),
                         "tls": "off"
                     },
-                    "credential": {"user": "zz_pg_reader", "password": PG_PASSWORD}
+                    "credential": {"username": "zz_pg_reader", "password": PG_PASSWORD}
                 })),
             )
             .await;
@@ -888,7 +888,7 @@ mod tests {
 
         fx.exercise_a_stored_credential(
             &id,
-            json!({"user": "zz_pg_reader", "password": PG_REPLACED_PASSWORD}),
+            json!({"username": "zz_pg_reader", "password": PG_REPLACED_PASSWORD}),
         )
         .await;
 
@@ -911,7 +911,7 @@ mod tests {
                     "kind": "mysql",
                     "name": "shop",
                     "config": {"host": host, "port": port, "database": "shop", "tls": "off"},
-                    "credential": {"user": "zz_mysql_reader", "password": MYSQL_PASSWORD}
+                    "credential": {"username": "zz_mysql_reader", "password": MYSQL_PASSWORD}
                 })),
             )
             .await;
@@ -920,7 +920,7 @@ mod tests {
 
         fx.exercise_a_stored_credential(
             &id,
-            json!({"user": "zz_mysql_reader", "password": MYSQL_REPLACED_PASSWORD}),
+            json!({"username": "zz_mysql_reader", "password": MYSQL_REPLACED_PASSWORD}),
         )
         .await;
 
@@ -2304,7 +2304,7 @@ mod tests {
             assert_eq!(
                 credentials,
                 [
-                    (json!("user"), json!(true)),
+                    (json!("username"), json!(true)),
                     (json!("password"), json!(true))
                 ]
             );
@@ -2322,7 +2322,7 @@ mod tests {
                 "/sources",
                 Some(
                     json!({"kind": "postgres", "name": "warehouse", "config": config,
-                    "credential": {"user": "reader", "password": "pw"}}),
+                    "credential": {"username": "reader", "password": "pw"}}),
                 ),
             )
         };
@@ -2387,7 +2387,7 @@ mod tests {
         assert_eq!(created.body["config"]["queries"], queries);
         assert_eq!(
             created.body["credential_fields_set"],
-            json!(["password", "user"])
+            json!(["password", "username"])
         );
 
         let more = json!([
@@ -2450,7 +2450,7 @@ mod tests {
                         "database": options.get_database().unwrap(),
                         "tls": "off"
                     },
-                    "credential": {"user": role, "password": "zf_prev_pw"}
+                    "credential": {"username": role, "password": "zf_prev_pw"}
                 })),
             )
             .await;

@@ -72,7 +72,7 @@ export const POSTGRES_KIND: SourceKind = {
     setting("queries", "Queries", "queries", { help: "Named SELECT statements." }),
   ],
   credential_fields: [
-    setting("user", "User", "text", { required: true, secret: true }),
+    setting("username", "User", "text", { required: true, secret: true }),
     setting("password", "Password", "text", { required: true, secret: true }),
   ],
   capabilities: { push: false, incremental: true, full_refresh: true, emits_deletes: false },

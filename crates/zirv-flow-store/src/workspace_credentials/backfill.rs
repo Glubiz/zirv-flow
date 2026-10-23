@@ -213,6 +213,75 @@ mod tests {
 
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_database_source_credential_is_named_for_username_and_still_opens_with_its_sealed_user(
+        pool: PgPool,
+    ) {
+        migrate_before_credentials(&pool).await;
+        let ws = workspace(&pool, "one").await;
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        for (kind, name) in [
+            ("postgres", "warehouse"),
+            ("mysql", "shop"),
+            ("fake", "other"),
+        ] {
+            let secret_id = secret(
+                &pool,
+                &keys,
+                ws,
+                SecretPurpose::ConnectorCredential,
+                br#"{"user":"reader","password":"pw"}"#,
+            )
+            .await;
+            let fields: Vec<String> = if kind == "fake" {
+                vec!["token".to_owned()]
+            } else {
+                vec!["user".to_owned(), "password".to_owned()]
+            };
+            sqlx::query(
+                "INSERT INTO sources (id, workspace_id, kind, name, config, \
+                    credential_secret_id, credential_fields) \
+                 VALUES ($1, $2, $3, $4, '{}', $5, $6)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(kind)
+            .bind(name)
+            .bind(secret_id.as_uuid())
+            .bind(fields)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0047_workspace_credentials.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let rows: Vec<(String, serde_json::Value, Uuid)> = sqlx::query_as(
+            "SELECT s.kind, c.hints, c.id FROM sources s JOIN credentials c ON c.id = s.credential_id \
+             ORDER BY s.name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let kinds: Vec<_> = rows.iter().map(|row| row.0.as_str()).collect();
+        assert_eq!(kinds, ["fake", "mysql", "postgres"]);
+        assert_eq!(rows[0].1, json!({"token": ""}));
+        for row in &rows[1..] {
+            assert_eq!(row.1, json!({"username": "", "password": ""}));
+            let opened = open_credential(&pool, &keys, ws, row.2).await.unwrap();
+            assert_eq!(
+                opened.secret.expose(),
+                br#"{"user":"reader","password":"pw"}"#
+            );
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_old_credential_columns_are_dropped_and_every_workspace_gets_its_own_credentials(
         pool: PgPool,
     ) {

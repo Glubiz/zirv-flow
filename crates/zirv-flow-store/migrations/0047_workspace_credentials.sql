@@ -63,9 +63,17 @@ ALTER TABLE destinations ADD COLUMN credential_id uuid;
 -- Existing sealed credentials become credentials that point at the same `encrypted_secrets` row.
 -- Nothing is re-sealed here: the ciphertext keeps its row and purpose, which the associated data
 -- binds. The id of the owner in the key and the name keeps every generated value unique.
+--
+-- The MySQL and PostgreSQL sources named their user field `user` and now name it `username`, as the
+-- built-in "Username and password" kind does, so a credential can be shared with them. The
+-- imported credential is named for the new field; the sealed JSON still holds `user`, which the
+-- sources read as a fallback, and the next rotation seals `username`.
 CREATE TEMPORARY TABLE imported_credentials AS
     SELECT 'source'::text AS owner, s.id AS owner_id, gen_random_uuid() AS id, s.workspace_id,
-           s.name AS owner_name, s.credential_secret_id AS secret_id, s.credential_fields,
+           s.name AS owner_name, s.credential_secret_id AS secret_id,
+           CASE WHEN s.kind IN ('mysql', 'postgres')
+                THEN array_replace(s.credential_fields, 'user', 'username')
+                ELSE s.credential_fields END AS credential_fields,
            s.created_by
     FROM sources s
     WHERE s.credential_secret_id IS NOT NULL

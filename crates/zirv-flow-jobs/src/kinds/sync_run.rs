@@ -2482,7 +2482,7 @@ mod tests {
             let secret = zirv_flow_core::SecretId::new();
             let sealed = seal(
                 &keys,
-                json!({"user": role, "password": "zf_job_pw"})
+                json!({"username": role, "password": "zf_job_pw"})
                     .to_string()
                     .as_bytes(),
                 &secret_aad(ws, secret, SecretPurpose::ConnectorCredential),
@@ -2501,7 +2501,7 @@ mod tests {
                 ws,
                 "warehouse credential",
                 secret,
-                &["user", "password"],
+                &["username", "password"],
             )
             .await
             .unwrap();
@@ -2551,7 +2551,10 @@ mod tests {
                 .await
                 .unwrap();
             let mut credential = Credential::new();
-            credential.insert("user", zirv_flow_core::SecretString::new(role.to_owned()));
+            credential.insert(
+                "username",
+                zirv_flow_core::SecretString::new(role.to_owned()),
+            );
             credential.insert(
                 "password",
                 zirv_flow_core::SecretString::new("zf_job_pw".to_owned()),

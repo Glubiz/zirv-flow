@@ -18,7 +18,7 @@ function mount() {
 const CREDENTIALS = [
   aCredentialHolding("cred-1", "CRM token", ["token"]),
   aCredentialHolding("cred-2", "Other CRM token", ["token"]),
-  aCredentialHolding("cred-pg", "Warehouse login", ["user", "password"]),
+  aCredentialHolding("cred-pg", "Warehouse login", ["username", "password"]),
 ];
 
 const BASE = {

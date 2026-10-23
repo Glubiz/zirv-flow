@@ -1473,6 +1473,96 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_built_in_username_and_password_credential_can_be_shared_with_database_sources(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let basic = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "basic", "name": "Warehouse login",
+                            "fields": {"username": "reader"}, "secret": {"password": "pw"}})),
+            )
+            .await;
+        assert_eq!(basic.status, StatusCode::CREATED, "{:?}", basic.body);
+        let basic_id = basic.body["id"].as_str().unwrap().to_owned();
+        let config = json!({"host": "db.example.com", "database": "shop"});
+
+        for kind in ["postgres", "mysql"] {
+            let created = fx
+                .as_admin(
+                    "POST",
+                    "/sources",
+                    Some(
+                        json!({"kind": kind, "name": format!("{kind} one"), "config": config,
+                                "credential_id": basic_id}),
+                    ),
+                )
+                .await;
+            assert_eq!(
+                created.status,
+                StatusCode::CREATED,
+                "{kind}: {:?}",
+                created.body
+            );
+            assert_eq!(
+                created.body["credential_fields_set"],
+                json!(["password", "username"])
+            );
+
+            // An update that moves a source onto the credential is accepted too.
+            let bare = fx
+                .as_admin(
+                    "POST",
+                    "/credentials",
+                    Some(json!({"kind": "custom", "name": format!("{kind} sealed"),
+                                "schema": {"fields": [
+                                    {"key": "username", "label": "U", "type": "string", "required": true, "secret": true},
+                                    {"key": "password", "label": "P", "type": "string", "required": true, "secret": true}]},
+                                "secret": {"username": "other", "password": "pw"}})),
+                )
+                .await;
+            let other = fx
+                .as_admin(
+                    "POST",
+                    "/sources",
+                    Some(
+                        json!({"kind": kind, "name": format!("{kind} two"), "config": config,
+                                "credential_id": bare.body["id"]}),
+                    ),
+                )
+                .await;
+            assert_eq!(
+                other.status,
+                StatusCode::CREATED,
+                "{kind}: {:?}",
+                other.body
+            );
+            let moved = fx
+                .as_admin(
+                    "PATCH",
+                    &format!("/sources/{}", other.body["id"].as_str().unwrap()),
+                    Some(json!({"credential_id": basic_id})),
+                )
+                .await;
+            assert_eq!(moved.status, StatusCode::OK, "{kind}: {:?}", moved.body);
+        }
+
+        // What the source opens carries the user under the key the source reads.
+        let opened =
+            zirv_flow_store::open_credential(&pool, &fx.keyring, fx.ws, basic_id.parse().unwrap())
+                .await
+                .unwrap();
+        let credential =
+            zirv_flow_connectors::sources::Credential::from_parts(&opened.secret, &opened.fields)
+                .unwrap();
+        assert_eq!(credential.get("username").unwrap().expose(), "reader");
+        assert_eq!(credential.get("password").unwrap().expose(), "pw");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_credential_needs_the_master_key(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let name = WorkspaceName::parse("ours").unwrap();
