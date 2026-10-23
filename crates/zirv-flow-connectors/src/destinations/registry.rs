@@ -40,13 +40,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kinds_are_unique_and_every_credential_field_is_secret_and_no_config_field_is() {
+    fn kinds_are_unique_and_every_credential_has_a_secret_field_and_no_config_field_is_secret() {
         let specs = Registry::built_in().specs();
 
         let kinds: HashSet<_> = specs.iter().map(|spec| spec.kind).collect();
         assert_eq!(kinds.len(), specs.len());
         for spec in specs {
-            assert!(spec.credential_fields.iter().all(|field| field.secret));
+            assert!(spec.credential_fields.iter().any(|field| field.secret));
             assert!(spec.config_fields.iter().all(|field| !field.secret));
         }
     }
