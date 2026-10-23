@@ -19,6 +19,7 @@ pub mod schedule;
 mod scope;
 mod secrets;
 pub mod segment;
+pub mod sending;
 pub mod signature;
 pub mod token;
 mod trace;

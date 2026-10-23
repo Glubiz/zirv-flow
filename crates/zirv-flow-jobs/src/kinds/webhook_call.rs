@@ -1787,7 +1787,6 @@ mod tests {
                     name: format!("T {id}"),
                     channel: channel.into(),
                     category: "transactional".into(),
-                    sender_identity_id: None,
                     document,
                 },
                 None,

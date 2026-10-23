@@ -286,6 +286,8 @@ pub enum SecretPurpose {
     WebhookSigning,
     /// The password or token a destination uses to deliver messages.
     DestinationCredential,
+    /// The private half of a sending domain DKIM key, as PKCS#8 DER.
+    DkimKey,
 }
 
 impl SecretPurpose {
@@ -298,6 +300,7 @@ impl SecretPurpose {
             Self::WebhookSecret => "webhook_secret",
             Self::WebhookSigning => "webhook_signing",
             Self::DestinationCredential => "destination_credential",
+            Self::DkimKey => "dkim_key",
         }
     }
 
@@ -310,6 +313,7 @@ impl SecretPurpose {
             Self::WebhookSecret,
             Self::WebhookSigning,
             Self::DestinationCredential,
+            Self::DkimKey,
         ]
         .into_iter()
         .find(|purpose| purpose.as_str() == text)
@@ -913,6 +917,7 @@ mod tests {
             SecretPurpose::WebhookSecret,
             SecretPurpose::WebhookSigning,
             SecretPurpose::DestinationCredential,
+            SecretPurpose::DkimKey,
         ] {
             assert_eq!(SecretPurpose::parse(purpose.as_str()), Some(purpose));
         }

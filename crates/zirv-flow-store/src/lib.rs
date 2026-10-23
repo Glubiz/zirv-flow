@@ -24,6 +24,7 @@ mod pool;
 mod privacy;
 pub mod secrets;
 mod segments;
+mod sending;
 mod sessions;
 mod sources;
 mod stream_freshness;
@@ -201,6 +202,17 @@ pub use segments::{
     run_person_batch, run_segment_preview, segment_catalog, segment_catalog_details, segment_cron,
     segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use sending::fixtures as sending_fixtures;
+pub use sending::{
+    DomainCheck, DomainDelete, DomainRecord, IdentityError, NewSenderIdentity, NewSendingDomain,
+    RecordFinding, SENDING_DOMAIN_VERIFY_KIND, SenderError, SenderIdentity, SenderIdentityPatch,
+    SendingDomain, VerifiedSender, archive_sender_identity, create_sender_identity,
+    create_sender_identity_in, create_sending_domain, delete_sending_domain, due_sending_domains,
+    enqueue_domain_verify, find_sender_identity, find_sending_domain, list_domain_records,
+    list_sender_identities, list_sending_domains, list_workspace_domain_records,
+    record_domain_check, require_verified_sender, update_sender_identity,
+};
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
     delete_sessions_for_user, find_active_session, touch_session,
@@ -243,7 +255,7 @@ pub use sync_runs::{
 pub use templates::{
     LockedTemplate, NewTemplate, Template, TemplateDraft, TemplateError, TemplateFieldCatalog,
     TemplatePatch, TemplateUse, TemplateVersion, TemplateVersionSummary, archive_template,
-    create_template, find_template, find_template_draft, find_template_version,
+    create_template, document_sender, find_template, find_template_draft, find_template_version,
     list_template_versions, list_templates, lock_template, publish_template,
     read_template_field_catalog, save_template_draft, template_where_used, update_template,
 };

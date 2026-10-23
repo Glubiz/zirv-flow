@@ -21,6 +21,9 @@ const MAX_DRAIN_SHARDS: u32 = 16;
 /// The most render-host children `render.pool_size` may ask for.
 const MAX_RENDER_POOL: u32 = 32;
 
+/// The longest `sending.recheck_hours`: thirty days.
+const MAX_SENDING_RECHECK_HOURS: u32 = 720;
+
 /// The longest `render.deadline_ms`: ten minutes.
 const MAX_RENDER_DEADLINE_MS: u64 = 600_000;
 
@@ -31,7 +34,7 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 48] = [
+const CONFIG_KEYS: [&str; 49] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -73,6 +76,7 @@ const CONFIG_KEYS: [&str; 48] = [
     "render.pool_size",
     "render.deadline_ms",
     "render.memory_limit_mib",
+    "sending.recheck_hours",
     "egress.allow",
     "ai.providers",
     "ai.rate_limit_per_user_per_minute",
@@ -103,6 +107,7 @@ pub(crate) struct Config {
     imports: ImportsConfig,
     explorer: ExplorerConfig,
     render: RenderConfig,
+    sending: SendingConfig,
     #[serde(default)]
     egress: EgressConfig,
     /// The model allowlist of the AI assistant; empty means the assistant is unavailable.
@@ -352,6 +357,14 @@ struct RenderConfig {
     memory_limit_mib: u64,
 }
 
+/// Sending domains (architecture 10.2).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendingConfig {
+    /// Hours a sending domain may go without a DNS check before the scheduler leader queues one.
+    recheck_hours: u32,
+}
+
 /// What a CSV upload may be.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -542,6 +555,7 @@ impl Config {
             .merge(Serialized::default("render.pool_size", 2_u32))
             .merge(Serialized::default("render.deadline_ms", 5_000_u64))
             .merge(Serialized::default("render.memory_limit_mib", 512_u64))
+            .merge(Serialized::default("sending.recheck_hours", 6_u32))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -662,6 +676,7 @@ impl Config {
         }
 
         config.validate_render(path, &env_sources)?;
+        config.validate_sending(path, &env_sources)?;
         config.validate_events(path, &env_sources)?;
         config.validate_ingest(path, &env_sources)?;
         if config.imports.max_file_bytes == 0 {
@@ -739,6 +754,22 @@ impl Config {
             return Err(fail(
                 "render.memory_limit_mib",
                 "must be between 64 and 1048576",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The re-check interval must be at least an hour and at most thirty days.
+    fn validate_sending(
+        &self,
+        path: Option<&Path>,
+        env_sources: &HashMap<String, String>,
+    ) -> Result<(), ConfigError> {
+        if !(1..=MAX_SENDING_RECHECK_HOURS).contains(&self.sending.recheck_hours) {
+            return Err(ConfigError::new(
+                "sending.recheck_hours",
+                "must be between 1 and 720",
+                source_for("sending.recheck_hours", path, env_sources),
             ));
         }
         Ok(())
@@ -1013,6 +1044,11 @@ impl Config {
     /// Concurrent drain loops per workspace in `ingest.drain`.
     pub(crate) fn ingest_drain_shards(&self) -> u32 {
         self.ingest.drain_shards
+    }
+
+    /// How long a sending domain may go without a DNS check before the scheduler queues one.
+    pub(crate) fn sending_domain_recheck(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.sending.recheck_hours) * 3600)
     }
 
     /// The render pool's size and per-render deadline, and the children's memory limit in bytes.
@@ -2340,6 +2376,34 @@ output_price_per_mtok = 15000000
             let error = Config::load(None, env).unwrap_err().to_string();
 
             assert!(error.contains("must be at least 1"), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn sending_domains_are_rechecked_every_six_hours_unless_configured() {
+        let mut env = database_env("postgres://localhost/database");
+        assert_eq!(
+            Config::load(None, env.clone())
+                .unwrap()
+                .sending_domain_recheck(),
+            std::time::Duration::from_secs(6 * 3600)
+        );
+
+        env.push(("ZIRV_FLOW_SENDING__RECHECK_HOURS".into(), "12".into()));
+        assert_eq!(
+            Config::load(None, env).unwrap().sending_domain_recheck(),
+            std::time::Duration::from_secs(12 * 3600)
+        );
+        for value in ["0", "721"] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_SENDING__RECHECK_HOURS".into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(
+                error.contains("sending.recheck_hours: must be between 1 and 720"),
+                "{value}: {error}"
+            );
         }
     }
 

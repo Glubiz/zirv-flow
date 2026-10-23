@@ -24,6 +24,7 @@ mod privacy_erase;
 mod privacy_export;
 mod segment_reevaluate;
 pub(crate) mod segment_refresh;
+mod sending_domain_verify;
 mod sync_run;
 mod sync_tokens;
 mod traits_recompute;
@@ -56,6 +57,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &flow_settle::FlowSettle,
     &flow_lifecycle::FlowLifecycle,
     &webhook_call::WebhookCall,
+    &sending_domain_verify::SendingDomainVerify,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text

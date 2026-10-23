@@ -684,7 +684,6 @@ mod tests {
                     name: format!("T {id}"),
                     channel: channel.to_owned(),
                     category: "transactional".to_owned(),
-                    sender_identity_id: None,
                     document,
                 },
                 None,

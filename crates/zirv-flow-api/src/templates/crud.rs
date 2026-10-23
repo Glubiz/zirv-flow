@@ -4,7 +4,7 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -27,15 +27,6 @@ use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
 const MAX_NAME_CHARS: usize = 100;
-
-/// Tells an absent field from a `null` one: absent is `None`, `null` is `Some(None)`.
-fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Option::<T>::deserialize(deserializer).map(Some)
-}
 
 /// The channel of a template. Only the two with a registered content type can be made.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
@@ -88,7 +79,8 @@ pub(crate) struct TemplateBody {
     channel: String,
     /// `marketing` or `transactional`; fixed when the template is made.
     category: String,
-    /// The sender identity of an email template.
+    /// The sender identity the draft's document names (`email.sender`), when it is an identity of
+    /// this workspace. Read-only: it follows the draft, which is where the sender is set.
     sender_identity_id: Option<Uuid>,
     /// The newest published version; null before the first publish.
     current_version: Option<i32>,
@@ -180,7 +172,6 @@ pub(crate) struct CreateTemplateRequest {
     channel: TemplateChannelRequest,
     /// Default `marketing` for email and `transactional` for a webhook.
     category: Option<TemplateCategoryRequest>,
-    sender_identity_id: Option<Uuid>,
     /// The first draft. Its channel and category must be the template's. Absent: an empty
     /// code-mode document.
     #[schema(value_type = Option<Object>)]
@@ -190,10 +181,6 @@ pub(crate) struct CreateTemplateRequest {
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct UpdateTemplateRequest {
     name: Option<String>,
-    /// `null` clears it.
-    #[serde(default, deserialize_with = "present")]
-    #[schema(value_type = Option<Uuid>, nullable)]
-    sender_identity_id: Option<Option<Uuid>>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -253,7 +240,6 @@ pub(crate) async fn create_template(
         name,
         channel: request.channel.as_str().to_owned(),
         category: category.as_str().to_owned(),
-        sender_identity_id: request.sender_identity_id,
         document,
     };
     // The same checks a draft save makes, against the template this will be.
@@ -262,7 +248,7 @@ pub(crate) async fn create_template(
         name: new.name.clone(),
         channel: new.channel.clone(),
         category: new.category.clone(),
-        sender_identity_id: new.sender_identity_id,
+        sender_identity_id: None,
         current_version: None,
         archived_at: None,
         created_by: created_by.map(|user| user.as_uuid()),
@@ -305,16 +291,10 @@ pub(crate) async fn update_template(
     if name.is_some() {
         fields.push("name");
     }
-    if request.sender_identity_id.is_some() {
-        fields.push("sender_identity_id");
-    }
     if fields.is_empty() {
         return Err(invalid("body", "must change at least one field"));
     }
-    let patch = TemplatePatch {
-        name,
-        sender_identity_id: request.sender_identity_id,
-    };
+    let patch = TemplatePatch { name };
     let mut tx = zirv_flow_store::begin(pool).await?;
     let template = zirv_flow_store::update_template(&mut tx, workspace, id, &patch)
         .await
@@ -498,7 +478,7 @@ pub(crate) async fn get(
     Ok(Json(TemplateDetailBody::new(&template, &draft)))
 }
 
-/// Changes a template's name or sender identity. The channel and the category are fixed when the
+/// Changes a template's name. The channel and the category are fixed when the
 /// template is made. Audited as `template.updated`.
 #[utoipa::path(
     put,
@@ -641,20 +621,6 @@ mod tests {
             serde_json::from_str::<CreateTemplateRequest>(r#"{"name":"A","channel":"sms"}"#)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn an_update_tells_a_cleared_sender_from_an_absent_one() {
-        let absent: UpdateTemplateRequest = serde_json::from_str(r#"{"name":"A"}"#).unwrap();
-        let cleared: UpdateTemplateRequest =
-            serde_json::from_str(r#"{"sender_identity_id":null}"#).unwrap();
-        let set: UpdateTemplateRequest =
-            serde_json::from_str(&format!(r#"{{"sender_identity_id":"{}"}}"#, Uuid::nil()))
-                .unwrap();
-
-        assert_eq!(absent.sender_identity_id, None);
-        assert_eq!(cleared.sender_identity_id, Some(None));
-        assert_eq!(set.sender_identity_id, Some(Some(Uuid::nil())));
     }
 
     #[test]

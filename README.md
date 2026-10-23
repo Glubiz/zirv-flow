@@ -117,6 +117,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](#render-host) |
 | `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
+| `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
@@ -2109,6 +2110,25 @@ page size set, only the 100,000-page cap ends such a stream.
 `zirv_flow_source_rate_limit_wait_seconds_total{source_type}`. The labels are the source type and
 fixed values only: never a URL, a host or a source id. No error or log line holds a secret, a URL,
 a header or a response body.
+
+## Sending domains
+
+An email template publishes only with a sender identity on a verified sending domain (a publish
+with any other sender is a 422 `sender_unverified`). Workspace admins manage both:
+
+- `POST /api/v1/workspaces/{ws}/sending-domains` with `{"domain": "example.com"}` (optional
+  `selector`, default `zirv`, and `spf_mechanism`, such as `include:spf.relay.example`) generates
+  an RSA-2048 DKIM key, seals the private half (it is never returned) and answers with the three
+  DNS TXT records to publish: DKIM at `<selector>._domainkey.<domain>`, SPF at the domain and DMARC
+  at `_dmarc.<domain>`. The SPF value is a recommendation: a name holds one `v=spf1` record, so
+  merge it with the one you have.
+- A background job reads those records. The domain is `verified` only while all three are `ok`:
+  DKIM when the published `p=` key matches, SPF when exactly one `v=spf1` record contains the
+  configured mechanism, DMARC when any `v=DMARC1` record has a valid `p=`. It falls back to
+  `unverified` when a check finds one missing or wrong; a name server that does not answer changes
+  nothing and the check is retried. `POST .../sending-domains/{id}/verify` queues a check now;
+  otherwise the scheduler re-checks every `sending.recheck_hours` (default 6).
+- `POST /api/v1/workspaces/{ws}/sender-identities` binds a from name and an address on the domain.
 
 ## Render host
 

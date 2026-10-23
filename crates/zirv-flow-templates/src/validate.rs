@@ -110,6 +110,15 @@ pub(crate) fn sample_context(catalog: &FieldCatalog) -> Value {
     Value::from_serialize(RenderContext::sample(catalog))
 }
 
+/// Whether `text` is a UUID in its hyphenated form (8-4-4-4-12 hexadecimal digits).
+fn is_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.len() == 5
+        && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, length)| {
+            group.len() == length && group.chars().all(|c| c.is_ascii_hexdigit())
+        })
+}
+
 fn validate_email(
     env: &Environment<'static>,
     email: &EmailContent,
@@ -117,10 +126,11 @@ fn validate_email(
     sample: &Value,
     issues: &mut Vec<Issue>,
 ) {
+    // The sender is the id of a sender identity, a UUID; anything else names no identity.
     if email
         .sender
         .as_deref()
-        .is_none_or(|sender| sender.trim().is_empty())
+        .is_none_or(|sender| !is_uuid(sender.trim()))
     {
         issues.push(Issue::new(code::MISSING_SENDER, "/email/sender"));
     }
@@ -497,7 +507,7 @@ mod tests {
     fn good_email() -> EmailContent {
         EmailContent {
             subject: "Hi {{ person.first_name }}".into(),
-            sender: Some("snd_1".into()),
+            sender: Some("00000000-0000-7000-8000-000000000001".into()),
             lang: Some("en".into()),
             category: Category::Marketing,
             syntax: Default::default(),
@@ -857,6 +867,14 @@ mod tests {
             codes(&email_issues(|email| email.sender = Some("  ".into()))),
             [code::MISSING_SENDER]
         );
+        // A sender that is not the id of a sender identity names none.
+        for bad in ["snd_1", "0000-0000", "zzzzzzzz-0000-7000-8000-000000000001"] {
+            assert_eq!(
+                codes(&email_issues(|email| email.sender = Some(bad.into()))),
+                [code::MISSING_SENDER],
+                "{bad}"
+            );
+        }
     }
 
     #[test]

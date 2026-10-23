@@ -338,9 +338,10 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # RUSTSEC-2023-0071 (rsa, via openidconnect): the Marvin timing side
-          # channel affects private-key operations. zirv-flow only verifies
-          # ID-token signatures with the provider's public keys. Remove this
-          # once rsa ships a fixed release.
+          # channel affects private-key operations. zirv-flow verifies
+          # ID-token signatures with the provider's public keys, and uses rsa
+          # to generate DKIM keys (sending domains), never to sign or decrypt:
+          # DKIM signing uses ring. Remove this once rsa ships a fixed release.
           ignore: RUSTSEC-2023-0071
 
   # PRs into `release/**` integration branches share one pinned release
