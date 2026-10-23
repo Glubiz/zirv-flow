@@ -2,6 +2,12 @@
 //! publishes, the rules that decide whether what DNS returned is what was asked for, and DKIM key
 //! generation.
 //!
+//! An alias (CNAME) at a record's name whose target is not a public name ([`is_public_name`]) is
+//! never followed. The record is a `Mismatch` shown with the fixed note [`PRIVATE_ALIAS_NOTE`],
+//! which carries none of the target's text, and the domain is `unverified` like any other
+//! record that is not `Ok`: public receivers cannot resolve such a record either. It is not
+//! `Missing`, because a record is there; it is not an outage either, so it is not retried.
+//!
 //! Pure: nothing here resolves a name. A resolver hands [`check_record`] the TXT strings it
 //! found. The RSA key is generated here and never used to sign or decrypt (signing is done with
 //! `ring` in the SMTP destination, which loads the PKCS#8 key this module produces).
@@ -370,6 +376,10 @@ pub fn check_record(kind: RecordKind, expected: &str, observed: &[String]) -> Re
         }
     }
 }
+
+/// The observed text of a record whose name is an alias to a non-public name: fixed, and with no
+/// text of the target.
+pub const PRIVATE_ALIAS_NOTE: &str = "(an alias to a non-public name, not followed)";
 
 /// What stands in for a TXT record that is not one of the expected types.
 pub const OTHER_TXT: &str = "(another TXT record, not shown)";
