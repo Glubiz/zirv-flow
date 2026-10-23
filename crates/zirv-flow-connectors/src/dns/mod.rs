@@ -10,9 +10,11 @@
 //! name to the name servers the operator configured for the host. What a tenant can learn through
 //! it is bounded by the callers: a sending domain must be a public name (`parse_domain` refuses
 //! internal and special-use suffixes), and only TXT text of the expected record type is stored or
-//! returned, rebuilt from its parsed fields (`redact_observed`). A CNAME in an answer's chain whose target is not a public name
-//! (the same rule, `is_public_name`) voids the answer, which is then empty: a public name cannot be
-//! made to answer from a private zone. Architecture 16.2 records the reasoning.
+//! returned, rebuilt from its parsed fields (`redact_observed`). A CNAME in an answer's chain whose
+//! target is not a public name (the same rule, `is_public_name`) voids the answer: the lookup
+//! fails with [`DnsError::PrivateAlias`], which carries none of the target's text, so a public name
+//! cannot be made to answer from a private zone and the caller can tell the alias from a missing
+//! record. Architecture 16.2 records the reasoning.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,6 +40,10 @@ pub enum DnsError {
     /// The name servers did not answer (a timeout, a refusal or a server failure). Retry later;
     /// the records' last known state says nothing.
     Unavailable,
+    /// The name is an alias, directly or through a chain, to a name that is not public. The alias
+    /// was not followed and nothing of the target is reported. Unlike [`Self::Unavailable`] this
+    /// is an answer, not an outage: public receivers cannot resolve the record either.
+    PrivateAlias,
 }
 
 impl std::fmt::Display for DnsError {
@@ -45,14 +51,15 @@ impl std::fmt::Display for DnsError {
         formatter.write_str(match self {
             Self::InvalidName => "not a valid DNS name",
             Self::Unavailable => "the name servers did not answer",
+            Self::PrivateAlias => "an alias to a non-public name, not followed",
         })
     }
 }
 
 impl std::error::Error for DnsError {}
 
-/// Whether every CNAME target in an answer's chain is a public name. A resolver returns no records
-/// from an answer for which this is false.
+/// Whether every CNAME target in an answer's chain is a public name. A resolver fails an answer
+/// for which this is false with [`DnsError::PrivateAlias`].
 pub(crate) fn chain_is_public<S: AsRef<str>>(targets: impl IntoIterator<Item = S>) -> bool {
     targets
         .into_iter()
@@ -65,7 +72,8 @@ pub type Lookup<'a> = Pin<Box<dyn Future<Output = Result<Vec<String>, DnsError>>
 /// Looks up TXT records.
 pub trait DnsResolver: Send + Sync + std::fmt::Debug {
     /// The TXT records at `name`, one string per record with its character strings joined. An
-    /// empty list when the name or its TXT records do not exist.
+    /// empty list when the name or its TXT records do not exist; [`DnsError::PrivateAlias`] when
+    /// the name is an alias to a non-public name.
     fn lookup_txt<'a>(&'a self, name: &'a str) -> Lookup<'a>;
 }
 
@@ -79,6 +87,10 @@ mod tests {
         assert_eq!(
             DnsError::Unavailable.to_string(),
             "the name servers did not answer"
+        );
+        assert_eq!(
+            DnsError::PrivateAlias.to_string(),
+            "an alias to a non-public name, not followed"
         );
     }
 

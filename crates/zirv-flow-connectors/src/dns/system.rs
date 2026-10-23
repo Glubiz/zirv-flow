@@ -34,6 +34,9 @@ impl SystemResolver {
         options.attempts = ATTEMPTS;
         // A re-check must see DNS as it is now, not as a cached answer held it.
         options.cache_size = 0;
+        // The CNAME chain is read from the answer to check each target, so keep the intermediate
+        // records rather than relying on the default.
+        options.preserve_intermediates = true;
         let resolver = builder.build().map_err(|_| DnsError::Unavailable)?;
         Ok(Self { resolver })
     }
@@ -69,7 +72,7 @@ impl DnsResolver for SystemResolver {
                         _ => None,
                     });
                     if !chain_is_public(targets) {
-                        return Ok(Vec::new());
+                        return Err(DnsError::PrivateAlias);
                     }
                     Ok(answers
                         .iter()
