@@ -378,9 +378,17 @@ As built (consent, topics and suppressions):
   It has no `person_id` and survives erasure by design; the other three are
   covered by the isolation tests and the erasure scan.
 - **Writes.** `store::set_consent` locks the person row, follows `merged_into`, treats a write of
-  the status already held as a no-op (no history row, no decision), and otherwise upserts the
-  state, appends the history row and a `consent.change` decision (reason is the source code,
-  subjects are the person and the change). `store::consent::move_on_merge` runs inside the merge
+  the status already held as a no-op (no history row, no decision) unless some other record of
+  the person and channel overlaps its scope (equal or absent topic, and equal values for every
+  dimension key both name), has a different status and lies strictly between the held row and
+  the change by (`changed_at`, change id); then it advances the row like any change, because
+  that is what makes the change the latest word for the messages both cover. Otherwise it appends
+  the history row and a `consent.change` decision (reason is the source code, subjects are the
+  person and the change) and upserts the state, but only when the change is newer by
+  (`changed_at`, change id) than the row: an older change, such as a late ingest, stays in the
+  history with a `superseded` decision, returns the `Superseded` outcome (callers count it as no
+  state change) and leaves the state, so the state always agrees with
+  the read rule's latest-change-wins. `store::consent::move_on_merge` runs inside the merge
   transaction: per channel and topic of the loser it applies `core::consent::merge` against the
   survivor, records a `merge` history row when the status changes, deletes the loser's states
   and re-points its history.

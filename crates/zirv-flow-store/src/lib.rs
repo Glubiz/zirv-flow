@@ -62,9 +62,12 @@ pub use changes::{
 };
 pub use clock::{Clock, ManualClock};
 pub use consent::{
-    ConsentChange, ConsentEntry, ConsentHistoryEntry, ConsentOutcome, NewTopic, Topic, TopicUpdate,
-    consent_for, consent_history, create_topic, find_topic, find_topic_by_key, list_topics,
-    set_consent, update_topic,
+    ConsentChange, ConsentEntry, ConsentExportCursor, ConsentExportRow, ConsentHistoryEntry,
+    ConsentOutcome, Dimension, DimensionUpdate, DimensionValue, NewDimension, NewTopic,
+    ReadOutcome, Topic, TopicUpdate, consent_export_page, consent_for, consent_history,
+    consent_read, create_dimension, create_dimension_value, create_topic, dimensions_of,
+    find_dimension, find_topic, find_topic_by_key, list_dimensions, list_topics, set_consent,
+    unknown_dimension_entry, update_dimension, update_dimension_value, update_topic,
 };
 pub use contacts::{
     Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,
@@ -80,9 +83,9 @@ pub use destinations::{
     Admission, AttemptOutcome, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt, Destination,
     DestinationStat, DestinationUpdate, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, NewDeliveryAttempt,
     NewDestination, RateGate, StatusClass, SubjectKind, archive_destination, bucket_state,
-    count_delivery_attempt, create_destination, destination_report, find_destination,
-    find_destination_for_update, list_delivery_attempts, list_destinations,
-    record_delivery_attempt, throttle_bucket, update_destination,
+    count_delivery_attempt, count_delivery_attempt_record_failure, create_destination,
+    destination_report, find_destination, find_destination_for_update, list_delivery_attempts,
+    list_destinations, record_delivery_attempt, throttle_bucket, update_destination,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,

@@ -366,7 +366,7 @@ async fn person_document(
     let events = section.events().await?;
     let consent = section
         .rows(
-            "SELECT c.channel, t.key AS topic, c.status, c.explicit, c.changed_at \
+            "SELECT c.channel, t.key AS topic, c.dimensions, c.status, c.explicit, c.changed_at \
              FROM consent c LEFT JOIN topics t \
                 ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
              WHERE c.workspace_id = $1 AND c.person_id = ANY($2) \
@@ -375,8 +375,8 @@ async fn person_document(
         .await?;
     let consent_history = section
         .rows(
-            "SELECT c.id, c.channel, t.key AS topic, c.from_status, c.to_status, c.source, \
-                    c.evidence, c.occurred_at, c.actor_user_id, c.trace_id \
+            "SELECT c.id, c.channel, t.key AS topic, c.dimensions, c.from_status, c.to_status, \
+                    c.source, c.evidence, c.occurred_at, c.actor_user_id, c.trace_id \
              FROM consent_changes c LEFT JOIN topics t \
                 ON t.workspace_id = c.workspace_id AND t.id = c.topic_id \
              WHERE c.workspace_id = $1 AND c.person_id = ANY($2) \

@@ -2,9 +2,9 @@
 //! destination type is one module here plus one line in [`ALL`]. Destinations hold no state and
 //! never touch the store; every network call goes through the [`DestinationContext`].
 //!
-//! No production destination ships yet: SMTP and webhook arrive with their own issues, so [`ALL`]
-//! is empty in a normal build and holds only the in-memory fake behind the `test-support`
-//! feature, the way the sources registry does.
+//! The built-in `webhook` destination is the one production type so far (SMTP arrives with its own
+//! issue). [`ALL`] adds the in-memory fake behind the `test-support` feature, the way the sources
+//! registry does.
 
 mod context;
 mod destination;
@@ -15,6 +15,7 @@ mod registry;
 mod retry_after;
 mod spec;
 mod validate;
+mod webhook;
 
 pub use context::DestinationContext;
 pub use destination::{BoxFuture, Delivered, Destination, ErasedDestination, Outbound};
@@ -29,6 +30,7 @@ pub use validate::{validate_config, validate_credential};
 pub use fake::GOOD_TOKEN as FAKE_GOOD_TOKEN;
 
 pub(crate) static ALL: &[&dyn ErasedDestination] = &[
+    &webhook::Webhook,
     #[cfg(feature = "test-support")]
     &fake::Fake,
 ];
