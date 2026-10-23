@@ -2151,8 +2151,10 @@ is bounded instead by two rules. A domain name must be a public one: single labe
 literals and the special-use or never-delegated suffixes (`localhost`, `local`,
 `internal`, `arpa`, `test`, `example`, `invalid`, `onion`, `alt`, `corp`, `home`, `mail`)
 are refused, so the check cannot be pointed at a private zone by name. A CNAME in an answer's
-chain whose target fails the same rule voids the answer (it is read as empty), so a public name
-cannot be aliased into a private zone either. And only a TXT record that parses completely as
+chain whose target fails the same rule is not followed and nothing of it is read, so a public
+name cannot be aliased into a private zone either; the record is reported as a `mismatch` with
+a fixed note (`(an alias to a non-public name, not followed)`) that carries none of the target's
+text, and the domain drops to `unverified`, because public receivers cannot resolve it either. And only a TXT record that parses completely as
 the expected type is shown (`v=spf1` at the domain, `v=DMARC1` at `_dmarc`, a DKIM record at
 the selector name), rebuilt from its parsed fields (SPF mechanisms and modifiers, the DMARC
 tags, the DKIM key tags, each in its RFC grammar) and never copied; any other string, or a

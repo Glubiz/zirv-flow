@@ -143,9 +143,18 @@ pub async fn set_consent(
     .await
     .map_err(StoreError::query)?;
     let held = held_row.as_ref().map(|(status, _, _)| status.clone());
+    let change_id = Uuid::now_v7();
     if let Some((status, at, last)) = &held_row
         && status == change.status.as_str()
-        && !reaffirm_matters(connection, workspace, person, change, (*at, *last)).await?
+        && !reaffirm_matters(
+            connection,
+            workspace,
+            person,
+            change,
+            change_id,
+            (*at, *last),
+        )
+        .await?
     {
         return Ok(ConsentOutcome::Unchanged);
     }
@@ -154,6 +163,7 @@ pub async fn set_consent(
         workspace,
         person,
         &StateWrite {
+            change_id,
             channel: change.channel,
             topic: change.topic,
             dimensions: &change.dimensions,
@@ -183,16 +193,16 @@ pub async fn set_consent(
 
 /// Whether re-affirming the held status changes what the read rule answers: some other record
 /// R of the person and channel overlaps the change scope, has a different status, and sits
-/// strictly between the held row and the incoming change by (`changed_at`, change id). Scopes
-/// overlap when the topics are equal or either has none, and every dimension key both maps name
-/// has the same value; a key missing from a map means all values. The incoming change id is a
-/// fresh one, later than every stored id, so R is before it when R is not after the change time.
-/// Runs under the person lock.
+/// strictly between the held row and the incoming change by (`changed_at`, change id), the
+/// incoming change's pair being (`occurred_at`, `incoming`). Scopes overlap when the topics are
+/// equal or either has none, and every dimension key both maps name has the same value; a key
+/// missing from a map means all values. Runs under the person lock.
 async fn reaffirm_matters(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person: Uuid,
     change: &ConsentChange,
+    incoming: Uuid,
     held: (OffsetDateTime, Option<Uuid>),
 ) -> Result<bool, StoreError> {
     sqlx::query_scalar(
@@ -205,7 +215,8 @@ async fn reaffirm_matters(
               AND c.status <> $8 \
               AND (c.changed_at, COALESCE(c.last_change_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
                   > ($6, COALESCE($7, '00000000-0000-0000-0000-000000000000'::uuid)) \
-              AND c.changed_at <= $9)",
+              AND (c.changed_at, COALESCE(c.last_change_id, '00000000-0000-0000-0000-000000000000'::uuid)) \
+                  < ($9, $10))",
     )
     .bind(workspace.as_uuid())
     .bind(person)
@@ -216,6 +227,7 @@ async fn reaffirm_matters(
     .bind(held.1)
     .bind(change.status.as_str())
     .bind(change.occurred_at)
+    .bind(incoming)
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)
@@ -273,6 +285,8 @@ async fn lock_current_person(
 
 /// The state and history row to write for one person, channel and topic.
 pub(super) struct StateWrite<'a> {
+    /// The id of the history row, which becomes the state row's `last_change_id`.
+    pub(super) change_id: Uuid,
     pub(super) channel: Channel,
     pub(super) topic: Option<Uuid>,
     pub(super) dimensions: &'a Dimensions,
@@ -298,7 +312,7 @@ pub(super) async fn write_state(
     write: &StateWrite<'_>,
     trace: &TraceContext,
 ) -> Result<(Uuid, bool), StoreError> {
-    let change_id = Uuid::now_v7();
+    let change_id = write.change_id;
     sqlx::query(
         "INSERT INTO consent_changes \
             (id, workspace_id, person_id, channel, topic_id, dimensions, from_status, to_status, \
@@ -1639,6 +1653,65 @@ mod tests {
         )
         .await;
         assert_eq!(apart, ConsentOutcome::Unchanged);
+        assert_eq!(count(&pool, "consent_changes").await, before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_record_with_a_later_id_at_the_change_time_does_not_make_a_reaffirm_matter(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        verticals(&pool, ws).await;
+        let ada = person(&pool, ws, "ada@example.com").await;
+        let trace = TraceContext::root(Cause::api("test"));
+        let retail = [("vertical", "retail")];
+        set(
+            &pool,
+            ws,
+            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T1),
+            &trace,
+        )
+        .await;
+        // An unsubscribed all-values record at T2 whose change id is later than any id the
+        // incoming change can get: a v7 id with the largest timestamp.
+        let later =
+            Uuid::from_u128((0xFFFF_FFFF_FFFF_u128 << 80) | (0x7_u128 << 76) | (0x2_u128 << 62));
+        sqlx::query(
+            "INSERT INTO consent_changes (id, workspace_id, person_id, channel, dimensions, \
+                to_status, source, occurred_at, trace_id) \
+             VALUES ($1, $2, $3, 'email', '{}'::jsonb, 'unsubscribed', 'api', $4, $1)",
+        )
+        .bind(later)
+        .bind(ws.as_uuid())
+        .bind(ada)
+        .bind(T2)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO consent (workspace_id, person_id, channel, dimensions, status, explicit, \
+                changed_at, last_change_id) \
+             VALUES ($1, $2, 'email', '{}'::jsonb, 'unsubscribed', true, $3, $4)",
+        )
+        .bind(ws.as_uuid())
+        .bind(ada)
+        .bind(T2)
+        .bind(later)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before = count(&pool, "consent_changes").await;
+
+        let outcome = set(
+            &pool,
+            ws,
+            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T2),
+            &trace,
+        )
+        .await;
+
+        assert_eq!(outcome, ConsentOutcome::Unchanged);
         assert_eq!(count(&pool, "consent_changes").await, before);
     }
 }
