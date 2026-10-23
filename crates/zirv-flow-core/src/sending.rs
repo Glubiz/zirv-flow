@@ -555,9 +555,41 @@ fn dmarc_size(size: &str) -> Option<String> {
     let digits = lower.trim_end_matches(['k', 'm', 'g', 't']);
     (!digits.is_empty()
         && lower.len() - digits.len() <= 1
-        && digits.len() <= 18
-        && digits.chars().all(|c| c.is_ascii_digit()))
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && digits.parse::<u64>().is_ok())
     .then_some(lower)
+}
+
+/// The `mailto:` address of a `dmarc-uri`: every `%` must start two hex digits, the decoded text
+/// must be UTF-8 and parse as an email, and it is re-encoded by one rule: ASCII letters, digits
+/// and `. _ - + @` stay literal, every other byte becomes an upper-case `%XX`.
+fn dmarc_mailbox(rest: &str) -> Option<String> {
+    let bytes = rest.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let pair = rest.get(at + 1..at + 3)?;
+            if !pair.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            decoded.push(u8::from_str_radix(pair, 16).ok()?);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    let email = Email::parse(std::str::from_utf8(&decoded).ok()?).ok()?;
+    let mut out = String::new();
+    for byte in email.as_str().bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+' | b'@') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Some(out)
 }
 
 /// One `dmarc-uri` (RFC 7489 section 6.2): `mailto:` with an address that parses, or `https:` with
@@ -566,12 +598,13 @@ fn dmarc_uri(uri: &str) -> Option<String> {
     let (scheme, rest) = uri.split_once(':')?;
     match scheme.to_ascii_lowercase().as_str() {
         "mailto" => {
-            let valid = rest.len() <= 254
-                && rest.chars().all(|c| {
-                    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
-                })
-                && Email::parse(rest).is_ok();
-            valid.then(|| format!("mailto:{rest}"))
+            let literal_ok = rest.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-' | '@')
+            });
+            let mailbox = (rest.len() <= 254 && literal_ok)
+                .then(|| dmarc_mailbox(rest))
+                .flatten()?;
+            Some(format!("mailto:{mailbox}"))
         }
         "https" => {
             let authority_and_path = rest.strip_prefix("//")?;
@@ -1001,12 +1034,37 @@ mod tests {
             "v=DMARC1; p=none; rua=https://reports.example.net/x?token=secret",
             "v=DMARC1; p=none; rua=https://user@reports.example.net/x",
             "v=DMARC1; p=none; rua=http://reports.example.net/x",
+            "v=DMARC1; p=none; rua=mailto:%zzSECRET@example.com",
+            "v=DMARC1; p=none; rua=mailto:a%@example.com",
+            "v=DMARC1; p=none; rua=mailto:a%4@example.com",
+            "v=DMARC1; p=none; rua=mailto:a@example.com%",
+            "v=DMARC1; p=none; rua=mailto:a%20b@example.com",
+            "v=DMARC1; p=none; rua=mailto:a@example.com!18446744073709551616",
             "v=DMARC1; p=none; psd=x",
             "v=DMARC1; p=none; t=u",
             "v=DMARC1; p=none; np=other",
         ] {
             assert_eq!(shown(bad), [OTHER_TXT], "{bad}");
         }
+    }
+
+    #[test]
+    fn dmarc_mailto_escapes_are_canonical_and_size_is_u64() {
+        let shown = |text: &str| redact_observed(RecordKind::Dmarc, &[text.to_owned()]);
+        assert_eq!(
+            shown("v=DMARC1; p=none; rua=mailto:A%2bB%40Example.com"),
+            ["v=DMARC1; p=none; rua=mailto:a+b@example.com"]
+        );
+        assert_eq!(
+            shown("v=DMARC1; p=none; rua=mailto:a%2Eb@example.com"),
+            ["v=DMARC1; p=none; rua=mailto:a.b@example.com"]
+        );
+        assert_eq!(
+            shown("v=DMARC1; p=none; rua=mailto:a%25b@example.com"),
+            ["v=DMARC1; p=none; rua=mailto:a%25b@example.com"]
+        );
+        let max = "v=DMARC1; p=none; rua=mailto:a@example.com!18446744073709551615k";
+        assert_eq!(shown(max), [max.replace('K', "k")]);
     }
 
     #[test]
