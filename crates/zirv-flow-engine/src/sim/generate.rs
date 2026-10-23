@@ -2,6 +2,8 @@
 //! node created after its source), every node is reached through the edge that created it, every
 //! port is wired once, and the result is asserted to pass `core::flow::validate_graph`.
 
+use std::collections::BTreeMap;
+
 use chrono::{Days, NaiveDate};
 use serde_json::json;
 use uuid::Uuid;
@@ -25,6 +27,7 @@ enum Shape {
     Branch,
     Split,
     Webhook,
+    Send,
     SetTrait,
     IncrementTrait,
     UnsetTrait,
@@ -34,7 +37,8 @@ enum Shape {
     Exit,
 }
 
-/// The shapes with output ports: every kind that is not an end.
+/// The shapes with output ports that random graphs draw from: every kind that is not an end and
+/// not in [`COVERED_ONLY`].
 const OPEN: [Shape; 12] = [
     Shape::WaitDuration,
     Shape::WaitTimeOfDay,
@@ -49,6 +53,11 @@ const OPEN: [Shape; 12] = [
     Shape::List,
     Shape::GoalContinue,
 ];
+
+/// The shapes with output ports that only a covering graph holds. `action.send` is here, not in
+/// [`OPEN`], so the seeded populations of the other kinds draw the same graphs they did before
+/// the send node existed, and each covering graph still has one.
+const COVERED_ONLY: [Shape; 1] = [Shape::Send];
 
 /// The shapes that end an enrollment.
 const ENDS: [Shape; 2] = [Shape::GoalExit, Shape::Exit];
@@ -77,6 +86,13 @@ pub const fn list_id(index: u128) -> Uuid {
 }
 
 const LIST_BASE: u128 = 0x018f_0000_0000_7000_8000_0000_0000_0010;
+
+/// The id of a template, destination or topic a generated `action.send` node names.
+pub const fn send_id(index: u128) -> Uuid {
+    Uuid::from_u128(SEND_BASE + index)
+}
+
+const SEND_BASE: u128 = 0x018f_0000_0000_7000_8000_0000_0000_0100;
 
 fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
     match shape {
@@ -154,6 +170,16 @@ fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
                 template: None,
             }
         }
+        Shape::Send => NodeKind::ActionSend {
+            template: send_id(u128::from(rng.below(3))),
+            destination: send_id(10 + u128::from(rng.below(2))),
+            topic: rng.chance(50).then(|| send_id(20)),
+            dimensions: if rng.chance(30) {
+                [("vertical".to_owned(), "sports".to_owned())].into()
+            } else {
+                BTreeMap::new()
+            },
+        },
         Shape::SetTrait => NodeKind::ActionUpdateTrait {
             key: format!("t{}", rng.below(5)),
             change: TraitChange::Set {
@@ -232,9 +258,10 @@ pub fn graph(rng: &mut Rng, size: usize, cover_all: bool) -> FlowGraph {
     let mut owed: Vec<Shape> = Vec::new();
     let size = if cover_all {
         owed.extend(OPEN);
+        owed.extend(COVERED_ONLY);
         rng.shuffle(&mut owed);
         owed.extend(ENDS);
-        size.max(OPEN.len() + 4)
+        size.max(OPEN.len() + COVERED_ONLY.len() + 4)
     } else {
         size.max(2)
     };
@@ -248,7 +275,7 @@ pub fn graph(rng: &mut Rng, size: usize, cover_all: bool) -> FlowGraph {
     let mut ends: Vec<usize> = Vec::new();
 
     // The entry always has ports.
-    let entry = if owed.first().is_some_and(|shape| OPEN.contains(shape)) {
+    let entry = if owed.first().is_some_and(|shape| !ENDS.contains(shape)) {
         owed.remove(0)
     } else {
         *rng.pick(&OPEN)
@@ -306,7 +333,7 @@ pub fn graph(rng: &mut Rng, size: usize, cover_all: bool) -> FlowGraph {
 fn take_owed(owed: &mut Vec<Shape>) -> Option<Shape> {
     let position = owed
         .iter()
-        .position(|shape| OPEN.contains(shape))
+        .position(|shape| !ENDS.contains(shape))
         .or_else(|| (!owed.is_empty()).then_some(0))?;
     Some(owed.remove(position))
 }

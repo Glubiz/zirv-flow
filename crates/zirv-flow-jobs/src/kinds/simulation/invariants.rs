@@ -13,7 +13,10 @@
 //!    person, list and operation must equal what the done steps make, once each.
 //! 2. **Every external effect enqueued once, under its stable key.** The trigger log of
 //!    `webhook.call` inserts holds exactly one row for the key of each done webhook step, and the
-//!    destination saw only those keys, with one body per key however often it was called.
+//!    destination saw only those keys, with one body per key however often it was called. The log
+//!    of `delivery.send` inserts holds exactly one row for the key of each done send step, with a
+//!    message id of its own. The driver does not run the send jobs: their gates and delivery have
+//!    tests of their own (`delivery_send`).
 //! 3. **No wake before its `wake_at`.** The driver recorded the virtual time of every wake that
 //!    moved an enrollment on.
 //! 4. **End state.** Every enrollment ended, or waits at a wait node with its wake job (and, at
@@ -29,7 +32,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, ListChange, NODE_TYPES, NodeKind, TraitChange};
 use zirv_flow_engine::effect_key;
-use zirv_flow_store::{DEFAULT_MAX_ATTEMPTS, STEP_JOB_KIND, WEBHOOK_JOB_KIND};
+use zirv_flow_store::{DEFAULT_MAX_ATTEMPTS, SEND_JOB_KIND, STEP_JOB_KIND, WEBHOOK_JOB_KIND};
 
 use super::driver::{Driver, KINDS, WakeMove};
 use super::world::{TRAIT_KEYS, World, end};
@@ -200,6 +203,7 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
 
     // Invariant 1, and the expected webhook keys for invariant 2.
     let mut expected_keys: BTreeMap<String, Uuid> = BTreeMap::new();
+    let mut expected_sends: BTreeSet<String> = BTreeSet::new();
     let mut expected_goals: BTreeSet<String> = BTreeSet::new();
     let mut kinds_run: BTreeSet<&'static str> = BTreeSet::new();
     for enrollment in &enrollments {
@@ -274,6 +278,9 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
                 NodeKind::ActionWebhook { .. } => {
                     expected_keys
                         .insert(effect_key(enrollment.id, node_id, "webhook"), enrollment.id);
+                }
+                NodeKind::ActionSend { .. } => {
+                    expected_sends.insert(effect_key(enrollment.id, node_id, "send"));
                 }
                 _ => {}
             }
@@ -418,6 +425,7 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
     found.count("goal conversions", expected_goals.len());
 
     external_effects(driver, w, &mut found, &expected_keys, &enrollments).await;
+    send_jobs(w, &mut found, &expected_sends).await;
 
     // Invariant 3.
     for text in wake_violations(&driver.wake_moves) {
@@ -439,6 +447,55 @@ pub(super) async fn check(w: &World, driver: &Driver<'_>, population: usize) -> 
     }
     found.count("node kinds run", kinds_run.len());
     found
+}
+
+/// Invariant 2 for `action.send`: each done send step enqueued one `delivery.send` job under its
+/// stable key, which is also the effect key in its payload, and no job was enqueued for a step that
+/// did not commit.
+async fn send_jobs(w: &World, found: &mut Findings, expected: &BTreeSet<String>) {
+    let logged: Vec<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT unique_key, payload ->> 'effect_key', payload ->> 'message_id' FROM sim_enqueued          WHERE workspace_id = $1 AND kind = $2",
+    )
+    .bind(w.env.ws.as_uuid())
+    .bind(SEND_JOB_KIND)
+    .fetch_all(&w.env.pool)
+    .await
+    .unwrap();
+    let mut enqueued: BTreeMap<String, usize> = BTreeMap::new();
+    let mut messages: BTreeSet<String> = BTreeSet::new();
+    for (unique, effect, message) in logged {
+        let key = effect.unwrap_or_default();
+        if unique.as_deref() != Some(key.as_str()) {
+            found.violate(format!(
+                "invariant 2: the send of {key} has unique key {unique:?}: it is not queued under its stable key"
+            ));
+        }
+        if !message.is_some_and(|message| messages.insert(message)) {
+            found.violate(format!(
+                "invariant 2: the send of {key} has no message id of its own"
+            ));
+        }
+        *enqueued.entry(key).or_default() += 1;
+    }
+    for (key, count) in &enqueued {
+        if !expected.contains(key) {
+            found.violate(format!(
+                "invariant 2 (unexpected key): {count} send jobs were enqueued under {key}, which no done step explains"
+            ));
+        } else if *count != 1 {
+            found.violate(format!(
+                "invariant 2 (enqueued more than once): the send of {key} was enqueued {count} times"
+            ));
+        }
+    }
+    for key in expected {
+        if !enqueued.contains_key(key) {
+            found.violate(format!(
+                "invariant 2 (never enqueued): the send of {key} was never enqueued"
+            ));
+        }
+    }
+    found.count("send jobs enqueued", enqueued.len());
 }
 
 /// Invariant 2.

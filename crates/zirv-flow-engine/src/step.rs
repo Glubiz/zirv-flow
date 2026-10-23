@@ -296,6 +296,24 @@ impl Run<'_> {
                 );
                 next()
             }
+            NodeKind::ActionSend {
+                template,
+                destination,
+                topic,
+                dimensions,
+            } => {
+                self.effect(
+                    node,
+                    Some("send"),
+                    EffectKind::Send {
+                        template: *template,
+                        destination: *destination,
+                        topic: *topic,
+                        dimensions: dimensions.clone(),
+                    },
+                );
+                next()
+            }
             NodeKind::ActionUpdateTrait { key, change } => {
                 self.effect(
                     node,
@@ -626,6 +644,55 @@ mod tests {
         );
         let external: Vec<bool> = transition.effects.iter().map(Effect::is_external).collect();
         assert_eq!(external, [false, false, true, false]);
+    }
+
+    #[test]
+    fn a_send_node_makes_one_external_effect_under_a_stable_send_key() {
+        let template = Uuid::from_u128(11);
+        let destination = Uuid::from_u128(12);
+        let topic = Uuid::from_u128(13);
+        let dimensions: std::collections::BTreeMap<String, String> =
+            [("vertical".to_owned(), "sports".to_owned())].into();
+        let g = graph(
+            vec![
+                (
+                    "mail",
+                    NodeKind::ActionSend {
+                        template,
+                        destination,
+                        topic: Some(topic),
+                        dimensions: dimensions.clone(),
+                    },
+                ),
+                ("end", NodeKind::Exit {}),
+            ],
+            &[("mail", "next", "end")],
+        );
+        let state = start(&g);
+
+        let first = run(&g, &state, StepInput::Start);
+        let replay = run(&g, &state, StepInput::Start);
+
+        assert_eq!(first, replay, "a replay yields the same effects and keys");
+        assert_eq!(first.outcome, Outcome::Completed);
+        assert_eq!(first.effects.len(), 1);
+        let effect = &first.effects[0];
+        assert_eq!(
+            effect.kind,
+            EffectKind::Send {
+                template,
+                destination,
+                topic: Some(topic),
+                dimensions,
+            }
+        );
+        assert!(effect.is_external());
+        let id = enrollment();
+        assert_eq!(effect.step_key, format!("{id}:mail"));
+        assert_eq!(
+            effect.effect_key.as_deref(),
+            Some(format!("{id}:mail:send").as_str())
+        );
     }
 
     #[test]

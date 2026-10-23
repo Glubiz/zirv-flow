@@ -1,6 +1,8 @@
 //! The data [`step`](crate::step) reads and returns: the persisted enrollment state, the inputs,
 //! the injected context and the [`Transition`] to commit (architecture 9.2 and 9.3).
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -130,6 +132,15 @@ pub enum EffectKind {
         url: String,
         trait_keys: Vec<String>,
         template: Option<Uuid>,
+    },
+    /// External: one message of `template` through `destination`, passed through the send gates
+    /// when the job runs (architecture 10.1). `topic` and `dimensions` are the message's consent
+    /// coordinates.
+    Send {
+        template: Uuid,
+        destination: Uuid,
+        topic: Option<Uuid>,
+        dimensions: BTreeMap<String, String>,
     },
 }
 

@@ -12,10 +12,10 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
     Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
     database_now, delete_expired_import_data, destination_report, dirty_backlog, dirty_heads,
-    disable_schedule, due_schedules, due_sending_domains, enqueue, enqueue_domain_verify,
-    enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
-    expire_contact_idempotency, expire_exports, fail_orphaned_runs, inbox_heads,
-    prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
+    disable_schedule, due_schedules, due_sending_domains, end_orphaned_messages, enqueue,
+    enqueue_domain_verify, enqueue_drain, enqueue_reevaluate, ensure_decision_partitions,
+    ensure_event_partitions, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
+    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
     reconcile_segment_schedules, stream_freshness, try_lead,
 };
 
@@ -117,6 +117,7 @@ pub struct Scheduler {
     feed_pruned: Option<Instant>,
     /// When the sync runs were last reconciled with their jobs; none until this instance leads.
     sync_reconciled: Option<Instant>,
+    messages_reconciled: Option<Instant>,
     /// The stream freshness gauges.
     freshness: FreshnessGauges,
     /// When the freshness gauges were last refreshed; none until this instance leads.
@@ -140,6 +141,7 @@ impl Scheduler {
             imports_checked: None,
             feed_pruned: None,
             sync_reconciled: None,
+            messages_reconciled: None,
             freshness: FreshnessGauges::default(),
             freshness_checked: None,
             destinations: DestinationGauges::default(),
@@ -186,6 +188,7 @@ impl Scheduler {
         self.keep_imports().await;
         self.keep_debugger_feed().await;
         self.keep_sync_runs().await;
+        self.keep_messages(now).await;
         self.keep_freshness(now).await;
         self.keep_destinations().await;
         self.keep_sending_domains().await;
@@ -203,6 +206,7 @@ impl Scheduler {
         self.keep_imports().await;
         self.keep_debugger_feed().await;
         self.keep_sync_runs().await;
+        self.keep_messages(now).await;
         self.keep_freshness(now).await;
         self.keep_destinations().await;
         self.keep_sending_domains().await;
@@ -314,6 +318,29 @@ impl Scheduler {
         }
     }
 
+    /// Ends the open messages whose `delivery.send` job is dead or gone: on gaining leadership,
+    /// then at most every minute. A job the reaper buried never runs again, so nothing else would
+    /// end its message. A failure is logged and retried at the next check.
+    async fn keep_messages(&mut self, now: OffsetDateTime) {
+        let due = self
+            .messages_reconciled
+            .is_none_or(|checked| checked.elapsed() >= SYNC_RECONCILE_INTERVAL);
+        if !due {
+            return;
+        }
+        self.messages_reconciled = Some(Instant::now());
+        match end_orphaned_messages(&self.pool, now).await {
+            Ok(ended) if !ended.is_empty() => {
+                warn!(
+                    "ended {} message(s) whose send job is dead or gone",
+                    ended.len()
+                );
+            }
+            Ok(_) => {}
+            Err(error) => warn!("could not end the messages whose send job is gone: {error}"),
+        }
+    }
+
     /// Refreshes the stream freshness gauges from the state `stream_freshness` computes at
     /// `now`: on gaining leadership, then at most every [`FRESHNESS_INTERVAL`]. The state is
     /// derived on every call and never stored, so there is nothing to mark. A failure is logged
@@ -404,6 +431,7 @@ impl Scheduler {
             self.imports_checked = None;
             self.feed_pruned = None;
             self.sync_reconciled = None;
+            self.messages_reconciled = None;
             self.freshness_checked = None;
             self.freshness.zero_all();
             self.destinations_checked = None;

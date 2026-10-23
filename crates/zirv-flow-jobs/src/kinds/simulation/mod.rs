@@ -1,6 +1,7 @@
 //! The PostgreSQL runtime simulation (architecture section 18, layer 2 of the `engine` row).
 //!
-//! The real runtime runs on PostgreSQL: `flow.enroll`, `flow.step` and `webhook.call` jobs, with
+//! The real runtime runs on PostgreSQL: `flow.enroll`, `flow.step` and `webhook.call` jobs (and the
+//! `delivery.send` jobs the send nodes queue, which are only counted), with
 //! event waits, over 90 virtual days and a few hundred enrollments on generated graphs that use
 //! every node kind. Time is a `ManualClock`. Events arrive at seeded virtual times, many of them
 //! at, just before or just after the timeout of the wait they answer. Every job is put through
@@ -184,6 +185,17 @@ async fn simulate(pool: PgPool, ordinal: usize) {
     ] {
         need(mode);
     }
+    // The send nodes of the covering graphs ran and queued their sends, which the driver leaves
+    // queued (see invariant 2).
+    assert!(
+        found
+            .summary
+            .get("send jobs enqueued")
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "seed {seed}, population {population}: no send node queued a message"
+    );
     // Every kind of job goes through every mode, and through both concurrent variants.
     for kind in ["flow.step", "webhook.call", "flow.enroll"] {
         for mode in ["rollback", "commit without ack", "concurrent duplicate"] {

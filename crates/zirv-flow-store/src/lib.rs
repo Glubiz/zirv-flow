@@ -18,6 +18,7 @@ mod imports;
 mod ingest;
 mod jobs;
 mod lists;
+mod messages;
 mod migrations;
 mod people;
 mod pool;
@@ -104,28 +105,29 @@ pub use events::{
     set_event_policy, touch_debugger_watch, update_event_schema,
 };
 pub use flows::{
-    AudienceSource, ControlError, ENROLL_JOB_KIND, EffectError, EnrollEntries, EnrollEntry,
-    EnrollError, EnrollJobPayload, EnrollOutcome, EnrollRequest, EnrollWork, Enrolled, Enrollment,
-    EnrollmentCursor, EnrollmentFilter, EnrollmentPage, EnrollmentPath, EnrollmentStatus,
-    EnrollmentSummary, EnrollmentUpdate, ExitBatch, Flow, FlowAction, FlowError, FlowPatch,
-    FlowState, FlowTraitWrite, FlowVersion, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction,
-    LifecycleBatch, LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow,
-    NewStepExecution, NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation,
-    SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, STEP_JOB_KIND, SettleItem, SettlePayload, Signal,
-    SigningKey, SigningKeys, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent,
-    TriggerEvent, TriggerKind, TriggeredFlow, UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome,
-    WebhookPerson, WebhookResult, WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow,
-    audience_page, clear_waits, count_in_flight_enrollments, create_flow, create_signing_key,
-    enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch, find_enrollment,
-    find_event_of_person, find_events, find_flow, find_flow_version, flow_source,
+    AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError,
+    EnrollEntries, EnrollEntry, EnrollError, EnrollJobPayload, EnrollOutcome, EnrollRequest,
+    EnrollWork, Enrolled, Enrollment, EnrollmentCursor, EnrollmentFilter, EnrollmentPage,
+    EnrollmentPath, EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate, ExitBatch, Flow,
+    FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion, INTERNAL_ERROR,
+    LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch, LifecyclePayload,
+    LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow, NewStepExecution, NewWait,
+    NodeCount, Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND, SETTINGS_GOAL_NODE,
+    SETTLE_JOB_KIND, STEP_JOB_KIND, SendOutcome, SettleItem, SettlePayload, Signal, SigningKey,
+    SigningKeys, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent, TriggerEvent,
+    TriggerKind, TriggeredFlow, UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson,
+    WebhookResult, WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow, audience_page,
+    clear_waits, count_in_flight_enrollments, create_flow, create_signing_key,
+    end_orphaned_messages, enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch,
+    find_enrollment, find_event_of_person, find_events, find_flow, find_flow_version, flow_source,
     flow_state_for_step, has_webhook_signing_secret, hold_enrollment, list_flow_enrollments,
     list_flow_versions, list_flows, live_signing_keys, load_enrollment_path, lock_audience_page,
     lock_enrollment, lock_flow, lock_webhook_person, occurrence_of, pause_flow, publish_flow,
-    read_webhook_subject, reconcile_flow_schedules, record_steps, record_webhook_outcome,
-    register_wait, release_enrollment, reopen_failed_step, resolve_survivors, resume_batch,
-    resume_failed, resume_flow, rotate_signing_key, save_enrollment, segment_is_watched,
-    segment_trigger_flows, settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft,
-    version_node_counts, wait_filters,
+    read_webhook_subject, reconcile_flow_schedules, record_send_outcome, record_steps,
+    record_webhook_outcome, register_wait, release_enrollment, reopen_failed_step,
+    resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
+    save_enrollment, segment_is_watched, segment_trigger_flows, settle_wait_step, step_zones,
+    unhealthy_inputs, update_flow_draft, version_node_counts, wait_filters,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -157,6 +159,10 @@ pub use lists::{
     List, ListMember, ListSource, MAX_PEOPLE_PER_CALL, MemberIdentifier, MembershipChange,
     MembershipError, MembershipOutcome, PersonList, add_members, create_list, delete_list,
     find_list, list_lists, lists_for, members, membership_history, remove_members, update_list,
+};
+pub use messages::{
+    GateRecord, Message, MessageStatus, NewMessage, find_message, insert_message,
+    list_person_messages, mark_message_sending, message_status, read_send_address,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{
@@ -237,8 +243,9 @@ pub use stream_offsets::{
 };
 pub use suppressions::{
     AddOutcome, BatchEntry, NewSuppression, RemoveOutcome, SUPPRESSION_KINDS, Suppression,
-    SuppressionCursor, add_suppression, add_suppressions, count_suppressed, find_suppression,
-    is_suppressed, list_suppressions, remove_suppression,
+    SuppressionCursor, SuppressionScope, add_organization_suppression, add_suppression,
+    add_suppressions, count_suppressed, find_suppression, is_suppressed, list_suppressions,
+    remove_suppression, suppressing_scope,
 };
 pub use sync_runs::{
     BatchOutcome as SyncBatchOutcome, BatchProgress as SyncBatchProgress,

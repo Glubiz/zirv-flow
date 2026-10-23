@@ -368,6 +368,10 @@ async fn lock_merged_and_survivor(
 ///   ended enrollments, which are history of the person that was enrolled, and re-pointing them
 ///   could collide with the survivor's on the in-flight and occurrence unique indexes. They go
 ///   with the group when it is erased.
+/// - `messages` is **kept on the old id**, for the same reason: a message is history of the person it
+///   was sent to, and the log reads through `person_merges` ([`crate::list_person_messages`]) so
+///   the survivor sees it. A `delivery.send` still queued names the old id and is dropped when the
+///   enrollment it belongs to has exited (the merge exits the loser's in-flight enrollments).
 /// - `step_executions` has no person column and follows its enrollment.
 /// - `enrollment_waits` is **deleted** in the merge transaction with the enrollment that held it:
 ///   a wait left on the old id would never match an event, which resolves to the survivor, while
@@ -1410,8 +1414,22 @@ mod tests {
             .await
             .unwrap();
         }
-        // An ended enrollment of the loser: history, kept on the old id.
+        // An ended enrollment of the loser: history, kept on the old id. So is a message sent to
+        // them.
         let ended = enroll_in(&pool, ws, loser, "completed").await;
+        let message = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, completed_at) \
+             VALUES ($1, $2, $3, $4, 'n', gen_random_uuid(), gen_random_uuid(), 'sent', now())",
+        )
+        .bind(message)
+        .bind(ws.as_uuid())
+        .bind(loser)
+        .bind(ended)
+        .execute(&pool)
+        .await
+        .unwrap();
         apply_one(
             &pool,
             ws,
@@ -1460,6 +1478,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, loser, "ended enrollments stay on the old id");
+        let sent_to: Uuid = sqlx::query_scalar("SELECT person_id FROM messages WHERE id = $1")
+            .bind(message)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sent_to, loser, "messages stay on the old id");
+        let through_merges = crate::list_person_messages(&pool, ws, survivor, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            through_merges
+                .iter()
+                .map(|found| found.id)
+                .collect::<Vec<_>>(),
+            [message],
+            "the survivor's log reads through person_merges"
+        );
     }
 
     #[sqlx::test]

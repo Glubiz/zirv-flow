@@ -32,6 +32,8 @@ const MESSAGES: Record<FlowIssue["code"], string> = {
   invalid_trait_key: "A field name is empty or not valid.",
   invalid_trait_value: "The value is not valid for this change.",
   too_many_trait_keys: "The webhook sends more fields than it may.",
+  invalid_dimension: "A consent dimension of the email is not valid.",
+  too_many_dimensions: "The email names more consent dimensions than it may.",
   invalid_cron: "The schedule is not a valid cron expression.",
   invalid_timezone: "The time zone is not a valid time zone name.",
   exit_on_goal_without_goal: "Leaving the flow on the goal needs a goal. Add one, or turn that off.",
@@ -48,6 +50,10 @@ const MESSAGES: Record<FlowIssue["code"], string> = {
   webhook_secret_missing: "The workspace has no webhook signing secret. An admin can create one in the workspace settings.",
   webhook_template_unusable:
     "The template must be a published webhook template. Choose one that is published and made for webhooks.",
+  send_template_unusable:
+    "The template must be a published email template that is not archived. Choose one that is published.",
+  send_destination_unusable: "The destination must be one that is live and delivers email. Choose another.",
+  unknown_dimension: "This refers to a consent dimension or a value the workspace does not have.",
 };
 
 /** The text for an issue, with the output it concerns named when it is about one. */

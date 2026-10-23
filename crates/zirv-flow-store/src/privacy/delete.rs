@@ -126,6 +126,7 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM step_executions WHERE workspace_id = $1 AND enrollment_id IN \n        (SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM messages WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -153,6 +154,8 @@ macro_rules! names_erased_person {
         "( \
             (kind = 'flow.step' AND payload ->> 'enrollment_id' = ANY($3)) \
             OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \
+                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
+            OR (kind = 'delivery.send' AND payload ->> 'person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)))"
@@ -1076,7 +1079,7 @@ mod tests {
         let enrollment = enrollment_of(&pool, person).await;
         let payload = match kind {
             "flow.step" => serde_json::json!({ "enrollment_id": enrollment }),
-            "webhook.call" => serde_json::json!({ "person_id": person }),
+            "webhook.call" | "delivery.send" => serde_json::json!({ "person_id": person }),
             "person.merge.rewrite" => {
                 serde_json::json!({ "workspace_id": ws, "merged_person_id": merged })
             }
@@ -1167,8 +1170,74 @@ mod tests {
     erased_while_running_tests! {
         running_flow_step: "flow.step",
         running_webhook_call: "webhook.call",
+        running_delivery_send: "delivery.send",
         running_merge_rewrite: "person.merge.rewrite",
         running_flow_enroll: "flow.enroll",
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erased_person_loses_their_messages_and_their_pending_sends_but_not_a_bystanders(
+        pool: PgPool,
+    ) {
+        let Seeded {
+            ws,
+            person,
+            merged,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let kept = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, completed_at) \
+             VALUES ($1, $2, $3, gen_random_uuid(), 'n', gen_random_uuid(), gen_random_uuid(), \
+                'sent', now())",
+        )
+        .bind(kept)
+        .bind(ws.as_uuid())
+        .bind(bystander)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let messages = |people: Vec<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM messages WHERE person_id = ANY($1)",
+                )
+                .bind(people)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(messages(vec![person, merged]).await, 2);
+        let sends = "SELECT count(*) FROM jobs WHERE kind = 'delivery.send'";
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(sends)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+
+        erase(&pool, ws, person).await;
+
+        assert_eq!(messages(vec![person, merged]).await, 0);
+        assert_eq!(
+            messages(vec![bystander]).await,
+            1,
+            "a bystander keeps their log"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(sends)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "the pending send is purged"
+        );
     }
 
     #[sqlx::test]

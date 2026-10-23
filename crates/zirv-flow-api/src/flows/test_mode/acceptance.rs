@@ -460,6 +460,58 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn test_mode_captures_a_send_and_writes_nothing(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let template = uuid::Uuid::now_v7();
+        let destination = uuid::Uuid::now_v7();
+        let topic = uuid::Uuid::now_v7();
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "mail", "type": "action.send", "template": template,
+             "destination": destination, "topic": topic,
+             "dimensions": {"vertical": "sports"}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [{"id": "e1", "from": "mail", "port": "next", "to": "end"}]});
+        let flow = f.create_flow("Mail", graph).await;
+        let before = f.counts().await;
+        assert!(
+            before.iter().any(|(name, _)| name == "messages"),
+            "messages is counted"
+        );
+
+        let walked = f
+            .lead(
+                "POST",
+                &f.uri(&flow),
+                Some(json!({"snapshot": {}, "start_at": "2030-01-01T00:00:00Z"})),
+            )
+            .await;
+
+        assert_eq!(walked.status, StatusCode::OK, "{:?}", walked.body);
+        let body = &walked.body;
+        assert_eq!(
+            path_nodes(body),
+            pairs(&[("mail", "passed"), ("end", "completed")])
+        );
+        assert_eq!(body["halted"], Value::Null);
+        let [send] = body["external_effects"].as_array().unwrap().as_slice() else {
+            panic!("one captured send");
+        };
+        let enrollment = body["enrollment_id"].as_str().unwrap();
+        assert_eq!(send["kind"], "send");
+        assert_eq!(send["effect_key"], json!(format!("{enrollment}:mail:send")));
+        assert_eq!(send["detail"]["template"], json!(template));
+        assert_eq!(send["detail"]["destination"], json!(destination));
+        assert_eq!(send["detail"]["topic"], json!(topic));
+        assert_eq!(send["detail"]["dimensions"], json!({"vertical": "sports"}));
+        assert_eq!(
+            f.counts().await,
+            before,
+            "no message, event, job or decision was written"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_published_version_and_an_inline_graph_are_walked_and_a_replay_repeats(pool: PgPool) {
         let f = fixture(&pool).await;
         let flow = f.create_flow("Journey", journey(false)).await;

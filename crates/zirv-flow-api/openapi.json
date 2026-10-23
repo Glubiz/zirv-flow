@@ -24074,7 +24074,7 @@
           },
           "detail": {
             "type": "object",
-            "description": "What the node asked for. A webhook shows the `url` and the `envelope` that would be sent\n(never the signing secret or a signature)."
+            "description": "What the node asked for. A webhook shows the `url` and the `envelope` that would be sent\n(never the signing secret or a signature); a send shows the template, destination, topic\nand dimensions of the message it would queue (nothing is rendered, checked against consent\nor sent, and no message is written)."
           },
           "effect_key": {
             "type": [
@@ -24085,7 +24085,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "`update_trait`, `list`, `goal` or `webhook`."
+            "description": "`update_trait`, `list`, `goal`, `webhook` or `send`."
           },
           "node": {
             "type": "string"
@@ -25282,6 +25282,53 @@
         },
         "additionalProperties": false
       },
+      "FlowActionSendNode": {
+        "type": "object",
+        "description": "Sends a person an email: the published `template` through the `destination`. The send passes the gates of architecture 10.1 when it runs (address, consent, suppression, a verified sender), so a person without consent is skipped and the flow goes on. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "template",
+          "destination"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A live destination that delivers email."
+          },
+          "dimensions": {
+            "type": "object",
+            "description": "The message's consent dimension values, dimension key to value key, at most 20.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "template": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A published, unarchived template of the `email` channel."
+          },
+          "topic": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The consent topic of the message. Absent: consent is judged with no topic."
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "action.send"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "FlowActionUpdateTraitNode": {
         "type": "object",
         "description": "Changes one trait as the flow's own contribution. Port `next`.",
@@ -25826,6 +25873,8 @@
               "invalid_trait_key",
               "invalid_trait_value",
               "too_many_trait_keys",
+              "invalid_dimension",
+              "too_many_dimensions",
               "invalid_cron",
               "invalid_timezone",
               "exit_on_goal_without_goal",
@@ -25840,7 +25889,10 @@
               "unknown_topic",
               "webhook_url_refused",
               "webhook_secret_missing",
-              "webhook_template_unusable"
+              "webhook_template_unusable",
+              "send_template_unusable",
+              "send_destination_unusable",
+              "unknown_dimension"
             ]
           },
           "edge": {
@@ -25922,6 +25974,9 @@
           },
           {
             "$ref": "#/components/schemas/FlowActionWebhookNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowActionSendNode"
           },
           {
             "$ref": "#/components/schemas/FlowActionUpdateTraitNode"

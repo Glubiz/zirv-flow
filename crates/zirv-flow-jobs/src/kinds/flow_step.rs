@@ -33,14 +33,15 @@ use zirv_flow_segments::{
 };
 use zirv_flow_store::{
     EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
-    GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, STEP_JOB_KIND, StepJobInput,
-    StepJobPayload, StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND, append_decisions,
-    apply_flow_list, apply_flow_trait, clear_waits, enqueue, find_enrollment, find_event_of_person,
-    find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment, record_steps,
-    register_wait, release_enrollment, reopen_failed_step, run_person_batch, save_enrollment,
-    segment_catalog, settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
+    GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, SEND_JOB_KIND, STEP_JOB_KIND,
+    StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND,
+    append_decisions, apply_flow_list, apply_flow_trait, clear_waits, enqueue, find_enrollment,
+    find_event_of_person, find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment,
+    record_steps, register_wait, release_enrollment, reopen_failed_step, run_person_batch,
+    save_enrollment, segment_catalog, settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
 };
 
+use super::delivery_send::Queued;
 use super::segment_refresh::{catalog_of, sql_query};
 use crate::{JobContext, JobError, JobKind};
 
@@ -731,6 +732,42 @@ async fn apply_effect(
         EffectKind::GoalConversion => {
             decisions.push(walk.decision("flow.goal", "converted", None, step, Some(&effect.node)));
             Ok(None)
+        }
+        EffectKind::Send {
+            template,
+            destination,
+            topic,
+            dimensions,
+        } => {
+            let label = input_freshness(conn, walk).await?;
+            let key = effect
+                .effect_key
+                .clone()
+                .ok_or_else(|| JobError::new("an external effect has no key"))?;
+            let mut job = NewJob::new(SEND_JOB_KIND, enrollment.trace.clone());
+            job.workspace_id = Some(walk.workspace);
+            job.unique_key = Some(key.clone());
+            // The message id is minted here, in the step's transaction: it is the idempotency
+            // key at the destination, so every attempt of the send carries the same one.
+            job.payload = Queued {
+                workspace: walk.workspace,
+                message: Uuid::now_v7(),
+                key: &key,
+                flow: enrollment.flow_id,
+                version: enrollment.flow_version,
+                node: &effect.node,
+                enrollment: enrollment.id,
+                person: enrollment.person_id,
+                template: *template,
+                destination: *destination,
+                topic: *topic,
+                dimensions,
+                queued_at: walk.now,
+            }
+            .payload()
+            .ok_or_else(|| JobError::new("the time cannot be formatted"))?;
+            enqueue(&mut *conn, &job).await?;
+            Ok(Some(label))
         }
         EffectKind::Webhook {
             url,

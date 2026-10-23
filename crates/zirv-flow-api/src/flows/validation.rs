@@ -29,9 +29,12 @@ pub(crate) mod code {
     pub(crate) const WEBHOOK_URL_REFUSED: &str = "webhook_url_refused";
     pub(crate) const WEBHOOK_SECRET_MISSING: &str = "webhook_secret_missing";
     pub(crate) const WEBHOOK_TEMPLATE_UNUSABLE: &str = "webhook_template_unusable";
+    pub(crate) const SEND_TEMPLATE_UNUSABLE: &str = "send_template_unusable";
+    pub(crate) const SEND_DESTINATION_UNUSABLE: &str = "send_destination_unusable";
+    pub(crate) const UNKNOWN_DIMENSION: &str = "unknown_dimension";
 
     /// Every code added here.
-    pub(crate) const ALL: [&str; 9] = [
+    pub(crate) const ALL: [&str; 12] = [
         UNKNOWN_SEGMENT,
         UNKNOWN_LIST,
         UNKNOWN_TRAIT,
@@ -41,7 +44,26 @@ pub(crate) mod code {
         WEBHOOK_URL_REFUSED,
         WEBHOOK_SECRET_MISSING,
         WEBHOOK_TEMPLATE_UNUSABLE,
+        SEND_TEMPLATE_UNUSABLE,
+        SEND_DESTINATION_UNUSABLE,
+        UNKNOWN_DIMENSION,
     ];
+}
+
+/// What the workspace holds of the things the `action.send` nodes of a flow name, read for the
+/// ids the graph names only.
+#[derive(Default)]
+pub(crate) struct SendFacts {
+    /// The templates a send node may name: of the workspace, not archived, of the `email` channel
+    /// and with a published version.
+    pub(crate) templates: BTreeSet<Uuid>,
+    /// The destinations a send node may name: of the workspace, not archived, and of a type that
+    /// delivers email.
+    pub(crate) destinations: BTreeSet<Uuid>,
+    /// The topics of the workspace's email channel.
+    pub(crate) topics: BTreeSet<Uuid>,
+    /// The nodes whose dimension values name a dimension or a value the workspace does not have.
+    pub(crate) unknown_dimensions: BTreeSet<String>,
 }
 
 /// What the checks read from the workspace, all taken in one transaction.
@@ -56,6 +78,8 @@ pub(crate) struct Environment<'a> {
     /// The templates a webhook node may name: those of the workspace that are not archived, have
     /// a published version and are of the `webhook` channel.
     pub(crate) webhook_templates: &'a BTreeSet<Uuid>,
+    /// What the send nodes of the flow name.
+    pub(crate) send: &'a SendFacts,
 }
 
 /// The issues of a flow and what it reads, for the impact preview.
@@ -184,6 +208,12 @@ impl Checker<'_> {
                 } => {
                     self.webhook(url, trait_keys, *template, &node.id);
                 }
+                NodeKind::ActionSend {
+                    template,
+                    destination,
+                    topic,
+                    ..
+                } => self.send(*template, *destination, *topic, &node.id),
                 NodeKind::ActionUpdateTrait { key, .. } => {
                     if !self.environment.catalog.traits.contains_key(key) {
                         self.issue(code::UNKNOWN_TRAIT, id, Some("/key".to_owned()));
@@ -302,6 +332,34 @@ impl Checker<'_> {
         }
     }
 
+    /// A send node names a template and a destination that can send, a topic of the email channel
+    /// and dimension values the workspace has. Consent itself is not judged here: it is read when
+    /// the message is sent.
+    fn send(&mut self, template: Uuid, destination: Uuid, topic: Option<Uuid>, node: &str) {
+        let id = Some(node);
+        let facts = self.environment.send;
+        if !facts.templates.contains(&template) {
+            self.issue(
+                code::SEND_TEMPLATE_UNUSABLE,
+                id,
+                Some("/template".to_owned()),
+            );
+        }
+        if !facts.destinations.contains(&destination) {
+            self.issue(
+                code::SEND_DESTINATION_UNUSABLE,
+                id,
+                Some("/destination".to_owned()),
+            );
+        }
+        if topic.is_some_and(|topic| !facts.topics.contains(&topic)) {
+            self.issue(code::UNKNOWN_TOPIC, id, Some("/topic".to_owned()));
+        }
+        if facts.unknown_dimensions.contains(node) {
+            self.issue(code::UNKNOWN_DIMENSION, id, Some("/dimensions".to_owned()));
+        }
+    }
+
     fn webhook(&mut self, url: &str, trait_keys: &[String], template: Option<Uuid>, node: &str) {
         let id = Some(node);
         if template.is_some_and(|template| !self.environment.webhook_templates.contains(&template))
@@ -376,6 +434,7 @@ mod tests {
         egress: EgressPolicy,
         signing_secret: bool,
         webhook_templates: BTreeSet<Uuid>,
+        send: SendFacts,
     }
 
     impl Default for Setup {
@@ -385,6 +444,7 @@ mod tests {
                 egress: EgressPolicy::default(),
                 signing_secret: true,
                 webhook_templates: BTreeSet::new(),
+                send: SendFacts::default(),
             }
         }
     }
@@ -399,6 +459,7 @@ mod tests {
                 egress: &self.egress,
                 signing_secret: self.signing_secret,
                 webhook_templates: &self.webhook_templates,
+                send: &self.send,
             };
             check(
                 &serde_json::from_value(graph).unwrap(),
@@ -644,6 +705,58 @@ mod tests {
         assert_eq!(
             codes(&setup.check(graph(other), manual())),
             ["webhook_template_unusable n /template"]
+        );
+    }
+
+    #[test]
+    fn a_send_must_name_a_template_a_destination_a_topic_and_dimensions_the_workspace_has() {
+        let (template, destination, topic) =
+            (Uuid::from_u128(7), Uuid::from_u128(8), Uuid::from_u128(9));
+        let (stranger, other_topic) = (Uuid::from_u128(10), Uuid::from_u128(11));
+        let graph = |template: Uuid, destination: Uuid, topic: Option<Uuid>| {
+            let mut node = json!({"id": "n", "type": "action.send",
+                "template": template, "destination": destination});
+            if let Some(topic) = topic {
+                node["topic"] = json!(topic);
+            }
+            around(node, &["next"])
+        };
+        let setup = Setup {
+            send: SendFacts {
+                templates: BTreeSet::from([template]),
+                destinations: BTreeSet::from([destination]),
+                topics: BTreeSet::from([topic]),
+                unknown_dimensions: BTreeSet::new(),
+            },
+            ..Setup::default()
+        };
+
+        assert_eq!(
+            codes(&setup.check(graph(template, destination, Some(topic)), manual())),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            codes(&setup.check(graph(template, destination, None), manual())),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            codes(&setup.check(graph(stranger, stranger, Some(other_topic)), manual())),
+            [
+                "send_template_unusable n /template",
+                "send_destination_unusable n /destination",
+                "unknown_topic n /topic",
+            ]
+        );
+        let dimensions = Setup {
+            send: SendFacts {
+                unknown_dimensions: BTreeSet::from(["n".to_owned()]),
+                ..SendFacts::default()
+            },
+            ..Setup::default()
+        };
+        assert!(
+            codes(&dimensions.check(graph(template, destination, None), manual()))
+                .contains(&"unknown_dimension n /dimensions".to_owned())
         );
     }
 

@@ -90,7 +90,7 @@ pub(super) fn external_effects_once(world: &World<'_>, out: &mut Vec<Violation>)
     let mut rows: BTreeMap<&str, usize> = BTreeMap::new();
     for row in &db.outbox {
         *rows.entry(row.key.as_str()).or_default() += 1;
-        let stable = effect_key(row.enrollment, &row.node, "webhook");
+        let stable = effect_key(row.enrollment, &row.node, row.kind);
         if row.key != stable {
             violation(
                 out,
@@ -128,24 +128,27 @@ pub(super) fn external_effects_once(world: &World<'_>, out: &mut Vec<Violation>)
         let Some((id, node_id, node)) = world.node_of(key) else {
             continue;
         };
-        let NodeKind::ActionWebhook {
-            url, trait_keys, ..
-        } = &node.kind
-        else {
-            continue;
+        let (kind, url, trait_keys) = match &node.kind {
+            NodeKind::ActionWebhook {
+                url, trait_keys, ..
+            } => ("webhook", url.as_str(), trait_keys.as_slice()),
+            NodeKind::ActionSend { .. } => ("send", "", [].as_slice()),
+            _ => continue,
         };
-        let stable = effect_key(id, node_id, "webhook");
+        let stable = effect_key(id, node_id, kind);
         match db.outbox.iter().find(|row| row.key == stable) {
             None => violation(
                 out,
                 Invariant::ExternalEffectsOnce,
                 format!("step {key} ran but its external effect {stable} was never enqueued"),
             ),
-            Some(row) if row.url != *url || row.trait_keys != *trait_keys => violation(
-                out,
-                Invariant::ExternalEffectsOnce,
-                format!("the external effect {stable} does not carry its node's url and keys"),
-            ),
+            Some(row) if row.kind != kind || row.url != url || row.trait_keys != trait_keys => {
+                violation(
+                    out,
+                    Invariant::ExternalEffectsOnce,
+                    format!("the external effect {stable} does not carry its node's url and keys"),
+                )
+            }
             Some(_) => {}
         }
     }

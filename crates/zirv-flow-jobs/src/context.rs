@@ -15,6 +15,7 @@ use zirv_flow_store::{
 };
 
 use crate::JobError;
+use crate::delivery::rate::RateGates;
 
 /// What the ingest drain needs beyond the handler's transaction: a pool for its own
 /// transaction per batch (the job's transaction only holds the lease), the redaction key,
@@ -41,6 +42,7 @@ pub struct JobContext<'a> {
     keyring: Option<Arc<Keyring>>,
     egress: Arc<EgressPolicy>,
     rate_limits: Arc<RateLimits>,
+    rate_gates: Arc<RateGates>,
     clock: Clock,
     render_pool: Option<RenderPool>,
     dns: Option<Arc<dyn DnsResolver>>,
@@ -57,6 +59,7 @@ impl<'a> JobContext<'a> {
             keyring: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            rate_gates: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
             dns: None,
@@ -131,6 +134,17 @@ impl<'a> JobContext<'a> {
         self.egress = egress;
         self.rate_limits = rate_limits;
         self
+    }
+
+    /// Gives the handler the process's rate gates, one per destination.
+    pub(crate) fn with_rate_gates(mut self, gates: Arc<RateGates>) -> Self {
+        self.rate_gates = gates;
+        self
+    }
+
+    /// The rate gates of the destinations this process sends to.
+    pub(crate) fn rate_gates(&self) -> &Arc<RateGates> {
+        &self.rate_gates
     }
 
     /// The master keys that open stored secrets; none when the worker has no master key.

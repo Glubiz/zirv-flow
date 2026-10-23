@@ -4756,12 +4756,14 @@ export interface components {
             at: string;
             /**
              * @description What the node asked for. A webhook shows the `url` and the `envelope` that would be sent
-             *     (never the signing secret or a signature).
+             *     (never the signing secret or a signature); a send shows the template, destination, topic
+             *     and dimensions of the message it would queue (nothing is rendered, checked against consent
+             *     or sent, and no message is written).
              */
             detail: Record<string, never>;
             /** @description The key an external effect carries to its destination; null for internal ones. */
             effect_key?: string | null;
-            /** @description `update_trait`, `list`, `goal` or `webhook`. */
+            /** @description `update_trait`, `list`, `goal`, `webhook` or `send`. */
             kind: string;
             node: string;
             /** @description The step idempotency key, `{enrollment_id}:{node_id}`. */
@@ -5273,6 +5275,32 @@ export interface components {
             /** @enum {string} */
             type: "action.list";
         };
+        /** @description Sends a person an email: the published `template` through the `destination`. The send passes the gates of architecture 10.1 when it runs (address, consent, suppression, a verified sender), so a person without consent is skipped and the flow goes on. Port `next`. */
+        FlowActionSendNode: {
+            /**
+             * Format: uuid
+             * @description A live destination that delivers email.
+             */
+            destination: string;
+            /** @description The message's consent dimension values, dimension key to value key, at most 20. */
+            dimensions?: {
+                [key: string]: string;
+            };
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /**
+             * Format: uuid
+             * @description A published, unarchived template of the `email` channel.
+             */
+            template: string;
+            /**
+             * Format: uuid
+             * @description The consent topic of the message. Absent: consent is judged with no topic.
+             */
+            topic?: string;
+            /** @enum {string} */
+            type: "action.send";
+        };
         /** @description Changes one trait as the flow's own contribution. Port `next`. */
         FlowActionUpdateTraitNode: {
             change: components["schemas"]["FlowTraitChange"];
@@ -5426,7 +5454,7 @@ export interface components {
             /** @description A JSON pointer into the node, the edge or the settings object. Inside a condition or a filter it continues with the segment pointer. */
             at?: string;
             /** @enum {string} */
-            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing" | "webhook_template_unusable";
+            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "invalid_dimension" | "too_many_dimensions" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing" | "webhook_template_unusable" | "send_template_unusable" | "send_destination_unusable" | "unknown_dimension";
             /** @description The id of the edge it concerns, when it does. */
             edge?: string;
             /** @description The id of the node it concerns, when it does. */
@@ -5449,7 +5477,7 @@ export interface components {
             type: "manual";
         };
         /** @description One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused. */
-        FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
+        FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionSendNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
         /** @description What a leaf condition saw, flattened out of the evaluation tree. */
         FlowObservedBody: {
             /**

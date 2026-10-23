@@ -1,6 +1,10 @@
 //! Identifier-level suppressions (architecture sections 6 and 16.3). A suppression is keyed
 //! by the keyed hash of an identifier; the value is never stored, and the rows are not
 //! person-scoped, so they outlive the person.
+//!
+//! A row is per workspace or organization-wide (OQ-19). The workspace functions below act on the
+//! workspace's own rows only; [`is_suppressed`] and [`suppressing_scope`] answer for a send, so
+//! they read both scopes, and [`add_organization_suppression`] writes the organization's.
 
 use sqlx::prelude::FromRow;
 use sqlx::{PgExecutor, QueryBuilder};
@@ -112,12 +116,12 @@ pub async fn add_suppression<'e>(
     // state the statement acted on.
     let (inserted, upgraded): (bool, bool) = sqlx::query_as(
         "WITH prior AS (\
-            SELECT reason FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2), \
+            SELECT reason FROM suppressions WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2), \
          written AS (\
             INSERT INTO suppressions \
                 (workspace_id, identifier_hash, kind, reason, source, note, created_by, id) \
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-            ON CONFLICT (workspace_id, identifier_hash) DO UPDATE \
+            ON CONFLICT (workspace_id, identifier_hash) WHERE scope = 'workspace' DO UPDATE \
                 SET reason = EXCLUDED.reason, source = EXCLUDED.source \
                 WHERE EXCLUDED.reason = 'erased' AND suppressions.reason <> 'erased' \
             RETURNING 1) \
@@ -167,7 +171,7 @@ pub async fn add_suppressions<'e>(
             (workspace_id, identifier_hash, kind, reason, source, note, created_by, id) \
          SELECT $1, hash, kind, $4, $5, note, $6, id \
          FROM unnest($2::bytea[], $3::text[], $7::text[], $8::uuid[]) AS t(hash, kind, note, id) \
-         ON CONFLICT (workspace_id, identifier_hash) DO NOTHING",
+         ON CONFLICT (workspace_id, identifier_hash) WHERE scope = 'workspace' DO NOTHING",
     )
     .bind(workspace.as_uuid())
     .bind(hashes)
@@ -193,7 +197,7 @@ pub async fn count_suppressed<'e>(
     let hashes: Vec<&[u8]> = hashes.iter().map(|hash| hash.as_slice()).collect();
     let count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM suppressions \
-         WHERE workspace_id = $1 AND identifier_hash = ANY($2::bytea[])",
+         WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = ANY($2::bytea[])",
     )
     .bind(workspace.as_uuid())
     .bind(hashes)
@@ -212,11 +216,11 @@ pub async fn remove_suppression<'e>(
     let (removed, erased): (i64, bool) = sqlx::query_as(
         "WITH removed AS (\
             DELETE FROM suppressions \
-            WHERE workspace_id = $1 AND identifier_hash = $2 AND reason <> 'erased' \
+            WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2 AND reason <> 'erased' \
             RETURNING 1) \
          SELECT (SELECT count(*) FROM removed), \
                 EXISTS (SELECT 1 FROM suppressions \
-                        WHERE workspace_id = $1 AND identifier_hash = $2 AND reason = 'erased')",
+                        WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2 AND reason = 'erased')",
     )
     .bind(workspace.as_uuid())
     .bind(identifier_hash.as_slice())
@@ -237,7 +241,7 @@ pub async fn find_suppression<'e>(
 ) -> Result<Option<Suppression>, StoreError> {
     let row: Option<SuppressionRow> = sqlx::query_as(
         "SELECT id, identifier_hash, kind, reason, source, note, created_at, created_by \
-         FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2",
+         FROM suppressions WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2",
     )
     .bind(workspace.as_uuid())
     .bind(identifier_hash.as_slice())
@@ -247,22 +251,99 @@ pub async fn find_suppression<'e>(
     row.map(SuppressionRow::into_suppression).transpose()
 }
 
-/// Whether the hash is suppressed in the workspace, for any reason.
+/// The scope of a suppression (OQ-19). A hard bounce suppresses organization-wide, because the
+/// address does not exist for any brand; complaints and manual entries stay in their workspace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SuppressionScope {
+    Workspace,
+    Organization,
+}
+
+impl SuppressionScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::Organization => "organization",
+        }
+    }
+}
+
+/// Suppresses a hash for the whole organization: every workspace's sends honour it. The row has
+/// no workspace, so it is keyed by the hash alone. As with a workspace row, a hash suppressed
+/// already keeps its first reason, except that `erased` replaces any other.
+pub async fn add_organization_suppression<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewSuppression<'_>,
+) -> Result<AddOutcome, StoreError> {
+    let (inserted, upgraded): (bool, bool) = sqlx::query_as(
+        "WITH prior AS (\
+            SELECT reason FROM suppressions \
+            WHERE scope = 'organization' AND identifier_hash = $1), \
+         written AS (\
+            INSERT INTO suppressions \
+                (workspace_id, scope, identifier_hash, kind, reason, source, note, created_by, id) \
+            VALUES (NULL, 'organization', $1, $2, $3, $4, $5, $6, $7) \
+            ON CONFLICT (identifier_hash) WHERE scope = 'organization' DO UPDATE \
+                SET reason = EXCLUDED.reason, source = EXCLUDED.source \
+                WHERE EXCLUDED.reason = 'erased' AND suppressions.reason <> 'erased' \
+            RETURNING 1) \
+         SELECT NOT EXISTS (SELECT 1 FROM prior) AND EXISTS (SELECT 1 FROM written), \
+                EXISTS (SELECT 1 FROM prior) AND EXISTS (SELECT 1 FROM written)",
+    )
+    .bind(new.identifier_hash.as_slice())
+    .bind(new.kind)
+    .bind(new.reason.as_str())
+    .bind(new.source)
+    .bind(new.note)
+    .bind(new.created_by)
+    .bind(Uuid::now_v7())
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(match (inserted, upgraded) {
+        (true, _) => AddOutcome::Added,
+        (_, true) => AddOutcome::Upgraded,
+        _ => AddOutcome::Existing,
+    })
+}
+
+/// The scope that suppresses the hash for a send from `workspace`: the workspace's own, else the
+/// organization's; `None` when neither does. One statement over the two unique indexes (one per
+/// scope), so a send pays a single lookup for both.
+pub async fn suppressing_scope<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    identifier_hash: &[u8; 32],
+) -> Result<Option<SuppressionScope>, StoreError> {
+    let scope: Option<String> = sqlx::query_scalar(
+        "SELECT scope FROM suppressions \
+         WHERE identifier_hash = $2 \
+           AND ((scope = 'workspace' AND workspace_id = $1) OR scope = 'organization') \
+         ORDER BY scope = 'workspace' DESC LIMIT 1",
+    )
+    .bind(workspace.as_uuid())
+    .bind(identifier_hash.as_slice())
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    match scope.as_deref() {
+        None => Ok(None),
+        Some("workspace") => Ok(Some(SuppressionScope::Workspace)),
+        Some("organization") => Ok(Some(SuppressionScope::Organization)),
+        Some(_) => Err(corrupt("unknown suppression scope")),
+    }
+}
+
+/// Whether the hash is suppressed for a send from the workspace, in either scope and for any
+/// reason: the workspace's own entries and the organization's.
 pub async fn is_suppressed<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     identifier_hash: &[u8; 32],
 ) -> Result<bool, StoreError> {
-    let found: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM suppressions \
-                        WHERE workspace_id = $1 AND identifier_hash = $2)",
-    )
-    .bind(workspace.as_uuid())
-    .bind(identifier_hash.as_slice())
-    .fetch_one(executor)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(found)
+    Ok(suppressing_scope(executor, workspace, identifier_hash)
+        .await?
+        .is_some())
 }
 
 /// The position after a listed suppression: its time and id.
@@ -279,7 +360,7 @@ pub async fn list_suppressions<'e>(
 ) -> Result<(Vec<Suppression>, bool), StoreError> {
     let mut query = QueryBuilder::new(
         "SELECT id, identifier_hash, kind, reason, source, note, created_at, created_by \
-         FROM suppressions WHERE workspace_id = ",
+         FROM suppressions WHERE scope = 'workspace' AND workspace_id = ",
     );
     query.push_bind(workspace.as_uuid());
     if let Some(reason) = reason {
@@ -459,6 +540,111 @@ mod tests {
             RemoveOutcome::NotFound
         );
         assert!(is_suppressed(&pool, one, &ada).await.unwrap());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_organization_suppression_blocks_every_workspace_and_a_workspace_one_only_its_own(
+        pool: PgPool,
+    ) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let (ada, bob) = (hash("ada@example.com"), hash("bob@example.com"));
+        let mut bounce = manual(ada);
+        bounce.reason = SuppressionReason::HardBounce;
+        let added = add_organization_suppression(&pool, &bounce).await.unwrap();
+        add_suppression(&pool, one, &manual(bob)).await.unwrap();
+
+        assert_eq!(added, AddOutcome::Added);
+        for ws in [one, two] {
+            assert!(is_suppressed(&pool, ws, &ada).await.unwrap());
+            assert_eq!(
+                suppressing_scope(&pool, ws, &ada).await.unwrap(),
+                Some(SuppressionScope::Organization)
+            );
+        }
+        assert_eq!(
+            suppressing_scope(&pool, one, &bob).await.unwrap(),
+            Some(SuppressionScope::Workspace)
+        );
+        assert!(!is_suppressed(&pool, two, &bob).await.unwrap());
+        // The organization's rows are not in any workspace's list, lookup or count.
+        assert!(find_suppression(&pool, one, &ada).await.unwrap().is_none());
+        assert_eq!(count_suppressed(&pool, one, &[ada]).await.unwrap(), 0);
+        assert_eq!(
+            remove_suppression(&pool, one, &ada).await.unwrap(),
+            RemoveOutcome::NotFound
+        );
+        // A hash can be suppressed in both scopes, and the workspace's is reported first.
+        add_suppression(&pool, one, &manual(ada)).await.unwrap();
+        assert_eq!(
+            suppressing_scope(&pool, one, &ada).await.unwrap(),
+            Some(SuppressionScope::Workspace)
+        );
+        // Re-adding keeps the first reason; erased replaces it.
+        assert_eq!(
+            add_organization_suppression(&pool, &manual(ada))
+                .await
+                .unwrap(),
+            AddOutcome::Existing
+        );
+        let mut erased = manual(ada);
+        erased.reason = SuppressionReason::Erased;
+        assert_eq!(
+            add_organization_suppression(&pool, &erased).await.unwrap(),
+            AddOutcome::Upgraded
+        );
+    }
+
+    /// The plan of `sql` for one workspace and one hash, as text.
+    async fn plan(pool: &PgPool, sql: &str, ws: WorkspaceId, hash: &[u8; 32]) -> String {
+        let lines: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {sql}")))
+            .bind(ws.as_uuid())
+            .bind(hash.as_slice())
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        lines.join("\n")
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_workspace_lookups_state_the_scope_so_they_use_the_partial_unique_index(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        sqlx::query(
+            "INSERT INTO suppressions (id, workspace_id, identifier_hash, kind, reason, source) \
+             SELECT gen_random_uuid(), $1, sha256(i::text::bytea), 'email', 'manual', 'api' \
+             FROM generate_series(1, 5000) AS i",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE suppressions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hash = hash("ada@example.com");
+        let without =
+            "SELECT id FROM suppressions WHERE workspace_id = $1 AND identifier_hash = $2";
+        let with = "SELECT id FROM suppressions \
+                    WHERE workspace_id = $1 AND scope = 'workspace' AND identifier_hash = $2";
+
+        let before = plan(&pool, without, ws, &hash).await;
+        let after = plan(&pool, with, ws, &hash).await;
+
+        println!("without the scope:\n{before}\nwith the scope:\n{after}");
+        assert!(after.contains("suppressions_workspace_hash_idx"), "{after}");
+        assert!(
+            !before.contains("suppressions_workspace_hash_idx"),
+            "{before}"
+        );
+        // The functions use the stated form: a hit is found through it.
+        add_suppression(&pool, ws, &manual(hash)).await.unwrap();
+        assert!(find_suppression(&pool, ws, &hash).await.unwrap().is_some());
+        assert_eq!(count_suppressed(&pool, ws, &[hash]).await.unwrap(), 1);
     }
 
     #[sqlx::test]

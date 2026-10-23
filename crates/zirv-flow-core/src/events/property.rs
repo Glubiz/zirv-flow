@@ -31,22 +31,39 @@ pub fn validate_event_name(name: &str) -> Result<(), ValidationError> {
 /// (architecture 8.3). A client, a sync or an import never sends one.
 pub const RESERVED_EVENT_PREFIX: &str = "segment.";
 
+/// The prefix of the message events the send pipeline and the feedback paths write
+/// (architecture 10.1): `email.sent`, `email.skipped`, `email.failed` and the later delivery,
+/// bounce, complaint and engagement events. A client never sends one.
+pub const EMAIL_EVENT_PREFIX: &str = "email.";
+
+/// The event the send pipeline writes when a message was handed to its destination.
+pub const EMAIL_SENT_EVENT: &str = "email.sent";
+/// The event the send pipeline writes when a gate stopped a message (`no_address`, `no_consent`,
+/// `suppressed`, `sender_unverified`).
+pub const EMAIL_SKIPPED_EVENT: &str = "email.skipped";
+/// The event the send pipeline writes when a message could not be rendered or delivered.
+pub const EMAIL_FAILED_EVENT: &str = "email.failed";
+
 /// The event a flow writes when a webhook action's call succeeded (architecture 9.1).
 pub const WEBHOOK_SUCCEEDED_EVENT: &str = "webhook.succeeded";
 /// The event a flow writes when a webhook action's call failed for good (architecture 9.1).
 pub const WEBHOOK_FAILED_EVENT: &str = "webhook.failed";
 
-/// The reserved names that are not under [`RESERVED_EVENT_PREFIX`].
+/// The reserved prefixes: names under them are the system's.
+const RESERVED_EVENT_PREFIXES: [&str; 2] = [RESERVED_EVENT_PREFIX, EMAIL_EVENT_PREFIX];
+
+/// The reserved names that are not under a reserved prefix.
 const RESERVED_EVENT_NAMES: [&str; 2] = [WEBHOOK_SUCCEEDED_EVENT, WEBHOOK_FAILED_EVENT];
 
 /// Whether `name` is reserved for the system, ignoring case so a variant cannot slip past: the
-/// `segment.` prefix, and the two webhook outcome names.
+/// `segment.` and `email.` prefixes, and the two webhook outcome names.
 pub fn is_reserved_event_name(name: &str) -> bool {
-    name.get(..RESERVED_EVENT_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_EVENT_PREFIX))
-        || RESERVED_EVENT_NAMES
-            .iter()
-            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+    RESERVED_EVENT_PREFIXES.iter().any(|reserved| {
+        name.get(..reserved.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(reserved))
+    }) || RESERVED_EVENT_NAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(name))
 }
 
 /// The error code of a client event under a reserved name.
@@ -58,7 +75,7 @@ pub fn validate_client_event_name(name: &str) -> Result<(), ValidationError> {
     if is_reserved_event_name(name) {
         Err(ValidationError::new(
             "name",
-            "must not start with segment. or be a webhook outcome name, which the system reserves",
+            "must not start with segment. or email. or be a webhook outcome name, which the system reserves",
         ))
     } else {
         Ok(())
@@ -281,6 +298,11 @@ mod tests {
             "SEGMENT.",
             "webhook.succeeded",
             "Webhook.Failed",
+            "email.sent",
+            "email.skipped",
+            "email.opened",
+            "Email.Failed",
+            "EMAIL.",
         ] {
             assert!(is_reserved_event_name(name), "{name}");
             assert!(validate_client_event_name(name).is_err(), "{name}");
@@ -292,6 +314,9 @@ mod tests {
             "webhook.succeeded.x",
             "webhook.called",
             "my.segment.entered",
+            "emails.sent",
+            "email",
+            "my.email.sent",
             "order",
             "seg",
             "é",

@@ -18,6 +18,7 @@ use zirv_flow_store::{
 };
 
 use crate::context::{IngestSettings, JobContext};
+use crate::delivery::rate::RateGates;
 use crate::metrics::{self, Outcome};
 use crate::registry::Registry;
 
@@ -58,6 +59,9 @@ pub struct WorkerConfig {
     pub egress: Arc<EgressPolicy>,
     /// The rate-limit buckets of outbound source calls, shared by every run in this process.
     pub rate_limits: Arc<RateLimits>,
+    /// The rate gates of the destinations this process sends to, shared by every send job. Give
+    /// every worker of a process the same set, so a destination's block of tokens is spent once.
+    pub rate_gates: Arc<RateGates>,
     /// The clock segment refreshes read: the database's in production, a manual one in tests.
     pub clock: Clock,
     /// The isolated renderer that send handlers render through; none leaves them without one.
@@ -84,6 +88,7 @@ impl WorkerConfig {
             ingest_drain_shards: 8,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            rate_gates: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
             dns: None,
@@ -391,6 +396,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_event_retention(shared.config.event_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_clock(shared.config.clock.clone())
+            .with_rate_gates(Arc::clone(&shared.config.rate_gates))
             .with_render_pool(shared.config.render_pool.clone())
             .with_dns(shared.config.dns.clone())
             .with_outbound(
@@ -649,6 +655,7 @@ mod tests {
             ingest_drain_shards: 4,
             egress: Arc::default(),
             rate_limits: Arc::default(),
+            rate_gates: Arc::default(),
             clock: Clock::default(),
             render_pool: None,
             dns: None,

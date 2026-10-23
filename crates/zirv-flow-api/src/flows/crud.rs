@@ -13,12 +13,14 @@ use utoipa::ToSchema;
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
+use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::ValidationError;
+use zirv_flow_core::consent::Channel;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
 use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow};
 
 use super::schema::{GRAPH, ISSUE, SETTINGS};
-use super::validation::{Environment, check};
+use super::validation::{Environment, SendFacts, check};
 use super::{
     default_settings, draft_of, empty_graph, flow_error, issue_problems, name_taken, parse_graph,
     parse_settings,
@@ -223,6 +225,7 @@ pub(crate) async fn check_document(
     let now = zirv_flow_store::database_now(&mut *connection).await?;
     let signing_secret = zirv_flow_store::has_webhook_signing_secret(connection, workspace).await?;
     let webhook_templates = usable_webhook_templates(connection, workspace, graph).await?;
+    let send = send_facts(connection, workspace, graph).await?;
     let environment = Environment {
         catalog: &catalog,
         storage: &storage,
@@ -230,6 +233,7 @@ pub(crate) async fn check_document(
         egress: state.egress_policy(),
         signing_secret,
         webhook_templates: &webhook_templates,
+        send: &send,
     };
     Ok((check(graph, settings, &environment), now))
 }
@@ -261,6 +265,61 @@ async fn usable_webhook_templates(
         }
     }
     Ok(usable)
+}
+
+/// What the workspace holds of the templates, destinations, topics and dimension values the send
+/// nodes of `graph` name: a template that is not archived, of the `email` channel and published; a
+/// destination that is not archived and of a type that delivers email; a topic of the email
+/// channel; and, per node, whether its dimension values are all the workspace's.
+async fn send_facts(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    graph: &FlowGraph,
+) -> Result<SendFacts, ApiError> {
+    let registry = Registry::built_in();
+    let mut facts = SendFacts::default();
+    for node in &graph.nodes {
+        let NodeKind::ActionSend {
+            template,
+            destination,
+            topic,
+            dimensions,
+        } = &node.kind
+        else {
+            continue;
+        };
+        let found = zirv_flow_store::find_template(&mut *connection, workspace, *template).await?;
+        if found.is_some_and(|template| {
+            template.channel == "email"
+                && template.archived_at.is_none()
+                && template.current_version.is_some()
+        }) {
+            facts.templates.insert(*template);
+        }
+        let found =
+            zirv_flow_store::find_destination(&mut *connection, workspace, *destination).await?;
+        if found.is_some_and(|destination| {
+            destination.archived_at.is_none()
+                && registry
+                    .get(&destination.kind)
+                    .is_some_and(|driver| driver.spec().capabilities.channels.contains(&"email"))
+        }) {
+            facts.destinations.insert(*destination);
+        }
+        if let Some(topic) = topic {
+            let found = zirv_flow_store::find_topic(&mut *connection, workspace, *topic).await?;
+            if found.is_some_and(|topic| topic.channel == Channel::Email) {
+                facts.topics.insert(*topic);
+            }
+        }
+        if zirv_flow_store::unknown_dimension_entry(connection, workspace, dimensions)
+            .await?
+            .is_some()
+        {
+            facts.unknown_dimensions.insert(node.id.clone());
+        }
+    }
+    Ok(facts)
 }
 
 /// [`check_document`] in a read-only transaction of its own that is dropped, for a caller that
