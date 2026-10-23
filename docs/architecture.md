@@ -890,6 +890,9 @@ least 50 in 90 days, not VIP, subscribed to the newsletter":
 | `event` | Property filters, then `count`/`sum`/`min`/`max`/`avg`/first or last time over a window (`last` duration, `between`, since a timestamp trait); "did not" and "never" |
 | `list`, `segment` | Membership; segment references must stay acyclic |
 | `consent`, `identifier` | Channel/topic state; presence of an identifier kind |
+| `messages` | Policy only: sent messages on a channel, counted or reduced to the last, in a window, filtered by dimension values (10.1) |
+
+A `consent` leaf without a `channel` is the policy form: its `status` is `granted`, `denied` or `none` for the message being sent (the status of the record that decides it, apart from the topic default). `messages` and that form read the send, which a segment has none of, so validation refuses them in a segment with the issue code `policy_only`. A policy rule is compiled with `compile_policy` and a `SendContext` (channel, dimension values, recorded status): the message consent leaf becomes a constant of the send, and `messages` reads only `sent` rows of `messages` that are not test sends, by `completed_at`. The reference evaluator takes the same facts, and a generated corpus checks it against the SQL.
 
 **Semantics.** Every leaf is two-valued: a missing trait, or a missing or null property, makes every operator false except `not_exists`, so `neq` and `not_in` on a missing value are false. `not` is plain boolean negation of its child, so "not (country eq DK)" includes people with no country while "country neq DK" does not. Over zero matching events `count` is 0, and `sum`, `min`, `max`, `avg` and first or last time are missing, so every comparison on them is false. Date values compare at UTC midnight; the workspace time zone is out of scope in v1, a recorded limitation (21.1). The compiled SQL reproduces this with `COALESCE(…, false)`, and the property tests enforce it (ruling 887b9eef).
 
@@ -1154,6 +1157,20 @@ it further, for example by product vertical. Zirv Flow therefore separates:
 - **The policy.** An ordered list of named rules over the M4 AST, compiled to
   SQL and evaluated for one person in the send transaction. It is versioned and
   published like a segment; publishing appends a `definition_change` decision.
+- **One policy per workspace.** Dimensions and topics are per workspace, and a rule decides on
+  the message's own channel and dimension values, so a rule that concerns one topic or vertical
+  says so in its condition. The policy has a draft (`GET`/`PUT .../consent/policy/draft`, `write`)
+  and immutable versions (`POST .../publish` and `GET .../versions`, `admin`); a publish validates
+  every condition and appends the decision. Rule ids are UUIDs, except the built-in
+  `recorded_consent`. The tables are `consent_policies` and `consent_policy_versions`, and are
+  not person-scoped.
+- **Evaluation.** Gate 3 reads the recorded consent, then the store evaluates the published
+  version's rules in order on the send's connection with the compiled SQL (`jobs` compiles, with
+  `segments`; `store` runs it and never sees the compiler). The first rule that matches is the
+  deciding one: its name goes to `messages.deciding_rule` and its id to the `send.gate` decision.
+  A rule that cannot be compiled when the send runs (something it reads was archived since the
+  publish) matches, so the send is stopped. A transactional message skips the gate.
+  `POST .../consent/policy/evaluate` runs the same evaluation for a person without sending.
 - **Deny-only rules**. The send proceeds when no rule matches,
   and the deciding rule is the first rule that matches. The built-in `recorded
   consent` rule can be moved but not removed; it matches when the read above
