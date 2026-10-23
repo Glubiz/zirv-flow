@@ -126,6 +126,7 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM step_executions WHERE workspace_id = $1 AND enrollment_id IN \n        (SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM messages WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -153,6 +154,8 @@ macro_rules! names_erased_person {
         "( \
             (kind = 'flow.step' AND payload ->> 'enrollment_id' = ANY($3)) \
             OR (kind = 'webhook.call' AND payload ->> 'person_id' IN \
+                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
+            OR (kind = 'delivery.send' AND payload ->> 'person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)))"

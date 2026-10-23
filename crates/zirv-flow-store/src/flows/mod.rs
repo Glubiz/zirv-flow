@@ -14,6 +14,7 @@ mod inputs;
 mod inspector;
 mod lifecycle;
 mod runtime;
+mod send;
 mod signing;
 mod state;
 mod triggers;
@@ -53,6 +54,7 @@ pub use runtime::{
     count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps, register_wait,
     save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
+pub use send::{SEND_JOB_KIND, SendOutcome, record_send_outcome};
 pub use signing::{
     Rotation, SigningKey, SigningKeys, create_signing_key, live_signing_keys, rotate_signing_key,
 };

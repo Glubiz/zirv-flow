@@ -368,6 +368,10 @@ async fn lock_merged_and_survivor(
 ///   ended enrollments, which are history of the person that was enrolled, and re-pointing them
 ///   could collide with the survivor's on the in-flight and occurrence unique indexes. They go
 ///   with the group when it is erased.
+/// - `messages` is **kept on the old id**, for the same reason: a message is history of the person it
+///   was sent to, and the log reads through `person_merges` ([`crate::list_person_messages`]) so
+///   the survivor sees it. A `delivery.send` still queued names the old id and is dropped when the
+///   enrollment it belongs to has exited (the merge exits the loser's in-flight enrollments).
 /// - `step_executions` has no person column and follows its enrollment.
 /// - `enrollment_waits` is **deleted** in the merge transaction with the enrollment that held it:
 ///   a wait left on the old id would never match an event, which resolves to the survivor, while

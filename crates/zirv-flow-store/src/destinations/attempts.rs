@@ -211,35 +211,54 @@ pub async fn list_delivery_attempts<'e>(
 pub struct DestinationStat {
     pub workspace_id: Uuid,
     pub destination_id: Uuid,
-    /// Items waiting for delivery. 0 until the send pipeline (#220) has a queue to count.
+    /// Items waiting for delivery: the destination's `delivery.send` jobs that are ready, a
+    /// deferred one (waiting for a rate-limit token) included.
     pub queue_depth: i64,
-    /// Age in seconds of the oldest waiting item; 0 when none waits.
+    /// Age in seconds of the oldest waiting item, counted from the moment it became runnable;
+    /// 0 when none waits or the oldest is not yet due.
     pub oldest_age_seconds: i64,
+}
+
+#[derive(FromRow)]
+struct StatRow {
+    workspace_id: Uuid,
+    destination_id: Uuid,
+    queue_depth: i64,
+    oldest_age_seconds: i64,
 }
 
 /// One row per live destination with its queue gauges. The attempt and outcome counters are not
 /// here: they are counted in-process where an attempt is recorded, so this never scans
 /// `delivery_attempts`.
 ///
-/// There is no delivery queue yet, so `queue_depth` and `oldest_age_seconds` are 0; the send
-/// pipeline (#220) replaces that part of the query with the count and the age of its waiting
-/// items.
+/// The gauges read the send queue: the ready `delivery.send` jobs by the destination in their
+/// payload, through the partial index `jobs_delivery_send_idx`.
 pub async fn destination_report<'e>(
     executor: impl PgExecutor<'e>,
 ) -> Result<Vec<DestinationStat>, StoreError> {
-    let destinations: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "SELECT workspace_id, id FROM destinations WHERE archived_at IS NULL ORDER BY id",
+    let rows: Vec<StatRow> = sqlx::query_as(
+        "SELECT d.workspace_id, d.id AS destination_id, \
+                COALESCE(q.depth, 0) AS queue_depth, \
+                COALESCE(GREATEST(0, EXTRACT(EPOCH FROM (clock_timestamp() - q.oldest))), 0)::bigint \
+                    AS oldest_age_seconds \
+         FROM destinations d \
+         LEFT JOIN ( \
+             SELECT payload ->> 'destination_id' AS destination, count(*) AS depth, \
+                    min(run_at) AS oldest \
+             FROM jobs WHERE kind = 'delivery.send' AND state = 'ready' \
+             GROUP BY payload ->> 'destination_id') q ON q.destination = d.id::text \
+         WHERE d.archived_at IS NULL ORDER BY d.id",
     )
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
-    Ok(destinations
+    Ok(rows
         .into_iter()
-        .map(|(workspace_id, destination_id)| DestinationStat {
-            workspace_id,
-            destination_id,
-            queue_depth: 0,
-            oldest_age_seconds: 0,
+        .map(|row| DestinationStat {
+            workspace_id: row.workspace_id,
+            destination_id: row.destination_id,
+            queue_depth: row.queue_depth,
+            oldest_age_seconds: row.oldest_age_seconds,
         })
         .collect())
 }
@@ -401,6 +420,65 @@ mod tests {
                 oldest_age_seconds: 0,
             }]
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_report_counts_the_ready_sends_of_each_destination_and_ages_the_oldest(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let busy = destination(&pool, ws, "Busy").await;
+        let idle = destination(&pool, ws, "Idle").await;
+        let job = |kind: &'static str, destination: Uuid, state: &'static str, age: i32| {
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, state, run_at, unique_key, \
+                    cause_kind, cause_id, trace_id) \
+                 VALUES (gen_random_uuid(), $1, $2, \
+                    jsonb_build_object('destination_id', $3::text), $4, \
+                    now() - $5 * interval '1 second', gen_random_uuid()::text, 'api', 't', \
+                    gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(kind)
+            .bind(destination)
+            .bind(state)
+            .bind(age)
+        };
+        // Two ready sends (the older is 90 s due), one deferred into the future, one running, one
+        // of another kind, and one of a destination that is not live.
+        for (kind, state, age) in [
+            ("delivery.send", "ready", 90),
+            ("delivery.send", "ready", 10),
+            ("delivery.send", "ready", -600),
+            ("delivery.send", "running", 500),
+            ("webhook.call", "ready", 500),
+        ] {
+            job(kind, busy, state, age).execute(&pool).await.unwrap();
+        }
+        let gone = destination(&pool, ws, "Gone").await;
+        job("delivery.send", gone, "ready", 5)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::archive_destination(&pool, ws, gone).await.unwrap();
+
+        let report = destination_report(&pool).await.unwrap();
+
+        let of = |id: Uuid| {
+            report
+                .iter()
+                .find(|stat| stat.destination_id == id)
+                .unwrap()
+        };
+        assert_eq!(report.len(), 2, "{report:?}");
+        assert_eq!(of(busy).queue_depth, 3);
+        assert!(
+            (90..=95).contains(&of(busy).oldest_age_seconds),
+            "{report:?}"
+        );
+        assert_eq!(of(idle).queue_depth, 0);
+        assert_eq!(of(idle).oldest_age_seconds, 0);
     }
 
     #[test]
