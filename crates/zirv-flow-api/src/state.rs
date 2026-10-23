@@ -42,6 +42,8 @@ pub struct AppState {
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
     /// Hashes identifiers for suppressions; absent until the master key is given.
     pub(crate) identifier_key: Option<Arc<HmacKey>>,
+    /// Fingerprints sealed credentials (architecture 16.2); absent until the HMAC root is given.
+    pub(crate) redaction_key: Option<Arc<HmacKey>>,
     /// The master keys that open stored secrets; absent until given.
     keyring: Option<Arc<Keyring>>,
     /// The explorer's time and row limits.
@@ -97,6 +99,7 @@ impl AppState {
             imports: ImportLimits::default(),
             setup_token: Arc::default(),
             identifier_key: None,
+            redaction_key: None,
             keyring: None,
             explorer: ExplorerLimits::default(),
             segment_preview_timeout: crate::segments::PREVIEW_TIMEOUT,
@@ -211,10 +214,12 @@ impl AppState {
         self
     }
 
-    /// Derives the identifier-hashing key from the deployment's HMAC root. Without it the
-    /// suppression endpoints answer 503.
+    /// Derives the identifier-hashing key and the redaction key from the deployment's HMAC root.
+    /// Without the first the suppression endpoints answer 503; without the second a credential
+    /// has no fingerprint.
     pub fn with_hmac_root(mut self, root: &HmacRoot) -> Self {
         self.identifier_key = Some(Arc::new(root.hmac_key(HmacPurpose::Identifier)));
+        self.redaction_key = Some(Arc::new(root.hmac_key(HmacPurpose::Redaction)));
         self
     }
 
@@ -372,12 +377,17 @@ mod tests {
     async fn the_identifier_key_comes_from_the_hmac_root_and_is_off_until_given() {
         let root = HmacRoot::bootstrap_from(&MasterKey::generate());
 
-        assert!(state().identifier_key.is_none());
+        assert!(state().identifier_key.is_none() && state().redaction_key.is_none());
         let with = state().with_hmac_root(&root);
         let derived = root.hmac_key(HmacPurpose::Identifier);
+        let redaction = root.hmac_key(HmacPurpose::Redaction);
         assert_eq!(
             with.identifier_key.unwrap().digest(b"x"),
             derived.digest(b"x")
+        );
+        assert_eq!(
+            with.redaction_key.unwrap().digest(b"x"),
+            redaction.digest(b"x")
         );
     }
 

@@ -6,19 +6,24 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::{SecretId, UserId, WorkspaceId};
+use zirv_flow_core::{UserId, WorkspaceId};
 
 use crate::StoreError;
 
-/// A configured destination. The credential is a reference to a sealed secret, never a value.
+/// A configured destination. The credential is a reference to a workspace credential, never a
+/// value.
 #[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct Destination {
     pub id: Uuid,
     pub kind: String,
     pub name: String,
     pub config: Value,
+    /// The workspace credential the destination uses.
+    pub credential_id: Option<Uuid>,
+    /// The sealed secret of that credential at the time of the read; derived, not stored here.
+    /// Open the credential with [`open_credential`](crate::open_credential).
     pub credential_secret_id: Option<Uuid>,
-    /// The names of the credential fields that are set; never their values.
+    /// The names of the fields the credential holds; never their values. Derived.
     pub credential_fields: Vec<String>,
     /// Deliveries per second the destination tolerates.
     pub rate: i32,
@@ -33,21 +38,23 @@ pub struct Destination {
 /// The columns of [`Destination`].
 macro_rules! destination_columns {
     () => {
-        "id, kind, name, config, credential_secret_id, credential_fields, rate, burst, \
+        "id, kind, name, config, credential_id, \
+         credential_secret_of(workspace_id, credential_id) AS credential_secret_id, \
+         credential_field_names(workspace_id, credential_id) AS credential_fields, rate, burst, \
          archived_at, created_by, created_at, updated_at"
     };
 }
 
-/// A destination to create. The secret named by `credential_secret_id` must already exist in the
-/// same transaction.
+/// A destination to create. The credential, if any, must be a live credential of the workspace;
+/// lock it with [`lock_credential_for_use`](crate::lock_credential_for_use) in the same
+/// transaction.
 #[derive(Debug)]
 pub struct NewDestination<'a> {
     pub id: Uuid,
     pub kind: &'a str,
     pub name: &'a str,
     pub config: &'a Value,
-    pub credential_secret_id: Option<SecretId>,
-    pub credential_fields: &'a [String],
+    pub credential_id: Option<Uuid>,
     pub rate: i32,
     pub burst: i32,
     pub created_by: Option<UserId>,
@@ -60,10 +67,8 @@ pub struct DestinationUpdate<'a> {
     pub config: Option<&'a Value>,
     pub rate: Option<i32>,
     pub burst: Option<i32>,
-    /// Links a credential secret the destination had none of.
-    pub credential_secret_id: Option<SecretId>,
-    /// Replaces the names of the credential fields that are set.
-    pub credential_fields: Option<&'a [String]>,
+    /// Links another workspace credential.
+    pub credential_id: Option<Uuid>,
 }
 
 /// Creates a destination and its full rate bucket. A name already taken by a live destination in
@@ -75,9 +80,9 @@ pub async fn create_destination<'e>(
 ) -> Result<Destination, StoreError> {
     sqlx::query_as(concat!(
         "WITH d AS ( \
-            INSERT INTO destinations (id, workspace_id, kind, name, config, credential_secret_id, \
-                credential_fields, rate, burst, created_by) \
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *), \
+            INSERT INTO destinations (id, workspace_id, kind, name, config, credential_id, \
+                rate, burst, created_by) \
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *), \
          b AS ( \
             INSERT INTO destination_rate_buckets \
                 (destination_id, workspace_id, rate, burst, tokens, refilled_at) \
@@ -91,8 +96,7 @@ pub async fn create_destination<'e>(
     .bind(new.kind)
     .bind(new.name)
     .bind(new.config)
-    .bind(new.credential_secret_id.map(|id| id.as_uuid()))
-    .bind(new.credential_fields)
+    .bind(new.credential_id)
     .bind(new.rate)
     .bind(new.burst)
     .bind(new.created_by.map(|user| user.as_uuid()))
@@ -172,8 +176,7 @@ pub async fn update_destination<'e>(
         "WITH d AS ( \
             UPDATE destinations SET name = COALESCE($3, name), config = COALESCE($4, config), \
                 rate = COALESCE($5, rate), burst = COALESCE($6, burst), \
-                credential_secret_id = COALESCE($7, credential_secret_id), \
-                credential_fields = COALESCE($8, credential_fields), updated_at = now() \
+                credential_id = COALESCE($7, credential_id), updated_at = now() \
             WHERE workspace_id = $1 AND id = $2 AND archived_at IS NULL RETURNING *), \
          b AS ( \
             UPDATE destination_rate_buckets b SET burst = d.burst, \
@@ -189,8 +192,7 @@ pub async fn update_destination<'e>(
     .bind(update.config)
     .bind(update.rate)
     .bind(update.burst)
-    .bind(update.credential_secret_id.map(|id| id.as_uuid()))
-    .bind(update.credential_fields)
+    .bind(update.credential_id)
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)
@@ -225,12 +227,11 @@ pub async fn archive_destination<'e>(
 mod tests {
     use serde_json::json;
     use sqlx::PgPool;
-    use zirv_flow_core::{
-        Keyring, MasterKey, SecretPurpose, Slug, WorkspaceName, seal, secret_aad,
-    };
+    use zirv_flow_core::{Slug, WorkspaceName};
 
     use super::*;
-    use crate::{create_workspace, secrets};
+    use crate::create_workspace;
+    use crate::workspace_credentials::testing::credential_with_fields;
 
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
         let name = WorkspaceName::parse(slug).unwrap();
@@ -244,22 +245,11 @@ mod tests {
             kind: "fake",
             name,
             config,
-            credential_secret_id: None,
-            credential_fields: &[],
+            credential_id: None,
             rate: 10,
             burst: 10,
             created_by: None,
         }
-    }
-
-    async fn secret(pool: &PgPool, ws: WorkspaceId, purpose: SecretPurpose) -> SecretId {
-        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
-        let id = SecretId::new();
-        let sealed = seal(&keys, b"{}", &secret_aad(ws, id, purpose));
-        secrets::insert_unchecked(pool, ws, purpose, id, &sealed)
-            .await
-            .unwrap();
-        id
     }
 
     #[sqlx::test]
@@ -302,6 +292,7 @@ mod tests {
         assert_eq!(names, ["alpha", "Beta"]);
 
         let more = json!({"mode": "throttle"});
+        let credential = credential_with_fields(&pool, ws, "mail", &["token"]).await;
         let updated = update_destination(
             &pool,
             ws,
@@ -311,8 +302,7 @@ mod tests {
                 config: Some(&more),
                 rate: Some(20),
                 burst: Some(30),
-                credential_fields: Some(&["token".to_owned()]),
-                ..DestinationUpdate::default()
+                credential_id: Some(credential.id),
             },
         )
         .await
@@ -386,16 +376,16 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let other = workspace(&pool, "two").await;
         let config = json!({});
-        let foreign = secret(&pool, other, SecretPurpose::DestinationCredential).await;
-        let own = secret(&pool, ws, SecretPurpose::DestinationCredential).await;
+        let foreign = credential_with_fields(&pool, other, "mail", &["token"]).await;
+        let own = credential_with_fields(&pool, ws, "mail", &["token"]).await;
 
         let mut refused = new("A", &config);
-        refused.credential_secret_id = Some(foreign);
+        refused.credential_id = Some(foreign.id);
         assert!(create_destination(&pool, ws, &refused).await.is_err());
         let mut linked = new("B", &config);
-        linked.credential_secret_id = Some(own);
+        linked.credential_id = Some(own.id);
         let created = create_destination(&pool, ws, &linked).await.unwrap();
-        assert_eq!(created.credential_secret_id, Some(own.as_uuid()));
+        assert_eq!(created.credential_secret_id, Some(own.secret_id));
 
         let mut first = crate::begin(&pool).await.unwrap();
         find_destination_for_update(&mut first, ws, created.id)

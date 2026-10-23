@@ -56,7 +56,7 @@ mod tests {
             let spec = registry.get(kind).expect(kind).spec();
             let credentials: Vec<_> = spec.credential_fields.iter().map(|f| f.key).collect();
             assert_eq!(spec.kind, kind);
-            assert_eq!(credentials, ["user", "password"]);
+            assert_eq!(credentials, ["username", "password"]);
             assert!(spec.capabilities.incremental && spec.capabilities.full_refresh);
             assert!(!spec.capabilities.emits_deletes);
         }

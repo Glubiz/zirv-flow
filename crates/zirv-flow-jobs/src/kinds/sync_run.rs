@@ -40,14 +40,14 @@ use zirv_flow_core::mapping::{
     self, Header, JsonRecord, Mapping, TraitState, reject_sample, validate_paths,
 };
 use zirv_flow_store::HmacKey;
-use zirv_flow_store::secrets::{self, OpenError};
+use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
     PartitionOffset, PgPool, ProfileRecord, ReconcileQueued, RunEnd, SYNC_DELETE_BY_SIGNAL,
-    SYNC_DELETE_BY_SOURCE, SYNC_RUN_JOB_KIND, SecretId, SecretPurpose, StoreError, Stream,
-    SweepOutcome, SweepUnit, SyncBatch, SyncBatchOutcome, SyncCounts, SyncEvent, SyncLease,
-    SyncReject, SyncRun, SyncUpsert, commit_sync_batch, fail_run, find_source, find_stream_by_id,
-    finish_run, list_trait_definitions, queue_reconcile_run, queue_runs_for_source, run_trace,
-    start_run, sweep_exceeds_limit, sweep_unreached,
+    SYNC_DELETE_BY_SOURCE, SYNC_RUN_JOB_KIND, StoreError, Stream, SweepOutcome, SweepUnit,
+    SyncBatch, SyncBatchOutcome, SyncCounts, SyncEvent, SyncLease, SyncReject, SyncRun, SyncUpsert,
+    commit_sync_batch, fail_run, find_source, find_stream_by_id, finish_run,
+    list_trait_definitions, queue_reconcile_run, queue_runs_for_source, run_trace, start_run,
+    sweep_exceeds_limit, sweep_unreached,
 };
 
 use super::import_rows::Probe;
@@ -419,34 +419,30 @@ async fn load_traits(
     Ok((catalog, plain))
 }
 
-/// Opens the credential of a source right before it is read.
+/// Opens the workspace credential of a source right before it is read: the non-secret fields and
+/// the sealed secret, merged into the typed credential the connector takes. A rotation needs no
+/// change to the source, because the current secret is read here on every run.
 pub(super) async fn open_credential(
     ctx: &JobContext<'_>,
     pool: &PgPool,
     workspace: WorkspaceId,
-    secret: Option<Uuid>,
+    credential: Option<Uuid>,
 ) -> Result<Credential, Failure> {
-    let Some(secret) = secret else {
+    let Some(credential) = credential else {
         return Ok(Credential::new());
     };
     let keyring = ctx.keyring().ok_or(JobError::new(
         "the worker has no master key to open the credential",
     ))?;
-    let bytes = secrets::open_json(
-        pool,
-        keyring,
-        workspace,
-        SecretId::from_uuid(secret),
-        SecretPurpose::ConnectorCredential,
-    )
-    .await
-    .map_err(|error| match error {
-        OpenError::Store(error) => Failure::from(error),
-        OpenError::NotFound | OpenError::Unopenable => {
-            Failure::job(JobError::new("the source credential could not be opened"))
-        }
-    })?;
-    Credential::from_json(&bytes)
+    let opened = zirv_flow_store::open_credential(pool, keyring, workspace, credential)
+        .await
+        .map_err(|error| match error {
+            OpenError::Store(error) => Failure::from(error),
+            OpenError::NotFound | OpenError::Unopenable => {
+                Failure::job(JobError::new("the source credential could not be opened"))
+            }
+        })?;
+    Credential::from_parts(&opened.secret, &opened.fields)
         .map_err(|_| Failure::job(JobError::new("the source credential could not be read")))
 }
 
@@ -863,8 +859,7 @@ async fn run_pass(
     };
 
     // The credential is opened right before the read and dropped with it.
-    let mut credential =
-        open_credential(ctx, pool, ids.workspace, source.credential_secret_id).await?;
+    let mut credential = open_credential(ctx, pool, ids.workspace, source.credential_id).await?;
     // An account connected by consent: its tokens seed the context, and refreshes are stored.
     let source_context = super::sync_tokens::prepare(
         pool,
@@ -948,7 +943,8 @@ mod tests {
     use zirv_flow_core::mapping::{ColumnRule, Target};
     use zirv_flow_core::people::{Precedence, TraitType};
     use zirv_flow_core::{
-        Cause, Keyring, MasterKey, Slug, TraceContext, WorkspaceName, seal, secret_aad,
+        Cause, Keyring, MasterKey, SecretId, SecretPurpose, Slug, TraceContext, WorkspaceName,
+        seal, secret_aad,
     };
     use zirv_flow_store::{
         CancelOutcome, ClaimedJob, DiscoveredStream, NewSource, NewTraitDefinition, RunKind,
@@ -1041,8 +1037,7 @@ mod tests {
                 kind: "fake",
                 name: "crm",
                 config: &config,
-                credential_secret_id: None,
-                credential_fields: &[],
+                credential_id: None,
                 schedule: None,
                 created_by: None,
             },
@@ -1804,8 +1799,17 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE sources SET credential_secret_id = $1")
-            .bind(secret.as_uuid())
+        let credential = zirv_flow_store::import_secret_as_credential(
+            &pool,
+            env.ws,
+            "source credential",
+            secret,
+            &["token"],
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE sources SET credential_id = $1")
+            .bind(credential.id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1842,6 +1846,127 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(env.run(second.id).await.state, "succeeded");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_sources_share_one_credential_and_a_rotation_reaches_both_on_their_next_open(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::WorkspaceId;
+        use zirv_flow_store::secrets::insert_unchecked;
+        use zirv_flow_store::{NewWorkspaceCredential, create_credential, swap_credential_secret};
+
+        async fn sealed_secret(
+            pool: &PgPool,
+            keys: &Keyring,
+            ws: WorkspaceId,
+            plaintext: &[u8],
+        ) -> SecretId {
+            let id = SecretId::new();
+            let purpose = SecretPurpose::WorkspaceCredential;
+            let sealed = seal(keys, plaintext, &secret_aad(ws, id, purpose));
+            insert_unchecked(pool, ws, purpose, id, &sealed)
+                .await
+                .unwrap();
+            id
+        }
+
+        let env = setup(&pool, json!({}), "full_refresh").await;
+        let (_, job) = env.queue().await;
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        let old = sealed_secret(&pool, &keys, env.ws, br#"{"token":"old"}"#).await;
+        let credential = create_credential(
+            &pool,
+            env.ws,
+            &NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: "shared",
+                name: "Shared",
+                kind: "custom",
+                schema: None,
+                fields: &json!({"region": "eu"}),
+                secret_id: old,
+                hints: &json!({"token": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let config = json!({});
+        let mut sources = vec![env.source];
+        let second = create_source(
+            &pool,
+            env.ws,
+            &NewSource {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "erp",
+                config: &config,
+                credential_id: Some(credential.id),
+                schedule: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE sources SET credential_id = $1 WHERE id = $2")
+            .bind(credential.id)
+            .bind(env.source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sources.push(second.id);
+
+        async fn token_of(
+            env: &Env,
+            job: &ClaimedJob,
+            keys: &Arc<Keyring>,
+            source: Uuid,
+        ) -> String {
+            let found = zirv_flow_store::find_source(&env.pool, env.ws, source)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut connection = env.pool.acquire().await.unwrap();
+            let ctx = JobContext::new(&mut connection, job).with_outbound(
+                Some(keys.clone()),
+                Arc::default(),
+                Arc::default(),
+            );
+            let credential = open_credential(&ctx, &env.pool, env.ws, found.credential_id)
+                .await
+                .unwrap_or_else(|_| panic!("the credential did not open"));
+            assert_eq!(credential.get("region").unwrap().expose(), "eu");
+            credential.get("token").unwrap().expose().to_owned()
+        }
+
+        for source in &sources {
+            assert_eq!(token_of(&env, &job, &keys, *source).await, "old");
+        }
+        let new = sealed_secret(&pool, &keys, env.ws, br#"{"token":"new"}"#).await;
+        let mut tx = begin(&pool).await.unwrap();
+        let replaced = swap_credential_secret(
+            &mut tx,
+            env.ws,
+            credential.id,
+            new,
+            &json!({"token": ""}),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        zirv_flow_store::secrets::delete(&mut *tx, env.ws, replaced)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        for source in &sources {
+            assert_eq!(token_of(&env, &job, &keys, *source).await, "new");
+        }
     }
 
     #[sqlx::test]
@@ -2357,7 +2482,7 @@ mod tests {
             let secret = zirv_flow_core::SecretId::new();
             let sealed = seal(
                 &keys,
-                json!({"user": role, "password": "zf_job_pw"})
+                json!({"username": role, "password": "zf_job_pw"})
                     .to_string()
                     .as_bytes(),
                 &secret_aad(ws, secret, SecretPurpose::ConnectorCredential),
@@ -2371,6 +2496,15 @@ mod tests {
             )
             .await
             .unwrap();
+            let credential = zirv_flow_store::import_secret_as_credential(
+                pool,
+                ws,
+                "warehouse credential",
+                secret,
+                &["username", "password"],
+            )
+            .await
+            .unwrap();
             let source = create_source(
                 pool,
                 ws,
@@ -2379,8 +2513,7 @@ mod tests {
                     kind: "postgres",
                     name: "warehouse",
                     config: &config,
-                    credential_secret_id: Some(secret),
-                    credential_fields: &["user".to_owned(), "password".to_owned()],
+                    credential_id: Some(credential.id),
                     schedule: None,
                     created_by: None,
                 },
@@ -2418,7 +2551,10 @@ mod tests {
                 .await
                 .unwrap();
             let mut credential = Credential::new();
-            credential.insert("user", zirv_flow_core::SecretString::new(role.to_owned()));
+            credential.insert(
+                "username",
+                zirv_flow_core::SecretString::new(role.to_owned()),
+            );
             credential.insert(
                 "password",
                 zirv_flow_core::SecretString::new("zf_job_pw".to_owned()),
@@ -3760,8 +3896,7 @@ mod tests {
                 kind: "file",
                 name: "export",
                 config: &config,
-                credential_secret_id: None,
-                credential_fields: &[],
+                credential_id: None,
                 schedule: None,
                 created_by: None,
             },
@@ -4496,6 +4631,15 @@ mod tests {
                 .await
                 .unwrap();
 
+            let shared = zirv_flow_store::import_secret_as_credential(
+                pool,
+                ws,
+                "api credential",
+                credential,
+                &["client_id", "client_secret"],
+            )
+            .await
+            .unwrap();
             let source = create_source(
                 pool,
                 ws,
@@ -4504,8 +4648,7 @@ mod tests {
                     kind: "http",
                     name: "api",
                     config: &config,
-                    credential_secret_id: Some(credential),
-                    credential_fields: &["client_id".to_owned(), "client_secret".to_owned()],
+                    credential_id: Some(shared.id),
                     schedule: None,
                     created_by: None,
                 },

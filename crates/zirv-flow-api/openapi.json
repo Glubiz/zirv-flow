@@ -4085,6 +4085,787 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/credential-kinds": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "The credential kinds and their schemas, so a form can be drawn from data. A kind named\n`custom` takes its schema in the create request. Never holds a value. Workspace admins only.",
+        "operationId": "list_credential_kinds",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The built-in kinds with their schemas",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KindBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/credentials": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "The workspace's live credentials, ordered by name. Workspace admins only.",
+        "operationId": "list_credentials",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The live credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CredentialBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Creates a credential and seals its secret fields. Workspace admins only. Audited as\n`credential.created`.",
+        "operationId": "create_credential",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live credential has that name or key, or the master key is outdated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, key, kind, schema, field or secret",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the secret",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/credentials/{id}": {
+      "get": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "One credential, archived or not, with the sources and destinations that use it. Workspace\nadmins only.",
+        "operationId": "get_credential",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or credential, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Archives a credential. Refused with `credential_in_use` while a live source or destination\nuses it. Workspace admins only. Audited as `credential.archived`.",
+        "operationId": "archive_credential",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Archived"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or credential, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live source or destination uses it (`code` is `credential_in_use`), or it is already archived (`credential_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Changes the name or the non-secret values of a credential. Secret values change only through\nthe rotate endpoint. Workspace admins only. Audited as `credential.updated`.",
+        "operationId": "update_credential",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or credential, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another live credential has that name, or the credential is archived (`code` is `credential_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name or field, or no field at all",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/credentials/{id}/secret": {
+      "put": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Rotates the secret: seals the new values, swaps them in and deletes the old secret in one\ntransaction. Every source and destination that uses the credential opens the new value on its\nnext call. Workspace admins only. Audited as `credential.rotated`, with field names only.",
+        "operationId": "rotate_credential",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RotateCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rotated credential",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or credential, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The credential is archived (`code` is `credential_archived`), or the master key is outdated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A missing, unknown or empty secret field",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to seal the secret",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/credentials/{id}/test": {
+      "post": {
+        "tags": [
+          "credentials"
+        ],
+        "summary": "Tests a credential by running the check of a source or destination that uses it. A failed\ncheck is a 200 with `ok` false, a fixed `message` and a `code`. Records `last_tested_at` and the\noutcome. Workspace admins only. Audited as `credential.tested`.",
+        "operationId": "test_credential",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Credential id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestCredentialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The outcome of the check",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialTestBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or credential, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The credential or the destination is archived, or the owner's type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not exactly one of source_id and destination_id, or one that does not use this credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The source or destination did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/debugger/stream": {
       "get": {
         "tags": [
@@ -21500,6 +22281,62 @@
           }
         }
       },
+      "CreateCredentialRequest": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "description": "The non-secret values by field key.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable identifier of 1 to 64 lowercase letters, digits, `_` and `-`. Default: made from\nthe name."
+          },
+          "kind": {
+            "type": "string",
+            "description": "A built-in kind from `GET .../credential-kinds`, or `custom` with its own `schema`.",
+            "example": "smtp"
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 128 characters after trimming; unique among the workspace's live credentials,\nignoring case.",
+            "example": "Mail account"
+          },
+          "schema": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SchemaBody",
+                "description": "The fields of a `custom` credential; refused for a built-in kind."
+              }
+            ]
+          },
+          "secret": {
+            "type": "object",
+            "description": "The secret values by field key. Sealed on arrival and never returned.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateDestinationRequest": {
         "type": "object",
         "required": [
@@ -21524,15 +22361,13 @@
               "type": "string"
             }
           },
-          "credential": {
-            "type": "object",
-            "description": "The credential fields by name. Sealed on arrival and never returned.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
+          "credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace credential the destination uses (`/credentials`). Required when the\ndestination type has required credential fields, which the credential must hold."
           },
           "kind": {
             "type": "string",
@@ -21760,15 +22595,13 @@
               "type": "string"
             }
           },
-          "credential": {
-            "type": "object",
-            "description": "The credential fields by name. Sealed on arrival and never returned.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
+          "credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace credential the source uses (`/credentials`). Required when the source type\nhas required credential fields, which the credential must hold."
           },
           "kind": {
             "type": "string",
@@ -22034,6 +22867,164 @@
           }
         ],
         "description": "A hook with its shared secret, shown once."
+      },
+      "CredentialBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "name",
+          "kind",
+          "schema_version",
+          "schema",
+          "fields",
+          "hints",
+          "same_secret_as",
+          "used_by",
+          "rotated_at",
+          "archived",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "An archived credential is read-only history."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "fields": {
+            "type": "object",
+            "description": "The non-secret values.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The redaction HMAC of the sealed secret, equal for equal secrets; null for an imported\ncredential until it is rotated."
+          },
+          "hints": {
+            "type": "object",
+            "description": "Per secret field that is set: its last four characters when the value has at least 16\ncharacters, else an empty string (fully masked). The values are never returned.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "key": {
+            "type": "string",
+            "description": "A short stable identifier, unique among the workspace's live credentials.",
+            "example": "mail-account"
+          },
+          "kind": {
+            "type": "string",
+            "description": "A built-in kind (`GET .../credential-kinds`), `custom` (its own schema) or `imported` (a\ncredential a source or destination sealed before credentials existed).",
+            "example": "smtp"
+          },
+          "last_test_outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ok` or `failed`; null when never tested."
+          },
+          "last_tested_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string",
+            "example": "Mail account"
+          },
+          "rotated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "rotated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who last rotated it; null when an API key did, or it was never rotated by a user."
+          },
+          "same_secret_as": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The other live credentials sealed with the same secret."
+          },
+          "schema": {
+            "$ref": "#/components/schemas/SchemaBody",
+            "description": "The fields of the credential and which are secret. Draw the form from this."
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "used_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsedByBody"
+            },
+            "description": "The live sources and destinations that use it."
+          }
+        }
+      },
+      "CredentialTestBody": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,\n`egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or\n`failed`. Null when the check passed."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A fixed sentence for `code`. Never holds a credential, a host, an address or a URL; null\nwhen the check passed."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "Whether the check passed."
+          }
+        }
       },
       "CsvImportBody": {
         "type": "object",
@@ -22629,7 +23620,15 @@
             "items": {
               "type": "string"
             },
-            "description": "The names of the credential fields that are set. Their values are never returned."
+            "description": "The names of the fields the credential holds. Their values are never returned."
+          },
+          "credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace credential the destination uses."
           },
           "id": {
             "type": "string",
@@ -24193,6 +25192,16 @@
             "description": "True for a credential field: render a password input and never prefill it."
           }
         }
+      },
+      "FieldTypeBody": {
+        "type": "string",
+        "description": "The value type of a credential field.",
+        "enum": [
+          "string",
+          "integer",
+          "enum",
+          "url"
+        ]
       },
       "FinalStateBody": {
         "type": "object",
@@ -26414,6 +27423,29 @@
           }
         }
       },
+      "KindBody": {
+        "type": "object",
+        "description": "One credential kind with its schema.",
+        "required": [
+          "id",
+          "label",
+          "schema"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The id stored in `credential.kind`.",
+            "example": "api_key"
+          },
+          "label": {
+            "type": "string",
+            "example": "API key"
+          },
+          "schema": {
+            "$ref": "#/components/schemas/SchemaBody"
+          }
+        }
+      },
       "KindDepthBody": {
         "type": "object",
         "required": [
@@ -28274,6 +29306,25 @@
           }
         }
       },
+      "RotateCredentialRequest": {
+        "type": "object",
+        "required": [
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "object",
+            "description": "Every secret field of the credential, with its new value. Sealed on arrival and never\nreturned.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "RotatedSecretBody": {
         "type": "object",
         "description": "A new shared secret, shown once.",
@@ -28600,6 +29651,60 @@
             "description": "The content document."
           }
         }
+      },
+      "SchemaBody": {
+        "type": "object",
+        "description": "A list of fields: the shape of one credential.",
+        "required": [
+          "fields"
+        ],
+        "properties": {
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SchemaFieldBody"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SchemaFieldBody": {
+        "type": "object",
+        "description": "One field of a credential schema.",
+        "required": [
+          "key",
+          "label",
+          "type"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Lowercase letters, digits and underscores, starting with a letter.",
+            "example": "api_key"
+          },
+          "label": {
+            "type": "string",
+            "example": "API key"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The allowed values of an `enum` field."
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "boolean",
+            "description": "A secret field is sealed and never returned. Only a `string` can be secret."
+          },
+          "type": {
+            "$ref": "#/components/schemas/FieldTypeBody"
+          }
+        },
+        "additionalProperties": false
       },
       "SchemaVersionBody": {
         "type": "object",
@@ -30253,7 +31358,15 @@
             "items": {
               "type": "string"
             },
-            "description": "The names of the credential fields that are set. Their values are never returned."
+            "description": "The names of the fields the credential holds. Their values are never returned."
+          },
+          "credential_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace credential the source uses."
           },
           "enabled": {
             "type": "boolean"
@@ -31231,6 +32344,29 @@
           }
         }
       },
+      "TestCredentialRequest": {
+        "type": "object",
+        "description": "Which source or destination runs the check. Exactly one id.",
+        "properties": {
+          "destination_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A destination that uses this credential."
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A source that uses this credential."
+          }
+        },
+        "additionalProperties": false
+      },
       "TimelineBody": {
         "type": "object",
         "required": [
@@ -31805,6 +32941,29 @@
           }
         }
       },
+      "UpdateCredentialRequest": {
+        "type": "object",
+        "properties": {
+          "fields": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Replaces the whole object of non-secret values.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateDestinationRequest": {
         "type": "object",
         "properties": {
@@ -31825,18 +32984,13 @@
               "type": "string"
             }
           },
-          "credential": {
+          "credential_id": {
             "type": [
-              "object",
+              "string",
               "null"
             ],
-            "description": "Replaces the whole credential: every required credential field must be given.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
+            "format": "uuid",
+            "description": "Uses another workspace credential, which must hold every required credential field."
           },
           "name": {
             "type": [
@@ -32006,18 +33160,13 @@
               "type": "string"
             }
           },
-          "credential": {
+          "credential_id": {
             "type": [
-              "object",
+              "string",
               "null"
             ],
-            "description": "Replaces the whole credential: every required credential field must be given.",
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
+            "format": "uuid",
+            "description": "Uses another workspace credential, which must hold every required credential field."
           },
           "enabled": {
             "type": [
@@ -32188,6 +33337,29 @@
           }
         }
       },
+      "UsedByBody": {
+        "type": "object",
+        "description": "A live source or destination that uses a credential.",
+        "required": [
+          "kind",
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`source` or `destination`.",
+            "example": "destination"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "UserBody": {
         "type": "object",
         "description": "A user as shown to API callers; never includes the password hash.",
@@ -32242,6 +33414,17 @@
           "streams"
         ],
         "properties": {
+          "credential_schema": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SchemaBody",
+                "description": "The credential schema the manifest declares in `auth.credential` (a built-in kind it names,\nor its own fields), so the credential form can be drawn from it; null when it declares\nnone or the manifest is invalid. Create the credential as kind `custom` with this schema."
+              }
+            ]
+          },
           "issues": {
             "type": "array",
             "items": {

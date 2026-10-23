@@ -39,6 +39,7 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::oidc::{Callback, NO_STORE};
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::resolve;
 use crate::{AppState, request_id};
 
 /// Where the provider sends the browser back to, for every source; registered once.
@@ -160,7 +161,7 @@ pub(crate) async fn start(
     {
         return Err(super::invalid("credential.client_id", "is required"));
     }
-    let credential = credential::load(&state, workspace.id, source.credential_secret_id).await?;
+    let credential = resolve::load(&state, workspace.id, source.credential_id).await?;
     let client_id = credential
         .get("client_id")
         .ok_or_else(|| super::invalid("credential.client_id", "is required"))?;
@@ -383,7 +384,7 @@ async fn complete(
     let public_url = state
         .public_url()
         .ok_or_else(|| failed("exchange_failed"))?;
-    let credential = credential::load(state, workspace, source.credential_secret_id)
+    let credential = resolve::load(state, workspace, source.credential_id)
         .await
         .map_err(Failure::fault)?;
     let client_id = credential
@@ -452,9 +453,35 @@ async fn store_tokens(
     let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, source.id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    if locked.credential_secret_id != source.credential_secret_id
+    // The consent is for one credential and one client. A rotation of the same credential in
+    // between changes only its secrets, so the tokens still belong to the source; a source moved
+    // to another credential, or a credential now holding another client id, does not.
+    if locked.credential_id != source.credential_id
         || active_binding(&locked.config, credential).as_deref() != Some(tokens.binding.as_str())
     {
+        return Ok(false);
+    }
+    // Read the client id from the credential's locked row, in this transaction: a rotation or a
+    // patch waits for this write, so the tokens are never stored for a client the credential no
+    // longer names.
+    let Some(credential_id) = locked.credential_id else {
+        return Ok(false);
+    };
+    if zirv_flow_store::lock_credential_for_use(&mut tx, workspace, credential_id)
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let opened = zirv_flow_store::open_credential(&mut *tx, keyring, workspace, credential_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "a workspace credential could not be opened");
+            ApiError::internal()
+        })?;
+    let current =
+        Credential::from_parts(&opened.secret, &opened.fields).map_err(|_| ApiError::internal())?;
+    if active_binding(&locked.config, &current).as_deref() != Some(tokens.binding.as_str()) {
         return Ok(false);
     }
     let linked = match locked.oauth_secret_id {

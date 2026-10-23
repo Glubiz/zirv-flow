@@ -3,16 +3,15 @@ import { Link, useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, EmptyState, InlineError, PageHeader, Panel, ResourceView, Stepper, TextField } from "../../ui";
+import { CredentialPicker } from "../credentials";
 import { useWorkspaceAccess } from "../members";
 import { FieldInputs } from "./FieldInputs";
 import {
   configFrom,
-  credentialFrom,
   filled,
   initialValues,
   isPush,
   shapesValid,
-  withoutSecrets,
   type CreatedWebhook,
   type Source,
   type SourceKind,
@@ -48,6 +47,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
   const [kind, setKind] = useState<SourceKind | null>(null);
   const [name, setName] = useState("");
   const [values, setValues] = useState<Values>({});
+  const [credentialId, setCredentialId] = useState("");
   const [source, setSource] = useState<Source | null>(null);
   const [result, setResult] = useState<TestResult | null>(null);
   const [streams, setStreams] = useState<Stream[] | null>(null);
@@ -57,7 +57,8 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
 
   function choose(chosen: SourceKind) {
     setKind(chosen);
-    setValues(initialValues([...chosen.config_fields, ...chosen.credential_fields]));
+    setValues(initialValues(chosen.config_fields));
+    setCredentialId("");
     setSource(null);
     setResult(null);
     setStreams(null);
@@ -71,9 +72,8 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
     setFailure(null);
     try {
       const config = configFrom(kind.config_fields, values);
-      const credential = credentialFrom(kind.credential_fields, values);
-      // The first attempt creates the source. A retry after a failed test changes it, and sends
-      // the credential only when it was typed again: the server never returns it to prefill.
+      // The first attempt creates the source. A retry after a failed test changes it. The
+      // credential is a workspace credential, chosen by id: nothing secret passes through here.
       const saved = source
         ? await unwrap(
             client.PATCH("/api/v1/workspaces/{ws}/sources/{id}", {
@@ -81,18 +81,22 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
               body: {
                 name: name.trim(),
                 config,
-                ...(Object.keys(credential).length > 0 ? { credential } : {}),
+                ...(credentialId !== "" ? { credential_id: credentialId } : {}),
               },
             }),
           )
         : await unwrap(
             client.POST("/api/v1/workspaces/{ws}/sources", {
               params: { path: { ws: workspaceId } },
-              body: { kind: kind.kind, name: name.trim(), config, credential },
+              body: {
+                kind: kind.kind,
+                name: name.trim(),
+                config,
+                ...(credentialId !== "" ? { credential_id: credentialId } : {}),
+              },
             }),
           );
       setSource(saved);
-      setValues((current) => withoutSecrets(kind.credential_fields, current));
       setResult(
         await unwrap(
           client.POST("/api/v1/workspaces/{ws}/sources/{id}/test", {
@@ -128,18 +132,18 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
   }
 
   const nameOk = name.trim() !== "" && name.trim().length <= MAX_NAME_CHARS;
-  // A retry may leave the credential blank to keep the one already stored.
+  // A credential is needed when the type has a required credential field.
   const requiredOk = kind
     ? filled(kind.config_fields, values) &&
       shapesValid(kind.config_fields, values) &&
-      (source !== null || filled(kind.credential_fields, values))
+      (credentialId !== "" || !kind.credential_fields.some((field) => field.required))
     : false;
 
   return (
     <div className="page">
       <PageHeader
         title="New source"
-        lede="Choose a type, fill in its settings, and test the connection. Then discover its streams and pick the ones to read. The credential is stored encrypted and is never shown again."
+        lede="Choose a type, fill in its settings, and test the connection. Then discover its streams and pick the ones to read. The credential is a shared workspace credential: stored encrypted, never shown again, and rotated in one place."
       />
       {kind && isPush(kind) ? null : <Stepper steps={STEPS} current={step} label="Source setup steps" />}
       <Panel>
@@ -217,15 +221,12 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
                 {kind.credential_fields.length > 0 ? (
                   <fieldset className="stack">
                     <legend className="strong">Credential</legend>
-                    <p className="muted">
-                      {source
-                        ? "Leave these blank to keep the credential you saved. They are never shown again."
-                        : "Stored encrypted. It cannot be read back."}
-                    </p>
-                    <FieldInputs
+                    <CredentialPicker
+                      workspaceId={workspaceId}
                       fields={kind.credential_fields}
-                      values={values}
-                      onChange={(key, value) => setValues((current) => ({ ...current, [key]: value }))}
+                      value={credentialId}
+                      onChange={setCredentialId}
+                      purpose={kind.label}
                       disabled={busy}
                     />
                   </fieldset>

@@ -1,7 +1,7 @@
 //! Checks a source's settings against its spec before anything is stored. Reasons name the field
 //! and never repeat a value.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use url::Url;
@@ -114,6 +114,38 @@ pub(crate) fn check_credential<V: AsRef<str>>(
     } else {
         Err(errors)
     }
+}
+
+/// Checks that a stored credential, which has the fields named in `present`, holds every
+/// required credential field of the owner. Reasons name the field and never a value.
+pub(crate) fn check_credential_names(
+    fields: &[FieldSpec],
+    noun: &str,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    let errors: Vec<_> = fields
+        .iter()
+        .filter(|field| field.required && !present.contains(field.key))
+        .map(|field| {
+            error(
+                field.key,
+                &format!("is required by this {noun} type and the credential has no such field"),
+            )
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// [`check_credential_names`] for a source type.
+pub fn validate_credential_names(
+    spec: &SourceSpec,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_names(spec.credential_fields, "source", present)
 }
 
 /// The settings of a stream a user chose, as they are stored.
@@ -408,6 +440,17 @@ mod tests {
         values.clear();
         values.insert("token".to_owned(), "ok".to_owned());
         assert!(validate_credential(&SPEC, &values, true).is_ok());
+    }
+
+    #[test]
+    fn a_stored_credential_must_hold_every_required_field_of_the_source_type() {
+        let present = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect();
+
+        assert!(validate_credential_names(&SPEC, &present(&["token"])).is_ok());
+        let errors = fields_of(validate_credential_names(&SPEC, &present(&["user"])));
+
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("token: "), "{errors:?}");
     }
 
     fn descriptor() -> StreamDescriptor {

@@ -48,13 +48,43 @@ mod tests {
         csrf: String,
     }
 
+    #[derive(Clone, Copy)]
     enum Auth<'a> {
         Key(&'a str),
         Session(&'a Login),
         Anonymous,
     }
 
+    /// Sends a request. A body that still carries an inline credential for a source or
+    /// destination is expanded to a workspace credential first (`expand_inline_credential`).
     async fn call(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        auth: Auth<'_>,
+    ) -> Reply {
+        let sent = crate::test_support::expand_inline_credential(
+            |method, uri, body| async move {
+                let reply = call_once(router, &method, &uri, body, auth).await;
+                (reply.status, reply.body)
+            },
+            method,
+            uri,
+            body,
+        )
+        .await;
+        match sent {
+            Ok(body) => call_once(router, method, uri, body, auth).await,
+            Err((status, body)) => Reply {
+                status,
+                headers: Default::default(),
+                body,
+            },
+        }
+    }
+
+    async fn call_once(
         router: &Router,
         method: &str,
         uri: &str,

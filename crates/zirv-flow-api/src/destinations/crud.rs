@@ -1,9 +1,8 @@
-//! The destinations of a workspace: create, read, change and archive. A credential goes in
-//! sealed, in the transaction that stores the destination, and comes back only as the names of
-//! its fields. Each change is audited with ids, names and field names, never a value. Everything
-//! here is for workspace admins.
+//! The destinations of a workspace: create, read, change and archive. A destination uses a
+//! workspace credential by id and shows only the names of its fields. Each change is audited with
+//! ids, names and field names, never a value. Everything here is for workspace admins.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -13,8 +12,8 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{validate_config, validate_credential};
-use zirv_flow_core::{SecretId, SecretPurpose, SecretString, UserId, WorkspaceId};
+use zirv_flow_connectors::destinations::{validate_config, validate_credential_names};
+use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_store::{Destination, DestinationUpdate, NewDestination, PgPool, StoreError};
 
 use super::{archived, kind_unavailable, registry};
@@ -23,9 +22,9 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
-use crate::sources::credential::{keyring, to_plaintext};
-use crate::sources::crud::{check_name, field_names};
+use crate::sources::crud::check_name;
 use crate::sources::{field_problems, invalid};
+use crate::workspace_credentials::resolve::lock_for_use;
 
 /// The rate a destination gets when the request names none, in deliveries per second.
 pub(crate) const DEFAULT_RATE: i32 = 10;
@@ -42,7 +41,9 @@ pub(crate) struct DestinationBody {
     /// The plain settings. Never holds a credential.
     #[schema(value_type = BTreeMap<String, serde_json::Value>)]
     config: Value,
-    /// The names of the credential fields that are set. Their values are never returned.
+    /// The workspace credential the destination uses.
+    credential_id: Option<Uuid>,
+    /// The names of the fields the credential holds. Their values are never returned.
     credential_fields_set: Vec<String>,
     /// Deliveries per second the destination tolerates; the rate bucket enforces it across
     /// workers and processes.
@@ -68,6 +69,7 @@ impl From<&Destination> for DestinationBody {
             kind: destination.kind.clone(),
             name: destination.name.clone(),
             config: destination.config.clone(),
+            credential_id: destination.credential_id,
             credential_fields_set: destination.credential_fields.clone(),
             rate: destination.rate,
             burst: destination.burst,
@@ -91,10 +93,9 @@ pub(crate) struct CreateDestinationRequest {
     /// The plain settings, checked against the type's field specs.
     #[schema(value_type = BTreeMap<String, serde_json::Value>)]
     config: Value,
-    /// The credential fields by name. Sealed on arrival and never returned.
-    #[serde(default)]
-    #[schema(value_type = BTreeMap<String, String>)]
-    credential: BTreeMap<String, SecretString>,
+    /// The workspace credential the destination uses (`/credentials`). Required when the
+    /// destination type has required credential fields, which the credential must hold.
+    credential_id: Option<Uuid>,
     /// Deliveries per second, 1 to 100000. Default 10.
     rate: Option<i32>,
     /// The most deliveries at once, 1 to 100000. Default: the rate.
@@ -108,9 +109,8 @@ pub(crate) struct UpdateDestinationRequest {
     config: Option<Value>,
     rate: Option<i32>,
     burst: Option<i32>,
-    /// Replaces the whole credential: every required credential field must be given.
-    #[schema(value_type = Option<BTreeMap<String, String>>)]
-    credential: Option<BTreeMap<String, SecretString>>,
+    /// Uses another workspace credential, which must hold every required credential field.
+    credential_id: Option<Uuid>,
 }
 
 fn check_limit(field: &str, value: i32) -> Result<i32, ApiError> {
@@ -132,8 +132,8 @@ fn name_taken(error: StoreError) -> ApiError {
     }
 }
 
-/// Creates a destination with its rate bucket, seals its credential and audits
-/// `destination.created` (and `secret.created` for the credential), all in one transaction.
+/// Creates a destination with its rate bucket and audits `destination.created`, in one
+/// transaction.
 pub(crate) async fn create_destination(
     state: &AppState,
     context: &Context,
@@ -148,29 +148,23 @@ pub(crate) async fn create_destination(
     let spec = driver.spec();
     let name = check_name(&request.name)?;
     validate_config(spec, &request.config).map_err(|errors| field_problems("config", errors))?;
-    validate_credential(spec, &request.credential, true)
-        .map_err(|errors| field_problems("credential", errors))?;
+    if request.credential_id.is_none() {
+        validate_credential_names(spec, &BTreeSet::new())
+            .map_err(|errors| field_problems("credential", errors))?;
+    }
     let rate = check_limit("rate", request.rate.unwrap_or(DEFAULT_RATE))?;
     let burst = check_limit("burst", request.burst.unwrap_or(rate))?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let secret = if request.credential.is_empty() {
-        None
-    } else {
-        let plaintext = to_plaintext(&request.credential)?;
-        Some(
-            admin::create_secret_in(
-                &mut tx,
-                context,
-                keyring(state)?,
-                workspace,
-                SecretPurpose::DestinationCredential,
-                &plaintext,
-            )
+    let linked = match request.credential_id {
+        Some(id) => Some(
+            lock_for_use(&mut tx, workspace, id, |present| {
+                validate_credential_names(spec, present)
+            })
             .await?,
-        )
+        ),
+        None => None,
     };
-    let fields = field_names(&request.credential);
     let destination = zirv_flow_store::create_destination(
         &mut *tx,
         workspace,
@@ -179,8 +173,7 @@ pub(crate) async fn create_destination(
             kind: spec.kind,
             name,
             config: &request.config,
-            credential_secret_id: secret,
-            credential_fields: &fields,
+            credential_id: linked.as_ref().map(|credential| credential.id),
             rate,
             burst,
             created_by,
@@ -195,7 +188,8 @@ pub(crate) async fn create_destination(
         "destination.created",
         Some(("destination", destination.id)),
         json!({"kind": destination.kind, "name": destination.name,
-               "rate": rate, "burst": burst, "credential_fields": fields}),
+               "rate": rate, "burst": burst, "credential_id": destination.credential_id,
+               "credential_fields": destination.credential_fields}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -245,12 +239,7 @@ pub(crate) async fn update_destination(
     if burst.is_some() {
         fields.push("burst");
     }
-    if let Some(values) = &request.credential {
-        if values.is_empty() {
-            return Err(invalid("credential", "must not be empty"));
-        }
-        validate_credential(spec, values, true)
-            .map_err(|errors| field_problems("credential", errors))?;
+    if request.credential_id.is_some() {
         fields.push("credential");
     }
     if fields.is_empty() {
@@ -266,38 +255,15 @@ pub(crate) async fn update_destination(
     if locked.archived_at.is_some() {
         return Err(archived());
     }
-    let mut linked = None;
-    let credential_names = request.credential.as_ref().map(field_names);
-    if let Some(values) = &request.credential {
-        let plaintext = to_plaintext(values)?;
-        let keyring = keyring(state)?;
-        match locked.credential_secret_id {
-            Some(secret) => {
-                admin::replace_secret_in(
-                    &mut tx,
-                    context,
-                    keyring,
-                    workspace,
-                    SecretId::from_uuid(secret),
-                    &plaintext,
-                )
-                .await?;
-            }
-            None => {
-                linked = Some(
-                    admin::create_secret_in(
-                        &mut tx,
-                        context,
-                        keyring,
-                        workspace,
-                        SecretPurpose::DestinationCredential,
-                        &plaintext,
-                    )
-                    .await?,
-                );
-            }
-        }
-    }
+    let linked = match request.credential_id {
+        Some(id) => Some(
+            lock_for_use(&mut tx, workspace, id, |present| {
+                validate_credential_names(spec, present)
+            })
+            .await?,
+        ),
+        None => None,
+    };
     let destination = zirv_flow_store::update_destination(
         &mut *tx,
         workspace,
@@ -307,8 +273,7 @@ pub(crate) async fn update_destination(
             config: request.config.as_ref(),
             rate,
             burst,
-            credential_secret_id: linked,
-            credential_fields: credential_names.as_deref(),
+            credential_id: linked.as_ref().map(|credential| credential.id),
         },
     )
     .await
@@ -545,6 +510,7 @@ mod tests {
             kind: "fake".into(),
             name: "Mail".into(),
             config: json!({"mode": "ok"}),
+            credential_id: Some(Uuid::nil()),
             credential_secret_id: Some(Uuid::nil()),
             credential_fields: vec!["token".into()],
             rate: 10,

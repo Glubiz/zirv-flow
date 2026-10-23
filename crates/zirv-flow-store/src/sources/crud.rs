@@ -9,19 +9,24 @@ use zirv_flow_core::{SecretId, UserId, WorkspaceId};
 
 use crate::{StoreError, secrets};
 
-/// A configured source. The credential is a reference to a sealed secret, never a value.
+/// A configured source. The credential is a reference to a workspace credential, never a value.
 #[derive(Clone, Debug, FromRow, PartialEq)]
 pub struct Source {
     pub id: Uuid,
     pub kind: String,
     pub name: String,
     pub config: Value,
+    /// The workspace credential the source uses.
+    pub credential_id: Option<Uuid>,
+    /// The sealed secret of that credential at the time of the read; derived, not stored here.
+    /// Open the credential with [`open_credential`](crate::open_credential), which reads the
+    /// secret in the same statement, so a rotation in between cannot leave a stale id.
     pub credential_secret_id: Option<Uuid>,
     /// The sealed OAuth2 tokens of the source (purpose `oauth_token`), once an admin has
     /// connected an account. A reference, never a value.
     pub oauth_secret_id: Option<Uuid>,
     pub oauth_connected_at: Option<OffsetDateTime>,
-    /// The names of the credential fields that are set; never their values.
+    /// The names of the fields the credential holds; never their values. Derived.
     pub credential_fields: Vec<String>,
     pub schedule: Option<String>,
     pub enabled: bool,
@@ -33,21 +38,23 @@ pub struct Source {
 /// The columns of [`Source`].
 macro_rules! source_columns {
     () => {
-        "id, kind, name, config, credential_secret_id, oauth_secret_id, oauth_connected_at, \
-         credential_fields, schedule, enabled, created_by, created_at, updated_at"
+        "id, kind, name, config, credential_id, \
+         credential_secret_of(workspace_id, credential_id) AS credential_secret_id, \
+         oauth_secret_id, oauth_connected_at, \
+         credential_field_names(workspace_id, credential_id) AS credential_fields, \
+         schedule, enabled, created_by, created_at, updated_at"
     };
 }
 
-/// A source to create. The secret named by `credential_secret_id` must already exist in the
-/// same transaction.
+/// A source to create. The credential, if any, must be a live credential of the workspace; lock it
+/// with [`lock_credential_for_use`](crate::lock_credential_for_use) in the same transaction.
 #[derive(Debug)]
 pub struct NewSource<'a> {
     pub id: Uuid,
     pub kind: &'a str,
     pub name: &'a str,
     pub config: &'a Value,
-    pub credential_secret_id: Option<SecretId>,
-    pub credential_fields: &'a [String],
+    pub credential_id: Option<Uuid>,
     pub schedule: Option<&'a str>,
     pub created_by: Option<UserId>,
 }
@@ -60,10 +67,8 @@ pub struct SourceUpdate<'a> {
     /// `Some(None)` clears the schedule.
     pub schedule: Option<Option<&'a str>>,
     pub enabled: Option<bool>,
-    /// Links a credential secret the source had none of.
-    pub credential_secret_id: Option<SecretId>,
-    /// Replaces the names of the credential fields that are set.
-    pub credential_fields: Option<&'a [String]>,
+    /// Links another workspace credential.
+    pub credential_id: Option<Uuid>,
 }
 
 /// Creates a source. A name already taken in the workspace is a conflict.
@@ -73,9 +78,9 @@ pub async fn create_source<'e>(
     new: &NewSource<'_>,
 ) -> Result<Source, StoreError> {
     sqlx::query_as(concat!(
-        "INSERT INTO sources (id, workspace_id, kind, name, config, credential_secret_id, \
-            credential_fields, schedule, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING ",
+        "INSERT INTO sources (id, workspace_id, kind, name, config, credential_id, \
+            schedule, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ",
         source_columns!()
     ))
     .bind(new.id)
@@ -83,8 +88,7 @@ pub async fn create_source<'e>(
     .bind(new.kind)
     .bind(new.name)
     .bind(new.config)
-    .bind(new.credential_secret_id.map(|id| id.as_uuid()))
-    .bind(new.credential_fields)
+    .bind(new.credential_id)
     .bind(new.schedule)
     .bind(new.created_by.map(|user| user.as_uuid()))
     .fetch_one(executor)
@@ -198,8 +202,7 @@ pub async fn update_source(
          UPDATE sources SET name = COALESCE($3, name), config = COALESCE($4, config), \
             schedule = CASE WHEN $5 THEN $6 ELSE schedule END, \
             enabled = COALESCE($7, enabled), \
-            credential_secret_id = COALESCE($8, credential_secret_id), \
-            credential_fields = COALESCE($9, credential_fields), updated_at = now() \
+            credential_id = COALESCE($8, credential_id), updated_at = now() \
          WHERE workspace_id = $1 AND id = $2 RETURNING ",
         source_columns!()
     ))
@@ -210,8 +213,7 @@ pub async fn update_source(
     .bind(update.schedule.is_some())
     .bind(update.schedule.flatten())
     .bind(update.enabled)
-    .bind(update.credential_secret_id.map(|id| id.as_uuid()))
-    .bind(update.credential_fields)
+    .bind(update.credential_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(StoreError::query)?;
@@ -219,9 +221,10 @@ pub async fn update_source(
     Ok(source)
 }
 
-/// Deletes a source with its streams, its credential secret and its token secret, and returns
-/// what was deleted. `None` when there is no such source. The caller holds a transaction, so the source and its
-/// secret go together.
+/// Deletes a source with its streams and its token secret, and returns what was deleted. The
+/// workspace credential it used stays: other sources and destinations may share it. `None` when
+/// there is no such source. The caller holds a transaction, so the source and its token secret go
+/// together.
 pub async fn delete_source(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -236,12 +239,6 @@ pub async fn delete_source(
     .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    if let Some(secret) = deleted
-        .as_ref()
-        .and_then(|source| source.credential_secret_id)
-    {
-        secrets::delete(&mut *connection, workspace, SecretId::from_uuid(secret)).await?;
-    }
     if let Some(secret) = deleted.as_ref().and_then(|source| source.oauth_secret_id) {
         secrets::delete(&mut *connection, workspace, SecretId::from_uuid(secret)).await?;
     }
@@ -257,6 +254,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::workspace_credentials::testing::credential_with_fields;
     use crate::{begin, commit, create_workspace};
 
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
@@ -271,8 +269,7 @@ mod tests {
             kind: "fake",
             name,
             config,
-            credential_secret_id: None,
-            credential_fields: &[],
+            credential_id: None,
             schedule: None,
             created_by: None,
         }
@@ -360,22 +357,21 @@ mod tests {
         .unwrap();
         assert_eq!(cleared.schedule, None);
 
-        let secret_id = secret(&pool, ws).await;
+        let credential = credential_with_fields(&pool, ws, "mail", &["token"]).await;
         let fields = vec!["token".to_owned()];
         let linked = update_source(
             &mut pool.acquire().await.unwrap(),
             ws,
             created.id,
             &SourceUpdate {
-                credential_secret_id: Some(secret_id),
-                credential_fields: Some(&fields),
+                credential_id: Some(credential.id),
                 ..SourceUpdate::default()
             },
         )
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(linked.credential_secret_id, Some(secret_id.as_uuid()));
+        assert_eq!(linked.credential_secret_id, Some(credential.secret_id));
         assert_eq!(linked.credential_fields, fields);
         let kept = update_source(
             &mut pool.acquire().await.unwrap(),
@@ -423,20 +419,29 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn deleting_a_source_deletes_its_secret_in_the_same_transaction(pool: PgPool) {
+    async fn deleting_a_source_deletes_its_token_secret_in_the_same_transaction_and_keeps_the_shared_credential(
+        pool: PgPool,
+    ) {
         let ws = workspace(&pool, "one").await;
         let secret_id = secret(&pool, ws).await;
+        let credential = credential_with_fields(&pool, ws, "mail", &["token"]).await;
         let config = json!({});
         let source = create_source(
             &pool,
             ws,
             &NewSource {
-                credential_secret_id: Some(secret_id),
+                credential_id: Some(credential.id),
                 ..new("crm", &config)
             },
         )
         .await
         .unwrap();
+        sqlx::query("UPDATE sources SET oauth_secret_id = $1 WHERE id = $2")
+            .bind(secret_id.as_uuid())
+            .bind(source.id)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let mut tx = begin(&pool).await.unwrap();
         delete_source(&mut tx, ws, source.id)
@@ -455,6 +460,16 @@ mod tests {
             .unwrap();
         commit(tx).await.unwrap();
         assert!(secrets::get(&pool, ws, secret_id).await.unwrap().is_none());
+        let kept = crate::find_credential(&pool, ws, credential.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            secrets::get(&pool, ws, SecretId::from_uuid(kept.secret_id))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[sqlx::test]
@@ -515,14 +530,14 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_store_refuses_a_secret_or_a_source_of_another_workspace(pool: PgPool) {
         let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
-        let foreign_secret = secret(&pool, two).await;
+        let foreign_secret = credential_with_fields(&pool, two, "mail", &["token"]).await;
         let config = json!({});
 
         let created = create_source(
             &pool,
             one,
             &NewSource {
-                credential_secret_id: Some(foreign_secret),
+                credential_id: Some(foreign_secret.id),
                 ..new("crm", &config)
             },
         )
@@ -535,7 +550,7 @@ mod tests {
             one,
             own.id,
             &SourceUpdate {
-                credential_secret_id: Some(foreign_secret),
+                credential_id: Some(foreign_secret.id),
                 ..SourceUpdate::default()
             },
         )

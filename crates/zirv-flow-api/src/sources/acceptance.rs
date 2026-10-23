@@ -38,6 +38,7 @@ mod tests {
         csrf: String,
     }
 
+    #[derive(Clone, Copy)]
     enum Auth<'a> {
         Anonymous,
         Key(&'a str),
@@ -55,7 +56,36 @@ mod tests {
         seen: std::sync::Mutex<Vec<String>>,
     }
 
+    /// Sends a request. A body that still carries an inline credential for a source or
+    /// destination is expanded to a workspace credential first (`expand_inline_credential`).
     async fn call(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        auth: Auth<'_>,
+    ) -> Reply {
+        let sent = crate::test_support::expand_inline_credential(
+            |method, uri, body| async move {
+                let reply = call_once(router, &method, &uri, body, auth).await;
+                (reply.status, reply.body)
+            },
+            method,
+            uri,
+            body,
+        )
+        .await;
+        match sent {
+            Ok(body) => call_once(router, method, uri, body, auth).await,
+            Err((status, body)) => Reply {
+                status,
+                headers: Default::default(),
+                body,
+            },
+        }
+    }
+
+    async fn call_once(
         router: &Router,
         method: &str,
         uri: &str,
@@ -402,13 +432,14 @@ mod tests {
         assert_eq!(deleted.status, StatusCode::NO_CONTENT);
         let gone = fx.as_admin("GET", &format!("/sources/{id}"), None).await;
         assert_eq!(gone.status, StatusCode::NOT_FOUND);
-        for table in ["sources", "streams", "encrypted_secrets"] {
+        // The workspace credential the source used is its own object and stays, with its secret.
+        for (table, expected) in [("sources", 0), ("streams", 0), ("encrypted_secrets", 1)] {
             let count: i64 =
                 sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-            assert_eq!(count, 0, "{table}");
+            assert_eq!(count, expected, "{table}");
         }
     }
 
@@ -495,7 +526,13 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(kept, 2, "a refused create rolls its secret back");
+        // Each create made its credential first; the refused one left its credential, not a source.
+        assert_eq!(kept, 3, "a refused create stores no source");
+        let sources: i64 = sqlx::query_scalar("SELECT count(*) FROM sources")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sources, 2);
     }
 
     #[sqlx::test]
@@ -510,7 +547,7 @@ mod tests {
         .await;
         let no_credential = create(json!({"kind": "fake", "name": "x", "config": {}})).await;
         let wrong_credential = create(json!({"kind": "fake", "name": "x", "config": {},
-            "credential": {"token": "ok", "password": "p"}}))
+            "credential_id": uuid::Uuid::now_v7()}))
         .await;
         let bad_schedule = create(json!({"kind": "fake", "name": "x", "config": {},
             "credential": {"token": "ok"}, "schedule": "sometimes"}))
@@ -545,7 +582,7 @@ mod tests {
         assert_eq!(fields(&unknown_kind), ["kind"]);
         assert_eq!(fields(&bad_config), ["config.extra", "config.streams"]);
         assert_eq!(fields(&no_credential), ["credential.token"]);
-        assert_eq!(fields(&wrong_credential), ["credential.password"]);
+        assert_eq!(fields(&wrong_credential), ["credential_id"]);
         assert_eq!(fields(&bad_schedule), ["schedule"]);
         assert_eq!(fields(&bad_name), ["name"]);
         let id = fx.create_ok("CRM", "ok", 1).await;
@@ -570,9 +607,11 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
+        // The credential of the first source and one made for each of the three refused bodies
+        // that named a valid credential: a credential is its own object, not part of a source.
         assert_eq!(
-            secrets_stored, 1,
-            "a refused create leaves no secret behind"
+            secrets_stored, 4,
+            "a refused create leaves no source behind"
         );
     }
 
@@ -663,13 +702,13 @@ mod tests {
             [
                 "secret.created",
                 "source.created",
-                "secret.replaced",
+                "secret.created",
+                "secret.deleted",
                 "source.updated",
                 "source.tested",
                 "source.discovered",
                 "stream.configured",
                 "source.deleted",
-                "secret.deleted",
             ]
         );
         let summaries: String = zirv_flow_store::list_audit(&pool, 200)
@@ -840,7 +879,7 @@ mod tests {
                         "database": options.get_database().unwrap(),
                         "tls": "off"
                     },
-                    "credential": {"user": "zz_pg_reader", "password": PG_PASSWORD}
+                    "credential": {"username": "zz_pg_reader", "password": PG_PASSWORD}
                 })),
             )
             .await;
@@ -849,7 +888,7 @@ mod tests {
 
         fx.exercise_a_stored_credential(
             &id,
-            json!({"user": "zz_pg_reader", "password": PG_REPLACED_PASSWORD}),
+            json!({"username": "zz_pg_reader", "password": PG_REPLACED_PASSWORD}),
         )
         .await;
 
@@ -872,7 +911,7 @@ mod tests {
                     "kind": "mysql",
                     "name": "shop",
                     "config": {"host": host, "port": port, "database": "shop", "tls": "off"},
-                    "credential": {"user": "zz_mysql_reader", "password": MYSQL_PASSWORD}
+                    "credential": {"username": "zz_mysql_reader", "password": MYSQL_PASSWORD}
                 })),
             )
             .await;
@@ -881,7 +920,7 @@ mod tests {
 
         fx.exercise_a_stored_credential(
             &id,
-            json!({"user": "zz_mysql_reader", "password": MYSQL_REPLACED_PASSWORD}),
+            json!({"username": "zz_mysql_reader", "password": MYSQL_REPLACED_PASSWORD}),
         )
         .await;
 
@@ -2265,7 +2304,7 @@ mod tests {
             assert_eq!(
                 credentials,
                 [
-                    (json!("user"), json!(true)),
+                    (json!("username"), json!(true)),
                     (json!("password"), json!(true))
                 ]
             );
@@ -2283,7 +2322,7 @@ mod tests {
                 "/sources",
                 Some(
                     json!({"kind": "postgres", "name": "warehouse", "config": config,
-                    "credential": {"user": "reader", "password": "pw"}}),
+                    "credential": {"username": "reader", "password": "pw"}}),
                 ),
             )
         };
@@ -2348,7 +2387,7 @@ mod tests {
         assert_eq!(created.body["config"]["queries"], queries);
         assert_eq!(
             created.body["credential_fields_set"],
-            json!(["password", "user"])
+            json!(["password", "username"])
         );
 
         let more = json!([
@@ -2411,7 +2450,7 @@ mod tests {
                         "database": options.get_database().unwrap(),
                         "tls": "off"
                     },
-                    "credential": {"user": role, "password": "zf_prev_pw"}
+                    "credential": {"username": role, "password": "zf_prev_pw"}
                 })),
             )
             .await;

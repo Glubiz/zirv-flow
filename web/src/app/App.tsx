@@ -2,6 +2,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 
 import { AiSettingsPage } from "../features/assistant";
 import { ApiKeysPage } from "../features/api-keys";
+import { CredentialsPage } from "../features/credentials";
 import { ContactDefinitionPage, ContactPage, ContactsPage } from "../features/contacts";
 import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
@@ -149,6 +150,7 @@ export function AppRoutes() {
           <Route path="w/:ws/privacy" element={<PrivacyPage />} />
           <Route path="w/:ws/ai" element={<AiSettingsPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
+          <Route path="w/:ws/credentials" element={<CredentialsPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />
           <Route path="jobs" element={<JobsPage />} />

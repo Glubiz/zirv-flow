@@ -1111,6 +1111,10 @@ send time** (consent can change while a person waits):
 | 8 | Destination rate limit | deferred until a token is available |
 | 9 | Deliver with idempotency key | `sent`, retried, or `failed` |
 
+A destination's credential is a workspace credential (16.2): it is chosen by `credential_id`,
+shared with any other source or destination whose type needs the same fields, and rotated once
+for all of them. The destination check and a delivery open the credential's current secret at use.
+
 Each outcome updates `messages` (template version, destination, data
 freshness, gate results) and appends a person event, so the profile answers
 "why did this person not get the email". Zirv Flow enforces the consent policy
@@ -2073,6 +2077,30 @@ key (`secrets.master_key_file` or env, identified by key id).
 `zirv-flow admin rotate-master-key` re-wraps data keys in one transaction
 without decrypting payloads. The API never returns plaintext. A lost master key means
 credentials must be re-entered (documented).
+
+**Workspace credentials (M6, ruling 20303fa3).** A source or destination does not seal a
+credential of its own: it references a named workspace credential by `credential_id`. A
+credential has a `kind` (the schema id: a fixed built-in `CredentialKind` of `api_key`, `basic`,
+`smtp`, `oauth2_client` or `signing_secret`, data in `core` and not a registry, or `custom` with a
+schema carried in the row, which is how a manifest `auth.credential` schema is stored), its non-secret
+`fields` as JSON, and one `secret_id` that holds every secret field as a single sealed JSON object
+(purpose `workspace_credential`, same associated data rule as every secret). It also keeps a hint per
+secret field (the last four characters of a value of at least 16, else nothing), a fingerprint (the
+redaction HMAC of the sealed object, used only to warn that a secret was entered twice), `rotated_at`,
+`last_tested_at` and the last test outcome. Rotation seals the new object, swaps `secret_id` and
+deletes the old `encrypted_secrets` row in one transaction; because `api` and `jobs` open the
+credential's current secret right before every use (the credential row and its secret are read in one
+statement, so a swap in between cannot leave a deleted id), nothing else changes and no cached copy
+exists. `admin rotate-master-key` re-wraps these rows like any other. Credentials a source or
+destination had sealed itself before migration 0047 became `imported` credentials that point at the
+same `encrypted_secrets` row with its old purpose (`connector_credential` or
+`destination_credential`): nothing is re-sealed in SQL because the associated data binds the
+purpose, the secret stays readable, and the next rotation re-seals it as `workspace_credential`. The
+old `credential_secret_id` and `credential_fields` columns of `sources` and `destinations` were
+dropped after the backfill; the secret id and the field names are derived from the credential. OAuth
+access and refresh tokens stay per source (`oauth_token`), because they are runtime state. Archiving
+is refused while a live source or destination references the credential, and an archived credential
+cannot be referenced.
 
 As built (M2): the master key arrives in M2 as `secrets.master_key_file` or `secrets.master_key`, with per-purpose HMAC keys derived by HKDF-SHA256 (identifier and redaction hashes); M3 reuses it for the envelope encryption above.
 

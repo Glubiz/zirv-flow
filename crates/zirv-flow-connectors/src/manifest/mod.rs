@@ -15,8 +15,8 @@ use serde_json::Value;
 
 pub use issue::{Issue, code};
 pub use model::{
-    Auth, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation, Manifest,
-    PaginationSpec, RateLimitSpec, StreamSpec,
+    Auth, CredentialSpec, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation,
+    Manifest, PaginationSpec, RateLimitSpec, StreamSpec,
 };
 
 use issue::{child, index};
@@ -61,7 +61,12 @@ pub fn needs_authorization(value: &Value) -> bool {
 /// authorization-code grant is optional, as a public client has none: see
 /// [`optional_credential_fields`].
 pub fn declared_credential_fields(manifest: &Manifest) -> &'static [&'static str] {
-    match manifest.auth {
+    credential_fields_of(&manifest.auth)
+}
+
+/// [`declared_credential_fields`] for an auth section.
+pub(crate) fn credential_fields_of(auth: &Auth) -> &'static [&'static str] {
+    match auth {
         Auth::None => &[],
         Auth::ApiKey { .. } => &["api_key"],
         Auth::Basic => &["username", "password"],

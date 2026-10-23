@@ -1396,7 +1396,25 @@ mod tests {
             .await;
         let audited = zirv_flow_store::list_audit(&pool, 200).await.unwrap().len();
         assert_eq!(audited, before, "a preview is not audited");
-        let pull = fx.as_admin("POST", "/sources", Some(json!({"kind": "fake", "name": "crm", "config": {}, "credential": {"token": "ok"}}))).await;
+        let credential = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "crm token",
+                            "schema": {"fields": [{"key": "token", "label": "Token", "type": "string",
+                                                    "required": true, "secret": true}]},
+                            "secret": {"token": "ok"}})),
+            )
+            .await;
+        let credential_id = credential.body["id"].as_str().unwrap().to_owned();
+        let pull = fx
+            .as_admin(
+                "POST",
+                "/sources",
+                Some(json!({"kind": "fake", "name": "crm", "config": {},
+                            "credential_id": credential_id})),
+            )
+            .await;
         let pull_id = pull.body["id"].as_str().unwrap().to_owned();
         fx.as_admin("POST", &format!("/sources/{pull_id}/discover"), None)
             .await;

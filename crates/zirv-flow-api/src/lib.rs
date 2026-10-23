@@ -40,6 +40,7 @@ mod users;
 mod version;
 mod web;
 mod webhooks;
+mod workspace_credentials;
 mod workspaces;
 
 #[cfg(test)]
@@ -504,6 +505,28 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/destinations/{id}/check",
             post(destinations::actions::check),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/credential-kinds",
+            get(workspace_credentials::schema::list_kinds),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/credentials",
+            get(workspace_credentials::crud::list).post(workspace_credentials::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/credentials/{id}",
+            get(workspace_credentials::crud::get)
+                .patch(workspace_credentials::crud::update)
+                .delete(workspace_credentials::crud::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/credentials/{id}/secret",
+            put(workspace_credentials::crud::rotate),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/credentials/{id}/test",
+            post(workspace_credentials::check::test),
         )
         .route(
             "/api/v1/workspaces/{ws}/sending-domains",

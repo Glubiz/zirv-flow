@@ -22,15 +22,16 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{DiscoveredStream, Source, Stream};
 
 use super::streams::{StreamBody, bodies, checked_mapping};
-use super::{credential, kind_unavailable, registry, tokens};
+use super::{kind_unavailable, registry, tokens};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::imports::MappingBody;
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::resolve;
 
 /// The longest a test or a discovery may take.
-pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct TestBody {
@@ -41,11 +42,11 @@ pub(crate) struct TestBody {
 }
 
 /// A source ready to call: its row, its type, its opened credential and its network context.
-pub(super) struct Prepared {
-    pub(super) source: Source,
-    pub(super) driver: &'static dyn ErasedSource,
-    pub(super) credential: Credential,
-    pub(super) context: SourceContext,
+pub(crate) struct Prepared {
+    pub(crate) source: Source,
+    pub(crate) driver: &'static dyn ErasedSource,
+    pub(crate) credential: Credential,
+    pub(crate) context: SourceContext,
 }
 
 /// The network context of a call for source `id` of type `kind`. Its requests are counted by the
@@ -70,7 +71,7 @@ pub(super) fn network_context(
     .map_err(|_| ApiError::internal())
 }
 
-pub(super) async fn prepare(
+pub(crate) async fn prepare(
     state: &AppState,
     workspace: WorkspaceId,
     id: Uuid,
@@ -79,7 +80,7 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let driver = registry().get(&source.kind).ok_or_else(kind_unavailable)?;
-    let mut credential = credential::load(state, workspace, source.credential_secret_id).await?;
+    let mut credential = resolve::load(state, workspace, source.credential_id).await?;
     let context = network_context(
         state,
         driver.spec().kind,
@@ -96,7 +97,7 @@ pub(super) async fn prepare(
     })
 }
 
-pub(super) fn timed_out() -> ApiError {
+pub(crate) fn timed_out() -> ApiError {
     ApiError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "the source did not answer in time",

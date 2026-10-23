@@ -15,11 +15,12 @@ use zirv_flow_connectors::destinations::{DestinationContext, DestinationError};
 use zirv_flow_connectors::http::{HttpError, HttpLimits};
 use zirv_flow_core::WorkspaceId;
 
-use super::{archived, credential, kind_unavailable, registry};
+use super::{archived, kind_unavailable, registry};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
+use crate::workspace_credentials::resolve;
 
 /// The longest a check may take.
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,14 +28,14 @@ pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Serialize, ToSchema)]
 pub(crate) struct DestinationCheckBody {
     /// Whether the settings and the credential work.
-    ok: bool,
+    pub(crate) ok: bool,
     /// Why they do not, in a fixed sentence per `code`. Never holds a credential, a host, an
     /// address or a URL.
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     /// A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,
     /// `egress_denied`, `network_error`, `upstream_error`, `rate_limited`, `unsupported` or
     /// `failed`. Null when the check passed.
-    code: Option<String>,
+    pub(crate) code: Option<String>,
 }
 
 /// The code and the fixed sentence for a failed check. The connector's own text can name a host
@@ -83,7 +84,7 @@ pub(crate) async fn check_destination(
     let driver = registry()
         .get(&destination.kind)
         .ok_or_else(kind_unavailable)?;
-    let credential = credential::load(state, workspace, destination.credential_secret_id).await?;
+    let credential = resolve::load(state, workspace, destination.credential_id).await?;
     let network = DestinationContext::new(
         state.egress_policy().clone(),
         HttpLimits::default(),

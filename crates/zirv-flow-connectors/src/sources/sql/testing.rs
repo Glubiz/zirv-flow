@@ -69,7 +69,7 @@ pub(crate) fn loopback_context(kind: &'static str) -> SourceContext {
 
 pub(crate) fn credential(user: &str, password: &str) -> Credential {
     let mut credential = Credential::new();
-    credential.insert("user", SecretString::new(user.to_owned()));
+    credential.insert("username", SecretString::new(user.to_owned()));
     credential.insert("password", SecretString::new(password.to_owned()));
     credential
 }
@@ -166,7 +166,7 @@ mod tests {
     fn the_credential_helper_sets_both_fields() {
         let credential = credential("reader", "pw");
 
-        assert_eq!(credential.get("user").unwrap().expose(), "reader");
+        assert_eq!(credential.get("username").unwrap().expose(), "reader");
         assert_eq!(credential.get("password").unwrap().expose(), "pw");
     }
 
