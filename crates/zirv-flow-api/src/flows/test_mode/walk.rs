@@ -545,6 +545,27 @@ impl Walker<'_> {
                 }
                 self.external.push(body("webhook", captured));
             }
+            EffectKind::Send {
+                template,
+                destination,
+                topic,
+                dimensions,
+            } => {
+                // A walk sends nothing, renders nothing and writes no message: it names the
+                // message a real run would queue. The gates run only when the send does, against
+                // the consent, suppression and sender of that moment, so a walk cannot say which
+                // one would stop it.
+                let mut captured = json!({
+                    "template": template,
+                    "destination": destination,
+                    "dimensions": dimensions,
+                    "idempotency_key": effect.effect_key,
+                });
+                if let (Some(topic), Some(captured)) = (topic, captured.as_object_mut()) {
+                    captured.insert("topic".to_owned(), json!(topic));
+                }
+                self.external.push(body("send", captured));
+            }
         }
     }
 

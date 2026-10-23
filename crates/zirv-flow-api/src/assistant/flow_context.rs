@@ -86,6 +86,10 @@ else.
 - split.random: {\"arms\": [{\"weight\": n}, ...]}, two to ten arms whose weights are positive \
 and add up to 100. Ports: arm_0, arm_1, ...
 - action.webhook: {\"url\": an http or https URL, \"trait_keys\": [trait keys] (optional)}.
+- action.send: {\"template\": id of a published email template, \"destination\": id of a live \
+destination, \"topic\": id of a consent topic (optional), \"dimensions\": {dimension key: value \
+key} (optional)}: sends the person that email. Consent, suppression and the sender are checked \
+when it runs and a person who fails them is skipped, so the flow goes on either way.
 - action.update_trait: {\"key\": trait key, \"change\": {\"op\": \"set\", \"value\": v} or \
 {\"op\": \"increment\", \"by\": number} or {\"op\": \"unset\"}}.
 - action.list: {\"list_id\": id, \"change\": \"add\" or \"remove\"}.
@@ -111,7 +115,8 @@ settings:
 {\"type\": \"event\", \"event\": name, \"filters\": [...] (optional)} or {\"type\": \"goal_reached\"} \
 (needs a goal).
 An event name and its filters are checked as the segment condition {\"event\": name, \"where\": \
-filters}. A webhook node needs the workspace to have a signing secret; you cannot add one.
+filters}. A webhook node needs the workspace to have a signing secret; you cannot add one. A \
+send node needs a published template and a destination of the workspace, which you cannot create.
 
 Example:
 {\"graph\":{\"v\":1,\"nodes\":[{\"id\":\"wait\",\"type\":\"wait.duration\",\"seconds\":86400},\

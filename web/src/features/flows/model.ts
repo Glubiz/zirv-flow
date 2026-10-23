@@ -58,6 +58,7 @@ export function portsOf(node: FlowNode): string[] {
     case "wait.duration":
     case "wait.until_time":
     case "action.webhook":
+    case "action.send":
     case "action.update_trait":
     case "action.list":
       return ["next"];
@@ -127,6 +128,8 @@ function blankNode(type: NodeType, id: string): FlowNode {
       return { id, type, arms: [{ weight: 50 }, { weight: 50 }] };
     case "action.webhook":
       return { id, type, url: "", trait_keys: [] };
+    case "action.send":
+      return { id, type, template: NIL_UUID, destination: NIL_UUID };
     case "action.update_trait":
       return { id, type, key: "", change: { op: "set", value: "" } };
     case "action.list":

@@ -225,6 +225,45 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
             .property("template", uuid()),
         ),
         (
+            "action.send",
+            node(
+                "action.send",
+                "Sends a person an email: the published `template` through the `destination`. The \
+                 send passes the gates of architecture 10.1 when it runs (address, consent, \
+                 suppression, a verified sender), so a person without consent is skipped and the \
+                 flow goes on. Port `next`.",
+            )
+            .property(
+                "template",
+                uuid().description(Some(
+                    "A published, unarchived template of the `email` channel.",
+                )),
+            )
+            .required("template")
+            .property(
+                "destination",
+                uuid().description(Some("A live destination that delivers email.")),
+            )
+            .required("destination")
+            .property(
+                "topic",
+                uuid().description(Some(
+                    "The consent topic of the message. Absent: consent is judged with no topic.",
+                )),
+            )
+            .property(
+                "dimensions",
+                ObjectBuilder::new()
+                    .description(Some(
+                        "The message's consent dimension values, dimension key to value key, at \
+                         most 20.",
+                    ))
+                    .additional_properties(Some(AdditionalProperties::RefOr(RefOr::T(
+                        string().into(),
+                    )))),
+            ),
+        ),
+        (
             "action.update_trait",
             node(
                 "action.update_trait",

@@ -797,6 +797,46 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_under_the_reserved_email_prefix_is_refused_from_a_client(pool: PgPool) {
+        let fx = fixture(&pool).await;
+
+        let single = fx
+            .send(
+                "/api/v1/ingest/track",
+                json!({"userId": "u-1", "event": "email.sent"}),
+            )
+            .await;
+        let batch = fx
+            .send(
+                "/api/v1/ingest/batch",
+                json!({"batch": [
+                    {"type": "track", "userId": "u-1", "event": "seen"},
+                    {"type": "track", "userId": "u-1", "event": "Email.Opened"},
+                ]}),
+            )
+            .await;
+        let lookalike = fx
+            .send(
+                "/api/v1/ingest/track",
+                json!({"userId": "u-1", "event": "emails.sent"}),
+            )
+            .await;
+
+        assert_eq!(single.status, StatusCode::BAD_REQUEST, "{:?}", single.body);
+        assert!(single.body.to_string().contains("reserved_event_name"));
+        assert_eq!(batch.status, StatusCode::BAD_REQUEST, "{:?}", batch.body);
+        assert!(batch.body.to_string().contains("reserved_event_name"));
+        assert_eq!(
+            lookalike.status,
+            StatusCode::ACCEPTED,
+            "{:?}",
+            lookalike.body
+        );
+        assert_eq!(fx.inbox().await.len(), 1, "only the lookalike was stored");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_missing_or_wrong_key_is_a_401(pool: PgPool) {
         let fx = fixture(&pool).await;
         let body = || Body::from(json!({"userId": "u"}).to_string());

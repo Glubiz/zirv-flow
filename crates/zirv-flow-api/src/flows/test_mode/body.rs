@@ -254,10 +254,12 @@ pub(crate) struct EffectBody {
     pub(crate) step_key: String,
     /// The key an external effect carries to its destination; null for internal ones.
     pub(crate) effect_key: Option<String>,
-    /// `update_trait`, `list`, `goal` or `webhook`.
+    /// `update_trait`, `list`, `goal`, `webhook` or `send`.
     pub(crate) kind: &'static str,
     /// What the node asked for. A webhook shows the `url` and the `envelope` that would be sent
-    /// (never the signing secret or a signature).
+    /// (never the signing secret or a signature); a send shows the template, destination, topic
+    /// and dimensions of the message it would queue (nothing is rendered, checked against consent
+    /// or sent, and no message is written).
     #[schema(value_type = Object)]
     pub(crate) detail: Value,
 }
