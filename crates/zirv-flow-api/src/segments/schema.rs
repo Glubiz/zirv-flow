@@ -152,7 +152,8 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
                 .property(
                     "channel",
                     string().description(Some(
-                        "The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent.",
+                        "The channel. A segment names it; a consent policy rule may leave it out \
+                        to mean the message being sent.",
                     )),
                 )
                 .property("topic", string().build())
@@ -171,7 +172,9 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
                 .required("status")
                 .additional_properties(closed())
                 .build(),
-            "The person's consent status for a channel, or one of its topics. In a consent              policy rule, with no channel, the status is `granted`, `denied` or `none` for the              message being sent; a segment refuses that form.",
+            "The person's consent status for a channel, or one of its topics. In a consent \
+            policy rule, with no channel, the status is `granted`, `denied` or `none` for the \
+            message being sent; a segment refuses that form.",
         ),
     );
     put(
@@ -203,7 +206,9 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
                 .property("window", reference(WINDOW))
                 .additional_properties(closed())
                 .build(),
-            "Policy only, refused in a segment. The messages sent to the person on a channel,              counted or reduced to the latest, within a window and filtered by dimension values.              Only messages that were sent count.",
+            "Policy only, refused in a segment. The messages sent to the person on a channel, \
+            counted or reduced to the latest, within a window and filtered by dimension values. \
+            Only messages that were sent count.",
         ),
     );
     builders

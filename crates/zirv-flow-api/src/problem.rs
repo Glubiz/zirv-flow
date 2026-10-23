@@ -785,6 +785,18 @@ impl ApiError {
         }
     }
 
+    /// A save or publish of the consent policy that names a draft revision other than the current
+    /// one: the draft was saved by someone else since the caller read it.
+    pub(crate) fn consent_policy_revision_mismatch() -> Self {
+        Self {
+            code: Some("consent_policy_revision_mismatch"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the consent policy draft is not at the revision named; read it again",
+            )
+        }
+    }
+
     /// A publish (or, later, a send) whose sender identity may not send: it is unknown, archived,
     /// or on a domain whose DKIM, SPF and DMARC records are not all verified.
     pub(crate) fn sender_unverified(detail: impl Into<String>) -> Self {

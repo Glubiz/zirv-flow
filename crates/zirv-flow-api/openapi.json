@@ -3078,6 +3078,16 @@
               }
             }
           },
+          "409": {
+            "description": "The draft is not at the revision named",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "422": {
             "description": "The rules or a condition are not valid",
             "content": {
@@ -3209,6 +3219,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishConsentPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "The new version",
@@ -3242,6 +3262,16 @@
           },
           "404": {
             "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The draft is not at the revision named",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -3315,7 +3345,7 @@
             }
           },
           "403": {
-            "description": "A key without the read scope",
+            "description": "Not a workspace admin, or a key without the admin scope",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -23954,7 +23984,8 @@
         "description": "The rule that denied a send.",
         "required": [
           "id",
-          "name"
+          "name",
+          "unevaluable"
         ],
         "properties": {
           "id": {
@@ -23962,6 +23993,10 @@
           },
           "name": {
             "type": "string"
+          },
+          "unevaluable": {
+            "type": "boolean",
+            "description": "The rule denies because it can no longer be evaluated (something it reads was archived\nsince it was published), not because its condition holds. Sends are denied the same way."
           }
         }
       },
@@ -29552,6 +29587,20 @@
           }
         }
       },
+      "PublishConsentPolicyRequest": {
+        "type": "object",
+        "description": "The draft a publish is for.",
+        "required": [
+          "revision"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The revision of the draft the caller reviewed (0 when no draft was ever saved). A draft\nsaved since is a 409 `consent_policy_revision_mismatch` and nothing is published."
+          }
+        }
+      },
       "PublishedBody": {
         "type": "object",
         "description": "The new version and the flow after the publish.",
@@ -30299,9 +30348,15 @@
         "type": "object",
         "description": "The draft rules in order. The built-in `recorded_consent` rule must be among them.",
         "required": [
+          "revision",
           "rules"
         ],
         "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The revision of the draft being replaced, as the last read returned it (0 when no draft\nwas ever saved). A draft saved since is a 409 `consent_policy_revision_mismatch`."
+          },
           "rules": {
             "type": "array",
             "items": {
@@ -30752,7 +30807,7 @@
       },
       "SegmentConsentNode": {
         "type": "object",
-        "description": "The person's consent status for a channel, or one of its topics. In a consent              policy rule, with no channel, the status is `granted`, `denied` or `none` for the              message being sent; a segment refuses that form.",
+        "description": "The person's consent status for a channel, or one of its topics. In a consent policy rule, with no channel, the status is `granted`, `denied` or `none` for the message being sent; a segment refuses that form.",
         "required": [
           "consent"
         ],
@@ -30765,7 +30820,7 @@
             "properties": {
               "channel": {
                 "type": "string",
-                "description": "The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent."
+                "description": "The channel. A segment names it; a consent policy rule may leave it out to mean the message being sent."
               },
               "status": {
                 "type": "string",
@@ -30959,7 +31014,7 @@
           },
           {
             "type": "object",
-            "description": "The person's consent status for a channel, or one of its topics. In a consent              policy rule, with no channel, the status is `granted`, `denied` or `none` for the              message being sent; a segment refuses that form.",
+            "description": "The person's consent status for a channel, or one of its topics. In a consent policy rule, with no channel, the status is `granted`, `denied` or `none` for the message being sent; a segment refuses that form.",
             "required": [
               "consent",
               "v"
@@ -30973,7 +31028,7 @@
                 "properties": {
                   "channel": {
                     "type": "string",
-                    "description": "The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent."
+                    "description": "The channel. A segment names it; a consent policy rule may leave it out to mean the message being sent."
                   },
                   "status": {
                     "type": "string",
@@ -31024,7 +31079,7 @@
           },
           {
             "type": "object",
-            "description": "Policy only, refused in a segment. The messages sent to the person on a channel,              counted or reduced to the latest, within a window and filtered by dimension values.              Only messages that were sent count.",
+            "description": "Policy only, refused in a segment. The messages sent to the person on a channel, counted or reduced to the latest, within a window and filtered by dimension values. Only messages that were sent count.",
             "required": [
               "messages",
               "v"
@@ -31212,6 +31267,7 @@
               "unknown_list",
               "unknown_segment",
               "unknown_topic",
+              "unknown_dimension",
               "invalid_identifier_kind",
               "operator_not_allowed",
               "value_type_mismatch",
@@ -31332,7 +31388,7 @@
       },
       "SegmentMessagesNode": {
         "type": "object",
-        "description": "Policy only, refused in a segment. The messages sent to the person on a channel,              counted or reduced to the latest, within a window and filtered by dimension values.              Only messages that were sent count.",
+        "description": "Policy only, refused in a segment. The messages sent to the person on a channel, counted or reduced to the latest, within a window and filtered by dimension values. Only messages that were sent count.",
         "required": [
           "messages"
         ],

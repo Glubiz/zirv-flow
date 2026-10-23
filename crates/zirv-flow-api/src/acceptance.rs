@@ -12985,7 +12985,7 @@ email,b@example.com,
         add_member(&router, &owner, &ws, member_id, "member").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
-        let draft = json!({"rules": [
+        let draft = json!({"revision": 0, "rules": [
             {"id": "recorded_consent", "name": "x"},
             cooldown_rule("Cooldown")
         ]});
@@ -13018,7 +13018,7 @@ email,b@example.com,
             &router,
             "POST",
             &policy_uri(&ws, "/publish"),
-            None,
+            Some(json!({"revision": 1})),
             Auth::Session(&member),
         )
         .await;
@@ -13026,11 +13026,19 @@ email,b@example.com,
             &router,
             "POST",
             &policy_uri(&ws, "/publish"),
-            None,
+            Some(json!({"revision": 1})),
             Auth::Key(&admin_key),
         )
         .await;
         let versions = call(
+            &router,
+            "GET",
+            &policy_uri(&ws, "/versions"),
+            None,
+            Auth::Key(&admin_key),
+        )
+        .await;
+        let member_versions = call(
             &router,
             "GET",
             &policy_uri(&ws, "/versions"),
@@ -13055,6 +13063,8 @@ email,b@example.com,
         assert_eq!(published.body["version"], 1);
         assert_eq!(published.body["rules"].as_array().unwrap().len(), 2);
         assert_eq!(versions.body.as_array().unwrap().len(), 1);
+        // The version history is for admins, as publishing is.
+        assert_eq!(member_versions.status, StatusCode::FORBIDDEN);
         let decisions: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT action, outcome, cause_kind FROM decision_records \
              WHERE action = 'consent_policy.publish'",
@@ -13095,8 +13105,8 @@ email,b@example.com,
             async move { call(&router, "PUT", &uri, Some(body), Auth::Session(owner)).await }
         };
 
-        let removed = put(json!({"rules": [cooldown_rule("Only")]})).await;
-        let bad = put(json!({"rules": [
+        let removed = put(json!({"revision": 0, "rules": [cooldown_rule("Only")]})).await;
+        let bad = put(json!({"revision": 0, "rules": [
             {"name": "Ghost", "condition": {"v": 1, "trait": "ghost", "op": "exists"}},
             {"name": "Segment style", "condition": {"v": 1,
                 "consent": {"channel": "email", "status": "granted"}}},
@@ -13167,7 +13177,7 @@ email,b@example.com,
             &router,
             "PUT",
             &policy_uri(&ws, "/draft"),
-            Some(json!({"rules": [
+            Some(json!({"revision": 0, "rules": [
                 {"name": "No mail to anyone who consented", "condition": {"v": 1,
                     "consent": {"status": "granted"}}},
                 {"id": "recorded_consent", "name": "Recorded consent"}
@@ -13179,7 +13189,7 @@ email,b@example.com,
             &router,
             "POST",
             &policy_uri(&ws, "/publish"),
-            None,
+            Some(json!({"revision": 1})),
             Auth::Session(&owner),
         )
         .await;
@@ -13246,5 +13256,70 @@ email,b@example.com,
         assert_eq!(by_member.status, StatusCode::FORBIDDEN);
         assert_eq!(unknown_person.status, StatusCode::NOT_FOUND);
         assert_eq!(unknown_topic.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_or_publish_naming_a_stale_revision_is_a_409_and_writes_nothing(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let put = |revision: i64, name: &str| {
+            let (router, owner, uri) = (router.clone(), &owner, policy_uri(&ws, "/draft"));
+            let body = json!({"revision": revision, "rules": [
+                {"id": "recorded_consent", "name": "x"}, cooldown_rule(name)]});
+            async move { call(&router, "PUT", &uri, Some(body), Auth::Session(owner)).await }
+        };
+        let publish = |revision: i64| {
+            let (router, owner, uri) = (router.clone(), &owner, policy_uri(&ws, "/publish"));
+            async move {
+                call(
+                    &router,
+                    "POST",
+                    &uri,
+                    Some(json!({"revision": revision})),
+                    Auth::Session(owner),
+                )
+                .await
+            }
+        };
+
+        let first = put(0, "One").await;
+        let stale_first = put(0, "Other").await;
+        let second = put(1, "Two").await;
+        let stale_publish = publish(1).await;
+        let none_published = call(
+            &router,
+            "GET",
+            &policy_uri(&ws, "/versions"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let published = publish(2).await;
+        let draft = call(
+            &router,
+            "GET",
+            &policy_uri(&ws, "/draft"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(stale_first.status, StatusCode::CONFLICT);
+        assert_eq!(stale_first.body["code"], "consent_policy_revision_mismatch");
+        assert_eq!(second.body["revision"], 2);
+        assert_eq!(stale_publish.status, StatusCode::CONFLICT);
+        assert_eq!(
+            stale_publish.body["code"],
+            "consent_policy_revision_mismatch"
+        );
+        assert_eq!(none_published.body, json!([]));
+        assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
+        assert_eq!(published.body["rules"][1]["name"], "Two");
+        assert_eq!(draft.body["revision"], 2, "a refused save writes nothing");
     }
 }

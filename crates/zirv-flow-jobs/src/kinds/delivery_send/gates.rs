@@ -7,6 +7,7 @@
 //! their own on the worker's pool, and the rest are plain reads on the job's connection.
 
 use sqlx::PgConnection;
+use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::HmacKey;
 use zirv_flow_core::WorkspaceId;
@@ -27,6 +28,8 @@ pub(super) const SENDER_UNVERIFIED: &str = "sender_unverified";
 pub(super) const NO_ADDRESS: &str = "no_address";
 /// The code of a message the consent gate stopped.
 pub(super) const NO_CONSENT: &str = "no_consent";
+/// The note on a consent gate that a published rule that no longer compiles stopped.
+pub(super) const POLICY_RULE_UNEVALUABLE: &str = "policy_rule_unevaluable";
 /// The code of a message the suppression gate stopped.
 pub(super) const SUPPRESSED: &str = "suppressed";
 
@@ -145,6 +148,15 @@ pub(super) async fn consent(
         let mut gate = GateRecord::blocked("consent", NO_CONSENT);
         if let Ok(id) = denial.id.parse::<Uuid>() {
             gate = gate.with_detail("rule", id);
+        }
+        if denial.unevaluable {
+            // The rule did not match; it could not be read. Say so apart from a plain denial.
+            warn!(
+                workspace = %job.workspace.as_uuid(),
+                rule = %denial.id,
+                "a published consent rule cannot be evaluated; the send is denied"
+            );
+            gate = gate.with_note(POLICY_RULE_UNEVALUABLE);
         }
         return Ok(Err(Blocked {
             gate,

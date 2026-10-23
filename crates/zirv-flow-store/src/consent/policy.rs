@@ -134,6 +134,45 @@ pub async fn save_consent_policy_draft(
     policy_of(row)
 }
 
+/// Saves the draft only if it is still at `expected` revision (0 when no draft was ever saved),
+/// in the caller's transaction. None, with nothing written, when the draft was saved since.
+pub async fn save_consent_policy_draft_at(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    rules: &[PolicyRule],
+    saved_by: Option<UserId>,
+    expected: i32,
+) -> Result<Option<ConsentPolicy>, StoreError> {
+    let row: Option<PolicyRow> = if expected == 0 {
+        sqlx::query_as(concat!(
+            "INSERT INTO consent_policies (id, workspace_id, draft_rules, updated_by) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT (workspace_id) DO NOTHING RETURNING ",
+            policy_columns!()
+        ))
+        .bind(Uuid::now_v7())
+        .bind(workspace.as_uuid())
+        .bind(rules_value(rules)?)
+        .bind(saved_by.map(|user| user.as_uuid()))
+        .fetch_optional(&mut *connection)
+        .await
+    } else {
+        sqlx::query_as(concat!(
+            "UPDATE consent_policies SET draft_rules = $2, draft_revision = draft_revision + 1, \
+                updated_by = $3, updated_at = now() \
+             WHERE workspace_id = $1 AND draft_revision = $4 RETURNING ",
+            policy_columns!()
+        ))
+        .bind(workspace.as_uuid())
+        .bind(rules_value(rules)?)
+        .bind(saved_by.map(|user| user.as_uuid()))
+        .bind(expected)
+        .fetch_optional(&mut *connection)
+        .await
+    }
+    .map_err(StoreError::query)?;
+    row.map(policy_of).transpose()
+}
+
 /// Locks the workspace's policy row until the transaction ends, so two publishes take turns and
 /// a publish reads the draft it publishes. None when no draft was ever saved.
 pub async fn lock_consent_policy(
@@ -266,6 +305,9 @@ pub struct RuleToCheck {
 pub struct DecidingRule {
     pub id: String,
     pub name: String,
+    /// The rule matched because it could not be compiled (`RuleCheck::Unevaluable`), not because
+    /// its condition held.
+    pub unevaluable: bool,
 }
 
 /// Evaluates the rules in order for one person, on the caller's connection (the send's), and
@@ -292,6 +334,7 @@ pub async fn evaluate_consent_policy(
             return Ok(Some(DecidingRule {
                 id: rule.id.clone(),
                 name: rule.name.clone(),
+                unevaluable: rule.check == RuleCheck::Unevaluable,
             }));
         }
     }
@@ -413,6 +456,31 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_conditional_save_writes_only_at_the_expected_revision(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let rules = [custom("a"), PolicyRule::recorded_consent()];
+        let mut tx = begin(&pool).await.unwrap();
+
+        let first = save_consent_policy_draft_at(&mut tx, ws, &rules, None, 0)
+            .await
+            .unwrap();
+        let again_at_zero = save_consent_policy_draft_at(&mut tx, ws, &rules, None, 0)
+            .await
+            .unwrap();
+        let stale = save_consent_policy_draft_at(&mut tx, ws, &rules, None, 5)
+            .await
+            .unwrap();
+        let second = save_consent_policy_draft_at(&mut tx, ws, &rules, None, 1)
+            .await
+            .unwrap();
+
+        assert_eq!(first.unwrap().draft_revision, 1);
+        assert!(again_at_zero.is_none() && stale.is_none());
+        assert_eq!(second.unwrap().draft_revision, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn editing_the_draft_leaves_the_published_version_alone(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         save(&pool, ws, &[PolicyRule::recorded_consent()]).await;
@@ -530,9 +598,15 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(decided.map(|rule| rule.id), Some("a".to_owned()));
+        assert_eq!(decided.as_ref().map(|rule| rule.id.as_str()), Some("a"));
         assert_eq!(none, None);
         assert_eq!(reordered.map(|rule| rule.id), Some("a".to_owned()));
-        assert_eq!(unevaluable.map(|rule| rule.id), Some("c".to_owned()));
+        assert_eq!(decided.map(|rule| rule.unevaluable), Some(false));
+        let unevaluable = unevaluable.unwrap();
+        assert_eq!(unevaluable.id, "c");
+        assert!(
+            unevaluable.unevaluable,
+            "a rule that cannot be read says so"
+        );
     }
 }

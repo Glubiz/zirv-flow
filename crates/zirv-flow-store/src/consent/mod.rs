@@ -17,7 +17,7 @@ pub use policy::{
     ConsentPolicy, DecidingRule, PolicyVersion, RuleCheck, RuleToCheck, consent_policy_draft,
     evaluate_consent_policy, find_consent_policy, list_consent_policy_versions,
     lock_consent_policy, publish_consent_policy, published_consent_policy,
-    save_consent_policy_draft,
+    save_consent_policy_draft, save_consent_policy_draft_at,
 };
 pub use state::{
     ConsentChange, ConsentEntry, ConsentExportCursor, ConsentExportRow, ConsentHistoryEntry,

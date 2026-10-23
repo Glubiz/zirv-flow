@@ -75,7 +75,18 @@ pub(crate) struct ConsentPolicyRuleRequest {
 /// The draft rules in order. The built-in `recorded_consent` rule must be among them.
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct SaveConsentPolicyDraftRequest {
+    /// The revision of the draft being replaced, as the last read returned it (0 when no draft
+    /// was ever saved). A draft saved since is a 409 `consent_policy_revision_mismatch`.
+    revision: i32,
     rules: Vec<ConsentPolicyRuleRequest>,
+}
+
+/// The draft a publish is for.
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct PublishConsentPolicyRequest {
+    /// The revision of the draft the caller reviewed (0 when no draft was ever saved). A draft
+    /// saved since is a 409 `consent_policy_revision_mismatch` and nothing is published.
+    revision: i32,
 }
 
 /// The draft of the workspace's policy.
@@ -161,6 +172,9 @@ pub(crate) struct EvaluateConsentPolicyRequest {
 pub(crate) struct DecidingRuleBody {
     id: String,
     name: String,
+    /// The rule denies because it can no longer be evaluated (something it reads was archived
+    /// since it was published), not because its condition holds. Sends are denied the same way.
+    unevaluable: bool,
 }
 
 /// What the published policy decides for a person and a message. It holds no personal data.
@@ -251,8 +265,15 @@ pub(crate) async fn save_policy_draft(
     if !issues.is_empty() {
         return Err(ApiError::consent_policy_invalid(issues));
     }
-    let policy =
-        zirv_flow_store::save_consent_policy_draft(&mut tx, workspace, &rules, saved_by).await?;
+    let policy = zirv_flow_store::save_consent_policy_draft_at(
+        &mut tx,
+        workspace,
+        &rules,
+        saved_by,
+        request.revision,
+    )
+    .await?
+    .ok_or_else(ApiError::consent_policy_revision_mismatch)?;
     admin::audit(
         &mut tx,
         context,
@@ -275,10 +296,19 @@ pub(crate) async fn publish_policy(
     context: &Context,
     workspace: WorkspaceId,
     published_by: Option<UserId>,
+    expected_revision: i32,
 ) -> Result<PolicyVersion, ApiError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
     let locked = match zirv_flow_store::lock_consent_policy(&mut tx, workspace).await? {
+        // The revision is compared under the lock, so the draft that is published is the one the
+        // caller reviewed.
+        Some(locked) if locked.draft_revision != expected_revision => {
+            return Err(ApiError::consent_policy_revision_mismatch());
+        }
         Some(locked) => locked,
+        None if expected_revision != 0 => {
+            return Err(ApiError::consent_policy_revision_mismatch());
+        }
         None => {
             // Nothing was ever saved: publishing makes the default policy explicit.
             zirv_flow_store::save_consent_policy_draft(
@@ -409,6 +439,7 @@ pub(crate) async fn evaluate_policy(
         rule: deciding.map(|rule| DecidingRuleBody {
             id: rule.id,
             name: rule.name,
+            unevaluable: rule.unevaluable,
         }),
         policy_version: published.map(|version| version.version),
     })
@@ -457,6 +488,7 @@ pub(crate) async fn get_draft(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The draft is not at the revision named", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The rules or a condition are not valid", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -489,11 +521,13 @@ pub(crate) async fn put_draft(
     path = "/api/v1/workspaces/{ws}/consent/policy/publish",
     tag = "consent",
     params(("ws" = Uuid, Path, description = "Workspace id")),
+    request_body = PublishConsentPolicyRequest,
     responses(
         (status = 200, description = "The new version", body = ConsentPolicyVersionBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The draft is not at the revision named", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft is not valid", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -502,6 +536,7 @@ pub(crate) async fn publish(
     State(state): State<AppState>,
     principal: Principal,
     Path(ws): Path<String>,
+    ApiJson(body): ApiJson<PublishConsentPolicyRequest>,
 ) -> Result<Json<ConsentPolicyVersionBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let version = publish_policy(
@@ -509,6 +544,7 @@ pub(crate) async fn publish(
         &principal.context(),
         workspace.id,
         principal.user_id(),
+        body.revision,
     )
     .await?;
     Ok(Json(ConsentPolicyVersionBody::from(&version)))
@@ -524,7 +560,7 @@ pub(crate) async fn publish(
     responses(
         (status = 200, description = "The versions, newest first", body = Vec<ConsentPolicyVersionBody>),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a workspace admin, or a key without the admin scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -534,7 +570,7 @@ pub(crate) async fn versions(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<ConsentPolicyVersionBody>>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let versions = zirv_flow_store::list_consent_policy_versions(&state.pool, workspace.id).await?;
     Ok(Json(
         versions

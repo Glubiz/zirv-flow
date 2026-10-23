@@ -3336,6 +3336,15 @@ mod tests {
 
         assert_eq!(message.status, "skipped");
         assert_eq!(message.deciding_rule.as_deref(), Some("Ghost"));
+        // The denial says the rule could not be read, apart from a rule whose condition held.
+        assert!(
+            message
+                .gate_results
+                .to_string()
+                .contains("policy_rule_unevaluable"),
+            "{}",
+            message.gate_results
+        );
     }
 
     #[sqlx::test]

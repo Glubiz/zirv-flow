@@ -20,6 +20,8 @@ use crate::kinds::segment_refresh::{catalog_of, sql_query};
 pub(super) struct Denial {
     pub(super) id: String,
     pub(super) name: String,
+    /// The rule denied because it no longer compiles, not because its condition held.
+    pub(super) unevaluable: bool,
 }
 
 impl From<DecidingRule> for Denial {
@@ -27,6 +29,7 @@ impl From<DecidingRule> for Denial {
         Self {
             id: rule.id,
             name: rule.name,
+            unevaluable: rule.unevaluable,
         }
     }
 }
@@ -78,6 +81,7 @@ pub(super) async fn denial(
     let builtin = || Denial {
         id: RECORDED_CONSENT_RULE.to_owned(),
         name: RECORDED_CONSENT_NAME.to_owned(),
+        unevaluable: false,
     };
     let Some(published) = published_consent_policy(pool, workspace).await? else {
         return Ok(recorded_denies.then(builtin));
@@ -179,14 +183,16 @@ mod tests {
         assert!(
             Denial {
                 id: RECORDED_CONSENT_RULE.into(),
-                name: "x".into()
+                name: "x".into(),
+                unevaluable: false,
             }
             .is_builtin()
         );
         assert!(
             !Denial {
                 id: Uuid::nil().to_string(),
-                name: "x".into()
+                name: "x".into(),
+                unevaluable: false,
             }
             .is_builtin()
         );
@@ -207,7 +213,7 @@ mod tests {
             json!({"vertical": "retail"}),
             json!({"vertical": "b2b"}),
             json!({"vertical": "retail", "brand": "x"}),
-            json!({"brand": "nope"}),
+            json!({"brand": "x"}),
         ];
         let mut leaves = Vec::new();
         for status in ["granted", "denied", "none"] {
@@ -471,7 +477,16 @@ mod tests {
                 });
             }
         }
-        let catalog = Catalog::default();
+        let mut catalog = Catalog::default();
+        catalog.dimensions.insert(
+            "vertical".to_owned(),
+            ["retail".to_owned(), "b2b".to_owned()]
+                .into_iter()
+                .collect(),
+        );
+        catalog
+            .dimensions
+            .insert("brand".to_owned(), ["x".to_owned()].into_iter().collect());
         let storage = TraitStorage::default();
         let mut connection = pool.acquire().await.unwrap();
         let mut compared = 0;

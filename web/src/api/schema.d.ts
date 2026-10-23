@@ -4626,6 +4626,11 @@ export interface components {
         DecidingRuleBody: {
             id: string;
             name: string;
+            /**
+             * @description The rule denies because it can no longer be evaluated (something it reads was archived
+             *     since it was published), not because its condition holds. Sends are denied the same way.
+             */
+            unevaluable: boolean;
         };
         DecisionBody: {
             /** @example job.attempt */
@@ -6796,6 +6801,15 @@ export interface components {
             kind: string;
             models: components["schemas"]["ModelBody"][];
         };
+        /** @description The draft a publish is for. */
+        PublishConsentPolicyRequest: {
+            /**
+             * Format: int32
+             * @description The revision of the draft the caller reviewed (0 when no draft was ever saved). A draft
+             *     saved since is a 409 `consent_policy_revision_mismatch` and nothing is published.
+             */
+            revision: number;
+        };
         /** @description The new version and the flow after the publish. */
         PublishedBody: {
             flow: components["schemas"]["FlowBody"];
@@ -7114,6 +7128,12 @@ export interface components {
         };
         /** @description The draft rules in order. The built-in `recorded_consent` rule must be among them. */
         SaveConsentPolicyDraftRequest: {
+            /**
+             * Format: int32
+             * @description The revision of the draft being replaced, as the last read returned it (0 when no draft
+             *     was ever saved). A draft saved since is a 409 `consent_policy_revision_mismatch`.
+             */
+            revision: number;
             rules: components["schemas"]["ConsentPolicyRuleRequest"][];
         };
         SaveDraftRequest: {
@@ -7282,10 +7302,10 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
-        /** @description The person's consent status for a channel, or one of its topics. In a consent              policy rule, with no channel, the status is `granted`, `denied` or `none` for the              message being sent; a segment refuses that form. */
+        /** @description The person's consent status for a channel, or one of its topics. In a consent policy rule, with no channel, the status is `granted`, `denied` or `none` for the message being sent; a segment refuses that form. */
         SegmentConsentNode: {
             consent: {
-                /** @description The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent. */
+                /** @description The channel. A segment names it; a consent policy rule may leave it out to mean the message being sent. */
                 channel?: string;
                 /** @enum {string} */
                 status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown" | "granted" | "denied" | "none";
@@ -7331,7 +7351,7 @@ export interface components {
             v: 1;
         } | {
             consent: {
-                /** @description The channel. A segment names it; a consent policy rule may leave it out                          to mean the message being sent. */
+                /** @description The channel. A segment names it; a consent policy rule may leave it out to mean the message being sent. */
                 channel?: string;
                 /** @enum {string} */
                 status: "subscribed" | "unsubscribed" | "pending_confirmation" | "unknown" | "granted" | "denied" | "none";
@@ -7402,7 +7422,7 @@ export interface components {
         /** @description One problem with a definition. It carries a position and a fixed code, never a value from the definition. */
         SegmentIssue: {
             /** @enum {string} */
-            code: "unsupported_version" | "malformed" | "unknown_key" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_list" | "unknown_segment" | "unknown_topic" | "invalid_identifier_kind" | "operator_not_allowed" | "value_type_mismatch" | "value_missing" | "value_not_allowed" | "aggregate_not_allowed" | "invalid_duration" | "window_too_long" | "invalid_range" | "too_deep" | "too_many_nodes" | "too_many_values" | "value_too_long" | "policy_only";
+            code: "unsupported_version" | "malformed" | "unknown_key" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_list" | "unknown_segment" | "unknown_topic" | "unknown_dimension" | "invalid_identifier_kind" | "operator_not_allowed" | "value_type_mismatch" | "value_missing" | "value_not_allowed" | "aggregate_not_allowed" | "invalid_duration" | "window_too_long" | "invalid_range" | "too_deep" | "too_many_nodes" | "too_many_values" | "value_too_long" | "policy_only";
             /** @description A JSON pointer into the definition. */
             pointer: string;
         };
@@ -7441,7 +7461,7 @@ export interface components {
             /** @description Pass as `cursor` for the next page; null when there is none. */
             next_cursor?: string | null;
         };
-        /** @description Policy only, refused in a segment. The messages sent to the person on a channel,              counted or reduced to the latest, within a window and filtered by dimension values.              Only messages that were sent count. */
+        /** @description Policy only, refused in a segment. The messages sent to the person on a channel, counted or reduced to the latest, within a window and filtered by dimension values. Only messages that were sent count. */
         SegmentMessagesNode: {
             messages: {
                 agg: components["schemas"]["SegmentAggregate"];
@@ -10862,6 +10882,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The draft is not at the revision named */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The rules or a condition are not valid */
             422: {
                 headers: {
@@ -10946,7 +10975,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublishConsentPolicyRequest"];
+            };
+        };
         responses: {
             /** @description The new version */
             200: {
@@ -10977,6 +11010,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft is not at the revision named */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11025,7 +11067,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the read scope */
+            /** @description Not a workspace admin, or a key without the admin scope */
             403: {
                 headers: {
                     [name: string]: unknown;

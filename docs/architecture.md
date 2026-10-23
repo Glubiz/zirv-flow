@@ -1171,6 +1171,16 @@ it further, for example by product vertical. Zirv Flow therefore separates:
   A rule that cannot be compiled when the send runs (something it reads was archived since the
   publish) matches, so the send is stopped. A transactional message skips the gate.
   `POST .../consent/policy/evaluate` runs the same evaluation for a person without sending.
+  A rule that matches for this reason is recorded as `policy_rule_unevaluable` on the gate
+  record, logged as a warning with the workspace and rule ids, and flagged `unevaluable` in the
+  evaluate reply. The `messages` leaf counts the sent messages of the person and of everyone
+  merged into them, and a dimension filter in a rule is checked against the live dimension
+  catalog on save and publish. Version history (`GET .../versions`) is `admin`, as publishing is,
+  and a save or publish names the draft `revision` it is for (409 on a mismatch).
+- **Accepted properties.** A publish takes effect for sends whose consent gate starts after it
+  commits; a send already past its policy read finishes under the version it read. A cooldown
+  rule is not serialized across concurrent sends to one person, so two sends whose gates run at
+  the same moment can both pass.
 - **Deny-only rules**. The send proceeds when no rule matches,
   and the deciding rule is the first rule that matches. The built-in `recorded
   consent` rule can be moved but not removed; it matches when the read above
