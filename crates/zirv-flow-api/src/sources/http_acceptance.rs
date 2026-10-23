@@ -697,6 +697,64 @@ mod tests {
         );
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_between_the_start_and_the_callback_keeps_the_consent_unless_the_client_changed(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let rotate = |id: &str, client: &'static str| {
+            let id = id.to_owned();
+            let fx = &fx;
+            async move {
+                let source = fx.as_key("GET", &format!("/sources/{id}"), None).await;
+                let credential = source.body["credential_id"].as_str().unwrap().to_owned();
+                let reply = fx
+                    .as_key(
+                        "PUT",
+                        &format!("/credentials/{credential}/secret"),
+                        Some(json!({"secret": {"client_id": client, "client_secret": "rotated"}})),
+                    )
+                    .await;
+                assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            }
+        };
+
+        // Same client id, new secret: the callback still stores the tokens.
+        let kept = fx.create_source(fx.manifest()).await;
+        let state = fx.state_of(&fx.admin, &kept).await;
+        rotate(&kept, "client").await;
+        let reply = fx
+            .callback(Some(&fx.admin), &format!("code={CODE}&state={state}"))
+            .await;
+        assert!(
+            location(&reply).ends_with("?oauth=connected"),
+            "{}",
+            location(&reply)
+        );
+        let linked = fx
+            .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
+            .await;
+        assert_eq!(linked, 1);
+
+        // Another client id: the tokens were issued to a client the credential no longer names.
+        let dropped = fx.create_source(fx.manifest()).await;
+        let state = fx.state_of(&fx.admin, &dropped).await;
+        rotate(&dropped, "another-client").await;
+        let reply = fx
+            .callback(Some(&fx.admin), &format!("code={CODE}&state={state}"))
+            .await;
+        assert!(
+            location(&reply).ends_with("&reason=state_mismatch"),
+            "{}",
+            location(&reply)
+        );
+        let linked = fx
+            .count("SELECT count(*) FROM sources WHERE oauth_secret_id IS NOT NULL")
+            .await;
+        assert_eq!(linked, 1, "no tokens were stored for the second source");
+    }
+
     // ---- the consent --------------------------------------------------------------------
 
     #[sqlx::test]

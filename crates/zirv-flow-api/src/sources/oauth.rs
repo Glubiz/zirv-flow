@@ -453,9 +453,16 @@ async fn store_tokens(
     let locked = zirv_flow_store::find_source_for_update(&mut tx, workspace, source.id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    if locked.credential_secret_id != source.credential_secret_id
+    // The consent is for one credential and one client. A rotation of the same credential in
+    // between changes only its secrets, so the tokens still belong to the source; a source moved
+    // to another credential, or a credential now holding another client id, does not.
+    if locked.credential_id != source.credential_id
         || active_binding(&locked.config, credential).as_deref() != Some(tokens.binding.as_str())
     {
+        return Ok(false);
+    }
+    let current = resolve::load(state, workspace, locked.credential_id).await?;
+    if active_binding(&locked.config, &current).as_deref() != Some(tokens.binding.as_str()) {
         return Ok(false);
     }
     let linked = match locked.oauth_secret_id {
