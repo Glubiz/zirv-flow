@@ -54,11 +54,12 @@ use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::TraceContext;
-use zirv_flow_core::consent::Dimensions;
+use zirv_flow_core::consent::{Dimensions, SuppressionReason};
 use zirv_flow_store::{
-    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, MessageStatus, NewJob,
-    NewMessage, PgConnection, PgPool, SEND_JOB_KIND, SendOutcome, SubjectKind, WebhookPerson,
-    WebhookSubject, document_sender, find_destination, find_flow, find_template,
+    Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
+    MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
+    SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
+    add_organization_suppression, document_sender, find_destination, find_flow, find_template,
     find_template_version, insert_message, lock_webhook_person, mark_message_sending,
     message_status, read_template_field_catalog, read_webhook_subject, record_send_outcome,
     throttle_bucket,
@@ -69,6 +70,7 @@ pub(crate) use payload::Queued;
 use self::gates::Blocked;
 use self::payload::SendJob;
 use crate::delivery::attempt::AttemptTarget;
+use crate::delivery::verdict::SMTP_DEFERRED;
 use crate::delivery::{self, Verdict};
 use crate::{JobContext, JobError, JobKind};
 
@@ -97,6 +99,9 @@ struct Trail {
     category: Option<String>,
     /// The delivery attempts the destination saw.
     attempts: i32,
+    /// The suppression hash of an address a mail server refused for good: the write that ends the
+    /// message suppresses it in the whole organization (a hard bounce, OQ-12).
+    bounced: Option<[u8; 32]>,
 }
 
 impl Trail {
@@ -110,6 +115,7 @@ impl Trail {
             sender: None,
             category: None,
             attempts,
+            bounced: None,
         }
     }
 
@@ -311,6 +317,7 @@ async fn decide(
         workspace,
         destination: &destination,
         driver,
+        sender: &sender,
         message: job.message,
         address: &address,
         payload: &email,
@@ -328,7 +335,16 @@ async fn decide(
             trail.pass(GateRecord::passed("delivery"));
             Ok(Step::Finished(trail))
         }
-        Verdict::Terminal { reason, .. } => Ok(trail.fail("delivery", reason)),
+        Verdict::Terminal { reason, .. } => {
+            if reason == HARD_BOUNCE {
+                // The server says the address cannot receive mail: it is suppressed with the
+                // write that ends the message.
+                trail.bounced = ctx
+                    .identifier_key()
+                    .and_then(|key| gates::address_hash(&key, &address));
+            }
+            Ok(trail.fail("delivery", reason))
+        }
         Verdict::Retry {
             reason,
             message,
@@ -343,7 +359,13 @@ async fn decide(
                 let error = JobError::new(message);
                 return Err(retry_after.map_or(error, |wait| error.with_retry_after(wait)));
             }
-            Ok(trail.fail("delivery", reason))
+            // Temporary refusals that outlast the retries are a soft bounce, with no suppression.
+            let ended = if reason == SMTP_DEFERRED {
+                SOFT_BOUNCE
+            } else {
+                reason
+            };
+            Ok(trail.fail("delivery", ended))
         }
     }
 }
@@ -553,17 +575,33 @@ async fn write_end(
     };
     if !held {
         insert_message(&mut *connection, &message).await?;
-        return Ok(());
+    } else {
+        record_send_outcome(
+            &mut *connection,
+            &SendOutcome {
+                message,
+                trace,
+                job: Some(job_ref),
+            },
+        )
+        .await?;
     }
-    record_send_outcome(
-        connection,
-        &SendOutcome {
-            message,
-            trace,
-            job: Some(job_ref),
-        },
-    )
-    .await?;
+    if let Some(identifier_hash) = trail.bounced {
+        // A hard bounce suppresses the address in every workspace of the organization (OQ-19). The
+        // row holds the HMAC of the address, never the address.
+        add_organization_suppression(
+            &mut *connection,
+            &NewSuppression {
+                identifier_hash,
+                kind: "email",
+                reason: SuppressionReason::HardBounce,
+                source: "bounce",
+                note: None,
+                created_by: None,
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -577,7 +615,9 @@ mod tests {
     use sqlx::PgPool;
     use time::Duration as Span;
     use time::macros::datetime;
-    use zirv_flow_connectors::destinations::{fake_ledger_calls, fake_ledger_sent};
+    use zirv_flow_connectors::destinations::{
+        SmtpSink, SmtpSinkOptions, SmtpSinkStage, fake_ledger_calls, fake_ledger_sent,
+    };
     use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
     use zirv_flow_core::egress::EgressPolicy;
     use zirv_flow_core::{
@@ -2196,5 +2236,329 @@ mod tests {
         ] {
             assert_eq!(render::failed(failure), "render_error", "{failure}");
         }
+    }
+
+    // --- the smtp destination through the pipeline (#218) ---
+
+    /// An env whose destination is an SMTP relay at `sink` (no TLS: the sink is on loopback), whose
+    /// sender domain has a real DKIM key sealed under a keyring the worker holds, and whose render
+    /// host is running. Returns the env and the public key the domain publishes.
+    async fn smtp_env(pool: PgPool, sink: &SmtpSink) -> (Env, String) {
+        use zirv_flow_core::sending::generate_dkim_key;
+        use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
+        use zirv_flow_store::secrets::replace_unchecked;
+
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        env.keyring = Some(Arc::clone(&keys));
+        let key = generate_dkim_key().unwrap();
+        let secret: Uuid = sqlx::query_scalar(
+            "SELECT dkim_secret_id FROM sending_domains WHERE workspace_id = $1",
+        )
+        .bind(env.ws.as_uuid())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let secret = SecretId::from_uuid(secret);
+        let sealed = seal(
+            &keys,
+            key.private_pkcs8.expose(),
+            &secret_aad(env.ws, secret, SecretPurpose::DkimKey),
+        );
+        assert!(
+            replace_unchecked(&env.pool, env.ws, secret, &sealed)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE sending_domains SET dkim_public_key = $2 WHERE workspace_id = $1")
+            .bind(env.ws.as_uuid())
+            .bind(&key.public_key)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let config = json!({"host": "127.0.0.1", "port": sink.port(), "tls": "none"});
+        env.destination = create_destination(
+            &env.pool,
+            env.ws,
+            &NewDestination {
+                id: Uuid::now_v7(),
+                kind: "smtp",
+                name: "Relay",
+                config: &config,
+                credential_id: None,
+                rate: 100,
+                burst: 100,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        (env, key.public_key)
+    }
+
+    /// The value of the first header called `name` of a captured message.
+    fn header_of(data: &[u8], name: &str) -> Option<String> {
+        let text = String::from_utf8_lossy(data);
+        let head = text.split("\r\n\r\n").next()?;
+        head.split("\r\n").find_map(|line| {
+            let (candidate, value) = line.split_once(':')?;
+            candidate
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+    }
+
+    async fn suppressions(env: &Env) -> i64 {
+        env.count("SELECT count(*) FROM suppressions WHERE reason = 'hard_bounce'")
+            .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_smtp_send_is_signed_with_the_sender_domains_sealed_key_and_verifies_against_the_published_record(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::verify_dkim_signature;
+        use zirv_flow_core::sending::dkim_record_text;
+
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, public_key) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let captured = sink.messages();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].mail_from, "news@example.com");
+        assert_eq!(captured[0].recipients, ["ada@example.com"]);
+        let data = &captured[0].data;
+        assert_eq!(
+            verify_dkim_signature(data, &dkim_record_text(&public_key)),
+            Ok(())
+        );
+        let signature = header_of(data, "DKIM-Signature").unwrap();
+        assert!(signature.contains("d=example.com;") && signature.contains("s=zirv;"));
+        let id = queued.message.to_string();
+        assert_eq!(header_of(data, "X-Zirv-Idempotency-Key"), Some(id.clone()));
+        assert_eq!(
+            header_of(data, "Message-ID"),
+            Some(format!("<{id}@example.com>"))
+        );
+        assert!(
+            header_of(data, "List-Unsubscribe")
+                .unwrap()
+                .starts_with("<https://links.zirv-flow.invalid/u/")
+        );
+        assert_eq!(
+            header_of(data, "List-Unsubscribe-Post").as_deref(),
+            Some("List-Unsubscribe=One-Click")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_smtp_delivery_reuses_the_message_id_and_the_idempotency_key(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::DataEnd, "451 4.3.0 try again");
+
+        env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        let offered = sink.offered();
+        assert_eq!(offered.len(), 2, "the message went to the server twice");
+        let id = queued.message.to_string();
+        for data in &offered {
+            assert_eq!(header_of(data, "X-Zirv-Idempotency-Key"), Some(id.clone()));
+            assert_eq!(
+                header_of(data, "Message-ID"),
+                Some(format!("<{id}@example.com>"))
+            );
+        }
+        assert_eq!(sink.messages().len(), 1);
+        assert_eq!(env.message(queued.message).await.status, "sent");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hard_bounce_ends_the_message_as_email_bounced_and_suppresses_the_address_in_the_organization(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "550 5.1.1 no such user");
+
+        let bounced = env.send(person, template).await;
+
+        assert_eq!(
+            (bounced.status.as_str(), bounced.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        let events = env.events("email.bounced").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["bounce"], "hard");
+        assert_eq!(events[0]["reason"], "hard_bounce");
+        assert!(env.events("email.failed").await.is_empty());
+        assert_eq!(suppressions(&env).await, 1);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM suppressions WHERE scope = 'organization' AND source = 'bounce'"
+            )
+            .await,
+            1,
+            "organization-wide (OQ-19)"
+        );
+        let connections = sink.connections();
+
+        // The next message to the address is stopped by the suppression gate: no connection.
+        let again = env.send(person, template).await;
+
+        assert_eq!(
+            (again.status.as_str(), again.reason.as_deref()),
+            ("skipped", Some("suppressed"))
+        );
+        assert_eq!(
+            again.deciding_rule.as_deref(),
+            Some("suppression_organization")
+        );
+        assert_eq!(sink.connections(), connections);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refusal_that_is_not_about_the_recipient_fails_the_message_without_suppressing(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "554 5.7.1 relay access denied");
+
+        let failed = env.send(person, template).await;
+
+        assert_eq!(
+            (failed.status.as_str(), failed.reason.as_deref()),
+            ("failed", Some("smtp_rejected"))
+        );
+        assert_eq!(env.events("email.failed").await.len(), 1);
+        assert!(env.events("email.bounced").await.is_empty());
+        assert_eq!(
+            env.count("SELECT count(*) FROM suppressions").await,
+            0,
+            "nobody is suppressed"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn temporary_refusals_retry_and_when_they_run_out_are_a_soft_bounce_without_suppression(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("marketing").await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        sink.reply_at(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
+        let queued = env.queue(person, template, 2).await;
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(
+            env.message(queued.message).await.status,
+            "sending",
+            "a first 4xx is retried, not ended"
+        );
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (
+                ended.status.as_str(),
+                ended.reason.as_deref(),
+                ended.attempts
+            ),
+            ("failed", Some("soft_bounce"), 2)
+        );
+        let events = env.events("email.bounced").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["bounce"], "soft");
+        assert_eq!(env.count("SELECT count(*) FROM suppressions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dkim_key_that_cannot_be_opened_is_retried_as_credential_unavailable_and_nothing_connects(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::{Keyring, MasterKey};
+
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (mut env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+
+        // No master key at all, then another one: both are the retry of an unopenable credential.
+        env.keyring = None;
+        env.attempt().await.unwrap_err();
+        env.keyring = Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap()));
+        env.attempt().await.unwrap_err();
+
+        assert_eq!(sink.connections(), 0);
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        let attempts = env.attempts_of(queued.message).await;
+        assert_eq!(attempts.len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_from_an_unverified_domain_is_skipped_before_any_connection(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        sqlx::query("UPDATE sending_domains SET status = 'unverified' WHERE workspace_id = $1")
+            .bind(env.ws.as_uuid())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        let skipped = env.send(person, template).await;
+
+        assert_eq!(
+            (skipped.status.as_str(), skipped.reason.as_deref()),
+            ("skipped", Some("sender_unverified"))
+        );
+        assert_eq!(sink.connections(), 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_destination_that_does_not_sign_never_has_the_domain_key_opened(pool: PgPool) {
+        // The fake destination declares no signing, and the worker holds no master key: a key that
+        // had to be opened would retry the send. It is sent.
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+
+        let sent = env.send(person, template).await;
+
+        assert_eq!(sent.status, "sent");
+        assert!(env.keyring.is_none());
     }
 }

@@ -43,6 +43,10 @@ pub const EMAIL_SENT_EVENT: &str = "email.sent";
 pub const EMAIL_SKIPPED_EVENT: &str = "email.skipped";
 /// The event the send pipeline writes when a message could not be rendered or delivered.
 pub const EMAIL_FAILED_EVENT: &str = "email.failed";
+/// The event the send pipeline writes when a mail server refused a message synchronously: a hard
+/// bounce (the recipient cannot receive mail) or a soft one (a temporary refusal that outlasted the
+/// retries). Its `bounce` property says which.
+pub const EMAIL_BOUNCED_EVENT: &str = "email.bounced";
 
 /// The event a flow writes when a webhook action's call succeeded (architecture 9.1).
 pub const WEBHOOK_SUCCEEDED_EVENT: &str = "webhook.succeeded";

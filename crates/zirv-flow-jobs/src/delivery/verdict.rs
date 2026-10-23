@@ -14,9 +14,15 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use time::OffsetDateTime;
 use zirv_flow_connectors::destinations::{
-    Delivered, DestinationError, parse_retry_after as connector_parse,
+    Delivered, DestinationError, Refusal, parse_retry_after as connector_parse,
 };
 use zirv_flow_connectors::http::HttpError;
+use zirv_flow_store::HARD_BOUNCE;
+
+/// The reason of a message a mail server refused for a cause that is not the recipient.
+pub(crate) const SMTP_REJECTED: &str = "smtp_rejected";
+/// The reason of an attempt a mail server asked to repeat later (a 4xx reply).
+pub(crate) const SMTP_DEFERRED: &str = "smtp_4xx";
 
 /// How an attempt went.
 #[derive(Debug, Eq, PartialEq)]
@@ -129,6 +135,20 @@ pub(crate) fn verdict_of(
         },
         Err(DestinationError::Egress(error)) => judge_error(error),
         Err(DestinationError::Unreachable) => transport_failed(),
+        Err(DestinationError::Refused(Refusal::HardBounce)) => Verdict::Terminal {
+            status: None,
+            reason: HARD_BOUNCE,
+        },
+        Err(DestinationError::Refused(Refusal::Rejected)) => Verdict::Terminal {
+            status: None,
+            reason: SMTP_REJECTED,
+        },
+        Err(DestinationError::Refused(Refusal::Deferred)) => Verdict::Retry {
+            status: None,
+            reason: SMTP_DEFERRED,
+            message: "the mail server asked to try again later",
+            retry_after: None,
+        },
         Err(DestinationError::Other(_)) => Verdict::Retry {
             status: None,
             reason: "other",
@@ -182,6 +202,9 @@ mod tests {
             DestinationError::RateLimited { retry_after: None },
             DestinationError::Unsupported,
             DestinationError::Other("x".into()),
+            DestinationError::Refused(Refusal::HardBounce),
+            DestinationError::Refused(Refusal::Rejected),
+            DestinationError::Refused(Refusal::Deferred),
         ];
 
         for error in errors {
@@ -236,6 +259,35 @@ mod tests {
                 "{header}"
             );
         }
+    }
+
+    #[test]
+    fn a_mail_servers_refusals_have_their_own_reasons_and_only_a_deferral_retries() {
+        let now = datetime!(2031-05-06 07:08:09 UTC);
+
+        assert_eq!(
+            verdict_of(&Err(DestinationError::Refused(Refusal::HardBounce)), now),
+            Verdict::Terminal {
+                status: None,
+                reason: "hard_bounce"
+            }
+        );
+        assert_eq!(
+            verdict_of(&Err(DestinationError::Refused(Refusal::Rejected)), now),
+            Verdict::Terminal {
+                status: None,
+                reason: "smtp_rejected"
+            }
+        );
+        assert!(matches!(
+            verdict_of(&Err(DestinationError::Refused(Refusal::Deferred)), now),
+            Verdict::Retry {
+                status: None,
+                reason: "smtp_4xx",
+                retry_after: None,
+                ..
+            }
+        ));
     }
 
     #[test]

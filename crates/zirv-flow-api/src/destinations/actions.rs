@@ -55,7 +55,9 @@ fn describe(error: &DestinationError) -> (&'static str, &'static str) {
             "the destination's address is not allowed by the egress policy",
         ),
         DestinationError::Egress(_) => ("network_error", "the request to the destination failed"),
-        DestinationError::Upstream(_) | DestinationError::Answered { .. } => {
+        DestinationError::Upstream(_)
+        | DestinationError::Answered { .. }
+        | DestinationError::Refused(_) => {
             ("upstream_error", "the destination answered with an error")
         }
         DestinationError::RateLimited { .. } => {
