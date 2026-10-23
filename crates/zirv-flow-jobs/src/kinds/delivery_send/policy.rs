@@ -4,7 +4,7 @@
 
 use time::OffsetDateTime;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::consent::policy::{PolicyRule, RECORDED_CONSENT_RULE};
+use zirv_flow_core::consent::policy::{PolicyRule, RECORDED_CONSENT_NAME, RECORDED_CONSENT_RULE};
 use zirv_flow_core::consent::{Channel, Dimensions, RecordedConsent};
 use zirv_flow_segments::{Catalog, RuleKind, SendContext, TraitStorage, compile_rules};
 use zirv_flow_store::{
@@ -75,11 +75,9 @@ pub(super) async fn denial(
     recorded: RecordedConsent,
     recorded_denies: bool,
 ) -> Result<Option<Denial>, JobError> {
-    let builtin = || {
-        Denial::from(DecidingRule {
-            id: RECORDED_CONSENT_RULE.to_owned(),
-            name: zirv_flow_core::consent::policy::RECORDED_CONSENT_NAME.to_owned(),
-        })
+    let builtin = || Denial {
+        id: RECORDED_CONSENT_RULE.to_owned(),
+        name: RECORDED_CONSENT_NAME.to_owned(),
     };
     let Some(published) = published_consent_policy(pool, workspace).await? else {
         return Ok(recorded_denies.then(builtin));

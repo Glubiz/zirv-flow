@@ -454,8 +454,7 @@ async fn person_gates(
     transactional: bool,
     trail: &mut Trail,
 ) -> Result<Option<Blocked>, JobError> {
-    let clock = ctx.clock().clone();
-    match gates::consent(pool, &clock, job, transactional).await? {
+    match gates::consent(pool, ctx.clock(), job, transactional).await? {
         Ok(passed) => {
             trail.pass(passed.gate);
             trail.rule = passed.rule;
