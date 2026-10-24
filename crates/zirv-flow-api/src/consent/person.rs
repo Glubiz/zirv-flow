@@ -291,7 +291,9 @@ async fn read_of(
     )
     .await?
     {
-        ReadOutcome::Read { verdict, policy } => Ok(ReadBody {
+        ReadOutcome::Read {
+            verdict, policy, ..
+        } => Ok(ReadBody {
             allowed: verdict.allowed,
             deciding_change: verdict.deciding_change,
             default_policy: policy.as_str().to_owned(),

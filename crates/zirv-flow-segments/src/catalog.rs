@@ -17,6 +17,8 @@ pub struct Catalog {
     pub segments: HashSet<Uuid>,
     /// The consent topics of each channel: each key with its id.
     pub topics: HashMap<Channel, HashMap<String, Uuid>>,
+    /// The live consent dimensions: each key with its live value keys.
+    pub dimensions: HashMap<String, HashSet<String>>,
 }
 
 #[cfg(test)]
@@ -31,5 +33,6 @@ mod tests {
         assert!(catalog.lists.is_empty());
         assert!(catalog.segments.is_empty());
         assert!(catalog.topics.is_empty());
+        assert!(catalog.dimensions.is_empty());
     }
 }

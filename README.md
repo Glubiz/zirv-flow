@@ -716,6 +716,25 @@ UI or with `GET` and `POST /api/v1/workspaces/{ws}/topics` and `PATCH .../topics
 underscores or hyphens and never changes, and neither does the channel; the name, the
 description, the policy and the archived flag can change. Every change is audited.
 
+**Consent policy.** A workspace has one consent policy: an ordered list of named, deny-only
+rules that decide a marketing send at gate 3, after the recorded consent is read. A rule is a
+condition in the segment definition format; the send proceeds when no rule matches, and the first
+rule that matches denies it and is named on the message (`deciding_rule`) and in the gate's
+decision. The built-in `recorded_consent` rule matches when the recorded consent does not allow
+the send; it can be moved but not removed, and a workspace with no published policy has only that
+rule. Two leaves are valid in a policy only: `consent` with no channel, whose status is `granted`,
+`denied` or `none` for the message being sent, and `messages`, which counts the messages sent to
+the person on a channel in a window, or reads the time of the last one, filtered by dimension
+values (a cooldown is `{"messages": {"channel": "email", "agg": {"fn": "last_time", "op":
+"within_last", "value": "P1D"}}}`). Edit the draft with `GET` and `PUT
+/api/v1/workspaces/{ws}/consent/policy/draft` (`write` role), publish it with `POST
+.../consent/policy/publish` (`admin`; this appends a `definition_change` decision), list the
+versions with `GET .../consent/policy/versions`, and ask what the published policy decides for a
+person with `POST .../consent/policy/evaluate` (`admin`; the reply is a rule id and name or none,
+and no personal data). A rule that no longer compiles, because something it reads was archived
+since it was published, denies the send. A transactional message skips the gate. The builder UI
+comes later.
+
 **Suppressions** block an email address or phone number whatever anyone has consented to.
 Each reason is one of `hard_bounce`, `complaint`, `manual` or `erased`, and suppression is
 per workspace. The value is never stored: a suppression is kept under an HMAC-SHA256 of

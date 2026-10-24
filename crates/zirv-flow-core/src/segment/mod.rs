@@ -7,8 +7,8 @@ mod issue;
 mod parse;
 
 pub use ast::{
-    AggFn, Aggregate, ConsentCondition, Definition, EventCondition, NODE_KEYS, Node, Op,
-    PropertyFilter, TraitCondition, Window,
+    AggFn, Aggregate, ConsentCondition, Definition, EventCondition, MessagesCondition, NODE_KEYS,
+    Node, Op, PropertyFilter, TraitCondition, Window,
 };
 pub use classes::ChangeClasses;
 pub use issue::{Issue, code, pointer_push};

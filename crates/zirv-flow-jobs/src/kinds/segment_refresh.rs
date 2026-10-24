@@ -126,6 +126,7 @@ pub(super) fn catalog_of(snapshot: CatalogSnapshot) -> (Catalog, TraitStorage) {
         lists: snapshot.lists,
         segments: snapshot.segments,
         topics: snapshot.topics,
+        dimensions: snapshot.dimensions,
     };
     (catalog, storage)
 }

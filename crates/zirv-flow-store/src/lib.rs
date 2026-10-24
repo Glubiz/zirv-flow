@@ -65,11 +65,15 @@ pub use changes::{
 pub use clock::{Clock, ManualClock};
 pub use consent::{
     ConsentChange, ConsentEntry, ConsentExportCursor, ConsentExportRow, ConsentHistoryEntry,
-    ConsentOutcome, Dimension, DimensionUpdate, DimensionValue, NewDimension, NewTopic,
-    ReadOutcome, Topic, TopicUpdate, consent_export_page, consent_for, consent_history,
-    consent_read, create_dimension, create_dimension_value, create_topic, dimensions_of,
-    find_dimension, find_topic, find_topic_by_key, list_dimensions, list_topics, set_consent,
-    unknown_dimension_entry, update_dimension, update_dimension_value, update_topic,
+    ConsentOutcome, ConsentPolicy, DecidingRule, Dimension, DimensionUpdate, DimensionValue,
+    NewDimension, NewTopic, PolicyVersion, ReadOutcome, RuleCheck, RuleToCheck, Topic, TopicUpdate,
+    consent_export_page, consent_for, consent_history, consent_policy_draft, consent_read,
+    create_dimension, create_dimension_value, create_topic, dimensions_of, evaluate_consent_policy,
+    find_consent_policy, find_dimension, find_topic, find_topic_by_key,
+    list_consent_policy_versions, list_dimensions, list_topics, lock_consent_policy,
+    publish_consent_policy, published_consent_policy, save_consent_policy_draft,
+    save_consent_policy_draft_at, set_consent, unknown_dimension_entry, update_dimension,
+    update_dimension_value, update_topic,
 };
 pub use contacts::{
     Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,

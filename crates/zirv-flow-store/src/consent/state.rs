@@ -7,8 +7,8 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::{
-    ChangeSource, Channel, ConsentStatus, Dimensions, Read, Record, State, TOPIC_DIMENSION,
-    TopicPolicy, read,
+    ChangeSource, Channel, ConsentStatus, Dimensions, Read, Record, RecordedConsent, State,
+    TOPIC_DIMENSION, TopicPolicy, read, recorded_consent,
 };
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
@@ -493,6 +493,9 @@ pub enum ReadOutcome {
         verdict: Read,
         /// The policy whose default applied when no record decided.
         policy: TopicPolicy,
+        /// What the records say about the message, apart from the default: the status a consent
+        /// policy rule reads.
+        recorded: RecordedConsent,
     },
     NoSuchPerson,
     /// The topic is not in the workspace, or belongs to another channel.
@@ -569,6 +572,7 @@ pub async fn consent_read(
     Ok(ReadOutcome::Read {
         verdict: read(&message, &records, policy),
         policy,
+        recorded: recorded_consent(&message, &records),
     })
 }
 

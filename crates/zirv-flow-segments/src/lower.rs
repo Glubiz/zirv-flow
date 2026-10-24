@@ -7,18 +7,19 @@ use std::str::FromStr;
 
 use serde_json::{Map, Value};
 use time::{Duration, OffsetDateTime};
-use zirv_flow_core::consent::{Channel, ConsentStatus};
+use zirv_flow_core::consent::{Channel, ConsentStatus, RecordedConsent};
 use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::{SlotColumn, SlotKind, TraitType, number_sql, time_sql};
 use zirv_flow_core::segment::{
-    AggFn, Aggregate, ChangeClasses, ConsentCondition, EventCondition, Issue, Node, Op,
-    TraitCondition, Window, code,
+    AggFn, Aggregate, ChangeClasses, ConsentCondition, EventCondition, Issue, MessagesCondition,
+    Node, Op, TraitCondition, Window, code,
 };
 
 use crate::catalog::Catalog;
 use crate::deps::Deps;
 use crate::leaf::empty_aggregate_satisfies;
 use crate::operand::{absolute, number_of, numbers, strings, timestamp};
+use crate::policy::SendContext;
 use crate::query::Param;
 use crate::storage::{Storage, TraitStorage};
 use crate::time_value::parse_duration;
@@ -44,10 +45,12 @@ pub(crate) fn lower(
     catalog: &Catalog,
     storage: &TraitStorage,
     now: OffsetDateTime,
+    send: Option<&SendContext>,
 ) -> Result<Lowered, Vec<Issue>> {
     let mut lowerer = Lowerer {
         catalog,
         storage,
+        send,
         now,
         params: Vec::new(),
         deps: Deps::default(),
@@ -97,6 +100,8 @@ impl Field {
 struct Lowerer<'a> {
     catalog: &'a Catalog,
     storage: &'a TraitStorage,
+    /// The send a consent policy is lowered for; none for a segment.
+    send: Option<&'a SendContext>,
     now: OffsetDateTime,
     params: Vec<Param>,
     deps: Deps,
@@ -171,6 +176,7 @@ impl Lowerer<'_> {
                 )
             }
             Node::Consent(condition) => self.consent(condition),
+            Node::Messages(condition) => self.messages(condition),
             Node::Identifier(kind) => {
                 self.deps.identifiers.insert(kind.clone());
                 self.need(ChangeClasses::IDENTIFIERS);
@@ -192,7 +198,10 @@ impl Lowerer<'_> {
     }
 
     fn consent(&mut self, condition: &ConsentCondition) -> String {
-        let Ok(channel) = Channel::from_str(&condition.channel) else {
+        let Some(channel) = &condition.channel else {
+            return self.message_consent(condition);
+        };
+        let Ok(channel) = Channel::from_str(channel) else {
             return self.fail(code::VALUE_NOT_ALLOWED);
         };
         let Ok(status) = ConsentStatus::from_str(&condition.status) else {
@@ -200,7 +209,7 @@ impl Lowerer<'_> {
         };
         self.deps
             .consent
-            .insert((condition.channel.clone(), condition.topic.clone()));
+            .insert((channel.as_str().to_owned(), condition.topic.clone()));
         self.need(ChangeClasses::CONSENT);
         let topic = match &condition.topic {
             None => "c.topic_id IS NULL".to_owned(),
@@ -227,6 +236,81 @@ impl Lowerer<'_> {
             format!("NOT EXISTS (SELECT 1 {row} AND c.status <> {wanted})")
         } else {
             format!("EXISTS (SELECT 1 {row} AND c.status = {wanted})")
+        }
+    }
+
+    /// The consent leaf of a policy: what the person's records say about the message being sent,
+    /// read by the store before the rule runs and bound here as a value.
+    fn message_consent(&mut self, condition: &ConsentCondition) -> String {
+        let (Some(send), Some(wanted)) = (self.send, RecordedConsent::from_name(&condition.status))
+        else {
+            return self.fail(code::POLICY_ONLY);
+        };
+        // The status was read before the rule runs, so the leaf is a constant of this send.
+        (send.consent == wanted).to_string()
+    }
+
+    /// The messages leaf of a policy: the person's sent messages on a channel, filtered by
+    /// dimension values and a window.
+    fn messages(&mut self, condition: &MessagesCondition) -> String {
+        if self.send.is_none() {
+            return self.fail(code::POLICY_ONLY);
+        }
+        let Ok(channel) = Channel::from_str(&condition.channel) else {
+            return self.fail(code::VALUE_NOT_ALLOWED);
+        };
+        let channel = self.text(channel.as_str());
+        let dimensions = Value::Object(
+            condition
+                .dimensions
+                .iter()
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect(),
+        );
+        let dimensions = self.bind(Param::Jsonb(dimensions), "jsonb");
+        let window = match &condition.window {
+            None => String::new(),
+            Some(Window::Last(text)) => {
+                self.time_sensitive = true;
+                let Some(earlier) = span_of_text(text).and_then(|span| self.now.checked_sub(span))
+                else {
+                    return self.fail(code::INVALID_DURATION);
+                };
+                let from = self.instant(earlier);
+                let now = self.instant(self.now);
+                format!(" AND m.completed_at > {from} AND m.completed_at <= {now}")
+            }
+            Some(Window::Between(start, end)) => {
+                let (Some(start), Some(end)) = (timestamp(start), timestamp(end)) else {
+                    return self.fail(code::VALUE_TYPE_MISMATCH);
+                };
+                let start = self.instant(start);
+                let end = self.instant(end);
+                format!(" AND m.completed_at >= {start} AND m.completed_at < {end}")
+            }
+            Some(Window::SinceTrait(_)) => return self.fail(code::VALUE_NOT_ALLOWED),
+        };
+        let rows = format!(
+            "FROM (WITH RECURSIVE who(id) AS (SELECT p.id UNION \
+                SELECT g.merged_person_id FROM person_merges g JOIN who \
+                ON g.survivor_person_id = who.id WHERE g.workspace_id = p.workspace_id) \
+                SELECT id FROM who) w \
+             JOIN messages m ON m.person_id = w.id WHERE m.workspace_id = p.workspace_id \
+             AND m.status = 'sent' AND NOT m.test AND m.channel = {channel} \
+             AND m.dimensions @> {dimensions}{window}"
+        );
+        let agg = &condition.agg;
+        match agg.func {
+            AggFn::Count => {
+                let count = format!("(SELECT count(*) {rows})::float8");
+                self.number(&count, agg.op, agg.value.as_ref())
+            }
+            AggFn::LastTime => {
+                let last = format!("(SELECT max(m.completed_at) {rows})");
+                let compared = self.time(&last, Kind::Timestamp, agg.op, agg.value.as_ref());
+                format!("COALESCE({compared}, false)")
+            }
+            _ => self.fail(code::AGGREGATE_NOT_ALLOWED),
         }
     }
 
@@ -746,6 +830,7 @@ mod tests {
         let mut lowerer = Lowerer {
             catalog: &catalog,
             storage: &storage,
+            send: None,
             now: OffsetDateTime::UNIX_EPOCH,
             params: Vec::new(),
             deps: Deps::default(),
@@ -773,6 +858,7 @@ mod tests {
             &Catalog::default(),
             &TraitStorage::default(),
             OffsetDateTime::UNIX_EPOCH,
+            None,
         );
         assert_eq!(
             result.err(),
@@ -811,6 +897,7 @@ mod tests {
             &catalog,
             &TraitStorage::default(),
             OffsetDateTime::UNIX_EPOCH,
+            None,
         )
         .unwrap();
         assert!(!lowered.predicate.contains("avg("));

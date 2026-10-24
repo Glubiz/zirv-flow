@@ -399,6 +399,20 @@ impl ApiError {
         }
     }
 
+    /// A consent policy whose rules or conditions do not validate: every issue with its pointer
+    /// into the request and a fixed code.
+    pub(crate) fn consent_policy_invalid(issues: Vec<SegmentIssueProblem>) -> Self {
+        Self {
+            code: Some("consent_policy_invalid"),
+            segment: Some(Box::new(SegmentExtra {
+                issues: Some(issues),
+                cycle: None,
+                ..SegmentExtra::default()
+            })),
+            ..Self::unprocessable("the consent policy is not valid")
+        }
+    }
+
     /// A save that would make segments reference each other. The detail names the cycle as
     /// "A → B → A".
     pub(crate) fn segment_cycle(cycle: Vec<SegmentRefProblem>) -> Self {
@@ -767,6 +781,18 @@ impl ApiError {
             ..Self::new(
                 StatusCode::CONFLICT,
                 "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
+    /// A save or publish of the consent policy that names a draft revision other than the current
+    /// one: the draft was saved by someone else since the caller read it.
+    pub(crate) fn consent_policy_revision_mismatch() -> Self {
+        Self {
+            code: Some("consent_policy_revision_mismatch"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the consent policy draft is not at the revision named; read it again",
             )
         }
     }

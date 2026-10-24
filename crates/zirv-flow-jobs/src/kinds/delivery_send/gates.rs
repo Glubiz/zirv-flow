@@ -7,17 +7,19 @@
 //! their own on the worker's pool, and the rest are plain reads on the job's connection.
 
 use sqlx::PgConnection;
+use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::HmacKey;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::consent::Channel;
 use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_store::{
-    GateRecord, PgPool, ReadOutcome, SenderError, SuppressionScope, VerifiedSender, begin,
+    Clock, GateRecord, PgPool, ReadOutcome, SenderError, SuppressionScope, VerifiedSender, begin,
     consent_read, read_send_address, require_verified_sender, suppressing_scope,
 };
 
 use super::payload::SendJob;
+use super::policy;
 use crate::JobError;
 
 /// The code of a message the sender gate stopped.
@@ -26,17 +28,19 @@ pub(super) const SENDER_UNVERIFIED: &str = "sender_unverified";
 pub(super) const NO_ADDRESS: &str = "no_address";
 /// The code of a message the consent gate stopped.
 pub(super) const NO_CONSENT: &str = "no_consent";
+/// The note on a consent gate that a published rule that no longer compiles stopped.
+pub(super) const POLICY_RULE_UNEVALUABLE: &str = "policy_rule_unevaluable";
 /// The code of a message the suppression gate stopped.
 pub(super) const SUPPRESSED: &str = "suppressed";
 
 /// A gate that stopped the message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Blocked {
     /// What the gate recorded; its reason is the code the message is skipped with.
     pub(super) gate: GateRecord,
-    /// What decided, for the message log: `recorded_consent`, `topic_default`, a suppression's
-    /// scope, or none.
-    pub(super) rule: Option<&'static str>,
+    /// What decided, for the message log: `recorded_consent`, `topic_default`, the name of a
+    /// consent policy rule, a suppression's scope, or none.
+    pub(super) rule: Option<String>,
 }
 
 impl Blocked {
@@ -49,10 +53,10 @@ impl Blocked {
 }
 
 /// What a gate that let the message through leaves for the log.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Passed {
     pub(super) gate: GateRecord,
-    pub(super) rule: Option<&'static str>,
+    pub(super) rule: Option<String>,
 }
 
 /// The sender identity the template's version names, when it is live and its domain is verified.
@@ -100,13 +104,14 @@ pub(super) async fn address(
 /// (a topic or dimension archived since the flow was published) is not consented to either.
 pub(super) async fn consent(
     pool: &PgPool,
+    clock: &Clock,
     job: &SendJob,
     transactional: bool,
 ) -> Result<Result<Passed, Blocked>, JobError> {
     if transactional {
         return Ok(Ok(Passed {
             gate: GateRecord::passed("consent"),
-            rule: Some("transactional"),
+            rule: Some("transactional".to_owned()),
         }));
     }
     let read = consent_read(
@@ -118,11 +123,46 @@ pub(super) async fn consent(
         &job.dimensions,
     )
     .await?;
-    let ReadOutcome::Read { verdict, .. } = read else {
+    let ReadOutcome::Read {
+        verdict, recorded, ..
+    } = read
+    else {
         let mut blocked = Blocked::new("consent", NO_CONSENT);
-        blocked.rule = Some("unknown_scope");
+        blocked.rule = Some("unknown_scope".to_owned());
         return Ok(Err(blocked));
     };
+    // The workspace's published consent policy decides, and with none the recorded consent does.
+    let denial = policy::denial(
+        pool,
+        clock,
+        job.workspace,
+        job.person,
+        &job.dimensions,
+        recorded,
+        !verdict.allowed,
+    )
+    .await?;
+    if let Some(denial) = denial.filter(|denial| !denial.is_builtin()) {
+        // A rule of the policy denied the send: the message names it by name and the gate result
+        // by id.
+        let mut gate = GateRecord::blocked("consent", NO_CONSENT);
+        if let Ok(id) = denial.id.parse::<Uuid>() {
+            gate = gate.with_detail("rule", id);
+        }
+        if denial.unevaluable {
+            // The rule did not match; it could not be read. Say so apart from a plain denial.
+            warn!(
+                workspace = %job.workspace.as_uuid(),
+                rule = %denial.id,
+                "a published consent rule cannot be evaluated; the send is denied"
+            );
+            gate = gate.with_note(POLICY_RULE_UNEVALUABLE);
+        }
+        return Ok(Err(Blocked {
+            gate,
+            rule: Some(denial.name),
+        }));
+    }
     // A record decided, or the topic's policy default did (opt-in blocks, opt-out allows).
     let rule = if verdict.deciding_change.is_some() {
         "recorded_consent"
@@ -140,12 +180,12 @@ pub(super) async fn consent(
     Ok(if verdict.allowed {
         Ok(Passed {
             gate,
-            rule: Some(rule),
+            rule: Some(rule.to_owned()),
         })
     } else {
         Err(Blocked {
             gate,
-            rule: Some(rule),
+            rule: Some(rule.to_owned()),
         })
     })
 }
@@ -167,10 +207,13 @@ pub(super) async fn suppression(
             None => Ok(GateRecord::passed("suppression")),
             Some(scope) => Err(Blocked {
                 gate: GateRecord::blocked("suppression", SUPPRESSED),
-                rule: Some(match scope {
-                    SuppressionScope::Workspace => "suppression_workspace",
-                    SuppressionScope::Organization => "suppression_organization",
-                }),
+                rule: Some(
+                    match scope {
+                        SuppressionScope::Workspace => "suppression_workspace",
+                        SuppressionScope::Organization => "suppression_organization",
+                    }
+                    .to_owned(),
+                ),
             }),
         },
     )

@@ -25,6 +25,8 @@ pub struct CatalogSnapshot {
     pub segments: HashSet<Uuid>,
     /// Each channel's topics: a key with its id.
     pub topics: HashMap<Channel, HashMap<String, Uuid>>,
+    /// The live consent dimensions: a key with its live value keys.
+    pub dimensions: HashMap<String, HashSet<String>>,
     /// The trait slots in state `ready`, which the compiler may read. They come from the same
     /// snapshot as the traits.
     pub slots: Vec<(String, SlotColumn)>,
@@ -111,6 +113,20 @@ async fn read_catalog(
             .entry(topic.channel)
             .or_default()
             .insert(topic.key, topic.id);
+    }
+    let dimensions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT d.key, v.key FROM consent_dimensions d          JOIN consent_dimension_values v             ON v.workspace_id = d.workspace_id AND v.dimension_id = d.id          WHERE d.workspace_id = $1 AND d.archived_at IS NULL AND v.archived_at IS NULL",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    for (dimension, value) in dimensions {
+        snapshot
+            .dimensions
+            .entry(dimension)
+            .or_default()
+            .insert(value);
     }
     snapshot.slots = ready_trait_slots(&mut *connection, workspace).await?;
     Ok(snapshot)

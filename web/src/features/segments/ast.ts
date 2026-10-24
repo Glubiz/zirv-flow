@@ -252,7 +252,9 @@ export function isComplete(node: Node, traits: TraitTypes, events: ReadonlyMap<s
   }
   if ("list" in node) return node.list !== "";
   if ("segment" in node) return node.segment !== "";
-  if ("consent" in node) return node.consent.channel !== "";
+  if ("consent" in node) return (node.consent.channel ?? "") !== "";
+  // A policy-only leaf: the segment builder does not make or complete it.
+  if ("messages" in node) return false;
   const kind = node.identifier;
   return kind !== "" && kind !== "external:";
 }

@@ -15,6 +15,8 @@ pub mod code {
     pub const UNKNOWN_LIST: &str = "unknown_list";
     pub const UNKNOWN_SEGMENT: &str = "unknown_segment";
     pub const UNKNOWN_TOPIC: &str = "unknown_topic";
+    /// A consent dimension the workspace does not have, or has archived.
+    pub const UNKNOWN_DIMENSION: &str = "unknown_dimension";
     pub const INVALID_IDENTIFIER_KIND: &str = "invalid_identifier_kind";
     pub const OPERATOR_NOT_ALLOWED: &str = "operator_not_allowed";
     pub const VALUE_TYPE_MISMATCH: &str = "value_type_mismatch";
@@ -28,9 +30,11 @@ pub mod code {
     pub const TOO_MANY_NODES: &str = "too_many_nodes";
     pub const TOO_MANY_VALUES: &str = "too_many_values";
     pub const VALUE_TOO_LONG: &str = "value_too_long";
+    /// A leaf that reads the message being sent, which only a consent policy has.
+    pub const POLICY_ONLY: &str = "policy_only";
 
     /// Every code.
-    pub const ALL: [&str; 22] = [
+    pub const ALL: [&str; 24] = [
         UNSUPPORTED_VERSION,
         MALFORMED,
         UNKNOWN_KEY,
@@ -40,6 +44,7 @@ pub mod code {
         UNKNOWN_LIST,
         UNKNOWN_SEGMENT,
         UNKNOWN_TOPIC,
+        UNKNOWN_DIMENSION,
         INVALID_IDENTIFIER_KIND,
         OPERATOR_NOT_ALLOWED,
         VALUE_TYPE_MISMATCH,
@@ -53,6 +58,7 @@ pub mod code {
         TOO_MANY_NODES,
         TOO_MANY_VALUES,
         VALUE_TOO_LONG,
+        POLICY_ONLY,
     ];
 }
 

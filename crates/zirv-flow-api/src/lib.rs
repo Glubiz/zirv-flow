@@ -434,6 +434,22 @@ fn routes() -> Router<AppState> {
             patch(consent::dimensions::update_value_handler),
         )
         .route(
+            "/api/v1/workspaces/{ws}/consent/policy/draft",
+            get(consent::policy::get_draft).put(consent::policy::put_draft),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/policy/publish",
+            post(consent::policy::publish),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/policy/versions",
+            get(consent::policy::versions),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/consent/policy/evaluate",
+            post(consent::policy::evaluate),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/consent/import",
             post(consent::transfer::import_handler),
         )
