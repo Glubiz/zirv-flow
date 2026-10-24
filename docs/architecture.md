@@ -1371,7 +1371,10 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   gate as reason; no event, and the row stays `pending`. A quiet-hours deferral releases the slot in
   the same write, so the deferred run takes one when it really sends. Only a wait for a rate-limit
   token starts the six-hour clock (`first_wait`); a gate's deferral stores it as null, restarting
-  it after the hold, so a message held overnight is not failed as `rate_limited`. A resumed (`sending`) message skips gates 3 to 6
+  it after the hold, so a message held overnight is not failed as `rate_limited`. Each run of
+  token waits is bounded, but a send whose token waits alternate with gate holds has no bound on
+  its total wait. A defer-mode release time is read from other messages' slots, which a re-run
+  can move later; the woken message checks again and may defer once more. A resumed (`sending`) message skips gates 3 to 6
   as before.
 
 ### 10.2 Email, tracking and feedback

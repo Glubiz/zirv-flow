@@ -135,14 +135,15 @@ pub async fn read_send_limits(
 /// Replaces both settings. Run it in a transaction: the old settings are deleted and the new ones
 /// written, so a reader sees one set or the other. Replaces of one workspace are serialised by a
 /// lock on its row that the transaction holds to its end, so two concurrent replaces leave one
-/// writer's settings.
+/// writer's settings. The lock does not exclude key-share locks, so rows that reference the
+/// workspace are still written meanwhile.
 pub async fn replace_send_limits(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     caps: &[NewFrequencyCap],
     quiet_hours: Option<&QuietHours>,
 ) -> Result<(), StoreError> {
-    sqlx::query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE")
+    sqlx::query("SELECT id FROM workspaces WHERE id = $1 FOR NO KEY UPDATE")
         .bind(workspace.as_uuid())
         .fetch_optional(&mut *connection)
         .await
@@ -263,33 +264,46 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn concurrent_replaces_both_succeed_and_leave_one_writers_settings(pool: sqlx::PgPool) {
+    async fn a_replace_waits_for_one_in_flight_and_leaves_only_its_own_settings(
+        pool: sqlx::PgPool,
+    ) {
         let ws = workspace(&pool).await;
         let quiet = QuietHours {
             start: time!(21:00),
             end: time!(08:00),
             days: vec!["mon".to_owned()],
         };
-        let write = |first: i32| {
+        let mut first = pool.begin().await.unwrap();
+        let caps = [cap(1, CapMode::Skip), cap(2, CapMode::Skip)];
+        replace_send_limits(&mut first, ws, &caps, Some(&quiet))
+            .await
+            .unwrap();
+        let second = {
             let pool = pool.clone();
             let quiet = quiet.clone();
-            async move {
-                let caps = [cap(first, CapMode::Skip), cap(first + 1, CapMode::Skip)];
+            tokio::spawn(async move {
+                let caps = [cap(7, CapMode::Skip), cap(8, CapMode::Skip)];
                 let mut tx = pool.begin().await.unwrap();
                 replace_send_limits(&mut tx, ws, &caps, Some(&quiet))
                     .await
                     .unwrap();
                 tx.commit().await.unwrap();
-            }
+            })
         };
-        let (a, b) = (tokio::spawn(write(1)), tokio::spawn(write(7)));
-        a.await.unwrap();
-        b.await.unwrap();
+        // Without the lock, the second replace deletes nothing it can see and inserts its caps
+        // beside the first's while the first is still open.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !second.is_finished(),
+            "the second replace waits for the first"
+        );
+        first.commit().await.unwrap();
+        second.await.unwrap();
 
         let mut conn = pool.acquire().await.unwrap();
         let read = read_send_limits(&mut conn, ws).await.unwrap();
         let limits: Vec<i32> = read.caps.iter().map(|c| c.limit).collect();
-        assert!(limits == vec![1, 2] || limits == vec![7, 8], "{limits:?}");
+        assert_eq!(limits, vec![7, 8]);
         assert_eq!(read.quiet_hours, Some(quiet));
     }
 
