@@ -374,10 +374,9 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(
-            events,
-            [json!({"topic_id": offers.to_string(), "dimensions": {"region": "north"}})]
-        );
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["topic_id"], json!(offers.to_string()));
+        assert_eq!(events[0]["dimensions"], json!({"region": "north"}));
     }
 
     #[sqlx::test]

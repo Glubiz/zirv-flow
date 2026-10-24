@@ -1556,6 +1556,8 @@ mod tests {
         };
         let mut context = zirv_flow_render::RenderContext::default();
         context.message.id = queued.message.to_string();
+        // A marketing message must carry its unsubscribe link, which is never rewritten.
+        context.system.unsubscribe_url = format!("{PUBLIC_URL}/u/kept");
         let page = |urls: &[&str]| {
             let links: String = urls
                 .iter()
@@ -1563,7 +1565,10 @@ mod tests {
                 .collect();
             json!({"schema": 1, "channel": "email", "mode": "code", "email": {
                 "subject": "Hello", "sender": env.sender, "lang": "en", "category": "marketing",
-                "html": format!("<html><body>{links}</body></html>"), "text": "Hello",
+                "html": format!(
+                    "<html><body>{links}<a href=\"{{{{ system.unsubscribe_url }}}}\">Unsubscribe</a></body></html>"
+                ),
+                "text": "Hello {{ system.unsubscribe_url }}",
             }})
         };
 
