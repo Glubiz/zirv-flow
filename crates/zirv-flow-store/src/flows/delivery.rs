@@ -2,12 +2,19 @@
 //! person and traits to send, read without a lock before the call, and the outcome event with its
 //! decision, written after it under a short lock on the person. Every function runs in the job's
 //! transaction.
+//!
+//! `delivery.sync` (architecture 10.2, #226) reads and writes the same way, through the same
+//! functions: its outcome is a [`WebhookOutcome`] with a [`SyncDetail`], which makes the event
+//! `sync.succeeded` or `sync.failed` and the decision `sync.upsert` or `sync.remove`.
 
 use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::events::{WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT};
+use zirv_flow_core::events::{
+    SYNC_FAILED_EVENT, SYNC_SUCCEEDED_EVENT, WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT,
+};
+use zirv_flow_core::flow::SyncOperation;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::arrivals::{Arrival, enqueue_arrivals};
@@ -130,13 +137,6 @@ pub enum WebhookResult {
 }
 
 impl WebhookResult {
-    const fn event(self) -> &'static str {
-        match self {
-            Self::Succeeded => WEBHOOK_SUCCEEDED_EVENT,
-            Self::Failed => WEBHOOK_FAILED_EVENT,
-        }
-    }
-
     const fn outcome(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
@@ -145,7 +145,15 @@ impl WebhookResult {
     }
 }
 
-/// One finished webhook call.
+/// What makes a finished call a profile sync: where it went and what it did. Never the key or a
+/// trait value.
+#[derive(Clone, Copy, Debug)]
+pub struct SyncDetail {
+    pub destination: Uuid,
+    pub operation: SyncOperation,
+}
+
+/// One finished webhook call, or, with a `sync` detail, one finished profile sync.
 #[derive(Clone, Debug)]
 pub struct WebhookOutcome<'a> {
     pub workspace: WorkspaceId,
@@ -165,23 +173,56 @@ pub struct WebhookOutcome<'a> {
     pub now: OffsetDateTime,
     /// The job and attempt that recorded it.
     pub job: (Uuid, i32),
+    /// Set for a profile sync: the event and the decision are the sync family's.
+    pub sync: Option<SyncDetail>,
+}
+
+impl WebhookOutcome<'_> {
+    const fn event_name(&self) -> &'static str {
+        match (self.sync.is_some(), self.result) {
+            (false, WebhookResult::Succeeded) => WEBHOOK_SUCCEEDED_EVENT,
+            (false, WebhookResult::Failed) => WEBHOOK_FAILED_EVENT,
+            (true, WebhookResult::Succeeded) => SYNC_SUCCEEDED_EVENT,
+            (true, WebhookResult::Failed) => SYNC_FAILED_EVENT,
+        }
+    }
+
+    const fn decision_action(&self) -> &'static str {
+        match self.sync {
+            None => "webhook.call",
+            Some(SyncDetail {
+                operation: SyncOperation::Upsert,
+                ..
+            }) => "sync.upsert",
+            Some(SyncDetail {
+                operation: SyncOperation::Remove,
+                ..
+            }) => "sync.remove",
+        }
+    }
 }
 
 /// Records the outcome: the `webhook.succeeded` or `webhook.failed` event of the person (source
 /// `flows`, properties the node and enrollment ids, the status and the attempt count, never the
 /// response), a `webhook.call` decision under the enrollment's trace, and the steps of every
-/// enrollment that waits for the event. Returns the event's id.
+/// enrollment that waits for the event. Returns the event's id. A profile sync writes the
+/// `sync.` event and a `sync.upsert` or `sync.remove` decision instead, with the destination and
+/// the operation as well; never the external key or a trait value.
 pub async fn record_webhook_outcome(
     connection: &mut PgConnection,
     outcome: &WebhookOutcome<'_>,
 ) -> Result<Uuid, StoreError> {
     let event = Uuid::now_v7();
-    let properties = json!({
+    let mut properties = json!({
         "node_id": outcome.node,
         "enrollment_id": outcome.enrollment,
         "status": outcome.status,
         "attempts": outcome.attempts,
     });
+    if let (Some(sync), Some(map)) = (outcome.sync, properties.as_object_mut()) {
+        map.insert("destination_id".to_owned(), json!(sync.destination));
+        map.insert("operation".to_owned(), json!(sync.operation.as_str()));
+    }
     sqlx::query(
         "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
             properties, source, trace_id, validation_state) \
@@ -190,7 +231,7 @@ pub async fn record_webhook_outcome(
     .bind(event)
     .bind(outcome.workspace.as_uuid())
     .bind(outcome.person)
-    .bind(outcome.result.event())
+    .bind(outcome.event_name())
     .bind(outcome.now)
     .bind(&properties)
     .bind(FLOWS_SOURCE)
@@ -214,13 +255,14 @@ pub async fn record_webhook_outcome(
         ("event", event),
     ];
     subject_ids.extend(pinned.map(|(flow, _)| ("flow", flow)));
+    subject_ids.extend(outcome.sync.map(|sync| ("destination", sync.destination)));
     append_decision(
         &mut *connection,
         &NewDecision {
             graph: pinned.map(|(_, version)| GraphPoint::at(version, outcome.node)),
             workspace_id: outcome.workspace,
             trace: outcome.trace.clone(),
-            action: "webhook.call",
+            action: outcome.decision_action(),
             outcome: outcome.result.outcome(),
             reason: outcome.reason,
             subject_ids,
@@ -234,7 +276,7 @@ pub async fn record_webhook_outcome(
         &[Arrival {
             event_id: event,
             person_id: outcome.person,
-            name: outcome.result.event().to_owned(),
+            name: outcome.event_name().to_owned(),
         }],
     )
     .await?;
@@ -392,6 +434,7 @@ mod tests {
                 trace: &trace,
                 now: OffsetDateTime::now_utc(),
                 job: (Uuid::now_v7(), 2),
+                sync: None,
             },
         )
         .await
@@ -425,6 +468,88 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_outcome_writes_the_sync_event_and_decision_with_ids_and_codes_only(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let id = person(&pool, ws, json!({"plan": "SENTINEL-TRAIT"})).await;
+        let enrollment = enrolled(&pool, ws, id, "sync.failed").await;
+        let destination = Uuid::now_v7();
+        let trace = trace();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let event = record_webhook_outcome(
+            &mut connection,
+            &WebhookOutcome {
+                workspace: ws,
+                enrollment,
+                person: id,
+                node: "push",
+                result: WebhookResult::Failed,
+                status: None,
+                attempts: 1,
+                reason: Some("missing_key"),
+                trace: &trace,
+                now: OffsetDateTime::now_utc(),
+                job: (Uuid::now_v7(), 1),
+                sync: Some(SyncDetail {
+                    destination,
+                    operation: SyncOperation::Upsert,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let (name, properties): (String, Value) =
+            sqlx::query_as("SELECT name, properties FROM events WHERE id = $1")
+                .bind(event)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name, "sync.failed");
+        assert_eq!(
+            properties,
+            json!({
+                "node_id": "push",
+                "enrollment_id": enrollment,
+                "status": null,
+                "attempts": 1,
+                "destination_id": destination,
+                "operation": "upsert"
+            })
+        );
+        let (outcome, reason, ids): (String, Option<String>, Value) = sqlx::query_as(
+            "SELECT outcome, reason, subject_ids FROM decision_records WHERE action = 'sync.upsert'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (outcome.as_str(), reason.as_deref()),
+            ("failed", Some("missing_key"))
+        );
+        assert_eq!(ids["destination"], json!(destination));
+        assert_eq!(ids["person"], json!(id));
+        assert_eq!(decisions(&pool, ws, "webhook.call").await, 0);
+        let woken: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(woken, 1, "a wait for sync.failed is woken");
+        let everything: String = sqlx::query_scalar(
+            "SELECT (SELECT coalesce(string_agg(properties::text, ' '), '') FROM events) || \
+                    (SELECT coalesce(string_agg(subject_ids::text || coalesce(reason, ''), ' '), '') \
+                     FROM decision_records)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!everything.contains("SENTINEL"), "{everything}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failure_wakes_only_a_wait_for_the_failed_event(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         let id = person(&pool, ws, json!({})).await;
@@ -446,6 +571,7 @@ mod tests {
                 trace: &trace,
                 now: OffsetDateTime::now_utc(),
                 job: (Uuid::now_v7(), 5),
+                sync: None,
             },
         )
         .await

@@ -19,6 +19,8 @@ use crate::{NewJob, StoreError};
 pub const STEP_JOB_KIND: &str = "flow.step";
 /// The kind of the job a webhook action enqueues; its handler is the webhook action's own.
 pub const WEBHOOK_JOB_KIND: &str = "webhook.call";
+/// The kind of the job a profile sync action enqueues (architecture 10.2).
+pub const SYNC_JOB_KIND: &str = "delivery.sync";
 
 /// Where an enrollment is in its life. A yield at a branch is never stored.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
