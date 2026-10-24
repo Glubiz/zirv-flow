@@ -363,7 +363,13 @@ fn manifest(walk: &mut Walk, value: &Value) -> Option<Manifest> {
     let provider =
         provider.and_then(|value| super::destination::provider(walk, value, obj.at("destination")));
     if let Some(provider) = &provider {
-        super::destination::cross_check(walk, provider, auth.as_ref(), credential.as_ref());
+        super::destination::cross_check(
+            walk,
+            provider,
+            &headers,
+            auth.as_ref(),
+            credential.as_ref(),
+        );
     }
     walk.finish(obj);
     Some(Manifest {

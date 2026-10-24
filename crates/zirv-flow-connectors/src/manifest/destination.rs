@@ -789,6 +789,7 @@ fn header_name(
 pub(super) fn cross_check(
     walk: &mut Walk,
     provider: &Provider,
+    headers: &[(String, String)],
     auth: Option<&Auth>,
     credential: Option<&CredentialSpec>,
 ) {
@@ -797,6 +798,13 @@ pub(super) fn cross_check(
         Some(Auth::OAuth2ClientCredentials { .. } | Auth::OAuth2AuthorizationCode { .. })
     ) {
         walk.add(code::NOT_FOR_DESTINATIONS, "/auth/type".to_owned());
+    }
+    // A static header of the idempotency header's name would give the request two values or a
+    // constant one.
+    for (name, _) in headers {
+        if name.eq_ignore_ascii_case(&provider.send.idempotency_header) {
+            walk.add(code::FORBIDDEN_HEADER, format!("/headers/{name}"));
+        }
     }
     let secret_at = "/destination/feedback/verification/secret_field".to_owned();
     match credential.map(CredentialSpec::schema) {

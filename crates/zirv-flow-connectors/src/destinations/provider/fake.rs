@@ -69,6 +69,8 @@ pub enum Script {
 pub struct Accepted {
     /// The idempotency key.
     pub key: String,
+    /// How many idempotency headers the request carried.
+    pub key_headers: usize,
     pub path: String,
     pub body: Value,
     /// The `Authorization` header, if any.
@@ -350,8 +352,14 @@ fn decide(state: &Mutex<State>, request: &Request) -> Plan {
     let body = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
     let remote = format!("remote-{}", state.accepted.len() + 1);
     let answer = json!({"id": remote}).to_string();
+    let key_headers = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(&state.idempotency_header))
+        .count();
     state.accepted.push(Accepted {
         key: key.clone(),
+        key_headers,
         path: request.path.clone(),
         body,
         authorization: request.header("authorization").map(str::to_owned),

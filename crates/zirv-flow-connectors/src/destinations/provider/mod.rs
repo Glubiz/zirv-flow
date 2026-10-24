@@ -135,14 +135,15 @@ impl Destination for ProviderDestination {
             .headers
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
-            .chain([
-                (CONTENT_TYPE.as_str(), "application/json"),
-                (
-                    provider.send.idempotency_header.as_str(),
-                    message.idempotency_key,
-                ),
-            ]);
+            .chain([(CONTENT_TYPE.as_str(), "application/json")]);
         add_headers(&mut request, headers)?;
+        // The idempotency header replaces any header of the same name: the request carries exactly
+        // one value, the message id.
+        request.headers_mut().insert(
+            HeaderName::from_bytes(provider.send.idempotency_header.as_bytes())
+                .map_err(|_| unbuildable())?,
+            HeaderValue::from_str(message.idempotency_key).map_err(|_| unbuildable())?,
+        );
         *request.body_mut() = Some(body.to_string().into_bytes().into());
         apply_auth(&mut request, &manifest.auth, credential)?;
 
@@ -490,6 +491,32 @@ mod tests {
         assert!(spec.credential_fields.iter().all(|field| field.secret));
         assert!(spec.credential_fields.iter().all(|field| !field.required));
         assert!(spec.config_fields.iter().all(|field| !field.secret));
+    }
+
+    #[tokio::test]
+    async fn the_request_carries_exactly_one_idempotency_header_with_the_message_id() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_for(ONE, &fake);
+
+        deliver(&config, &token(), "msg-1", Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        let accepted = fake.accepted();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!((accepted[0].key.as_str(), accepted[0].key_headers), ("msg-1", 1));
+    }
+
+    #[test]
+    fn a_static_header_named_like_the_idempotency_header_is_refused_ignoring_case() {
+        let mut manifest = serde_json::from_str::<Value>(ONE).unwrap();
+        manifest["headers"] = json!({"idempotency-KEY": "constant"});
+
+        let issues = check_config(&json!({"manifest": manifest}));
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].field, "manifest/headers/idempotency-KEY");
+        assert_eq!(issues[0].reason, "forbidden_header");
     }
 
     #[test]
