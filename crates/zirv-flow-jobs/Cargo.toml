@@ -25,6 +25,7 @@ zirv-flow-engine.workspace = true
 zirv-flow-render.workspace = true
 zirv-flow-segments.workspace = true
 zirv-flow-store.workspace = true
+zirv-flow-templates.workspace = true
 
 [dev-dependencies]
 zirv-flow-connectors = { workspace = true, features = ["test-support"] }

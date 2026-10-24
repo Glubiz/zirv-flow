@@ -50,12 +50,12 @@
 //! last attempt the message fails. A 429 also slows the destination's bucket (`throttle_bucket`).
 //! An attempt row is recorded for every call, and counted after it commits.
 
-mod deliver;
-mod gates;
+pub(crate) mod deliver;
+pub(crate) mod gates;
 mod payload;
 mod policy;
 mod quiet;
-mod render;
+pub(crate) mod render;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -68,7 +68,8 @@ impl TestSendOutcome {
     }
 }
 
-/// A log row. It holds no address and no hash.
+/// A log row. It holds no address; the recipient hash is for the job and the lifecycle deletes and
+/// is never shown.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestSend {
     pub id: Uuid,
@@ -77,6 +78,7 @@ pub struct TestSend {
     pub member_id: Option<Uuid>,
     pub destination_id: Uuid,
     pub sender_identity_id: Uuid,
+    pub recipient_hash: Vec<u8>,
     pub recipient_member_id: Option<Uuid>,
     /// `person` or `sample`.
     pub render_context: String,
@@ -94,6 +96,7 @@ struct Row {
     member_id: Option<Uuid>,
     destination_id: Uuid,
     sender_identity_id: Uuid,
+    recipient_hash: Vec<u8>,
     recipient_member_id: Option<Uuid>,
     render_context: String,
     outcome: String,
@@ -111,6 +114,7 @@ impl Row {
             member_id: self.member_id,
             destination_id: self.destination_id,
             sender_identity_id: self.sender_identity_id,
+            recipient_hash: self.recipient_hash,
             recipient_member_id: self.recipient_member_id,
             render_context: self.render_context,
             outcome: TestSendOutcome::parse(&self.outcome)?,
@@ -122,7 +126,7 @@ impl Row {
 }
 
 const COLUMNS: &str = "id, template_id, template_version, member_id, destination_id, \
-    sender_identity_id, recipient_member_id, render_context, outcome, reason, created_at, \
+    sender_identity_id, recipient_hash, recipient_member_id, render_context, outcome, reason, created_at, \
     completed_at";
 
 /// A test send to reserve a slot for. The address, when the recipient is an allowlisted one, is
