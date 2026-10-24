@@ -4,6 +4,7 @@ import { useParams } from "react-router";
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, InlineError, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { useWorkspaceAccess } from "../members";
+import { ConsentNav } from "./ConsentNav";
 import { policyHelp, policyLabel } from "./labels";
 import { TopicDialog, type Topic } from "./TopicDialog";
 
@@ -14,6 +15,7 @@ export function TopicsPage() {
 
   return (
     <div className="page">
+      <ConsentNav workspaceId={ws} />
       <PageHeader
         title="Topics"
         lede="What people can subscribe to. A topic's setting decides whether silence means yes or no: opt-in topics need a subscription, opt-out topics reach everyone who has not unsubscribed."
