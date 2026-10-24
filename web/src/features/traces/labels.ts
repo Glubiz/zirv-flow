@@ -41,7 +41,8 @@ const MAIL_EVENTS: Record<string, string> = {
  */
 function attemptLabel(record: Labelled): string {
   const number = record.attempt != null ? `Attempt ${record.attempt}` : "Attempt";
-  const how = record.outcome === "failed" || record.outcome === "succeeded" ? record.outcome : record.outcome.replaceAll("_", " ");
+  // The last attempt to fail is "exhausted" to the worker; to a reader it failed like the others.
+  const how = record.outcome === "exhausted" ? "failed" : record.outcome === "failed" || record.outcome === "succeeded" ? record.outcome : record.outcome.replaceAll("_", " ");
   return record.reason ? `${number} ${how}: ${reasonLabel(record.reason)}` : `${number} ${how}`;
 }
 

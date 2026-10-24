@@ -109,6 +109,18 @@ describe("trace tree", () => {
     expect(within(rows[0] as HTMLElement).queryByRole("link")).not.toBeInTheDocument();
   });
 
+  it("reads a final failed attempt as failed, with its reason", () => {
+    const last: TraceTreeRecord = { ...record("9", "exhausted", START, "http_503"), action: "job.attempt", attempt: 5 };
+    render(
+      <MemoryRouter>
+        <TraceTree label="Attempts" workspaceId="ws1" records={[last]} />
+      </MemoryRouter>,
+    );
+
+    const row = screen.getByRole("list", { name: "Attempts" }).querySelector("li.trace-record");
+    expect(row?.querySelector(".strong")?.textContent.trim()).toBe("Attempt 5 failed: http 503");
+  });
+
   it("words the delivery feedback and the tracking events, and leaves a decision it does not know as its codes", () => {
     const labelled = (action: string, outcome: string, reason: string | null) => recordLabel({ action, outcome, reason, subject_ids: {} });
 
