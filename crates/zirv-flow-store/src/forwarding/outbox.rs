@@ -179,6 +179,8 @@ pub struct ClaimedRow {
     pub attempts: i32,
     /// Attempts of earlier cycles (before a re-drive).
     pub attempt_offset: i32,
+    /// Names this claim; a settle, defer or lease extension must present it.
+    pub claim_token: Uuid,
 }
 
 impl ClaimedRow {
@@ -200,7 +202,7 @@ pub async fn claim_due(
     lease: Duration,
 ) -> Result<Vec<ClaimedRow>, StoreError> {
     let mut rows: Vec<(OffsetDateTime, ClaimedRow)> = sqlx::query_as::<_, ClaimedWithDue>(
-        "UPDATE forwarding_outbox o SET attempts = o.attempts + 1, \
+        "UPDATE forwarding_outbox o SET attempts = o.attempts + 1, claim_token = gen_random_uuid(), \
              next_attempt_at = clock_timestamp() + make_interval(secs => $4), updated_at = now() \
          FROM (SELECT id, next_attempt_at AS due FROM forwarding_outbox \
                WHERE workspace_id = $1 AND destination_id = $2 AND state = 'pending' \
@@ -208,7 +210,7 @@ pub async fn claim_due(
                ORDER BY next_attempt_at, id LIMIT $3 FOR UPDATE SKIP LOCKED) c \
          WHERE o.id = c.id \
          RETURNING c.due, o.id, o.workspace_id, o.event_id, o.rule_id, o.idempotency_key, o.payload, o.attempts, \
-                   o.attempt_offset",
+                   o.attempt_offset, o.claim_token",
     )
     .bind(workspace.as_uuid())
     .bind(destination)
@@ -240,13 +242,14 @@ pub enum Settled {
     Dead,
 }
 
-/// Records how attempt `attempts` of row `id` ended, with the fixed `error` code for a retry or
-/// a dead letter. The write is fenced on the attempt number and the pending state: a row that was
-/// re-driven, erased or settled meanwhile is left as it is. Returns whether the row changed.
+/// Records how the claim `claim_token` of row `id` ended, with the fixed `error` code for a retry
+/// or a dead letter. The write is fenced on the claim token and the pending state: a row that was
+/// claimed again, re-driven, erased or settled meanwhile is left as it is. Returns whether the
+/// row changed.
 pub async fn settle_row(
     connection: &mut PgConnection,
     id: Uuid,
-    attempts: i32,
+    claim_token: Uuid,
     how: Settled,
     error: Option<&str>,
 ) -> Result<bool, StoreError> {
@@ -258,11 +261,12 @@ pub async fn settle_row(
     let changed = sqlx::query(
         "UPDATE forwarding_outbox SET state = $3, \
              payload = CASE WHEN $3 = 'delivered' THEN '{}'::jsonb ELSE payload END, \
-             last_error = $5, next_attempt_at = COALESCE($4, next_attempt_at), updated_at = now() \
-         WHERE id = $1 AND state = 'pending' AND attempts = $2",
+             last_error = $5, next_attempt_at = COALESCE($4, next_attempt_at), claim_token = NULL, \
+             updated_at = now() \
+         WHERE id = $1 AND state = 'pending' AND claim_token = $2",
     )
     .bind(id)
-    .bind(attempts)
+    .bind(claim_token)
     .bind(state)
     .bind(at)
     .bind(error)
@@ -299,7 +303,7 @@ pub async fn redrive(
     };
     let destinations: Vec<Uuid> = sqlx::query_scalar(
         "UPDATE forwarding_outbox SET state = 'pending', attempt_offset = attempt_offset + attempts, \
-             attempts = 0, next_attempt_at = now(), updated_at = now() \
+             attempts = 0, claim_token = NULL, next_attempt_at = now(), updated_at = now() \
          WHERE workspace_id = $1 \
            AND CASE WHEN $2::uuid IS NOT NULL THEN id = $2 AND state IN ('dead', 'pending') \
                     ELSE state = 'dead' AND ($3::uuid IS NULL OR destination_id = $3) END \
@@ -516,16 +520,16 @@ pub async fn enqueue_segment_forwarding(
 pub async fn defer_row(
     connection: &mut PgConnection,
     id: Uuid,
-    attempts: i32,
+    claim_token: Uuid,
     at: OffsetDateTime,
 ) -> Result<bool, StoreError> {
     Ok(sqlx::query(
         "UPDATE forwarding_outbox SET attempts = attempts - 1, next_attempt_at = $3, \
-             updated_at = now() \
-         WHERE id = $1 AND state = 'pending' AND attempts = $2",
+             claim_token = NULL, updated_at = now() \
+         WHERE id = $1 AND state = 'pending' AND claim_token = $2",
     )
     .bind(id)
-    .bind(attempts)
+    .bind(claim_token)
     .bind(at)
     .execute(connection)
     .await
@@ -933,7 +937,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_claim_counts_the_attempt_and_a_settle_is_fenced_on_it(pool: PgPool) {
+    async fn a_claim_counts_the_attempt_and_a_settle_is_fenced_on_its_token(pool: PgPool) {
         let (ws, destination) = fixture(&pool, "claim").await;
         add_rule(
             &pool,
@@ -964,15 +968,15 @@ mod tests {
         assert_eq!((first.len(), first[0].attempts, again.len()), (1, 1, 0));
         let row = &first[0];
 
-        // A settle for another attempt number changes nothing.
-        let stale = settle_row(&mut connection, row.id, 2, Settled::Dead, Some("http_4xx"))
+        // A settle for another claim changes nothing.
+        let stale = settle_row(&mut connection, row.id, Uuid::new_v4(), Settled::Dead, Some("http_4xx"))
             .await
             .unwrap();
         let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
         let retried = settle_row(
             &mut connection,
             row.id,
-            1,
+            row.claim_token,
             Settled::Retry(later),
             Some("http_5xx"),
         )
@@ -999,7 +1003,7 @@ mod tests {
             .unwrap();
         assert_eq!(second[0].attempts, 2);
         assert_eq!(second[0].idempotency_key, row.idempotency_key);
-        settle_row(&mut connection, row.id, 2, Settled::Dead, Some("http_5xx"))
+        settle_row(&mut connection, row.id, second[0].claim_token, Settled::Dead, Some("http_5xx"))
             .await
             .unwrap();
         let letters = list_dead_letters(&mut connection, ws, None, None, 10)
@@ -1044,7 +1048,7 @@ mod tests {
             .await
             .unwrap();
         for row in &claimed {
-            settle_row(&mut connection, row.id, 1, Settled::Dead, Some("http_4xx"))
+            settle_row(&mut connection, row.id, row.claim_token, Settled::Dead, Some("http_4xx"))
                 .await
                 .unwrap();
         }
@@ -1095,6 +1099,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(enrollments, 0);
+    }
+
+    async fn one_pending_row(pool: &PgPool, name: &str) -> (WorkspaceId, Uuid) {
+        let (ws, destination) = fixture(pool, name).await;
+        add_rule(
+            pool,
+            ws,
+            destination,
+            "order",
+            json!([]),
+            json!({"id": {"from": "event.id"}}),
+        )
+        .await;
+        apply_event_batch(
+            pool,
+            ws,
+            &redaction_key(),
+            &[record("order", json!({}), "m-1")],
+        )
+        .await
+        .unwrap();
+        (ws, destination)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_outcome_of_an_older_claim_never_settles_a_newer_one(pool: PgPool) {
+        let (ws, destination) = one_pending_row(&pool, "oldclaim").await;
+        let mut connection = pool.acquire().await.unwrap();
+        let lease = Duration::from_secs(300);
+
+        let first = claim_due(&mut connection, ws, destination, 10, lease)
+            .await
+            .unwrap()
+            .remove(0);
+        settle_row(
+            &mut connection,
+            first.id,
+            first.claim_token,
+            Settled::Dead,
+            Some("http_4xx"),
+        )
+        .await
+        .unwrap();
+        redrive(&mut connection, ws, Redrive::Row(first.id))
+            .await
+            .unwrap();
+        let second = claim_due(&mut connection, ws, destination, 10, lease)
+            .await
+            .unwrap()
+            .remove(0);
+        // The cycle counter repeats (attempt 1 again) but the claim does not.
+        assert_eq!((first.attempts, second.attempts), (1, 1));
+        assert_ne!(first.claim_token, second.claim_token);
+
+        let late_dead = settle_row(
+            &mut connection,
+            first.id,
+            first.claim_token,
+            Settled::Dead,
+            Some("http_5xx"),
+        )
+        .await
+        .unwrap();
+        let late_defer = defer_row(
+            &mut connection,
+            first.id,
+            first.claim_token,
+            OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        assert!(!late_dead && !late_defer, "the older claim changes nothing");
+        let (state, attempts): (String, i32) =
+            sqlx::query_as("SELECT state, attempts FROM forwarding_outbox WHERE id = $1")
+                .bind(first.id)
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap();
+        assert_eq!((state.as_str(), attempts), ("pending", 1));
+
+        let settled = settle_row(
+            &mut connection,
+            second.id,
+            second.claim_token,
+            Settled::Delivered,
+            None,
+        )
+        .await
+        .unwrap();
+        let again = settle_row(
+            &mut connection,
+            second.id,
+            second.claim_token,
+            Settled::Dead,
+            Some("http_5xx"),
+        )
+        .await
+        .unwrap();
+        assert!(settled && !again, "the second claim wins, once");
     }
 
     #[sqlx::test]

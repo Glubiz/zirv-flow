@@ -200,7 +200,7 @@ async fn forward_one(
                 };
                 if let Some(wait) = wait {
                     let mut tx = zirv_flow_store::begin(pool).await?;
-                    defer_row(&mut tx, row.id, row.attempts, now + wait).await?;
+                    defer_row(&mut tx, row.id, row.claim_token, now + wait).await?;
                     zirv_flow_store::commit(tx).await?;
                     return Ok(());
                 }
@@ -250,7 +250,7 @@ async fn forward_one(
     };
     // The row and its decision commit together.
     let mut tx = zirv_flow_store::begin(pool).await?;
-    let changed = settle_row(&mut tx, row.id, row.attempts, how, error).await?;
+    let changed = settle_row(&mut tx, row.id, row.claim_token, how, error).await?;
     if let (true, Some((outcome, reason))) = (changed, decision) {
         append_decision(
             &mut *tx,

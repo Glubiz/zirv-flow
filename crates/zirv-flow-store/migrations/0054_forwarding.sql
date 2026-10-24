@@ -49,6 +49,9 @@ CREATE TABLE forwarding_outbox (
     -- the numbers recorded in `delivery_attempts` never repeat.
     attempts        integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     attempt_offset  integer NOT NULL DEFAULT 0 CHECK (attempt_offset >= 0),
+    -- Set afresh at every claim and cleared when the claim ends (settle, defer, re-drive). A
+    -- settle or defer must present it, so an outcome of an older claim never lands on a newer one.
+    claim_token     uuid,
     -- A fixed code (a verdict reason), never a message, a URL or a value.
     last_error      text CHECK (last_error ~ '^[a-z0-9_]{1,64}$'),
     next_attempt_at timestamptz NOT NULL DEFAULT now(),
