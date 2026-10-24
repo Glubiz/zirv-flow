@@ -30,6 +30,7 @@ const REWRITE_TARGETS: &[(&str, &str, &[&str])] = &[
     ("events", "person_id", &["occurred_at", "id"]),
     ("event_dedupe", "person_id", &["message_id"]),
     ("ingest_rejects", "person_id", &["id"]),
+    ("forwarding_outbox", "person_id", &["id"]),
 ];
 
 /// The person that currently stands for `person`: the survivor when it was merged, else
@@ -1854,5 +1855,72 @@ mod tests {
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].subject_ids["survivor"], target.to_string());
         assert_eq!(decisions[0].subject_ids["merged"], loser.to_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_rewrite_re_points_the_forwarding_outbox_to_the_survivor(pool: PgPool) {
+        use crate::forwarding::support::{add_rule, destination_in};
+
+        let ws = workspace(&pool, "one").await;
+        let sink = destination_in(&pool, ws).await;
+        add_rule(
+            &pool,
+            ws,
+            sink,
+            "seen",
+            json!([]),
+            json!({"id": {"from": "event.id"}}),
+        )
+        .await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:crm", "1")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("crm", "2", &[("email", "l@example.com")], json!({})),
+        )
+        .await;
+        for index in 0..2 {
+            event_of(&pool, ws, "l@example.com", "seen", &format!("m-{index}")).await;
+        }
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "web",
+                "3",
+                &[("external:crm", "1"), ("email", "l@example.com")],
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(merged_into(&pool, loser).await, Some(survivor));
+        let owners = |person: Uuid| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM forwarding_outbox WHERE person_id = $1",
+                )
+                .bind(person)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!((owners(loser).await, owners(survivor).await), (2, 0));
+        let trace = TraceContext::root(Cause::api("rewrite"));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        rewrite_merged_person(&mut tx, ws, loser, &trace, None)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+
+        assert_eq!((owners(loser).await, owners(survivor).await), (0, 2));
     }
 }

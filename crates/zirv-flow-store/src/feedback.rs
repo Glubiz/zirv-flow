@@ -260,6 +260,15 @@ pub async fn record_provider_feedback(
         .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
+        crate::enqueue_forwarding(
+            &mut tx,
+            feedback.workspace,
+            &[crate::ForwardRef {
+                id: event_id,
+                occurred_at: feedback.now,
+            }],
+        )
+        .await?;
         enqueue_arrivals(
             &mut tx,
             feedback.workspace,
@@ -819,5 +828,56 @@ mod tests {
                 .unwrap();
             assert!(!text.contains('@'), "{sql}: {text}");
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_feedback_event_reaches_the_forwarding_outbox_only_when_the_whole_write_commits(
+        pool: PgPool,
+    ) {
+        use crate::forwarding::support::{
+            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+        };
+
+        let ws = workspace(&pool, "fb-fwd").await;
+        let sink = destination_in(&pool, ws).await;
+        add_rule(
+            &pool,
+            ws,
+            sink,
+            "email.bounced",
+            json!([]),
+            json!({"kind": {"from": "event.properties", "pointer": "/kind"}}),
+        )
+        .await;
+        let sent = sent(&pool, ws, Some([9_u8; 32])).await;
+        let trace = trace();
+        let hard = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-1"), &trace);
+        // The suppression is written after the event: failing it rolls the whole write back.
+        sqlx::query(
+            "CREATE FUNCTION refuse_suppression() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN RAISE EXCEPTION 'refused'; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse BEFORE INSERT ON suppressions \
+             FOR EACH ROW EXECUTE FUNCTION refuse_suppression()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(record_provider_feedback(&pool, &hard).await.is_err());
+        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+
+        sqlx::query("DROP TRIGGER refuse ON suppressions")
+            .execute(&pool)
+            .await
+            .unwrap();
+        record_provider_feedback(&pool, &hard).await.unwrap();
+        assert_eq!(payloads(&pool, ws).await, [json!({"kind": "hard"})]);
+        assert_eq!(forward_jobs(&pool).await, 1);
     }
 }

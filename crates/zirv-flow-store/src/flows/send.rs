@@ -132,8 +132,17 @@ pub async fn record_send_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    crate::enqueue_forwarding(
+        connection,
+        message.workspace,
+        &[crate::ForwardRef {
+            id: event,
+            occurred_at: message.now,
+        }],
+    )
+    .await?;
 
-    let subject_ids = |extra: Option<(&'static str, Uuid)>| {
+    let subject_ids =|extra: Option<(&'static str, Uuid)>| {
         let mut ids = vec![
             ("message", message.id),
             ("enrollment", message.enrollment),
@@ -476,5 +485,77 @@ mod tests {
         .await
         .unwrap();
         assert!(!everything.contains('@'), "no address is written");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_message_event_reaches_the_forwarding_outbox_in_its_transaction(pool: PgPool) {
+        use crate::forwarding::support::{
+            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+        };
+
+        let (ws, person, enrollment) = seeded(&pool).await;
+        let destination = destination_in(&pool, ws).await;
+        add_rule(
+            &pool,
+            ws,
+            destination,
+            "email.skipped",
+            serde_json::json!([]),
+            serde_json::json!({"reason": {"from": "event.properties", "pointer": "/reason"}}),
+        )
+        .await;
+        let dimensions = Dimensions::new();
+        let trace = trace();
+        let write = |message: Uuid| {
+            let dimensions = &dimensions;
+            let trace = &trace;
+            async move {
+                SendOutcome {
+                    message: NewMessage {
+                        id: message,
+                        workspace: ws,
+                        person,
+                        enrollment,
+                        flow: None,
+                        flow_version: None,
+                        node: "mail",
+                        template: Uuid::from_u128(1),
+                        template_version: Some(2),
+                        destination: Uuid::from_u128(3),
+                        sender_identity: None,
+                        category: Some("marketing"),
+                        topic: None,
+                        dimensions,
+                        status: MessageStatus::Skipped,
+                        reason: Some("no_consent"),
+                        deciding_rule: Some("topic_default"),
+                        gates: &[],
+                        attempts: 0,
+                        now: OffsetDateTime::now_utc(),
+                    },
+                    trace,
+                    job: Some((Uuid::from_u128(9), 1)),
+                }
+            }
+        };
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        record_send_outcome(&mut tx, &write(Uuid::now_v7()).await)
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        record_send_outcome(&mut tx, &write(Uuid::now_v7()).await)
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        assert_eq!(
+            payloads(&pool, ws).await,
+            [serde_json::json!({"reason": "no_consent"})]
+        );
+        assert_eq!(forward_jobs(&pool).await, 1);
     }
 }

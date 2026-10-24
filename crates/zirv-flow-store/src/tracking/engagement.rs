@@ -101,6 +101,15 @@ pub(super) async fn write_event(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    crate::enqueue_forwarding(
+        connection,
+        message.workspace(),
+        &[crate::ForwardRef {
+            id: event,
+            occurred_at: now,
+        }],
+    )
+    .await?;
     enqueue_arrivals(
         connection,
         message.workspace(),
@@ -223,5 +232,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(events, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_engagement_event_reaches_the_forwarding_outbox_in_its_transaction(pool: PgPool) {
+        use crate::forwarding::support::{
+            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+        };
+
+        let ws = workspace(&pool, "engage-fwd").await;
+        let sink = destination_in(&pool, ws).await;
+        add_rule(
+            &pool,
+            ws,
+            sink,
+            "email.opened",
+            json!([]),
+            json!({"machine": {"from": "event.properties", "pointer": "/machine"}}),
+        )
+        .await;
+        let (_, id) = message(&pool, ws).await;
+        let tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
+        let trace = trace();
+        let engagement = open(&trace);
+
+        let mut tx = begin(&pool).await.unwrap();
+        write_event(
+            &mut tx,
+            &tracked,
+            tracked.person_id,
+            engagement.name,
+            engagement.properties.clone(),
+            engagement.now,
+            &trace,
+        )
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+
+        record_engagement(&pool, &tracked, engagement).await.unwrap();
+        assert_eq!(payloads(&pool, ws).await, [json!({"machine": false})]);
+        assert_eq!(forward_jobs(&pool).await, 1);
     }
 }

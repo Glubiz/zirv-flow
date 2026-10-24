@@ -13,6 +13,7 @@ mod decisions;
 mod destinations;
 mod events;
 mod feedback;
+mod forwarding;
 mod flows;
 mod identities;
 mod imports;
@@ -114,6 +115,13 @@ pub use events::{
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
+};
+pub use forwarding::{
+    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
+    ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate, RuleWrite, Settled, claim_due,
+    create_rule, defer_row, delete_rule, enqueue_forwarding, enqueue_segment_forwarding, ensure_forward_job, find_rule, forwarding_report,
+    forwarding_status, list_dead_letters, list_rules, next_due, purge_delivered, redrive,
+    settle_row, update_rule,
 };
 pub use flows::{
     AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError,

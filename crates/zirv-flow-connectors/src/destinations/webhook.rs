@@ -83,7 +83,7 @@ impl Destination for Webhook {
             },
         ],
         capabilities: Capabilities {
-            channels: &["webhook"],
+            channels: &["webhook", "event"],
             idempotency_key: true,
             batching: false,
             // A raw URL has no rate bucket (architecture 10.1).
@@ -323,12 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn the_spec_has_a_secret_credential_no_rate_limit_and_the_webhook_channel() {
+    fn the_spec_has_a_secret_credential_no_rate_limit_and_the_webhook_and_event_channels() {
         let spec = &Webhook::SPEC;
 
         assert_eq!(spec.kind, "webhook");
         assert!(!spec.capabilities.rate_limit);
-        assert_eq!(spec.capabilities.channels, &["webhook"]);
+        assert_eq!(spec.capabilities.channels, &["webhook", "event"]);
         assert!(spec.credential_fields.iter().all(|field| field.secret));
     }
 
