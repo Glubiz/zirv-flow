@@ -31,8 +31,8 @@ use serde_json::{Map, Value};
 use tracing::warn;
 use zirv_flow_core::tracking::{Claims, TokenKind, verify};
 use zirv_flow_store::{
-    Engagement, Unsubscribed, find_message_link, find_tracked_message, record_engagement,
-    unsubscribe_message,
+    Engagement, TrackedMessage, Unsubscribed, find_message_link, find_tracked_message,
+    record_engagement, unsubscribe_message,
 };
 
 use crate::AppState;
@@ -84,6 +84,23 @@ pub(super) fn admit(
         .take(claims.message, 1, Instant::now())
         .map_err(|retry| refuse(pages::rate_limited(retry)))?;
     Ok(claims)
+}
+
+/// Admits an unsubscribe-kind token and loads the message it names; the error is the page to
+/// answer with.
+pub(super) async fn admit_message(
+    state: &AppState,
+    token: &str,
+) -> Result<TrackedMessage, Box<Response>> {
+    let claims = admit(state, TokenKind::Unsubscribe, token)?;
+    match find_tracked_message(&state.pool, claims.message).await {
+        Ok(Some(message)) => Ok(message),
+        Ok(None) => Err(Box::new(pages::not_found())),
+        Err(error) => {
+            warn!(%error, "an unsubscribe-link message could not be read");
+            Err(Box::new(pages::unavailable()))
+        }
+    }
 }
 
 fn gif() -> Response {
@@ -217,17 +234,9 @@ pub(crate) async fn unsubscribe_page(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Response {
-    let claims = match admit(&state, TokenKind::Unsubscribe, &token) {
-        Ok(claims) => claims,
-        Err(response) => return *response,
-    };
-    match find_tracked_message(&state.pool, claims.message).await {
-        Ok(Some(_)) => pages::confirm(&token),
-        Ok(None) => pages::not_found(),
-        Err(error) => {
-            warn!(%error, "an unsubscribe page could not be shown");
-            pages::unavailable()
-        }
+    match admit_message(&state, &token).await {
+        Ok(_) => pages::confirm(&token),
+        Err(response) => *response,
     }
 }
 
@@ -245,17 +254,9 @@ pub(crate) async fn unsubscribe(
     Path(token): Path<String>,
     body: Bytes,
 ) -> Response {
-    let claims = match admit(&state, TokenKind::Unsubscribe, &token) {
-        Ok(claims) => claims,
+    let message = match admit_message(&state, &token).await {
+        Ok(message) => message,
         Err(response) => return *response,
-    };
-    let message = match find_tracked_message(&state.pool, claims.message).await {
-        Ok(Some(message)) => message,
-        Ok(None) => return pages::not_found(),
-        Err(error) => {
-            warn!(%error, "an unsubscribe could not be recorded");
-            return pages::unavailable();
-        }
     };
     let trace = request_trace();
     match unsubscribe_message(&state.pool, &message, state.clock.now_in_process(), &trace).await {

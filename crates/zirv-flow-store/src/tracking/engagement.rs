@@ -29,7 +29,7 @@ pub struct Engagement<'a> {
 
 /// The trace of the enrollment a message was sent for, with the cause that started it; none when
 /// the enrollment is gone.
-pub(super) async fn enrollment_trace(
+async fn enrollment_trace(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     enrollment: Uuid,
@@ -50,6 +50,19 @@ pub(super) async fn enrollment_trace(
             cause: Cause::from_stored(kind, id),
         })
     }))
+}
+
+/// The trace to write a message's rows under: its enrollment's, or `fallback` when that is gone.
+pub(super) async fn message_trace(
+    connection: &mut PgConnection,
+    message: &TrackedMessage,
+    fallback: &TraceContext,
+) -> Result<TraceContext, StoreError> {
+    Ok(
+        enrollment_trace(connection, message.workspace(), message.enrollment_id)
+            .await?
+            .unwrap_or_else(|| fallback.clone()),
+    )
 }
 
 /// Writes the event of `person` for `message` and wakes what waits for it. The caller holds the
@@ -122,9 +135,7 @@ pub async fn record_engagement(
     if !matches!(locked, Some(None)) {
         return Ok(None);
     }
-    let trace = enrollment_trace(&mut tx, message.workspace(), message.enrollment_id)
-        .await?
-        .unwrap_or_else(|| engagement.fallback_trace.clone());
+    let trace = message_trace(&mut tx, message, engagement.fallback_trace).await?;
     let event = write_event(
         &mut tx,
         message,

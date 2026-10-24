@@ -13,13 +13,12 @@ use hashbrown::HashSet;
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::consent::{Channel, Dimensions};
-use zirv_flow_core::tracking::TokenKind;
 use zirv_flow_store::{
     PreferenceChange, ReadOutcome, StoreError, TrackedMessage, begin, consent_read,
-    find_tracked_message, list_dimensions, list_topics, save_preferences,
+    list_dimensions, list_topics, save_preferences,
 };
 
-use super::admit;
+use super::admit_message;
 use super::pages::{self, Choice, Group};
 use crate::AppState;
 use crate::trace::request_trace;
@@ -107,24 +106,12 @@ async fn load(state: &AppState, message: &TrackedMessage) -> Result<Loaded, Stor
     Ok(Loaded { groups, scopes })
 }
 
-async fn message_of(state: &AppState, token: &str) -> Result<TrackedMessage, Box<Response>> {
-    let claims = admit(state, TokenKind::Unsubscribe, token)?;
-    match find_tracked_message(&state.pool, claims.message).await {
-        Ok(Some(message)) => Ok(message),
-        Ok(None) => Err(Box::new(pages::not_found())),
-        Err(error) => {
-            warn!(%error, "the preference page could not be read");
-            Err(Box::new(pages::unavailable()))
-        }
-    }
-}
-
 /// `GET /u/{token}/preferences`.
 pub(crate) async fn preferences_page(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Response {
-    let message = match message_of(&state, &token).await {
+    let message = match admit_message(&state, &token).await {
         Ok(message) => message,
         Err(response) => return *response,
     };
@@ -151,7 +138,7 @@ pub(crate) async fn preferences_save(
     Path(token): Path<String>,
     body: Bytes,
 ) -> Response {
-    let message = match message_of(&state, &token).await {
+    let message = match admit_message(&state, &token).await {
         Ok(message) => message,
         Err(response) => return *response,
     };

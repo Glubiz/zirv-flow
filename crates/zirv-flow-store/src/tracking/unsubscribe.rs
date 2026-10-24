@@ -8,7 +8,7 @@ use zirv_flow_core::TraceContext;
 use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, Dimensions};
 
 use super::TrackedMessage;
-use super::engagement::{enrollment_trace, write_event};
+use super::engagement::{message_trace, write_event};
 use crate::consent::{ConsentChange, ConsentOutcome, dimensions_of, set_consent};
 use crate::{StoreError, begin, commit};
 
@@ -36,9 +36,7 @@ pub async fn unsubscribe_message(
 ) -> Result<Unsubscribed, StoreError> {
     let mut tx = begin(pool).await?;
     let workspace = message.workspace();
-    let trace = enrollment_trace(&mut tx, workspace, message.enrollment_id)
-        .await?
-        .unwrap_or_else(|| fallback_trace.clone());
+    let trace = message_trace(&mut tx, message, fallback_trace).await?;
     let change = ConsentChange {
         person: message.person_id,
         channel: Channel::Email,
@@ -112,9 +110,7 @@ pub async fn save_preferences(
 ) -> Result<PreferencesSaved, StoreError> {
     let mut tx = begin(pool).await?;
     let workspace = message.workspace();
-    let trace = enrollment_trace(&mut tx, workspace, message.enrollment_id)
-        .await?
-        .unwrap_or_else(|| fallback_trace.clone());
+    let trace = message_trace(&mut tx, message, fallback_trace).await?;
     let mut changed = 0;
     for choice in choices {
         let change = ConsentChange {
