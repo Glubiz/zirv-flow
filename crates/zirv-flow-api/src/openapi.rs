@@ -5,6 +5,7 @@ use crate::assistant;
 use crate::consent::{dimensions, person, policy, suppressions, topics, transfer};
 use crate::contacts;
 use crate::destinations;
+use crate::forwarding;
 use crate::events::{
     self, CreateEventSchemaRequest, EventPolicyBody, EventSchemaBody, EventSchemaDetailBody,
     IngestRejectBody, IngestRejectsBody, PropertyBody, ReasonBody, RedactionBody, SaveDraftRequest,
@@ -182,6 +183,14 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::remove,
         destinations::actions::check,
         destinations::domain_status::get,
+        forwarding::rules::list,
+        forwarding::rules::create,
+        forwarding::rules::get,
+        forwarding::rules::update,
+        forwarding::rules::remove,
+        forwarding::queue::dead_letters,
+        forwarding::queue::status,
+        forwarding::queue::redrive,
         feedback::receive::receive,
         workspace_credentials::schema::list_kinds,
         workspace_credentials::crud::list,
@@ -500,6 +509,15 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         lists::person::PersonListBody,
         lists::person::MembershipHistoryBody,
         lists::person::MembershipChangeBody,
+        forwarding::rules::RuleBody,
+        forwarding::rules::CreateRuleRequest,
+        forwarding::rules::UpdateRuleRequest,
+        forwarding::queue::DeadLetterBody,
+        forwarding::queue::DeadLettersBody,
+        forwarding::queue::QueueStatusBody,
+        forwarding::queue::ForwardingStatusBody,
+        forwarding::queue::RedriveRequest,
+        forwarding::queue::RedriveBody,
         destinations::crud::DestinationBody,
         destinations::crud::CreateDestinationRequest,
         destinations::crud::UpdateDestinationRequest,
