@@ -892,9 +892,7 @@ mod tests {
 
         // A second PUT replaces both: nothing of the first is left.
         let nothing = json!({"frequency_caps": [], "quiet_hours": null, "revision": 1});
-        let replaced = fx
-            .as_admin("PUT", "/sending/settings", Some(nothing))
-            .await;
+        let replaced = fx.as_admin("PUT", "/sending/settings", Some(nothing)).await;
         let after = json!({"frequency_caps": [], "quiet_hours": null, "revision": 2});
         assert_eq!(replaced.body, after);
         assert_eq!(
