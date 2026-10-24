@@ -14,7 +14,7 @@ use crate::assistant::{AiConfig, runtime::AiRuntime};
 use crate::events::ExplorerLimits;
 use crate::events::debugger::DebuggerHub;
 use crate::imports::ImportLimits;
-use crate::ingest::{IngestLimits, IngestState};
+use crate::ingest::{IngestLimits, IngestState, RateLimiter};
 use crate::oidc;
 
 pub(crate) type SchemaCheck = Arc<
@@ -69,6 +69,14 @@ pub struct AppState {
     /// Where browsers reach the server (`server.public_url`), without a trailing slash. Absent
     /// when the operator did not set it; an OAuth2 consent needs it for the redirect URI.
     public_url: Option<String>,
+    /// Verifies the tokens of the open, click and unsubscribe routes; absent until the HMAC root
+    /// is given, and those routes answer 404 meanwhile.
+    pub(crate) tracking_key: Option<Arc<HmacKey>>,
+    /// Extra user-agent fragments that mark an open as automated (`tracking.prefetch_user_agents`),
+    /// lower-cased.
+    pub(crate) prefetch_user_agents: Vec<String>,
+    /// The per-message rate limit of the tracking routes.
+    pub(crate) tracking_limiter: Arc<RateLimiter>,
 }
 
 /// OIDC sign-in, when it is configured.
@@ -110,7 +118,19 @@ impl AppState {
             ai: AiRuntime::default(),
             render_pool: None,
             public_url: None,
+            tracking_key: None,
+            prefetch_user_agents: Vec::new(),
+            tracking_limiter: Arc::new(crate::tracking::limiter()),
         }
+    }
+
+    /// The operator's extra user-agent fragments for machine opens (`tracking.prefetch_user_agents`).
+    pub fn with_prefetch_user_agents(mut self, fragments: Vec<String>) -> Self {
+        self.prefetch_user_agents = fragments
+            .into_iter()
+            .map(|fragment| fragment.to_lowercase())
+            .collect();
+        self
     }
 
     /// Whether the session cookie carries the `Secure` attribute. On by default; turn it
@@ -220,6 +240,7 @@ impl AppState {
     pub fn with_hmac_root(mut self, root: &HmacRoot) -> Self {
         self.identifier_key = Some(Arc::new(root.hmac_key(HmacPurpose::Identifier)));
         self.redaction_key = Some(Arc::new(root.hmac_key(HmacPurpose::Redaction)));
+        self.tracking_key = Some(Arc::new(root.hmac_key(HmacPurpose::Tracking)));
         self
     }
 
@@ -378,7 +399,12 @@ mod tests {
         let root = HmacRoot::bootstrap_from(&MasterKey::generate());
 
         assert!(state().identifier_key.is_none() && state().redaction_key.is_none());
+        assert!(state().tracking_key.is_none());
         let with = state().with_hmac_root(&root);
+        assert_eq!(
+            with.tracking_key.as_ref().unwrap().digest(b"x"),
+            root.hmac_key(HmacPurpose::Tracking).digest(b"x")
+        );
         let derived = root.hmac_key(HmacPurpose::Identifier);
         let redaction = root.hmac_key(HmacPurpose::Redaction);
         assert_eq!(

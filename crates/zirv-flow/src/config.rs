@@ -34,7 +34,7 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 49] = [
+const CONFIG_KEYS: [&str; 50] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -78,6 +78,7 @@ const CONFIG_KEYS: [&str; 49] = [
     "render.memory_limit_mib",
     "sending.recheck_hours",
     "egress.allow",
+    "tracking.prefetch_user_agents",
     "ai.providers",
     "ai.rate_limit_per_user_per_minute",
     "ai.max_repair_attempts",
@@ -110,6 +111,8 @@ pub(crate) struct Config {
     sending: SendingConfig,
     #[serde(default)]
     egress: EgressConfig,
+    #[serde(default)]
+    tracking: TrackingConfig,
     /// The model allowlist of the AI assistant; empty means the assistant is unavailable.
     #[serde(default)]
     ai: zirv_flow_api::AiConfig,
@@ -126,6 +129,20 @@ struct EgressConfig {
     #[serde(default)]
     allow: Vec<String>,
 }
+
+/// Open and click tracking (architecture 10.2).
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TrackingConfig {
+    /// Extra user-agent fragments that mark an open as automated, added to the built-in generic
+    /// markers (`proxy`, `prefetch`, `preview`, `scanner`, `crawler`, `bot`). Compared
+    /// case-insensitively as a substring. An open that matches is recorded with `machine = true`.
+    #[serde(default)]
+    prefetch_user_agents: Vec<String>,
+}
+
+/// The longest `tracking.prefetch_user_agents` entry, in characters.
+const MAX_USER_AGENT_FRAGMENT: usize = 128;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -665,6 +682,25 @@ impl Config {
             ));
         }
 
+        for entry in &config.tracking.prefetch_user_agents {
+            let reason = if entry.trim().is_empty() {
+                Some("must not hold an empty entry")
+            } else if entry.chars().count() > MAX_USER_AGENT_FRAGMENT {
+                Some("must not hold an entry over 128 characters")
+            } else if entry.chars().any(char::is_control) {
+                Some("must not hold a control character")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(ConfigError::new(
+                    "tracking.prefetch_user_agents",
+                    reason,
+                    source_for("tracking.prefetch_user_agents", path, &env_sources),
+                ));
+            }
+        }
+
         if let Err(error) = config.ai.validate() {
             let top = if error.key.starts_with("ai.providers") {
                 "ai.providers"
@@ -1060,6 +1096,15 @@ impl Config {
             },
             self.render.memory_limit_mib * 1024 * 1024,
         )
+    }
+
+    /// The operator's extra user-agent fragments for machine opens, lower-cased and trimmed.
+    pub(crate) fn prefetch_user_agents(&self) -> Vec<String> {
+        self.tracking
+            .prefetch_user_agents
+            .iter()
+            .map(|entry| entry.trim().to_lowercase())
+            .collect()
     }
 
     /// The egress policy built from `egress.allow`, which `load` has validated.
@@ -2182,6 +2227,54 @@ allow = [\"10.0.5.7/32\", \"192.168.0.0/16\"]
             assert!(error.contains(entry), "{error}");
             assert!(error.contains(reason), "{error}");
             assert!(error.contains("ZIRV_FLOW_EGRESS__ALLOW"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_prefetch_user_agent_list_is_empty_by_default_and_read_from_a_file_or_the_environment() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert!(defaults.prefetch_user_agents().is_empty());
+        assert!(toml::to_string(&defaults).unwrap().contains("[tracking]"));
+
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[tracking]
+prefetch_user_agents = [\" Example-Fetcher \", \"agent-x\"]
+",
+        );
+        let from_file = Config::load(Some(&file.0), []).unwrap();
+        assert_eq!(
+            from_file.prefetch_user_agents(),
+            ["example-fetcher", "agent-x"]
+        );
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS".into(),
+            "[\"agent-y\"]".into(),
+        ));
+        assert_eq!(
+            Config::load(None, env).unwrap().prefetch_user_agents(),
+            ["agent-y"]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_oversized_prefetch_user_agent_fails_naming_the_key() {
+        for entry in ["", "  ", &"x".repeat(129)] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((
+                "ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS".into(),
+                format!("[\"{entry}\"]").into(),
+            ));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(
+                error.starts_with("tracking.prefetch_user_agents: "),
+                "{error}"
+            );
         }
     }
 

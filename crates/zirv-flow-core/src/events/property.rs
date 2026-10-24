@@ -47,6 +47,14 @@ pub const EMAIL_FAILED_EVENT: &str = "email.failed";
 /// bounce (the recipient cannot receive mail) or a soft one (a temporary refusal that outlasted the
 /// retries). Its `bounce` property says which.
 pub const EMAIL_BOUNCED_EVENT: &str = "email.bounced";
+/// The event the open pixel writes (architecture 10.2). Its `machine` property says whether the
+/// open looks automated, and `machine_reason` why.
+pub const EMAIL_OPENED_EVENT: &str = "email.opened";
+/// The event a tracked link writes when it is followed. It names the link by its index, never by
+/// its URL.
+pub const EMAIL_CLICKED_EVENT: &str = "email.clicked";
+/// The event the unsubscribe link writes when it withdraws consent.
+pub const EMAIL_UNSUBSCRIBED_EVENT: &str = "email.unsubscribed";
 
 /// The event a flow writes when a webhook action's call succeeded (architecture 9.1).
 pub const WEBHOOK_SUCCEEDED_EVENT: &str = "webhook.succeeded";

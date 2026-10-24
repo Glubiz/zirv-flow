@@ -69,6 +69,12 @@ pub struct WorkerConfig {
     /// The resolver `sending_domain.verify` reads DNS through; without one that kind fails until
     /// one is configured.
     pub dns: Option<Arc<dyn DnsResolver>>,
+    /// Where browsers reach the server (`server.public_url`), without a trailing slash. Tracking
+    /// links are built on it; without it a marketing message fails to render.
+    pub public_url: Option<String>,
+    /// The key that signs open, click and unsubscribe tokens; without it a marketing message fails
+    /// to render.
+    pub tracking_key: Option<Arc<HmacKey>>,
 }
 
 impl WorkerConfig {
@@ -92,6 +98,8 @@ impl WorkerConfig {
             clock: Clock::default(),
             render_pool: None,
             dns: None,
+            public_url: None,
+            tracking_key: None,
         }
     }
 }
@@ -399,6 +407,10 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_rate_gates(Arc::clone(&shared.config.rate_gates))
             .with_render_pool(shared.config.render_pool.clone())
             .with_dns(shared.config.dns.clone())
+            .with_tracking(
+                shared.config.public_url.clone(),
+                shared.config.tracking_key.clone(),
+            )
             .with_outbound(
                 shared.config.keyring.clone(),
                 Arc::clone(&shared.config.egress),
@@ -659,6 +671,8 @@ mod tests {
             clock: Clock::default(),
             render_pool: None,
             dns: None,
+            public_url: None,
+            tracking_key: None,
         }
     }
 

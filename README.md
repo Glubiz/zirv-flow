@@ -119,6 +119,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
 | `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
+| `tracking.prefetch_user_agents` | list of strings | `[]` | extra user-agent fragments (case-insensitive) that mark an open as automated, added to the generic markers; see [Tracking and unsubscribe links](#tracking-and-unsubscribe-links) |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -2188,6 +2189,33 @@ page size set, only the 100,000-page cap ends such a stream.
 `zirv_flow_source_rate_limit_wait_seconds_total{source_type}`. The labels are the source type and
 fixed values only: never a URL, a host or a source id. No error or log line holds a secret, a URL,
 a header or a response body.
+
+## Tracking and unsubscribe links
+
+Marketing email is sent with signed links on `server.public_url` (the send fails `render_error`
+without it, and the secrets master key must be set). A transactional message is not tracked.
+
+- Links are rewritten to `/t/c/{token}` and redirect only to the link recorded for that message;
+  `/t/o/{token}` is a 1x1 GIF added at the end of the HTML.
+- `{{ system.unsubscribe_url }}` is `/u/{token}`: a GET shows a confirmation and changes nothing, a
+  POST unsubscribes. The `List-Unsubscribe` header uses it with `List-Unsubscribe-Post:
+  List-Unsubscribe=One-Click` (RFC 8058), so the URL must be `https`.
+  `{{ system.preferences_url }}` is `/u/{token}/preferences`, where the person picks topics and
+  dimension values; a change to one vertical blocks only that vertical.
+- Tokens hold the message id and a link index and a MAC, nothing else. The routes have no sign-in and
+  no CSRF token: the token authorises the one message. A bad token is a small 404 page.
+- Events: `email.opened` (with `machine` and `machine_reason`), `email.clicked` (with `link_index`) and
+  `email.unsubscribed`. An open is a machine open when its user agent contains `proxy`, `prefetch`,
+  `preview`, `scanner`, `crawler` or `bot`, or a fragment you list in `tracking.prefetch_user_agents`,
+  or when it arrives within 10 seconds of delivery. `machine = false` means not detected as a
+  machine, not a verified person. Neither the IP address nor the user agent is stored.
+
+```toml
+[tracking]
+prefetch_user_agents = ["my-gateway-fetcher"]
+```
+
+or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
 ## Sending domains
 

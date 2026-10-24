@@ -126,6 +126,8 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM step_executions WHERE workspace_id = $1 AND enrollment_id IN \n        (SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM message_links WHERE workspace_id = $1 AND message_id IN 
+        (SELECT id FROM messages WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM messages WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -1213,6 +1215,12 @@ mod tests {
             }
         };
         assert_eq!(messages(vec![person, merged]).await, 2);
+        sqlx::query(
+            "INSERT INTO message_links (workspace_id, message_id, link_index, url)              SELECT workspace_id, id, 0, 'https://links.test/x' FROM messages",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let sends = "SELECT count(*) FROM jobs WHERE kind = 'delivery.send'";
         assert_eq!(
             sqlx::query_scalar::<_, i64>(sends)
@@ -1229,6 +1237,15 @@ mod tests {
             messages(vec![bystander]).await,
             1,
             "a bystander keeps their log"
+        );
+        let links: Vec<Uuid> = sqlx::query_scalar("SELECT message_id FROM message_links")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            links,
+            [kept],
+            "erasing the person removes their messages' links"
         );
         assert_eq!(
             sqlx::query_scalar::<_, i64>(sends)

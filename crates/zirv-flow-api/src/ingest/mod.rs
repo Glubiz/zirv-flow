@@ -27,7 +27,7 @@ use crate::AppState;
 use crate::auth::Principal;
 use crate::problem::{ApiError, ItemProblem, Problem};
 use crate::trace::request_trace;
-use limiter::RateLimiter;
+pub(crate) use limiter::RateLimiter;
 use payload::{ItemError, Kind, batch_items, parse_items};
 
 /// What an ingestion request may carry and how fast a key may send. The rate is per

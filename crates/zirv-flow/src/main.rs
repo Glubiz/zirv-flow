@@ -454,6 +454,10 @@ async fn run_roles_reporting(
         worker_config.identifier_key = hmac_root
             .as_deref()
             .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
+        worker_config.public_url = config.public_url();
+        worker_config.tracking_key = hmac_root
+            .as_deref()
+            .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Tracking)));
         worker_config.keyring = secrets.as_ref().map(|secrets| Arc::clone(&secrets.keyring));
         worker_config.ingest_drain_batch_size = config.ingest_drain_batch_size();
         worker_config.ingest_drain_shards = config.ingest_drain_shards();
@@ -753,6 +757,7 @@ fn http_state(
         .with_explorer_limits(config.explorer_limits())
         .with_egress_policy(config.egress_policy())
         .with_public_url(config.public_url())
+        .with_prefetch_user_agents(config.prefetch_user_agents())
         .with_ai_config(config.ai_config());
     if let Some(secrets) = secrets {
         state = state

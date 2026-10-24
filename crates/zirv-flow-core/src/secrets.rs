@@ -105,6 +105,8 @@ pub enum HmacPurpose {
     Identifier,
     /// Keyed hashes that stand in for redacted values.
     Redaction,
+    /// Signs the open, click and unsubscribe tokens of sent messages.
+    Tracking,
 }
 
 impl HmacPurpose {
@@ -112,6 +114,7 @@ impl HmacPurpose {
         match self {
             Self::Identifier => "zirv-flow/hmac/identifier/v1",
             Self::Redaction => "zirv-flow/hmac/redaction/v1",
+            Self::Tracking => "zirv-flow/hmac/tracking/v1",
         }
     }
 }
@@ -600,6 +603,14 @@ mod tests {
         assert_ne!(identifier.0, redaction.0);
         assert_ne!(identifier.digest(b"a"), redaction.digest(b"a"));
         assert_eq!(identifier.0, root().hmac_key(HmacPurpose::Identifier).0);
+    }
+
+    #[test]
+    fn the_tracking_key_differs_from_the_other_purposes() {
+        let tracking = root().hmac_key(HmacPurpose::Tracking);
+
+        assert_ne!(tracking.0, root().hmac_key(HmacPurpose::Identifier).0);
+        assert_ne!(tracking.0, root().hmac_key(HmacPurpose::Redaction).0);
     }
 
     #[test]
