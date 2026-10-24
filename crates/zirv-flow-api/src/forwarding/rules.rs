@@ -15,7 +15,9 @@ use zirv_flow_core::forwarding::{Mapping, parse_filter};
 use zirv_flow_core::segment::{Issue, parse};
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_segments::validate;
-use zirv_flow_store::{ForwardingRule, NewRule, PgPool, RuleUpdate, RuleWrite, segment_catalog};
+use zirv_flow_store::{
+    ForwardingRule, NewRule, PgConnection, PgPool, RuleUpdate, RuleWrite, segment_catalog,
+};
 
 use super::{destination_unsupported, issues_problem, too_many_rules};
 use crate::AppState;
@@ -143,7 +145,7 @@ fn check_mapping(mapping: &Value) -> Result<(), ApiError> {
 /// workspace's event schema. A filter with predicates needs the event to have a published schema,
 /// which says which properties exist and their types.
 async fn check_filter(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     workspace: WorkspaceId,
     event_name: &str,
     filter: &Value,
@@ -153,8 +155,7 @@ async fn check_filter(
     if filters.is_empty() {
         return Ok(());
     }
-    let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
-    let snapshot = segment_catalog(&mut connection, workspace).await?;
+    let snapshot = segment_catalog(connection, workspace).await?;
     let (catalog, _) = catalog_of(snapshot);
     let definition = parse(&zirv_flow_core::forwarding::filter_definition(
         event_name, filter,
@@ -184,7 +185,13 @@ pub(crate) async fn create_rule(
     check_event_name(&request.event_name)?;
     check_mapping(&request.mapping)?;
     let filter = request.filter.clone().unwrap_or_else(|| json!([]));
-    check_filter(&state.pool, workspace, &request.event_name, &filter).await?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    check_filter(&mut connection, workspace, &request.event_name, &filter).await?;
+    drop(connection);
     check_destination(&state.pool, workspace, request.destination_id).await?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
@@ -235,6 +242,11 @@ fn name_taken(error: zirv_flow_store::StoreError) -> ApiError {
 }
 
 /// Changes a rule and audits `forwarding.rule_updated` with the names of the changed fields.
+///
+/// The rule is read and locked in the transaction that writes it, the patch is merged into that
+/// state, and the merged rule is validated before the write. Two concurrent changes (one to the
+/// filter, one to the event name) therefore cannot leave a filter that was never checked against
+/// the final event name.
 pub(crate) async fn update_rule(
     state: &AppState,
     context: &Context,
@@ -242,34 +254,19 @@ pub(crate) async fn update_rule(
     id: Uuid,
     request: &UpdateRuleRequest,
 ) -> Result<ForwardingRule, ApiError> {
-    let mut connection = state
-        .pool
-        .acquire()
-        .await
-        .map_err(|_| ApiError::internal())?;
-    let current = zirv_flow_store::find_rule(&mut connection, workspace, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    drop(connection);
-
+    // What the request alone can show wrong needs no lock.
     let mut fields: Vec<&'static str> = Vec::new();
     let name = request.name.as_deref().map(check_name).transpose()?;
     if name.is_some() {
         fields.push("name");
     }
-    let event_name = request.event_name.as_deref().unwrap_or(&current.event_name);
-    if request.event_name.is_some() {
+    if let Some(event_name) = &request.event_name {
         check_event_name(event_name)?;
         fields.push("event_name");
     }
     if let Some(mapping) = &request.mapping {
         check_mapping(mapping)?;
         fields.push("mapping");
-    }
-    // A changed name or filter is checked against the rule as it will be.
-    if request.filter.is_some() || request.event_name.is_some() {
-        let filter = request.filter.as_ref().unwrap_or(&current.filter);
-        check_filter(&state.pool, workspace, event_name, filter).await?;
     }
     if request.filter.is_some() {
         fields.push("filter");
@@ -282,6 +279,15 @@ pub(crate) async fn update_rule(
     }
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let current = zirv_flow_store::lock_rule(&mut tx, workspace, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    // A changed event name or filter is checked against the rule as it will be.
+    if request.filter.is_some() || request.event_name.is_some() {
+        let event_name = request.event_name.as_deref().unwrap_or(&current.event_name);
+        let filter = request.filter.as_ref().unwrap_or(&current.filter);
+        check_filter(&mut tx, workspace, event_name, filter).await?;
+    }
     let written = zirv_flow_store::update_rule(
         &mut tx,
         workspace,

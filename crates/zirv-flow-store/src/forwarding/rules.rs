@@ -156,6 +156,26 @@ pub async fn update_rule(
     Ok(RuleWrite::Saved(rule))
 }
 
+/// Locks a rule for a change and returns it as it is now: the workspace's rule-write lock, then
+/// the row itself. A caller that validates a merged change reads the rule here, in the
+/// transaction that writes it, so no other change lands between the check and the write. `None`
+/// when there is no such rule. Run it in a transaction.
+pub async fn lock_rule(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<Option<ForwardingRule>, StoreError> {
+    lock_rules(connection, workspace).await?;
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM forwarding_rules WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
+    )))
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Deletes a rule. Its outbox rows stay and are delivered. `None` when there is no such rule.
 pub async fn delete_rule(
     connection: &mut PgConnection,

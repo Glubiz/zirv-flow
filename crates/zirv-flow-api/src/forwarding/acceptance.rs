@@ -554,6 +554,77 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_changes_never_save_a_filter_invalid_for_the_final_event(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        sqlx::query(
+            "INSERT INTO event_schemas (workspace_id, name, mode, current_version) \
+             VALUES ($1, 'order.completed', 'warn', 1)",
+        )
+        .bind(fx.ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO event_schema_versions (workspace_id, name, version, properties) \
+             VALUES ($1, 'order.completed', 1, $2)",
+        )
+        .bind(fx.ws.as_uuid())
+        .bind(json!([{"name": "total", "type": "number", "required": false, "pii": false}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let id = fx.create_rule("racing").await;
+        let rule: Uuid = id.parse().unwrap();
+
+        // Both changes arrive while another writer holds the rule: each is checked against the
+        // rule as it is once it gets the lock, never against the state it was read in.
+        let mut holder = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::lock_rule(&mut holder, fx.ws, rule)
+            .await
+            .unwrap()
+            .unwrap();
+        let patch = |body: Value| {
+            let router = fx.router.clone();
+            let path = fx.path(&format!("/forwarding/rules/{id}"));
+            let key = fx.admin.clone();
+            tokio::spawn(
+                async move { call(&router, "PATCH", &path, Some(body), Auth::Key(&key)).await },
+            )
+        };
+        let filter = patch(json!({"filter": [{"prop": "total", "op": "gt", "value": 10}]}));
+        let event = patch(json!({"event_name": "refund.issued"}));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        zirv_flow_store::commit(holder).await.unwrap();
+        let replies = [filter.await.unwrap(), event.await.unwrap()];
+
+        let (event_name, stored): (String, Value) =
+            sqlx::query_as("SELECT event_name, filter FROM forwarding_rules WHERE id = $1")
+                .bind(rule)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let refused = replies
+            .iter()
+            .filter(|reply| reply.status == StatusCode::UNPROCESSABLE_ENTITY)
+            .count();
+        let saved = replies
+            .iter()
+            .filter(|reply| reply.status == StatusCode::OK)
+            .count();
+        assert_eq!(
+            (saved, refused),
+            (1, 1),
+            "one change wins, the other is refused"
+        );
+        // `refund.issued` has no published schema, so it carries no predicate.
+        assert!(
+            event_name == "order.completed" || stored == json!([]),
+            "{event_name} with {stored}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn dead_letters_are_paged_without_payloads_and_the_status_counts_the_queue(pool: PgPool) {
         let fx = fixture(&pool).await;
         fx.create_rule("Orders").await;

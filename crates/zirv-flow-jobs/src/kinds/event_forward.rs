@@ -37,8 +37,8 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
     Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision, PgPool,
-    Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job,
-    extend_lease, find_destination, next_due, purge_delivered, settle_row, throttle_bucket,
+    Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job, extend_lease,
+    find_destination, next_due, purge_delivered, settle_row, throttle_bucket,
 };
 
 use super::workspace_and_id;
@@ -998,5 +998,4 @@ mod tests {
             .unwrap();
         assert_eq!(token, Some(second.claim_token), "the newer claim is intact");
     }
-
 }

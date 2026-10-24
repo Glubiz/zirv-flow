@@ -994,9 +994,15 @@ mod tests {
         let row = &first[0];
 
         // A settle for another claim changes nothing.
-        let stale = settle_row(&mut connection, row.id, Uuid::new_v4(), Settled::Dead, Some("http_4xx"))
-            .await
-            .unwrap();
+        let stale = settle_row(
+            &mut connection,
+            row.id,
+            Uuid::new_v4(),
+            Settled::Dead,
+            Some("http_4xx"),
+        )
+        .await
+        .unwrap();
         let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
         let retried = settle_row(
             &mut connection,
@@ -1028,9 +1034,15 @@ mod tests {
             .unwrap();
         assert_eq!(second[0].attempts, 2);
         assert_eq!(second[0].idempotency_key, row.idempotency_key);
-        settle_row(&mut connection, row.id, second[0].claim_token, Settled::Dead, Some("http_5xx"))
-            .await
-            .unwrap();
+        settle_row(
+            &mut connection,
+            row.id,
+            second[0].claim_token,
+            Settled::Dead,
+            Some("http_5xx"),
+        )
+        .await
+        .unwrap();
         let letters = list_dead_letters(&mut connection, ws, None, None, 10)
             .await
             .unwrap();
@@ -1073,9 +1085,15 @@ mod tests {
             .await
             .unwrap();
         for row in &claimed {
-            settle_row(&mut connection, row.id, row.claim_token, Settled::Dead, Some("http_4xx"))
-                .await
-                .unwrap();
+            settle_row(
+                &mut connection,
+                row.id,
+                row.claim_token,
+                Settled::Dead,
+                Some("http_4xx"),
+            )
+            .await
+            .unwrap();
         }
         sqlx::query("DELETE FROM jobs WHERE kind = 'event.forward'")
             .execute(&mut *connection)
@@ -1225,7 +1243,6 @@ mod tests {
         .unwrap();
         assert!(settled && !again, "the second claim wins, once");
     }
-
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
