@@ -9,28 +9,24 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::TemplateFieldCatalog;
 use zirv_flow_templates::{
-    FieldCatalog, Hooks, Issue, RenderContext, RenderKind, TemplateDocument, Tracking,
-    content_type_of,
+    Hooks, Issue, RenderContext, RenderKind, TemplateDocument, Tracking, content_type_of,
 };
 
-use super::{field_catalog, issue_problems, stored_document};
+use super::{authorize_render, field_catalog, issue_problems, stored_document};
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, path_id};
+use crate::auth::{Principal, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, TemplateIssueProblem};
 
 /// Where an inert link points: the structure of a real tracked link, none of its meaning.
 const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
-
-/// The address a sample person has.
-const SAMPLE_EMAIL: &str = "sample@example.invalid";
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct TemplatePreviewRequest {
@@ -73,38 +69,6 @@ pub(crate) struct TemplatePreviewBody {
     body: Option<String>,
     /// The same checks a publish makes, against the workspace's fields now.
     issues: Vec<TemplateIssueProblem>,
-}
-
-/// The sample person's context: a deterministic value for every field in the catalog, by type.
-pub(crate) fn sample_context(catalog: &FieldCatalog) -> RenderContext {
-    let mut context = RenderContext::sample(catalog);
-    context
-        .person
-        .insert("email".to_owned(), Value::from(SAMPLE_EMAIL));
-    context
-}
-
-/// The context of a real person: the values of the traits the catalog knows (a trait the
-/// registry archived is not offered to templates), the send address, and sample event
-/// properties, because a preview has no triggering event.
-fn person_context(
-    catalog: &FieldCatalog,
-    traits: &Map<String, Value>,
-    email: Option<String>,
-) -> RenderContext {
-    let mut context = RenderContext::sample(catalog);
-    context.person.clear();
-    for key in catalog.person.keys() {
-        if let Some(value) = traits.get(key) {
-            context.person.insert(key.clone(), value.clone());
-        }
-    }
-    if let Some(email) = email {
-        context
-            .person
-            .insert("email".to_owned(), Value::from(email));
-    }
-    context
 }
 
 /// The rendered parts of a preview.
@@ -198,20 +162,7 @@ pub(crate) async fn preview(
     ApiJson(body): ApiJson<TemplatePreviewRequest>,
 ) -> Result<Json<TemplatePreviewBody>, ApiError> {
     let ws = path_id(&ws)?;
-    let workspace = if body.person_id.is_some() {
-        // Until the `view_pii` grant exists, a real person's values are for admins.
-        authorize(&state, &principal, ws, Need::Admin)
-            .await
-            .map_err(|error| {
-                if error.status_code() == axum::http::StatusCode::FORBIDDEN {
-                    ApiError::template_preview_values_forbidden()
-                } else {
-                    error
-                }
-            })?
-    } else {
-        authorize(&state, &principal, ws, Need::Write).await?
-    };
+    let workspace = authorize_render(&state, &principal, ws, body.person_id.is_some()).await?;
     let id: Uuid = path_id(&id)?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
@@ -238,7 +189,7 @@ pub(crate) async fn preview(
         zirv_flow_store::read_template_field_catalog(&mut tx, workspace.id).await?;
     let catalog = field_catalog(read);
     let (context, person_id) = match body.person_id {
-        None => (sample_context(&catalog), None),
+        None => (RenderContext::sample_person(&catalog), None),
         Some(requested) => {
             let person = zirv_flow_store::find_person(&mut *tx, workspace.id, requested)
                 .await?
@@ -248,11 +199,10 @@ pub(crate) async fn preview(
                 .into_iter()
                 .find(|identity| identity.kind == "email")
                 .map(|identity| identity.value);
-            let traits = match &person.traits {
-                Value::Object(map) => map.clone(),
-                _ => Map::new(),
-            };
-            (person_context(&catalog, &traits, email), Some(person.id))
+            (
+                RenderContext::real_person(&catalog, &person.traits, email),
+                Some(person.id),
+            )
         }
     };
     if let Some(person) = person_id {
@@ -316,6 +266,7 @@ mod tests {
     use serde_json::json;
     use zirv_flow_core::people::TraitType;
     use zirv_flow_render::RenderFailure;
+    use zirv_flow_templates::FieldCatalog;
 
     use super::*;
 
@@ -329,29 +280,15 @@ mod tests {
 
     #[test]
     fn the_sample_person_has_a_value_per_type_and_an_address() {
-        let context = sample_context(&catalog());
+        let context = RenderContext::sample_person(&catalog());
 
         assert_eq!(context.person["plan"], json!("sample"));
         assert_eq!(context.person["age"], json!(1));
-        assert_eq!(context.person["email"], json!(SAMPLE_EMAIL));
-        assert_eq!(context, sample_context(&catalog()));
-    }
-
-    #[test]
-    fn a_real_person_gets_only_the_fields_the_catalog_knows() {
-        let traits = json!({"plan": "pro", "secret": "x"});
-        let Value::Object(traits) = traits else {
-            unreachable!()
-        };
-
-        let context = person_context(&catalog(), &traits, Some("ann@example.com".into()));
-
-        assert_eq!(context.person["plan"], json!("pro"));
-        assert_eq!(context.person["email"], json!("ann@example.com"));
-        assert!(!context.person.contains_key("secret"));
-        assert!(!context.person.contains_key("age"));
-        let without = person_context(&catalog(), &traits, None);
-        assert!(!without.person.contains_key("email"));
+        assert_eq!(
+            context.person["email"],
+            json!(zirv_flow_templates::SAMPLE_EMAIL)
+        );
+        assert_eq!(context, RenderContext::sample_person(&catalog()));
     }
 
     #[test]

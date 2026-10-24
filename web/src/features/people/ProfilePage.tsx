@@ -1,4 +1,5 @@
-import { Link, useParams } from "react-router";
+import { useId, type KeyboardEvent } from "react";
+import { Link, useParams, useSearchParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type components } from "../../api";
 import { EmptyState, ErrorState, formatDateTime, HiddenValue, kindLabel, LoadingState, PageHeader, Panel, shortId } from "../../ui";
@@ -6,6 +7,7 @@ import { ConsentPanel } from "../consent";
 import { PersonListsPanel } from "../lists";
 import { useWorkspaceAccess } from "../members";
 import { SegmentExplainPanel } from "../segments";
+import { MessageLog } from "./MessageLog";
 import { Timeline } from "./Timeline";
 import { typeLabel } from "./TraitDialog";
 
@@ -24,6 +26,9 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
       unwrap(client.GET("/api/v1/workspaces/{ws}/people/{id}", { params: { path: { ws: workspaceId, id: requestedId } } })),
     [workspaceId, requestedId],
   );
+  const [params, setParams] = useSearchParams();
+  const tab: PersonTab = params.get("tab") === "messages" ? "messages" : "profile";
+  const tabsId = useId();
   const access = useWorkspaceAccess(workspaceId);
   const canWrite = access.status === "ready" && (access.data.canManage || access.data.role !== null);
 
@@ -62,19 +67,77 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
           The person you opened, {shortId(data.merged_from)}, was merged into this one. This is the combined profile.
         </p>
       ) : null}
-      <div className="profile-layout">
-        <div className="stack">
-          <IdentitiesPanel profile={data} />
-          <TraitsPanel traits={data.traits} />
-          {data.merges.length > 0 ? <MergesPanel workspaceId={workspaceId} profile={data} /> : null}
+      <PersonTabs
+        id={tabsId}
+        tab={tab}
+        onSelect={(next) => {
+          const updated = new URLSearchParams(params);
+          if (next === "messages") updated.set("tab", "messages");
+          else updated.delete("tab");
+          setParams(updated, { replace: true });
+        }}
+      />
+      {tab === "messages" ? (
+        <div role="tabpanel" id={`${tabsId}-messages-panel`} aria-labelledby={`${tabsId}-messages`}>
+          <MessageLog workspaceId={workspaceId} personId={data.id} />
         </div>
-        <div className="stack">
-          <ConsentPanel workspaceId={workspaceId} personId={data.id} canWrite={canWrite} />
-          <PersonListsPanel workspaceId={workspaceId} personId={data.id} />
-          <SegmentExplainPanel workspaceId={workspaceId} personId={data.id} />
+      ) : (
+        <div role="tabpanel" id={`${tabsId}-profile-panel`} aria-labelledby={`${tabsId}-profile`} className="stack">
+          <div className="profile-layout">
+            <div className="stack">
+              <IdentitiesPanel profile={data} />
+              <TraitsPanel traits={data.traits} />
+              {data.merges.length > 0 ? <MergesPanel workspaceId={workspaceId} profile={data} /> : null}
+            </div>
+            <div className="stack">
+              <ConsentPanel workspaceId={workspaceId} personId={data.id} canWrite={canWrite} />
+              <PersonListsPanel workspaceId={workspaceId} personId={data.id} />
+              <SegmentExplainPanel workspaceId={workspaceId} personId={data.id} />
+            </div>
+          </div>
+          <Timeline workspaceId={workspaceId} personId={data.id} />
         </div>
-      </div>
-      <Timeline workspaceId={workspaceId} personId={data.id} />
+      )}
+    </div>
+  );
+}
+
+type PersonTab = "profile" | "messages";
+
+const TABS: readonly { id: PersonTab; label: string }[] = [
+  { id: "profile", label: "Profile" },
+  { id: "messages", label: "Messages" },
+];
+
+/** The views of a person: what is known about them, and the messages sent to them. */
+function PersonTabs({ id, tab, onSelect }: { id: string; tab: PersonTab; onSelect: (tab: PersonTab) => void }) {
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    if (step === 0) return;
+    const next = TABS[(TABS.findIndex((item) => item.id === tab) + step + TABS.length) % TABS.length];
+    if (!next) return;
+    event.preventDefault();
+    onSelect(next.id);
+    document.getElementById(`${id}-${next.id}`)?.focus();
+  }
+  return (
+    <div role="tablist" aria-label="Person views" className="seg-tabs">
+      {TABS.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          role="tab"
+          id={`${id}-${item.id}`}
+          aria-selected={tab === item.id}
+          aria-controls={`${id}-${item.id}-panel`}
+          tabIndex={tab === item.id ? 0 : -1}
+          className={tab === item.id ? "seg seg-on" : "seg"}
+          onClick={() => onSelect(item.id)}
+          onKeyDown={onKeyDown}
+        >
+          {item.label}
+        </button>
+      ))}
     </div>
   );
 }

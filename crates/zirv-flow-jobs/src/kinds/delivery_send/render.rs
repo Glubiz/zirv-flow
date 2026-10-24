@@ -23,7 +23,7 @@ use zirv_flow_store::VerifiedSender;
 use super::payload::SendJob;
 
 /// The reason a message that could not be rendered fails with.
-pub(super) const RENDER_ERROR: &str = "render_error";
+pub(crate) const RENDER_ERROR: &str = "render_error";
 
 /// The host the unsubscribe and preference links of a transactional message are on when the worker
 /// has no public URL. `.invalid` never resolves (RFC 6761), so a link built here cannot reach
@@ -32,9 +32,9 @@ const PLACEHOLDER_HOST: &str = "https://links.zirv-flow.invalid";
 
 /// What builds and signs the tracking links of a message: the public URL, without a trailing
 /// slash, and the key that signs the tokens.
-pub(super) struct Tracker {
-    pub(super) base: String,
-    pub(super) key: Arc<HmacKey>,
+pub(crate) struct Tracker {
+    pub(crate) base: String,
+    pub(crate) key: Arc<HmacKey>,
 }
 
 impl Tracker {
@@ -43,7 +43,7 @@ impl Tracker {
     }
 
     /// The page that unsubscribes the person from this message's topic.
-    fn unsubscribe_url(&self, message: Uuid) -> String {
+    pub(crate) fn unsubscribe_url(&self, message: Uuid) -> String {
         format!(
             "{}/u/{}",
             self.base,
@@ -52,7 +52,7 @@ impl Tracker {
     }
 
     /// The preference center page.
-    fn preferences_url(&self, message: Uuid) -> String {
+    pub(crate) fn preferences_url(&self, message: Uuid) -> String {
         format!("{}/preferences", self.unsubscribe_url(message))
     }
 
@@ -68,9 +68,9 @@ impl Tracker {
 
 /// A rendered message and the links click tracking rewrote in it, as `(index, URL)`.
 #[derive(Debug)]
-pub(super) struct Tracked {
-    pub(super) rendered: Rendered,
-    pub(super) links: Vec<(u16, String)>,
+pub(crate) struct Tracked {
+    pub(crate) rendered: Rendered,
+    pub(crate) links: Vec<(u16, String)>,
 }
 
 /// `html` with `pixel` just before the last `</body>`, else at the end.
@@ -102,7 +102,13 @@ pub(super) fn context_of(
     context
         .person
         .insert("email".to_owned(), Value::from(address));
-    let message = job.message;
+    address_links(&mut context, job.message, tracker);
+    context
+}
+
+/// Sets the message id and the unsubscribe and preference URLs the message carries: signed when
+/// there is a `tracker`, and on a host that never resolves when there is none.
+pub(crate) fn address_links(context: &mut RenderContext, message: Uuid, tracker: Option<&Tracker>) {
     context.message.id = message.to_string();
     match tracker {
         Some(tracker) => {
@@ -114,14 +120,13 @@ pub(super) fn context_of(
             context.system.preferences_url = format!("{PLACEHOLDER_HOST}/p/{message}");
         }
     }
-    context
 }
 
 /// Renders `document` for `context`, or says why it could not. With a `tracker` the links are
 /// rewritten to the click route and the open pixel is added; the links come back to be recorded.
 /// Without one the message is left as rendered. `recorded` is what the message's earlier attempts
 /// recorded: a URL keeps its recorded index, so a token never leads anywhere but to its own link.
-pub(super) async fn render(
+pub(crate) async fn render(
     pool: Option<&RenderPool>,
     document: Value,
     context: &RenderContext,
@@ -237,7 +242,7 @@ pub(super) fn failed(failure: RenderFailure) -> &'static str {
 /// The payload an email destination is given: the sender, the rendered parts and the extra
 /// headers (`List-Unsubscribe` for marketing mail). The address travels beside it as the
 /// message's `to`.
-pub(super) fn email_payload(sender: &VerifiedSender, rendered: &Rendered) -> Value {
+pub(crate) fn email_payload(sender: &VerifiedSender, rendered: &Rendered) -> Value {
     json!({
         "from": {"name": sender.from_name, "address": sender.from_address},
         "reply_to": sender.reply_to,

@@ -22,22 +22,22 @@ use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError};
 
 /// One email to hand to a destination.
-pub(super) struct Call<'a> {
-    pub(super) workspace: WorkspaceId,
-    pub(super) destination: &'a Destination,
-    pub(super) driver: &'static dyn ErasedDestination,
+pub(crate) struct Call<'a> {
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) destination: &'a Destination,
+    pub(crate) driver: &'static dyn ErasedDestination,
     /// The sender identity on its verified domain: whose DKIM key signs the message.
-    pub(super) sender: &'a VerifiedSender,
+    pub(crate) sender: &'a VerifiedSender,
     /// The message id: the idempotency key at the destination.
-    pub(super) message: Uuid,
-    pub(super) address: &'a str,
-    pub(super) payload: &'a Value,
+    pub(crate) message: Uuid,
+    pub(crate) address: &'a str,
+    pub(crate) payload: &'a Value,
 }
 
 /// Delivers one email and judges the destination's answer. An error is a failure of this worker or
 /// of the database; the destination's answer, and a credential that cannot be opened, are a
 /// [`Verdict`].
-pub(super) async fn deliver(
+pub(crate) async fn deliver(
     ctx: &mut JobContext<'_>,
     call: &Call<'_>,
     now: OffsetDateTime,

@@ -782,6 +782,7 @@ function EnrollmentDetail({
         <TraceTree
           records={path.decisions}
           label="Decisions on the trace of this enrollment"
+          workspaceId={workspaceId}
           describe={describe}
           truncated={path.truncated}
           cited={assistantOn ? { ids: cited, active, rowId: decisionRowId } : undefined}

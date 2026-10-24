@@ -2321,6 +2321,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/people/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A person's message log, newest first, in pages. Each message names its template, flow step and
+         *     destination, the gates it went through in order, the exact reason it was skipped or failed, the
+         *     consent rule that decided, and, for a message that waits, when it runs again. A person that was
+         *     merged into another reads as the survivor, with the merged people's messages included. No
+         *     address and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`
+         *     (waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or
+         *     `failed`) and by `template_id`.
+         */
+        get: operations["list_person_messages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/people/{id}/timeline": {
         parameters: {
             query?: never;
@@ -3264,6 +3289,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/templates/{id}/test-send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sends a template to one workspace member or allowlisted address through a real destination,
+         *     marked `[TEST]`, with no tracking and no trace in the message log. The reply is the log row,
+         *     `queued`; poll the log for the outcome. At most 10 tests per member and 100 per workspace start in
+         *     any rolling hour. Needs the write role, or the admin role with `person_id`, and the CSRF token.
+         *     Audited as `template.test_sent`, with ids only.
+         */
+        post: operations["test_send_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/templates/{id}/versions": {
         parameters: {
             query?: never;
@@ -3310,6 +3358,65 @@ export interface paths {
          *     per flow however many versions name it. The draft of a flow is not a version and is not listed.
          */
         get: operations["template_where_used"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-send-allowlist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's test-send allowlist, oldest first. */
+        get: operations["list_test_send_allowlist"];
+        put?: never;
+        /**
+         * Allows test sends to an address. The address is normalised, hashed here and stored as the hash,
+         *     a masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as
+         *     `test_send.allowlist_added`, with the entry id and nothing else.
+         */
+        post: operations["add_test_send_allowlist_entry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-send-allowlist/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Removes an entry from the allowlist. Needs the workspace admin role and the CSRF token. Audited
+         *     as `test_send.allowlist_removed`, with the entry id and nothing else.
+         */
+        delete: operations["delete_test_send_allowlist_entry"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-sends": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's test-send log, newest first, optionally of one template (`template_id`). */
+        get: operations["list_test_sends"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3832,6 +3939,27 @@ export interface components {
              * @description Spent so far this month (UTC), in micro-units.
              */
             spent_micros: number;
+        };
+        AllowlistAddRequest: {
+            /**
+             * @description The email address a test send may go to.
+             * @example qa@example.com
+             */
+            address: string;
+        };
+        AllowlistBody: {
+            entries: components["schemas"]["AllowlistEntryBody"][];
+        };
+        AllowlistEntryBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description The first character, `***`, then `@domain`. The address itself is stored only sealed and never returned.
+             * @example q***@example.com
+             */
+            display_hint: string;
+            /** Format: uuid */
+            id: string;
         };
         ApiKeyBody: {
             /** Format: date-time */
@@ -6175,6 +6303,31 @@ export interface components {
              */
             threshold_seconds?: number | null;
         };
+        /** @description What one gate of the send found. Codes and ids only. */
+        GateResultBody: {
+            /**
+             * @description `enrollment`, `template`, `sender`, `address`, `consent`, `suppression`, `quiet_hours`,
+             *     `frequency_cap`, `render`, `rate_limit` or `delivery`.
+             * @example consent
+             */
+            gate: string;
+            /** @description A code that adds to the reason. */
+            note?: string | null;
+            /** @description The code that stopped the message. */
+            reason?: string | null;
+            /**
+             * @description `passed`, `blocked`, `deferred`, `in_flight` or `unconfirmed`.
+             * @example blocked
+             */
+            result: string;
+            /**
+             * Format: uuid
+             * @description The consent policy rule that decided, by id.
+             */
+            rule_id?: string | null;
+            /** @description For a deferral, when the message runs again. */
+            run_at?: string | null;
+        };
         /** @description Why the walk stopped before the graph or the script ended. */
         HaltBody: {
             /** @description The most events one load keeps (`unable_to_evaluate` only). */
@@ -6634,6 +6787,93 @@ export interface components {
             merged_at: string;
             /** Format: uuid */
             merged_person_id: string;
+        };
+        MessageBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The workspace's consent policy, when a rule of it denied the send.
+             */
+            consent_policy_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The consent policy rule that denied the send, by id.
+             */
+            consent_rule_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description What decided the consent gate: `recorded_consent`, `topic_default`, `transactional`, a
+             *     suppression's scope, or the name of the consent policy rule that denied the send.
+             */
+            deciding_rule?: string | null;
+            /**
+             * Format: date-time
+             * @description For a pending message that waits: when it runs again.
+             */
+            deferred_until?: string | null;
+            /** @description For a pending message that waits: `quiet_hours`, `frequency_cap` or `rate_limit`. */
+            deferred_why?: string | null;
+            destination: components["schemas"]["MessageDestinationBody"];
+            flow?: null | components["schemas"]["MessageFlowBody"];
+            /** @description In the order the send ran them. */
+            gate_results: components["schemas"]["GateResultBody"][];
+            /** Format: uuid */
+            id: string;
+            node: components["schemas"]["MessageNodeBody"];
+            /**
+             * @description The code a skipped or failed message ended with, such as `no_consent`.
+             * @example no_consent
+             */
+            reason?: string | null;
+            /**
+             * @description `pending`, `sending`, `sent`, `skipped` or `failed`.
+             * @example skipped
+             */
+            status: string;
+            template: components["schemas"]["MessageTemplateBody"];
+            /**
+             * @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`; none when the message has
+             *     no recorded decisions.
+             */
+            trace_id?: string | null;
+        };
+        MessageDestinationBody: {
+            /** Format: uuid */
+            id: string;
+            name?: string | null;
+        };
+        MessageFlowBody: {
+            /** Format: uuid */
+            id: string;
+            name?: string | null;
+            /** Format: int32 */
+            version?: number | null;
+        };
+        MessageNodeBody: {
+            id: string;
+            /** @description The step's name, when the flow version gives it one. */
+            name?: string | null;
+        };
+        MessageTemplateBody: {
+            /** @description `marketing` or `transactional`. */
+            category?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** @description None when the template no longer exists. */
+            name?: string | null;
+            /**
+             * Format: int32
+             * @description The version that was sent; none when the message ended before one was read.
+             */
+            version?: number | null;
+        };
+        MessagesBody: {
+            /** @description Newest first. */
+            messages: components["schemas"]["MessageBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
         };
         MethodsBody: {
             /** @description True when e-mail and password sign-in is accepted. */
@@ -8569,6 +8809,96 @@ export interface components {
              * @description A source that uses this credential.
              */
             source_id?: string | null;
+        };
+        /** @description A test send as the log shows it. It holds no address, no hash and no person. */
+        TestSendBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            destination_id: string;
+            /**
+             * Format: uuid
+             * @description Also the idempotency key at the destination.
+             */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The user who asked; null for an API key.
+             */
+            member_id?: string | null;
+            /**
+             * @description `queued`, `sent`, `suppressed`, `sender_unverified`, `render_failed`, `unconfirmed` or
+             *     `failed`.
+             * @example queued
+             */
+            outcome: string;
+            /** @description A fixed code that says why a test did not go out. */
+            reason?: string | null;
+            /**
+             * Format: uuid
+             * @description The workspace member the test went to; null for an allowlisted address.
+             */
+            recipient_member_id?: string | null;
+            /**
+             * @description `person` when a person's values rendered the template, else `sample`.
+             * @example sample
+             */
+            render_context: string;
+            /** Format: uuid */
+            sender_identity_id: string;
+            /** Format: uuid */
+            template_id: string;
+            /**
+             * Format: int32
+             * @description The published version sent; null for the draft.
+             */
+            template_version?: number | null;
+        };
+        /** @description Who a test goes to. Exactly one of the two fields is given. */
+        TestSendRecipient: {
+            /**
+             * @description An address on the workspace's test-send allowlist.
+             * @example qa@example.com
+             */
+            address?: string | null;
+            /**
+             * Format: uuid
+             * @description A member of this workspace; the test goes to the address on their account.
+             */
+            member?: string | null;
+        };
+        TestSendRequest: {
+            /**
+             * Format: uuid
+             * @description The destination to send through, as a send node names it.
+             */
+            destination_id: string;
+            /**
+             * Format: uuid
+             * @description Render with this person's values; needs the workspace admin role, as a preview does.
+             *     Absent: the sample person. The person is not recorded in the log.
+             */
+            person_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The sender identity, as a send node names it. It must be live on a verified domain, or the
+             *     test ends `sender_unverified`.
+             */
+            sender_identity_id: string;
+            to: components["schemas"]["TestSendRecipient"];
+            /**
+             * Format: int32
+             * @description The published version to send. Absent: the current draft.
+             */
+            version?: number | null;
+        };
+        TestSendsBody: {
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+            /** @description Newest first. */
+            test_sends: components["schemas"]["TestSendBody"][];
         };
         TimelineBody: {
             /** @description Newest first. */
@@ -18474,6 +18804,85 @@ export interface operations {
             };
         };
     };
+    list_person_messages: {
+        parameters: {
+            query?: {
+                /** @description Messages per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description `sent`, `skipped`, `deferred`, `in_progress` or `failed` */
+                result?: string;
+                /** @description Only messages of this template */
+                template_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of messages */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagesBody"];
+                };
+            };
+            /** @description A parameter is out of range or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person (an erased person included), or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_person_timeline: {
         parameters: {
             query?: {
@@ -22753,6 +23162,98 @@ export interface operations {
             };
         };
     };
+    test_send_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestSendRequest"];
+            };
+        };
+        responses: {
+            /** @description The log row, queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, a missing CSRF token, or a person asked for without the admin role (`code` is `template_preview_values_forbidden`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template, version, destination or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The template is archived (`template_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The recipient is neither a member nor allowlisted (`recipient_not_allowed`), the template or destination does not do email, or the body is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The member or the workspace reached its hourly limit; `Retry-After` is the seconds until a slot frees (`test_send_rate_limited`) */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_template_versions: {
         parameters: {
             query?: never;
@@ -22901,6 +23402,253 @@ export interface operations {
                 };
             };
             /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_send_allowlist: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    add_test_send_allowlist_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AllowlistAddRequest"];
+            };
+        };
+        responses: {
+            /** @description The entry */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistEntryBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is on the list already */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_test_send_allowlist_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Entry id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or entry, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_sends: {
+        parameters: {
+            query?: {
+                /** @description Only the tests of this template */
+                template_id?: string;
+                /** @description Rows per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of the log */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendsBody"];
+                };
+            };
+            /** @description limit or template_id is out of range or malformed, or before is not a cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
             404: {
                 headers: {
                     [name: string]: unknown;

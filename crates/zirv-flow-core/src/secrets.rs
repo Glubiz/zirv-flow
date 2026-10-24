@@ -293,6 +293,9 @@ pub enum SecretPurpose {
     DkimKey,
     /// The secret fields of a workspace credential, sealed as one JSON object.
     WorkspaceCredential,
+    /// The normalised address of a test-send allowlist entry. Its associated data binds the
+    /// workspace and the entry id, which is also the secret's id.
+    TestSendAddress,
 }
 
 impl SecretPurpose {
@@ -307,6 +310,7 @@ impl SecretPurpose {
             Self::DestinationCredential => "destination_credential",
             Self::DkimKey => "dkim_key",
             Self::WorkspaceCredential => "workspace_credential",
+            Self::TestSendAddress => "test_send_address",
         }
     }
 
@@ -321,6 +325,7 @@ impl SecretPurpose {
             Self::DestinationCredential,
             Self::DkimKey,
             Self::WorkspaceCredential,
+            Self::TestSendAddress,
         ]
         .into_iter()
         .find(|purpose| purpose.as_str() == text)
@@ -934,6 +939,7 @@ mod tests {
             SecretPurpose::DestinationCredential,
             SecretPurpose::DkimKey,
             SecretPurpose::WorkspaceCredential,
+            SecretPurpose::TestSendAddress,
         ] {
             assert_eq!(SecretPurpose::parse(purpose.as_str()), Some(purpose));
         }

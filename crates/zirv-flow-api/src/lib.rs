@@ -36,6 +36,7 @@ mod setup;
 mod sources;
 mod state;
 mod templates;
+mod test_sends;
 mod trace;
 mod traces;
 mod tracking;
@@ -327,6 +328,19 @@ fn routes() -> Router<AppState> {
             post(templates::preview::preview),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/test-send",
+            post(test_sends::test_send),
+        )
+        .route("/api/v1/workspaces/{ws}/test-sends", get(test_sends::list))
+        .route(
+            "/api/v1/workspaces/{ws}/test-send-allowlist",
+            get(test_sends::allowlist_list).post(test_sends::allowlist_add),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/test-send-allowlist/{id}",
+            delete(test_sends::allowlist_delete),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/segments",
             get(segments::crud::list).post(segments::crud::create),
         )
@@ -385,6 +399,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/people/{id}/timeline",
             get(people::timeline::get),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/people/{id}/messages",
+            get(people::messages::list),
         )
         .route(
             "/api/v1/workspaces/{ws}/event-schemas",

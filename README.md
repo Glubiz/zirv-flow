@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), segments (a builder compiled to SQL, full refresh, incremental re-evaluation and explain), the flow engine (versioned flows, a durable runtime with timers, event waits and re-entry rules, operator retry and skip, test mode and a trace inspector), and the AI provider layer and the mapping, manifest, segment and flow assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile, a person timeline and a per-person message log (why each message was or was not sent), and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), segments (a builder compiled to SQL, full refresh, incremental re-evaluation and explain), the flow engine (versioned flows, a durable runtime with timers, event waits and re-entry rules, operator retry and skip, test mode and a trace inspector), and the AI provider layer and the mapping, manifest, segment and flow assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -2216,6 +2216,32 @@ prefetch_user_agents = ["my-gateway-fetcher"]
 ```
 
 or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
+
+## Template test sends
+
+A test send sends one template through a real destination to one person who agreed to receive it: a
+member of the workspace, at the address on their account, or an address an admin put on the allowlist.
+The subject starts with `[TEST] `, links are not rewritten, there is no open pixel, and nothing is
+written to the message log, the events or the caps. `{{ system.unsubscribe_url }}` and the
+`List-Unsubscribe` header point to a `/u/{token}` link that answers "This was a test send. Nothing was
+changed." and does nothing.
+
+| Route | Needs | |
+|-------|-------|-|
+| `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
+| `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
+| `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; the list shows only a masked hint (`q***@example.com`) |
+
+Any other recipient is a 422 `recipient_not_allowed`. At most 10 test sends per member and 100 per
+workspace start in any rolling hour; past that the answer is 429 with `Retry-After`. A suppressed
+recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The job
+checks the recipient again when it runs: a member must still be a member (and the account's current
+address is used) and an allowlist entry must still exist, or the row ends `failed` with
+`recipient_unavailable` and nothing is sent. The log keeps 13 months. The log stores no address; an
+allowlist entry holds the hash, the masked hint and the normalised address sealed with the master key
+like a credential, and no job payload ever holds an address. Erasing a person deletes the log rows and
+the allowlist entries sent to or holding their addresses, and purges their queued test-send jobs. The
+leader ends a `queued` row whose job is dead or gone as `failed: abandoned`.
 
 ## Sending domains
 

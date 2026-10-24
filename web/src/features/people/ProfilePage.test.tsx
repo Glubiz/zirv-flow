@@ -445,4 +445,24 @@ describe("a person's timeline", () => {
     await user.click(retry[retry.length - 1]!);
     expect(await screen.findByText("Merged with another person")).toBeInTheDocument();
   });
+
+  it("has a Profile and a Messages tab, and the Messages tab loads the message log", async () => {
+    asOwner({
+      [`GET /api/v1/workspaces/ws1/people/${PERSON}/messages`]: () => json({ messages: [], next_before: null }),
+      "GET /api/v1/workspaces/ws1/templates": () => json([]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const profileTab = await screen.findByRole("tab", { name: "Profile" });
+    expect(profileTab).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByText("No messages to this person yet.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Messages" }));
+
+    expect(screen.getByRole("tab", { name: "Messages" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("No messages to this person yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Identities from crm" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Profile" }));
+    expect(await screen.findByRole("region", { name: "Identities from crm" })).toBeInTheDocument();
+  });
 });
