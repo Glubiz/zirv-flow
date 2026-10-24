@@ -74,7 +74,7 @@ use zirv_flow_store::{
     find_flow, find_template, find_template_version, insert_message, lock_webhook_person,
     mark_message_sending, mark_message_unconfirmed, message_in_flight, message_status,
     message_unconfirmed, read_template_field_catalog, read_webhook_subject,
-    record_message_deferral, record_send_outcome, throttle_bucket,
+    record_message_deferral, record_message_links, record_send_outcome, throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -317,14 +317,37 @@ async fn decide(
         }
     }
 
-    // Gate 7: render, in the pool.
-    let context = render::context_of(job, &traits, &address);
+    // Gate 7: render, in the pool. A marketing message carries signed unsubscribe, click and open
+    // links, so it needs the public URL and the tracking key; a transactional one is not tracked and
+    // gets the unsubscribe links only when it can.
+    let tracker = ctx.tracking().map(|(base, key)| render::Tracker {
+        base: base.to_owned(),
+        key: Arc::clone(key),
+    });
+    if tracker.is_none() && !transactional {
+        warn!(
+            "email not rendered: tracking links need server.public_url and the secrets master key"
+        );
+        return Ok(trail.fail_unsent(resuming, "render", render::RENDER_ERROR));
+    }
+    let context = render::context_of(job, &traits, &address, tracker.as_ref());
     let pool_for_render = ctx.render_pool().cloned();
-    let rendered = match render::render(pool_for_render.as_ref(), version.document, &context).await
+    let tracked = (!transactional).then_some(()).and(tracker.as_ref());
+    let tracked = match render::render(
+        pool_for_render.as_ref(),
+        version.document,
+        &context,
+        tracked,
+    )
+    .await
     {
-        Ok(rendered) => rendered,
+        Ok(tracked) => tracked,
         Err(reason) => return Ok(trail.fail_unsent(resuming, "render", reason)),
     };
+    // The links are recorded before delivery in a statement of their own, so the redirect works
+    // for whichever attempt the person receives and a retry writes the same rows.
+    record_message_links(&pool, workspace, job.message, &tracked.links).await?;
+    let rendered = tracked.rendered;
     trail.pass(GateRecord::passed("render"));
     let email = render::email_payload(&sender, &rendered);
 
@@ -854,6 +877,13 @@ mod tests {
         Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap())
     }
 
+    pub(super) const PUBLIC_URL: &str = "https://flow.example.test";
+
+    pub(super) fn tracking_key() -> Arc<zirv_flow_core::HmacKey> {
+        let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
+        Arc::new(HmacRoot::bootstrap_from(&master).hmac_key(HmacPurpose::Tracking))
+    }
+
     fn identifier_key() -> Arc<zirv_flow_core::HmacKey> {
         let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").unwrap();
         Arc::new(HmacRoot::bootstrap_from(&master).hmac_key(HmacPurpose::Identifier))
@@ -875,6 +905,7 @@ mod tests {
         version: i32,
         /// The worker has no identifier key, so a send fails after its row was written.
         no_key: bool,
+        no_public_url: bool,
         /// The master keys the worker opens credentials with.
         keyring: Option<Arc<zirv_flow_core::Keyring>>,
     }
@@ -934,6 +965,7 @@ mod tests {
                 ledger,
                 flow: Uuid::now_v7(),
                 no_key: false,
+                no_public_url: false,
                 keyring: None,
                 version: 1,
             };
@@ -1207,6 +1239,10 @@ mod tests {
                     })
                     .with_identifier_key((!self.no_key).then(identifier_key))
                     .with_render_pool(self.render.clone())
+                    .with_tracking(
+                        (!self.no_public_url).then(|| PUBLIC_URL.to_owned()),
+                        Some(tracking_key()),
+                    )
                     .with_rate_gates(Arc::clone(&self.gates))
                     .with_outbound(self.keyring.clone(), loopback(), Arc::default());
                 DeliverySend.run(&mut ctx, claimed.payload.clone()).await
@@ -1427,6 +1463,129 @@ mod tests {
                 .await,
             0
         );
+    }
+
+    const LINKED: &str = "<html><body><p>Hi</p><a href=\"https://shop.example.test/a?x=1\">Shop</a>         <a href=\"mailto:team@example.test\">Mail</a>         <a href=\"https://shop.example.test/b\">Again</a>         <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></body></html>";
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_marketing_message_has_tracked_links_a_pixel_and_the_real_unsubscribe_link(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::tracking::{TokenKind, verify};
+
+        let mut env = Env::new(pool, "tracked").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.template("marketing", LINKED).await;
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let sent = env.sent();
+        let html = sent[0].payload["html"].as_str().unwrap();
+        assert!(!html.contains("shop.example.test"), "{html}");
+        assert_eq!(
+            html.matches("https://flow.example.test/t/c/").count(),
+            2,
+            "{html}"
+        );
+        assert!(html.contains("mailto:team@example.test"), "{html}");
+        let pixel = html.find("/t/o/").expect("the open pixel");
+        assert!(
+            pixel > html.find("Unsubscribe").unwrap(),
+            "the pixel is at the end"
+        );
+        assert!(html.ends_with("</body></html>"), "{html}");
+        let links: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT link_index, url FROM message_links WHERE message_id = $1 ORDER BY link_index",
+        )
+        .bind(queued.message)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            links,
+            [
+                (0, "https://shop.example.test/a?x=1".to_owned()),
+                (1, "https://shop.example.test/b".to_owned())
+            ]
+        );
+        let header = sent[0].payload["headers"]["List-Unsubscribe"]
+            .as_str()
+            .unwrap();
+        let url = header.trim_start_matches('<').trim_end_matches('>');
+        let token = url.strip_prefix("https://flow.example.test/u/").expect(url);
+        let claims = verify(&tracking_key(), TokenKind::Unsubscribe, token).unwrap();
+        assert_eq!(claims.message, queued.message);
+        assert!(
+            html.contains(&url.replace('/', "&#x2f;")),
+            "the unsubscribe link is not rewritten: {html}"
+        );
+        assert_eq!(
+            sent[0].payload["headers"]["List-Unsubscribe-Post"],
+            "List-Unsubscribe=One-Click"
+        );
+        assert!(
+            sent[0].payload["text"]
+                .as_str()
+                .unwrap()
+                .contains("https://flow.example.test/u/")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transactional_message_has_no_tracking(pool: PgPool) {
+        let mut env = Env::new(pool, "plainmail").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        let template = env.template("transactional", LINKED).await;
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let html = env.sent()[0].payload["html"].as_str().unwrap().to_owned();
+        assert_eq!(
+            html.matches("https://shop.example.test/").count(),
+            2,
+            "{html}"
+        );
+        assert!(!html.contains("/t/o/") && !html.contains("/t/c/"), "{html}");
+        assert!(html.contains("flow.example.test&#x2f;u&#x2f;"), "{html}");
+        assert_eq!(env.count("SELECT count(*) FROM message_links").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn without_a_public_url_a_marketing_message_fails_and_a_transactional_one_is_sent(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "nourl").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.no_public_url = true;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let marketing = env.template("marketing", LINKED).await;
+        let transactional = env.template("transactional", LINKED).await;
+        let failing = env.queue(person, marketing, 5).await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(failing.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("render_error"))
+        );
+        assert!(env.sent().is_empty());
+        let sending = env.queue(person, transactional, 5).await;
+        env.attempt().await.unwrap();
+        assert_eq!(env.message(sending.message).await.status, "sent");
+        let html = env.sent()[0].payload["html"].as_str().unwrap().to_owned();
+        assert!(!html.contains("/t/o/") && !html.contains("/t/c/"), "{html}");
     }
 
     #[sqlx::test]
@@ -2587,7 +2746,7 @@ mod tests {
         assert!(
             header_of(data, "List-Unsubscribe")
                 .unwrap()
-                .starts_with("<https://links.zirv-flow.invalid/u/")
+                .starts_with("<https://flow.example.test/u/")
         );
         assert_eq!(
             header_of(data, "List-Unsubscribe-Post").as_deref(),

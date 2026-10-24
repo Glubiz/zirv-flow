@@ -7,10 +7,15 @@
 //! `failed: render_error` and nothing else: the pool replaces a child it killed, and the worker
 //! carries on with the next message.
 
+use std::sync::{Arc, Mutex};
+
 use serde_json::{Map, Value, json};
 use tracing::warn;
+use uuid::Uuid;
+use zirv_flow_core::HmacKey;
+use zirv_flow_core::tracking::{TokenKind, sign};
 use zirv_flow_render::{
-    Hooks, RenderContext, RenderFailure, RenderPool, Rendered, TemplateDocument,
+    Hooks, RenderContext, RenderFailure, RenderPool, Rendered, TemplateDocument, Tracking,
 };
 use zirv_flow_store::VerifiedSender;
 
@@ -19,10 +24,66 @@ use super::payload::SendJob;
 /// The reason a message that could not be rendered fails with.
 pub(super) const RENDER_ERROR: &str = "render_error";
 
-/// The host the placeholder links of a message are on. `.invalid` never resolves (RFC 6761), so a
-/// link built here cannot reach anyone's server. Signed unsubscribe and preference links, and the
-/// click and open tracking, replace these when the tracking endpoints exist.
+/// The host the unsubscribe and preference links of a transactional message are on when the worker
+/// has no public URL. `.invalid` never resolves (RFC 6761), so a link built here cannot reach
+/// anyone's server. A marketing message is not sent without the real links.
 const PLACEHOLDER_HOST: &str = "https://links.zirv-flow.invalid";
+
+/// What builds and signs the tracking links of a message: the public URL, without a trailing
+/// slash, and the key that signs the tokens.
+pub(super) struct Tracker {
+    pub(super) base: String,
+    pub(super) key: Arc<HmacKey>,
+}
+
+impl Tracker {
+    fn token(&self, kind: TokenKind, message: Uuid, link: u16) -> String {
+        sign(&self.key, kind, message, link)
+    }
+
+    /// The page that unsubscribes the person from this message's topic.
+    fn unsubscribe_url(&self, message: Uuid) -> String {
+        format!(
+            "{}/u/{}",
+            self.base,
+            self.token(TokenKind::Unsubscribe, message, 0)
+        )
+    }
+
+    /// The preference center page.
+    fn preferences_url(&self, message: Uuid) -> String {
+        format!("{}/preferences", self.unsubscribe_url(message))
+    }
+
+    /// The open pixel as an `<img>`.
+    fn pixel(&self, message: Uuid) -> String {
+        format!(
+            "<img src=\"{}/t/o/{}\" width=\"1\" height=\"1\" alt=\"\" style=\"display:none\">",
+            self.base,
+            self.token(TokenKind::Open, message, 0)
+        )
+    }
+}
+
+/// A rendered message and the links click tracking rewrote in it, as `(index, URL)`.
+#[derive(Debug)]
+pub(super) struct Tracked {
+    pub(super) rendered: Rendered,
+    pub(super) links: Vec<(u16, String)>,
+}
+
+/// `html` with `pixel` just before the last `</body>`, else at the end.
+fn with_pixel(html: &str, pixel: &str) -> String {
+    let at = html
+        .to_ascii_lowercase()
+        .rfind("</body")
+        .unwrap_or(html.len());
+    let mut out = String::with_capacity(html.len() + pixel.len());
+    out.push_str(&html[..at]);
+    out.push_str(pixel);
+    out.push_str(&html[at..]);
+    out
+}
 
 /// What the template reads for this message. `traits` holds the person's value for each registry
 /// trait the template may read (null when they have none); `address` is the one the message goes
@@ -31,6 +92,7 @@ pub(super) fn context_of(
     job: &SendJob,
     traits: &Map<String, Value>,
     address: &str,
+    tracker: Option<&Tracker>,
 ) -> RenderContext {
     let mut context = RenderContext::default();
     for (key, value) in traits.iter().filter(|(_, value)| !value.is_null()) {
@@ -41,17 +103,28 @@ pub(super) fn context_of(
         .insert("email".to_owned(), Value::from(address));
     let message = job.message;
     context.message.id = message.to_string();
-    context.system.unsubscribe_url = format!("{PLACEHOLDER_HOST}/u/{message}");
-    context.system.preferences_url = format!("{PLACEHOLDER_HOST}/p/{message}");
+    match tracker {
+        Some(tracker) => {
+            context.system.unsubscribe_url = tracker.unsubscribe_url(message);
+            context.system.preferences_url = tracker.preferences_url(message);
+        }
+        None => {
+            context.system.unsubscribe_url = format!("{PLACEHOLDER_HOST}/u/{message}");
+            context.system.preferences_url = format!("{PLACEHOLDER_HOST}/p/{message}");
+        }
+    }
     context
 }
 
-/// Renders `document` for `context`, or says why it could not.
+/// Renders `document` for `context`, or says why it could not. With a `tracker` the links are
+/// rewritten to the click route and the open pixel is added; the links come back to be recorded.
+/// Without one the message is left as rendered.
 pub(super) async fn render(
     pool: Option<&RenderPool>,
     document: Value,
     context: &RenderContext,
-) -> Result<Rendered, &'static str> {
+    tracker: Option<&Tracker>,
+) -> Result<Tracked, &'static str> {
     let Some(pool) = pool else {
         warn!("email not rendered: the worker has no render pool");
         return Err(RENDER_ERROR);
@@ -60,9 +133,46 @@ pub(super) async fn render(
         warn!("email not rendered: the stored document is not a template document");
         return Err(RENDER_ERROR);
     };
-    pool.render_email(&document, context, &Hooks::untracked())
+    let Some(tracker) = tracker else {
+        let rendered = pool
+            .render_email(&document, context, &Hooks::untracked())
+            .await
+            .map_err(failed)?;
+        return Ok(Tracked {
+            rendered,
+            links: Vec::new(),
+        });
+    };
+    let message = context.message.id.parse::<Uuid>().map_err(|_| {
+        warn!("email not rendered: the context holds no message id");
+        RENDER_ERROR
+    })?;
+    let links = Mutex::new(Vec::new());
+    let base = format!("{}/t/c", tracker.base);
+    let token = |index: usize, url: &str| {
+        let index = u16::try_from(index).unwrap_or(u16::MAX);
+        if let Ok(mut links) = links.lock() {
+            links.push((index, url.to_owned()));
+        }
+        tracker.token(TokenKind::Click, message, index)
+    };
+    let hooks = Hooks {
+        tracking: Tracking::Rewrite {
+            base_url: &base,
+            token: &token,
+        },
+    };
+    let mut rendered = pool
+        .render_email(&document, context, &hooks)
         .await
-        .map_err(failed)
+        .map_err(failed)?;
+    let links = links.into_inner().unwrap_or_default();
+    if links.len() > usize::from(u16::MAX) {
+        warn!("email not rendered: the message has more links than a token can name");
+        return Err(RENDER_ERROR);
+    }
+    rendered.html = with_pixel(&rendered.html, &tracker.pixel(message));
+    Ok(Tracked { rendered, links })
 }
 
 /// What a failed render comes to for the message: always [`RENDER_ERROR`], whether the renderer
@@ -129,7 +239,7 @@ mod tests {
         traits.insert("plan".to_owned(), json!("pro"));
         traits.insert("age".to_owned(), Value::Null);
 
-        let context = context_of(&job(), &traits, "ada@example.com");
+        let context = context_of(&job(), &traits, "ada@example.com", None);
 
         assert_eq!(context.person.get("plan"), Some(&json!("pro")));
         assert_eq!(context.person.get("age"), None, "a null trait is absent");
@@ -179,12 +289,56 @@ mod tests {
         );
     }
 
+    fn tracker() -> Tracker {
+        let master =
+            zirv_flow_core::MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=")
+                .unwrap();
+        Tracker {
+            base: "https://flow.example.test".to_owned(),
+            key: Arc::new(
+                zirv_flow_core::HmacRoot::bootstrap_from(&master)
+                    .hmac_key(zirv_flow_core::HmacPurpose::Tracking),
+            ),
+        }
+    }
+
+    #[test]
+    fn with_a_tracker_the_context_holds_signed_unsubscribe_and_preference_links() {
+        let tracker = tracker();
+
+        let context = context_of(&job(), &Map::new(), "ada@example.com", Some(&tracker));
+
+        let unsubscribe = &context.system.unsubscribe_url;
+        assert!(
+            unsubscribe.starts_with("https://flow.example.test/u/"),
+            "{unsubscribe}"
+        );
+        assert_eq!(
+            context.system.preferences_url,
+            format!("{unsubscribe}/preferences")
+        );
+        assert!(!unsubscribe.contains(".invalid"));
+    }
+
+    #[test]
+    fn the_pixel_goes_before_the_closing_body_tag_or_at_the_end() {
+        assert_eq!(with_pixel("<body>x</BODY>", "<i>"), "<body>x<i></BODY>");
+        assert_eq!(with_pixel("<p>x</p>", "<i>"), "<p>x</p><i>");
+        let tracker = tracker();
+        let pixel = tracker.pixel(Uuid::from_u128(2));
+        assert!(
+            pixel.starts_with("<img src=\"https://flow.example.test/t/o/"),
+            "{pixel}"
+        );
+        assert!(pixel.contains("width=\"1\" height=\"1\""));
+    }
+
     #[tokio::test]
     async fn without_a_pool_or_a_document_the_message_fails_as_a_render_error() {
         let context = RenderContext::default();
 
         assert_eq!(
-            render(None, json!({}), &context).await.unwrap_err(),
+            render(None, json!({}), &context, None).await.unwrap_err(),
             RENDER_ERROR
         );
     }

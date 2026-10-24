@@ -46,6 +46,8 @@ pub struct JobContext<'a> {
     clock: Clock,
     render_pool: Option<RenderPool>,
     dns: Option<Arc<dyn DnsResolver>>,
+    public_url: Option<String>,
+    tracking_key: Option<Arc<HmacKey>>,
 }
 
 impl<'a> JobContext<'a> {
@@ -63,7 +65,29 @@ impl<'a> JobContext<'a> {
             clock: Clock::default(),
             render_pool: None,
             dns: None,
+            public_url: None,
+            tracking_key: None,
         }
+    }
+
+    /// Gives the handler the public URL and the key that tracking links are built and signed with.
+    pub(crate) fn with_tracking(
+        mut self,
+        public_url: Option<String>,
+        key: Option<Arc<HmacKey>>,
+    ) -> Self {
+        self.public_url = public_url;
+        self.tracking_key = key;
+        self
+    }
+
+    /// The public URL (no trailing slash) and the tracking key; none unless the worker was given
+    /// both.
+    pub(crate) fn tracking(&self) -> Option<(&str, &Arc<HmacKey>)> {
+        Some((
+            self.public_url.as_deref()?.trim_end_matches('/'),
+            self.tracking_key.as_ref()?,
+        ))
     }
 
     /// Gives the handler the DNS resolver.
