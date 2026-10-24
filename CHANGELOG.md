@@ -15,3 +15,1080 @@ the type/scope is the only breaking-change signal this script reads -- a
 `BREAKING CHANGE:` footer in the commit body is not parsed. Full-rebuild
 command: `scripts/generate-changelog.sh --full`.
 
+## v0.97.0 (2026-10-24)
+
+### Features
+
+- the flow editor's assistant sheet, flow explanations and trace explanations in the inspector
+- assistant draft_flow, explain_flow and explain_trace tools, flow accept and masking
+- flow simulation summary and shared publish check for assistant drafts
+- flow drafts for the assistant (ai_drafts kind flow, flow_id)
+- nest the trace tree by the operator decisions that branch it
+- wire test mode and the Enrollments tab into the flow editor
+- enrollment inspector with per-node counts and operator actions
+- test mode sheet that walks a person step by step
+- draw a path, counts and marks over the flow canvas
+- export a trace tree from the traces feature
+- record 503 previews and a sample-statement plan in the M4 runner
+- split the M4 seed into steps that each stay under an hour
+- measurement runner for the M4 segment benchmarks
+- SQL seed for the M4 segment benchmarks
+- stack and API setup scripts for the M4 segment benchmarks
+- segment assistant panel, draft preview and explanation
+- segment assistant tools, drafts and explain
+- segment drafts in ai_drafts
+- trait index endpoints, slot jobs and slot-aware segment storage
+- typed trait slot columns, race-safe writers and compiler cutover
+- add the segment builder, live count, segment page and explain panel
+- carry segment definition issues on the API error
+- add the per-person segment explain endpoint
+- build the cleared-field set directly and cover a merged person
+- load one person for explain under a cap on events
+- work out how far back each event name is read
+- add the segment.reevaluate job and the dirty-set safety net
+- mark every writer's changes in the dirty set and diff a batch of people in SQL
+- reference evaluator for the segment AST over a person snapshot
+- segment members, history and refresh-now API, with computed fields and the api clock
+- segment.refresh job kind and the worker clock
+- segment membership tables, clock, refresh statement, cadence schedule and privacy hooks
+- reserve the segment. event names against clients, syncs and imports
+- segments API with versions, cycle rejection and preview with data age
+- store segments with versions, cycle check, preview queries and data age
+- compile segment definitions to parameterized SQL
+- add the change classes a segment depends on
+- publish the segment definition schemas in the OpenAPI document
+- add zirv-flow-segments with validation and normalization of segment definitions
+- add the segment definition AST and its parser to core
+- show the assistant panel in the mapping dialog and the manifest editor
+- add the assistant panel components and treat null as absent in the diff
+- add the golden-prompt harness and the evaluate-assistant command
+- purge expired assistant drafts in the hourly maintenance job
+- add the assistant draft and accept routes with their acceptance tests
+- add the assistant tool registry with read_source, draft_mapping and draft_manifest
+- add the assistant's schema lowering, diff and prompt modules
+- store assistant drafts in ai_drafts
+- add the AiTool trait, async three-way repair and fenced personal content
+- the manifest editor, the sample, and Connect account in the web app
+- show streaming streams, their lag and consumer runs in the web app
+- add stream-mode streams, consumer runs and lag to the API
+- add the kafka.consume job kind
+- manifest validate and sample endpoints, OAuth consent start and callback, account tokens at the call sites
+- add the webhook form, secret dialog, panel and sample preview to the sources UI
+- sync runs seed and persist account tokens and take the rate from the source
+- store stream offsets, lag and consumer runs
+- add the webhook receive endpoint, admin operations, preview sample and config keys
+- the http source interprets a manifest on the connector runtime
+- add the Kafka source connector
+- store the OAuth consent state and token secret, serialized refresh, suggested mapping
+- add the webhooks store module, migration 0026 and hook drain support
+- the pure HTTP manifest validator and reference manifests
+- add the stream sync mode, record occurrence, refused items and host list fields
+- runtime authorization-code grant, token store hook, registry-wide reservation numbers
+- add the webhook source kind with the push capability and Mapping::root_fields
+- add the webhook signature module, secret purpose and mapping root fields
+- accept SQL timestamp text in the mapping
+- link sync-written events to the record that produced them
+- edit the delete signal and reconciliation in the sources UI
+- expose the delete signal, reconciliation and sweep limit in the API
+- a mapping editor with preview for stream mappings, transform editor moved to ui
+- preview a stream mapping, accept lists, paths and events on streams
+- sweep, delete signals and reconciliation in the sync run
+- add the query editor and the CA field to the source form
+- check database source settings in validate_config and test the API
+- sync runs map records through map_json and apply events and lists
+- add the sweep, reconciliation runs and record-linked events to the store
+- apply events and list members in the sync batch transaction
+- add the MySQL source and share the discovery helpers
+- show source and stream freshness in the web app
+- report stream and source freshness in the API
+- the file source reads CSV, JSON and NDJSON in resumable byte windows
+- add the PostgreSQL source
+- refresh the stream freshness gauges from the scheduler leader
+- record stream freshness and compute it from the store
+- setting kinds, the egress connect helper and the shared SQL source helpers
+- nested paths, an event rule and map_json in the mapping core
+- add the delete signal to the mapping
+- add the freshness state function
+- show sync runs, their rejects and their trace on the source page
+- add the sync run API and the stream mapping setting
+- add the sync.run job kind
+- add the sync_runs store, batch transaction and schedule mirroring
+- add the sync_runs migration
+- share stream settings validation and credential parsing, extend the fake source
+- add the sync_run cause and JSON record cells
+- give source calls the connector runtime context
+- add cursor, offset, page and link-header pagination drivers
+- send source requests with auth, retries and origin binding
+- add the per-process source rate limit
+- add the connector runtime errors and retry policy
+- add the AI assistant settings and usage pages
+- gate model calls and add the admin AI endpoints
+- add the sources web feature
+- add the sources API
+- purge expired AI transcripts hourly
+- store AI settings, the call log and opt-in transcripts
+- add the ai.* deployment configuration
+- store sources and streams
+- add the zirv-flow-ai provider layer
+- add the Source trait, the source registry and a fake source
+- previous master key config, HMAC root at startup, rotate-master-key command
+- rotate the master key and audit secret writes
+- store sealed secrets and the deployment HMAC root
+- envelope encryption and a stable HMAC root in core
+- add egress.allow config and hand the policy to the API state and workers
+- add the connectors crate with the guarded HTTP client
+- add the pure egress policy to core
+- make the burst duration of the tier runner configurable
+- add the batch ramp and fix the A/B runner's process start
+- finer ramps, decision timing budget and stricter tier runs
+- add the decision A/B runner, the tier runbook section and tier-runner fixes
+- add the resource-tier compose override and the tier runner
+- add the OQ-1 trait storage benchmark scripts
+- add the bench-no-decisions feature to the store
+- add the applied-latency benchmark script
+- add the loadgen ingestion load generator
+- drain a workspace's inbox in concurrent shards
+- bucket inbox rows by record key and take them by shard
+- contacts list, form, detail and definition editor
+- contacts API, contact definition and bulk upsert
+- native contacts, idempotency and the contact inbox kind
+- contact definition and field validation
+- add the event debugger, the explorer and reject replay to the web app
+- serve the event debugger, the explorer and reject replay over the API
+- replay rejected events after a schema fix with a dry run
+- add the event explorer queries with partition-pruned, time-bounded reads
+- write a debugger feed while a workspace is watched
+- add the CSV import wizard and history to the web app
+- add the CSV import API
+- add the import.dry_run and import.run job kinds
+- add the imports tables and the import store
+- add the incremental CSV reader and the mapping core
+- Privacy page for erasure requests, exports and the orphan policy
+- admin replay-erasures re-applies the erasure ledger after a restore
+- person delete, erasure requests, exports and privacy settings
+- privacy.erase and privacy.export jobs, hourly export expiry
+- person deletion, orphan policy, erasure ledger and export
+- people search, profile and timeline pages
+- people search, profile and timeline endpoints
+- people search, profile and timeline readers
+- ingestion endpoints with limits and rate limiting
+- ingest.drain job and leader safety net
+- durable ingest inbox and transactional drain
+- topics and suppressions pages
+- consent, topics and suppressions endpoints
+- consent, topics and suppressions, and consent at merge
+- consent rules and the identifier hash
+- lists page and list detail with CSV import
+- list endpoints, member import and a person's lists
+- static lists with idempotent membership, history and merge union
+- merge rewrite covers events and rejects
+- governed event store, schema registry, rejects, retention, API and pages
+- identity conflicts page in the people feature
+- identity conflict review API and locked trait registry update
+- person.merge.rewrite job re-points conflicts after a merge
+- merge people during identity resolution
+- identity rules for merges in core
+- Fields page for the field registry, with docs
+- field registry API under /workspaces/{ws}/traits
+- people, identities and the field registry in core and store
+- operator master key and per-purpose HMAC keys
+- web UI shell with setup, sign-in, workspaces, members, API keys, jobs, traces and health
+- embed and serve the web UI with a strict CSP
+- optional OTLP trace export
+- first-run setup and jobs-admin API
+- metrics and health listener for worker-only and scheduler-only processes
+- container image, compose quickstart and healthcheck
+- trace ids, decision log, JSON logs and queue metrics
+- durable job queue and scheduler
+- OIDC sign-in with Keycloak as the reference provider
+- workspaces, local accounts, sessions and API keys
+- axum server with health, readiness, metrics and OpenAPI
+- PostgreSQL pool and embedded migrations
+- load TOML and env configuration and add the CLI roles
+- split into layered crates with enforced dependency rules
+
+### Fixes
+
+- a removed step keeps its title in the change list after an accept
+- nothing saves while an accept is in flight, an unknown accept outcome is reconciled with the server, accept is single-flight, adopt keeps a rename
+- FlowChanges counts connections once, unescapes pointer tokens and keeps graph-level paths out of settings
+- read-only canvas during an accept, stale explanation guards, gating reset, trigger citations, compact citation links, revealed nodes, flow-aware diff and re-layout after an accept
+- a held draft keeps the unsaved edits and undo until the accepted draft lands
+- bind URL placeholders to their node, reject embedded ones, mask URLs under the opt-in
+- regenerate openapi and the web client for the flow draft docs
+- simulate before storing a flow draft, document flow kind and accept errors, tests
+- refuse flows over the node limit and mask webhook URLs before the provider
+- word ai_flow_too_large without the lost continuation spaces
+- the reaper requeues a job whose zombie handler holds it, and skips only marked rows
+- the flow simulation treats a purged release as a failure
+- rewrite a page's key in a savepoint so a taken key cannot abort the erasure
+- lock the enroll jobs an erasure strips in id order
+- the reaper skips rows other transactions hold instead of waiting
+- log a purged job at info with the real reason
+- rewrite a running audience page in place instead of replacing it
+- lock expired jobs in id order in the reaper
+- mark every matching job in one statement so none changes state under the erasure
+- do the erasure's job-table work last so it cannot deadlock with a handler
+- an erasure marks running jobs, and a release deletes a marked job
+- test sheet radios, halt text, invalid-draft note and effect titles
+- say in the test sheet that unsaved settings are not walked
+- return focus only after Retry and Skip, and clear it when the selection changes
+- root a truncated trace on a neutral line, never an operator decision
+- keep the inspector detail mounted across a refetch and return focus after an action
+- highlight no wire when the port is unknown and several join the same two steps
+- drop the branch-label counts and say that entered counts step runs
+- name the real cause of an operator 409 and refuse Retry and Skip on a paused flow
+- test mode walks the unsaved draft inline and never saves
+- keep the inspector card mounted across versions and fit the view instead
+- yield status for branches, stale before version overflow, pin early timer
+- fix the segment preview timeout at 20 s
+- ignore the M4 bench state and link the follow-up issues
+- segment assistant masking and restore
+- backfill finish probe, slot lock order, assignment generation
+- enqueue the re-evaluation when a replay or a sync sweep marks people
+- lock segments in one total order in the pass, merge and erasure, so they cannot deadlock
+- update rustls to 0.23.46 for RUSTSEC-2026-0346 to 0349
+- segment form dirty check, leave guard on a data router, explain aggregate and version notes
+- decide a condition on a capped event name when its window is fully loaded
+- map a statement timeout on the explain segment reads to explain_timeout
+- cut every definition timestamp bound to whole microseconds
+- reconcile only unscheduled segments, so a failing refresh is not requeued hourly
+- compile avg as sum over count so large values do not overflow PostgreSQL's avg(float8)
+- schedule and first-refresh segments that predate migration 0031
+- read the wall clock for a segment refresh, not the transaction start
+- a catalog read cancelled at the preview timeout is a 503, not a 500
+- refuse deleting a segment version while its segment exists
+- a never-synced feeding source makes the preview's data age unknown, and live is explicit
+- require the write path's RFC 3339 shape before a temporal cast
+- guard temporal and integer casts, bound since_trait events, and leave equality indexable
+- refuse a NUL in any definition string
+- close the root variants of the segment definition schema and leave operands untyped
+- count a not toward the depth but not the node limit, and check aggregates of an unknown event
+- use is_multiple_of for the canonical duration
+- ask before an accepted manifest draft replaces edited text
+- accept a manifest draft for a source not created yet, and refuse a draft that keeps the placeholder
+- check a draft against the locked saved version when it is accepted
+- keep saved header and query values away from the model provider
+- ask before accepting a draft that would replace edited rows
+- reserve inside the dispatch flight and catch provider panics there
+- store the HTTP sync fixture's tokens under the manifest's binding
+- give the HTTP source fixture the push capability
+- keep the Kafka retry deadline well below the connect timeout
+- never use tokens a store saved under another binding
+- let an api_key header be Authorization
+- refuse percent signs in stream paths and forbidden api_key header names
+- refuse an OAuth callback after the manifest's authentication changed
+- a manifest sample draft keeps the saved base URL and auth
+- size the Kafka relay cap above any cluster's broker count
+- keep probing past a Kafka gap longer than one pass
+- never refresh with a refresh token issued for another token endpoint
+- store Kafka offsets that moved without a record
+- treat UnknownTopicOrPartition from a fetch as a retryable failure
+- say a null value, not an empty one, deletes a Kafka record
+- cap the sessions of the Kafka egress relay
+- probe several offsets past a Kafka gap, not only the next one
+- release only the freshness slot the failed append took
+- report hook freshness again after a failed append
+- sign the webhook timestamp header as sent
+- break the copied webhook curl example onto real lines
+- type the preview sample in the API document and test the replay order
+- the preview applies the delete signal
+- edit the whole mapping in one place
+- accept a dotted path as the delete signal column
+- exact decimal casts, refuse enum keys, correct the tls off text
+- count every record read, duplicates included
+- checked range arithmetic and document the header 422s
+- measure the sweep limit against earlier records, last key wins in a unit, re-mirror reconcile schedules
+- validate file ranges and drop blank discovered keys
+- clear enabled_at where tests disable a stream by SQL
+- lock the source before the stream when queuing a run
+- refuse a cursor or config change while a sync run is active
+- sync run review round 1 (cursor reset, dead-job reconciliation, shared rate limits, NUL samples, fenced run end)
+- end a repeated page stream on three identical full pages, measure link targets raw, test per-source buckets at the api
+- refund a cancelled rate-limit slot only when nothing queued behind it
+- never use an OAuth2 token that carries no binding
+- bound the pagination loop guards and catch a repeated page at once
+- refund a rate-limit token when its wait is cancelled
+- bind OAuth2 tokens to their configuration, fetch them single-flight, zeroize secret temporaries
+- stop redirects that leave the source's origin
+- keep AI call rows from leaking, make the budget a strict cap
+- reserve AI quota before dispatch
+- close the privacy holes in assistant history and tool specs
+- refuse discovered streams with a NUL, count raw client builders in the egress scan
+- scan every connectors source file for unguarded HTTP clients
+- show loading, error and empty states in the source wizard
+- validate discovered stream names before storing them
+- lock the source row before changing its credential, deserialize credentials into SecretString
+- bind a source's secret to its workspace
+- report a vanished secret on replace, rotate through one store function
+- guard every store secret write against an outdated key
+- refuse rotation without an HMAC root and secret writes on an outdated key
+- keep the URL out of a guarded response's debug print
+- treat the Azure WireServer as metadata and cap every response body
+- name every output of a longer burst run apart, not only the generator's
+- correct three burst report figures and name longer bursts apart
+- keep the job span on drain shard tasks and settle the abort test without sleeps
+- run a workspace's drain shards as separate tasks
+- scope the bench stack's compose project and widen the bench feature gate
+- aim the benchmark clients at 127.0.0.1
+- gate the decision timing helper with the test
+- record loadgen latency for every final outcome
+- make loadgen open loop and measure latency from the schedule
+- assert the bench switch is off at compile time
+- never apply past a skipped row, end a shard on an empty batch, default to 8 shards
+- take the oldest rows of a shard's buckets, not a quota per bucket
+- bucket unbucketed inbox rows on each run and bound the shard scans
+- re-check identity owners under the lock; patch and archived identifiers
+- bulk upsert checks the field registry like a single write
+- archived registry fields no longer block contact updates
+- a native contact's identifiers replace the stored ones
+- lock a contact in the drain as the single write does
+- keep the contact key out of the idempotency rows
+- repair the stylesheet merge and wait for the debugger stream in tests
+- load the published schemas of a replay in one query
+- settle the debugger position across workspaces, start new viewers behind open writers, cap streams per process
+- make the debugger stream gap-tolerant, clamped, bounded and honest about a down notifier
+- show replayed events in the debugger feed
+- tell the replay dialog when the redaction rules changed
+- re-apply the current redaction rules when a reject is replayed
+- bound the replay dry run and list at most 200 predictions
+- queue no replay job for a replay that selects nothing
+- read the whole explorer request from one snapshot
+- accept only RFC 3339 timestamps in the explorer's timestamp filter
+- delete a person's debugger feed rows and show replay cannot bring them back
+- name the explorer schemas apart from the list ones
+- serialise retention overrides with partition drops
+- skip a privacy-page poll beat while a refresh is in flight
+- retry a resolution whose locked person was erased meanwhile
+- re-read the longest retention override for every partition drop
+- keep one open identity conflict per shared identity
+- rebuild Cargo.lock and regenerate the API document after the rebase
+- count the rejected rows in the success message of an import
+- give up on abandoned imports and unfinished uploads
+- mark an import failed when its job runs out of attempts
+- stream an upload without a long transaction
+- refuse a file whose quote is never closed
+- count blank lines in the row numbers of an import
+- guard every field of the rejects CSV against spreadsheet formulas
+- continue from the stored checkpoint when a batch is fenced out
+- close the timeline media query the rebase left open
+- reuse parse_limit for the rejects page and regenerate the API document
+- keep polling after a failed refresh of a pending list
+- lock the source record before its person when removing a contribution
+- lock the pending inbox and the whole group before erasure reads its identities
+- scope the consent state text query to the state list
+- name the replay ledger row type for clippy
+- document what erasure covers and that replay erases every id of the group
+- refresh pending erasures and exports on the Privacy page
+- lock the person before the source record when removing a contribution
+- replay erases every person id the erased group had
+- match pending inbox rows by hash at job time and fold gained identities into the ledger
+- list every person merged into the survivor on the profile
+- only bounded reads report a statement timeout
+- refuse prefix and range search on PII traits without access to values
+- mask event properties the schema does not declare
+- regenerate Cargo.lock and openapi.json after the rebase
+- stamp received_at with the database clock
+- keep a rate-limit bucket until it would be full again
+- rename the suppression import schema so it does not collide with the lists import
+- evidence limit, import line numbers, opaque suppression cursor, survivor-only history re-point
+- mask consent evidence for callers without value access
+- lock merge-group lists in one order, report import line numbers
+- cap unmatched and not-found lists in member responses
+- redaction walks every copy, unique open conflicts, live retention cutoffs
+- rule checks judge only added identifiers, record splits, refuse stale moves
+- enforce identity rules on attach and close self-conflicts after rewrites
+- recompute only on stored rule changes and compare numbers by value
+- people store review findings
+- reach the master key through the store and fix backup wording
+- lock the build caches so the two image architectures cannot race
+- keep focus in the key secret dialog, reset dialogs on workspace switch, sign out on 401
+- report the asset's length on HEAD
+- show one active nav item without a workspace and print empty values as a dash
+- give every OpenAPI operation a unique id and drop the client-side dedup
+- redact OTLP endpoint credentials, reject query endpoints, accept future traceparent versions
+- refuse an overflowing dead-letter cursor and restore split SQL lines
+- publish the quickstart on localhost and scope the smoke job's token
+- keep partition upkeep going and zero gauges on step-down
+- open a warm pool's minimum connections at start
+- keep heartbeat connections warm and give a beat one period to acquire
+- isolate worker pools from HTTP and handlers, one shutdown deadline, stronger fence tests
+- resolve concurrent OIDC first sign-ins and log provider failures
+- keep the hashing permit until the blocking work ends
+- close sign-in timing leak, bound argon2, use DB clock for locks
+- report the schema refusal even when the unlock fails
+- refuse edited migrations and keep the migration lock out of the pool
+- mark the CI helper scripts executable
+
+### Performance
+
+- plan the segment re-evaluation batch generically (#149)
+- compile event aggregates as grouped sets over events
+- ANALYZE a trait slot column after its backfill is ready
+- plan compiled segment queries per execution
+- enqueue the re-evaluation once per transaction, not once per mark
+
+### Documentation
+
+- the consent policy in the architecture and the README; version 0.97.0 (#56)
+- the unconfirmed state, the 5.1.x rule, the header rules and the reason for a small SMTP client (#218)
+- the sending mark, the orphan sweep and delivery_unconfirmed in the send pipeline (#220)
+- workspace credentials in the README, architecture 10.1 and 16.2, and the manifest credential schema (#248)
+- real-client review deferred by the operator, tracked in #253 (#238)
+- block document shape, paths and limits in architecture 11 (#238)
+- OQ-25 decided, the mjml syntax field (#237)
+- render host section, 5.1 edges and 11.9; crate-deps self-test covers render (#236)
+- list the webhook content type in the registry
+- state the operator's pick as the reason for the builder move
+- move the template builder core into M6 and render in an isolated process
+- record the templates crate decisions
+- apply the #212 review fixes (stale OQ references, 21.1 style, provenance tags)
+- correct the 16.3 as-built erasure note for M5 and M6 (#212)
+- decide OQ-9, OQ-10, OQ-11, OQ-12, OQ-19 and OQ-32 and record the M6 rulings (#212)
+- tick the M5 exit criteria and add segments and flows to the README status
+- record in the repo memory bank that the bench database now has the 0.76.0 schema
+- link the ingest p99 follow-up to #209
+- link the M8 ingest note to #209 and soften the WAL claim to what the waits show
+- state the drift between the A/B runs, the sampler caveat and the per-event WAL range
+- drop the raw docker stats and queue samples, the run files carry their summaries
+- ingest p99 factor A/B on 0.76.0 with data, and the M8 note (#151)
+- correct the drain time and per-minute figures, state the shm and flow_entries limits
+- drop the raw docker stats samples; the per-container summaries stay
+- tidy the ID_SUBJECTS comment
+- the webhook headers, grace window, retry policy and outcome events
+- describe the schedule, manual and API triggers and the paused-flow skip
+- name the webhook signature window among the clock's readers
+- list the transient awaiting_conditions enrollment state
+- record the engine decisions for #156
+- align section 7, 7.5 and the M5 roadmap with the OQ-7 and OQ-14 decisions
+- keep the roadmap's 'simulation summary' term in 13.2
+- record the M5 flow-engine rulings; decide OQ-7 and OQ-14 (#154)
+- point the M4 summary's "every segment target is met" at the ingestion miss
+- name the 0.57.1 image in the M4 benchmark intro and source the 0.57.0 statistics
+- back the M4 batch-plan figures with committed data
+- record the ingestion API p99 miss of the M4 incremental phase (#151)
+- fix the OQ-2 entry layout
+- M4 incremental passes on 0.57.1; correct the cause of the 0.57.0 miss
+- M4 incremental re-run on 0.57.1 (after #149)
+- tick the M4 exit criteria in the roadmap
+- M4 re-run on 0.57.0 decides OQ-2 (no rollup for v1)
+- M4 segment benchmark data on 0.57.0 (10 M people, 50 M events)
+- architecture 8.2 describes the grouped event aggregates
+- the preview limit is 20 s in the README, and its comment cites 8.3
+- M4 segment benchmark results and the OQ-2 gap
+- raw data of the M4 segment benchmark at 10 million people
+- segment assistant
+- record the segment semantics ruling and scope the clock principle
+- record the M4 supervisor rulings in the architecture (#116)
+- describe the mapping and manifest assistant and bump to 0.46.0
+- the HTTP manifest source and authorization-code runtime, bump to 0.42.0
+- inbound webhooks in the README, the architecture and the roadmap
+- leave the hashbrown rule to clippy
+- hash maps and sets are hashbrown, enforced by clippy
+- hash maps and sets are hashbrown, enforced by clippy
+- the preview's deleted flag covers the delete signal
+- describe event links and the delete signal together
+- sweep, delete signals and reconciliation, bump to 0.38.0
+- file sources, the mapping reference and events in sync runs, bump to 0.38.0
+- database sources in the README and architecture, bump to 0.38.0
+- source freshness in the README and the architecture, bump to 0.38.0
+- sync runs in the README and the architecture, bump to 0.35.0
+- say that the connector runtime follows redirects only within the origin
+- document the connector runtime, bump to 0.35.0
+- describe the AI provider layer and bump to 0.34.0
+- describe sources in the README, bump to 0.34.0
+- secrets encryption and master key rotation, bump to 0.32.0
+- describe the egress policy and bump to 0.32.0
+- extend the M3 egress scope line to every outbound connection
+- record the M3 decisions (OQ-4, OQ-5, OQ-26, OQ-27, OQ-31, egress, secrets)
+- state the worker's fall to zero as the 10-minute drain ends
+- measure the burst drain with the shards on separate tasks
+- correct the burst and sustained figures in the benchmark report
+- link the benchmark misses to their issues and add the raw data
+- add the M2 ingestion benchmark report and the OQ-1 decision
+- add the benchmark runbook and a split-role compose override
+- fix the drain batch sentence in architecture 7.1
+- sharded ingest drain in the README and the architecture, bump to 0.29.0
+- contacts in the README and the architecture, bump to 0.27.0
+- describe the debugger's start in the OpenAPI document
+- event debugger, explorer and replay in the README and the architecture, bump to 0.26.0
+- CSV import in the README and the architecture, bump to 0.25.0
+- deletion, erasure and export in the README and the architecture, bump to 0.24.0
+- people search, profile and timeline in the README and the architecture, bump to 0.23.0
+- document ingestion
+- consent, topics and suppressions, bump to 0.21.0
+- lists in the README and the architecture, bump to 0.20.0
+- plan modular consent dimensions and consent policies for M6
+- merges and conflict review, bump to 0.18.0
+- decide OQ-3 (no unmerge in v1) and OQ-20 (HTTP API only)
+- record that the image is built from the release tag
+- plan native contacts and a Kafka source
+- render the native context files from LF sources
+- keep the module map within the context budget
+- restore line continuations in the Keycloak commands
+- plan sender authentication in M6 and multiple themes in M7
+- make module boundaries a first-class, enforced design rule
+- add event logging, traceability and LLM assistance to the design
+- link theme and snippet versions to the assets they reference
+- close review gaps in the template builder design
+- add the multi-channel template builder to the architecture
+- add architecture and milestone roadmap
+
+### Chores
+
+- add the zirv-flow-templates crate and the minijinja dependency
+- share the chunk loop in seed.sh, drop the pgc alias and two unused options
+- bump the workspace to 0.76.0 for the flaky-test fixes
+- drop a stray run of spaces from the throughput timeout message
+- held saves, reconcile, single-flight accept and the held controls in the editor
+- put the 100,000-person enrollment test in the same serial group as the throughput tests
+- run the job throughput tests one at a time and report the queue counts on a timeout
+- failed accept, read-only hold, stale explanations, gating, citations and switched enrollments
+- simplify the flow assistant sheet
+- poll for the abandoned backends to finish instead of sleeping after an aborted drain
+- the assistant sheet, flow and trace explanations, and the draft hold
+- run the loadgen timing tests on a paused clock with a socketless transport
+- bump the workspace to 0.75.0 for the assistant's flow tools
+- URL placeholder binding, embedded tokens, opt-in masking and a node-limit test that reproduces the leak
+- simplify the assistant's flow tools
+- regenerate the API client for the flow assistant
+- fmt and the draft kind round-trip test
+- bump the workspace to 0.74.0 for the erasure's running-job fix
+- order the erasure tests by polling for the lock wait instead of sleeping
+- satisfy clippy in the erasure deadlock test
+- bump the workspace to 0.73.0 for the flow runtime simulation
+- format the erasure job tests
+- update rustls-webpki and webpki-roots past RUSTSEC-2026-0381/0382/0383 and bump to 0.72.0
+- bump the workspace to 0.72.0 for the flow runtime simulation
+- make the unsaved-edit test deterministic with a failing autosave
+- type the inline graph matcher so lint passes
+- simplify the test mode and inspector code
+- test mode, the inspector, its counts and operator actions
+- accept either index for the per-node counts join
+- run the PostgreSQL flow simulation in the nightly workflow
+- bump the workspace to 0.71.0 for the flow inspector API
+- cover the exact limit-plus-one boundary of the enrollment decision cap
+- assert flow decisions on the timeline carry the trace and enrollment id
+- bump the workspace to 0.70.0 for the ingest test fix
+- bump the workspace to 0.69.0 for the merge rewrite erasure fixes
+- bump the workspace to 0.68.0 for flow merge and erasure handling
+- bump the workspace to 0.67.0 for the flow lifecycle
+- bump the workspace to 0.66.0 for signed webhook delivery
+- bump the workspace to 0.65.0 for flow triggers
+- bump the workspace to 0.64.0 for the flaky test fixes
+- bump the workspace to 0.63.0 for the flow runtime
+- bump the workspace to 0.62.0 for flow test mode
+- bump the workspace to 0.61.0 for the flow simulation
+- bump the workspace to 0.60.0 for the flows store and API
+- quote the nightly test filter so GitHub can parse the workflow
+- run the flow simulation nightly with a random seed and a large population
+- add the deterministic flow simulation harness for the engine
+- keep the engine workflow notes out of the tree
+- bump the workspace to 0.59.0 for the flow engine
+- share the wait-or-out-of-range halt and clear the wait inside the timer match
+- bump the workspace to 0.58.0 for core::flow
+- drop the dead TraitChange binding in flow validation
+- take the RunsPanel poll baseline once in-flight reads settle (#153)
+- keep autovacuum off in the #149 statistics test
+- simplify the grouped aggregate lowering
+- bump to 0.57.0
+- simplify the segment plan and slot statistics change
+- bump to 0.56.1
+- the assistant's drafted segment shows its preview count
+- simplify the M4 segment bench scripts
+- mark the M4 bench scripts executable
+- bump to 0.56.0
+- simplify the segment assistant
+- segment assistant end to end; bless openapi
+- bump to 0.55.0
+- keep the probe SQL on continuation lines
+- guard the probes and the slot-before-segment lock order of the segment jobs
+- stage the queued-exclusive scenario with a 10 s deadlock_timeout
+- drop a useless conversion in the slot tests
+- time the queued-exclusive scenario from the writer so the lock cycle shows
+- short-batch probe and concurrent clear
+- simplify trait slot store helpers
+- staged interleaving for the writer-read-before-assignment window
+- slot comparison, EXPLAIN, cutover, erasure and route tests; openapi, web client, docs
+- bump to 0.54.0
+- parse a stored cause kind with CauseKind::from_str
+- share valueText and the comparison phrase in the segments feature
+- cover the segment builder, live count, page, save and explain states
+- let auto-deref take the transaction
+- bump to 0.53.0
+- read the between bound as an instant directly in event_lower_bounds
+- read explain event rows into a named struct
+- bump to 0.52.0
+- cover the shared operand parsing
+- share definition operand parsing between the lowering and the evaluator
+- nightly comparison of the segment SQL and the evaluator with a random seed
+- compare the compiled SQL with the evaluator on PostgreSQL, and execute the golden fixtures
+- bump to 0.51.0
+- a test-support store function that runs a compiled query and returns the person ids
+- proptest generators for definitions and people, and the normalize equivalence property
+- add proptest behind the segments crate's test-support feature
+- share the event and decision statements of a refresh, use Uuid::as_u64_pair, trim the members handler
+- the segment node probes a batch through the open-member index
+- bump to 0.50.0
+- bump to 0.49.0
+- build the sample query tail before the query instead of patching its text
+- give catalog topics their ids and share the operator table
+- regenerate the web API types for the segment schemas
+- bump to 0.48.0
+- share the optional-string and window-key handling in the segment parser
+- prove the table scan finds a marker stored as bytea
+- give the OAuth mock non-hex access tokens
+- share one loopback-egress fixture across the credential tests
+- bump to 0.47.0
+- prove the M3 credential and sync-trace exit criteria
+- simplify the assistant
+- give the fake source a note knob for injection tests
+- expose the mapping check, preview and manifest sample for reuse
+- simplify the HTTP manifest source
+- number the Kafka migration 0028
+- simplify the Kafka source
+- hashbrown maps in the the HTTP manifest source code
+- simplify inbound webhooks
+- hashbrown maps in the inbound webhooks code
+- bump to 0.43.0
+- bump to 0.45.0
+- give the Redpanda fixture 1 GiB so the tests do not run out of partitions
+- run the Kafka tests against brokers and on both musl architectures
+- assert loading states without racing the mocked response
+- unit-test the webhook receive helpers
+- update the lock file for the jobs test dependency
+- bump to 0.42.0
+- drop the AI handler once the provider has the request
+- dotted workspace form for the hashbrown dependency
+- drain a webhook row end to end and count it under its kind
+- bump the workspace to 0.42.0
+- use hashbrown for hash maps and sets
+- drop the preview test's role before its assertions
+- a postgres table stream previews through the mapping editor
+- simplify database sources
+- simplify sync deletion
+- simplify file sources
+- restore the API tests after the merge and cover the test helpers
+- a throughput measurement helper for the database source
+- a NULL cursor row inside the first page of the composite fixture
+- keep the freshness store tests next to their code
+- simplify source freshness
+- run the PostgreSQL source through sync.run
+- run the MySQL source tests next to the PostgreSQL ones
+- add the PostgreSQL and MySQL drivers to the connectors crate
+- drop explicit derefs clippy flags
+- simplify sync runs
+- mark the sync run fixtures as test code
+- unit tests for the runs API helpers
+- drop wall-clock ceilings from the runtime tests
+- simplify the connector runtime
+- give the runtime test helpers a test of their own
+- keep the runtime test helpers clear of complex types
+- simplify the AI provider layer
+- simplify the sources change
+- bump to 0.33.0
+- simplify the secrets change
+- pin the redaction HMAC derivation with known answers
+- simplify the egress change
+- watch for a surviving drain shard for a second instead of one yield
+- simplify the drain shard tasks
+- bump to 0.31.0
+- simplify the benchmark tooling
+- bump to 0.30.0 and pass the drain shard count through the bench compose
+- time the decision appends of one drain batch
+- bump to 0.29.0
+- make bench-no-decisions fail to compile unless a builder opts in
+- read the bench feature gate from the resolved feature table
+- keep bench-no-decisions out of shipped builds
+- simplify the drain shards change
+- give the contacts definition and records files their own tests
+- renumber the contacts migration to 0017 and bump to 0.28.0
+- simplify the contacts change
+- renumber the investigation migration to 0016 and bump to 0.27.0
+- simplify the debugger and explorer change
+- list the replay kind in the registry tests
+- share the event-property masking rule and the bounded-read helper
+- merge the residuals first, as migration 0015 and 0.26.0
+- simplify the residuals change
+- simplify the CSV import change
+- cover the mapping shape, import jobs, chunking and retention constants
+- simplify the erasure change
+- regenerate openapi.json for the privacy endpoints
+- simplify the people search change
+- move the identifier-kind labels to shared ui
+- simplify the ingestion change
+- simplify the consent change
+- simplify the lists change
+- merge races compare the people the outcomes resolve to
+- bump to 0.17.0
+- simplify the people store change
+- do not rely on the order of decisions written in one transaction
+- simplify the master key change
+- release only the Linux binary
+- release 0.15.1 so the image is built with the locked build caches
+- run the owner's API flow on the compose stack and refuse startup through run
+- an owner creates a workspace through the UI
+- drop an unused test helper
+- publish on every merge to main
+- build the subscriber once and drop an unused reqwest feature
+- cover readiness through the real role wiring; list ops in the config row
+- reuse the readiness alias and restore a misplaced doc comment
+- keep the step-down test's backend kill in its own database
+- date partition tests off the clock and test step-down
+- ignore RUSTSEC-2023-0071 for verify-only RSA use
+- give the pool-saturation test a lease a slow runner cannot outlast
+- tighten the queue and scheduler code
+- tighten the OIDC sign-in code
+- make the lockout acceptance test independent of runner speed
+- share path-id parsing and return impl IntoResponse
+- unit-test each new API module
+- share one helper across the crate-dependency checks
+- set up the repository like zirv-cli
+
+### Other
+
+- api: a first publish creates the default draft only if no draft was saved meanwhile (#56)
+- consent policy: revision preconditions, admin-only version history, visible fail-closed denial, corpus edges, docs (#56)
+- segments: a messages dimension filter is checked against the live dimension catalog (#56)
+- segments: the messages leaf counts the messages of the people merged into the person, with a partial index (#56)
+- simplify: the built-in denial is built directly and the consent gate borrows the clock
+- clippy: one validation branch for a dimension filter, no explicit deref (#56)
+- api: acceptance tests for the consent policy endpoints (#56)
+- api: consent policy draft, publish, versions and evaluate-for-person endpoints (#56)
+- jobs: the reference evaluator and the compiled SQL agree on a generated policy corpus (#56)
+- jobs: gate 3 evaluates the published consent policy and names the rule that denied the send (#56)
+- store: consent policy draft, published versions and ordered evaluation (#56)
+- segments: the consent leaf reads the message being sent and a messages leaf counts sent messages, in a policy only (#56)
+- jobs: the in-flight mark is fenced by attempt and cleared when an attempt fails before the call (#218)
+- jobs: a call is marked in flight before it is made and cleared only on a definitive non-acceptance; a resumed enrollment or flow stop keeps its reason (#218, #264)
+- smtp: the sink has tests of its own (#218)
+- jobs: one rule for an unconfirmed message and for a resumed pre-delivery failure, the mark is written before settle, the identifier key is fetched later (#218)
+- smtp: the final-dot flag is set once the marker is written, link headers encode only inside <...>, more header names are reserved (#218)
+- connectors: the smtp tests import the sink login directly, so the crate's tests build alone (#218)
+- smtp: link headers are percent-encoded, a header name is kept once, long ASCII headers fold at white space (#218)
+- dkim: the test verifier canonicalizes with its own code and both are held to hand-written answers (#218)
+- smtp: a hard bounce needs a 5.1.x enhanced code, read from the last line of the reply (#218)
+- smtp: a reply lost after the final dot is unconfirmed, and a resumed bounce always suppresses (#218)
+- connectors: a destination's credential needs a secret field, not only secret fields (#218)
+- connectors: the smtp destination imports Refusal once (#218)
+- connectors: the smtp destination reads its server and login from the smtp credential (#218)
+- api: the destination registry lists smtp (#218)
+- jobs: open the sender domain's DKIM key for a signing destination and end a bounced message as email.bounced (#218)
+- connectors: the smtp destination with DKIM signing, List-Unsubscribe headers and OQ-12 classification (#218)
+- jobs: the send tests' render child runs under the production memory limit
+- send: open the destination's workspace credential, with its non-secret fields (#220)
+- send: end open messages whose job is gone in a leader sweep instead of in the handler (#220)
+- send: end a message the job gave up on, count the rate wait from its first deferral, and do not judge a delivered message again (#220)
+- deps: ctutils 0.4.5 for RUSTSEC-2026-0385
+- store: state the workspace scope in the suppression lookups so they use the partial index (#220)
+- connectors: SQL sources read the credential user as username so a Username and password credential fits them (#248)
+- send: simplify (#220)
+- core: a decoded DMARC mailbox with whitespace or a control character is hidden (#257)
+- sending: simplify (#257)
+- release: 0.93.0
+- release: 0.92.0
+- store: the lock tests poll for a waiting backend instead of sleeping (#248)
+- core: strict DMARC mailto escapes and the full u64 size range (#257)
+- jobs: end the message of a person merged away mid-send, and list the new kind in the registry tests (#220)
+- api: the OAuth token write reads the client id from the share-locked credential (#248)
+- api: an http source update share-locks the credential it keeps until commit (#248)
+- store, jobs: the message row is pending from the job's first run (#220)
+- store: concurrency tests for the use lock against archive and for two concurrent rotations (#248)
+- api: a consent survives a rotation of its own credential, and still fails for another client (#248)
+- api: a rotation or a patch cannot drop a field a live source or destination requires (#248)
+- api: an http source's credential must fit the schema its manifest declares (#248)
+- connectors: test the system resolver's private-alias path (#254)
+- store, docs: erasure and merge tests of the message log, as-built notes of the send pipeline (#220)
+- connectors: a secret the manifest auth reads must be a secret credential field (#248)
+- store: backfilled credential names carry the owner's full id so they cannot collide (#248)
+- api, web: validate, document and capture the action.send node; type fallout of the generated client (#220)
+- credentials: simplify (#248)
+- connectors: report a private alias on lookup errors too (#254)
+- jobs: tests of the send pipeline, the shared Retry-After parser and the fake destination ledger (#220)
+- release: 0.90.0
+- jobs: the delivery.send job, its gates, rate gates and the send node in flow.step (#220)
+- jobs: record a private alias as a mismatch with a fixed note (#254)
+- connectors: report an alias to a non-public name as DnsError::PrivateAlias, set preserve_intermediates (#254)
+- core: document the private alias rule and add its fixed note (#254)
+- core: hostname top label, RFC 7489 DMARC URIs and tags, RFC 7208 SPF macros (#254)
+- release: 0.89.0
+- store: the messages log, suppression scope, send outcome and queue gauges (#220)
+- core, engine: the action.send node, its effect and the reserved email. events (#220)
+- jobs: delivery tests use credential_id after the merge of main (#248)
+- store: drop a needless struct update in the destination test (#248)
+- web: Credentials settings page, credential picker with inline new credential, sources use credential_id (#248)
+- api: workspace credentials API, credential_id on sources and destinations, kinds, rotate, test, archive; bless openapi (#248)
+- release: 0.88.0
+- api, jobs: drop the template sender field from tests merged from main (#217)
+- store: compare the incoming change's (changed_at, id) pair in the re-affirm check (#251)
+- jobs: open the workspace credential of a source right before each read (#248)
+- store: migration 0047 workspace credentials, backfill in place, open, rotate, archive, used-by (#248)
+- store: review round 2 for sending domains, lock order, rebuilt redaction, no alias into private zones (#217)
+- connectors: manifest auth.credential schema, credentials merged from parts, name checks for stored credentials (#248)
+- core: credential kinds, schemas, validation, hint and fingerprint rules, workspace_credential purpose (#248)
+- store: review round 1 for sending domains, lock the sender, derive it from the draft, public names only, scan back-off (#217)
+- api: re-bless openapi for the import row wording (#219)
+- store: precise re-affirm rule and a Superseded outcome (#219)
+- webhook: archived-template test, a completed send never turns into a retry, recording survives cancellation, lock rule documented (#216)
+- api: stop the consent import at the row cap and name unknown values (#219)
+- store: older changes never replace newer state, re-affirm advances past newer records, strict dimension maps (#219)
+- webhook: attempt rows commit on their own, Content-Type and hop-by-hop headers are reserved, archived template test (#216)
+- release: 0.85.0
+- sending: simplify (#217)
+- release: 0.84.0
+- consent: simplify (#219)
+- jobs: list sending_domain.verify in the registry tests (#217)
+- release: 0.83.0
+- webhook: simplify (#216)
+- segments: re-bless the golden corpus for unscoped consent leaves (#219)
+- core: tidy the new tests for clippy (#219)
+- api: bless openapi, regenerate the web client, document sending domains and the rsa audit note (#217)
+- api: sending domains and sender identities, sender_unverified on template publish (#217)
+- api: the destination registry test lists the webhook (#216)
+- jobs: the worker's DNS resolver and the sending.recheck_hours setting (#217)
+- web: regenerate the API client for consent dimensions (#219)
+- api: consent dimensions CRUD, dimension-aware consent and history, consent CSV (#219)
+- store: page the consent states for export (#219)
+- api: openapi and web types for the webhook template, flow acceptance test for template validation (#216)
+- jobs: sending_domain.verify and the leader's periodic domain re-check (#217)
+- jobs: tests for the shared verdict and attempt path, templated payloads, after-commit actions (#216)
+- store: sending domains, records, sender identities and require_verified_sender, migration 0046 (#217)
+- jobs: webhook.call delivers through the webhook destination and the shared verdict and attempt code (#216)
+- store: name the read rule's state row (#219)
+- store: consent dimensions, dimension-scoped consent records and merge (#219)
+- api: refuse a webhook template that is unknown, unpublished, archived or not of the webhook channel (#216)
+- connectors: built-in webhook destination, 408 retries and unexpected statuses are terminal (#216)
+- core: optional template on action.webhook, carried by the webhook effect (#216)
+- connectors: DnsResolver trait, hickory system resolver and a fixture resolver (#217)
+- core: DKIM key generation, record texts and the record matching rules (#217)
+- core: dimension-scoped consent read rule and record merge (#219)
+- store: export count_delivery_attempt (#215)
+- store: archive removes the bucket, ensure locks the destination, count after commit (#215)
+- connectors: Retry-After refuses signed values, reads obsolete dates, saturates (#215)
+- store: keep the block's remaining count test-only (#215)
+- api: fixed check messages with codes, cross-workspace test (#215)
+- jobs: the leader publishes only the destination gauges (#215)
+- store: private token blocks, monotonic refill, self-healing bucket, workspace-led indexes, attempt counters (#215)
+- connectors: shared Retry-After parser (#215)
+- release: 0.82.0
+- destinations: simplify (#215)
+- api: destinations CRUD and check, Admin only, sealed credentials (#215)
+- jobs: per-destination gauges and counters, refreshed by the leader (#215)
+- store: destinations, delivery attempts and the OQ-9 rate bucket (#215)
+- connectors: Destination trait, registry and context (#215)
+- core: destination credential secret purpose (#215)
+- release: 0.81.0
+- templates: non-ASCII safe tag scan, raw blocks, stored drafts as 422 (#238)
+- templates: one content per document, typed parse errors, raw HTML and field hardening (#238)
+- templates: simplify (#238)
+- templates: pin ammonia 4.2.4 for its sanitizer security fixes (#238)
+- api: block templates keep their category; blocks draft, publish and preview test (#238)
+- templates: block document v1, blocks content type and renderer (#238)
+- release: 0.80.0
+- templates: count mjml nesting over the htmlparser tokens mrml reads (#237)
+- templates: mjml depth guard, include by local name, position wording, lang message (#237)
+- api: an mjml template drafts, publishes and previews like an html one (#237)
+- render: pool equals in-process for the mjml corpus (#237)
+- templates: mjml golden corpus, render and validation tests, timing test (#237)
+- templates: mjml syntax on email content, mrml render stage and checks (#237)
+- release: 0.79.0
+- api: where-used response describes one entry per flow (#214)
+- api: gate the publish timing tests on the child receiving the request (#214)
+- templates: audit real-person previews, check draft shape, version summaries, one where-used entry per flow (#214)
+- api: publish validates with no lock held and refuses a draft that changed (#214)
+- templates, render: validation dispatches through the content-type registry (#214)
+- templates: simplify (#214)
+- templates, render, api: validate runs in the render host (#214)
+- api: bless openapi and regenerate the web client types for templates (#214)
+- api: template routes, publish, where-used and preview through the render pool (#214)
+- store: templates, drafts, immutable versions, field catalog and where-used (#214)
+- templates: content-type registry (html, webhook) and a shared sample context (#214)
+- release: 0.78.0
+- render: one deadline per render, concurrent boot, ready-frame protocol faults (#236)
+- render: pool tests start children that announce ready (#236)
+- render: ready handshake, parent-side limit warning, bounded stderr, clean close is protocol (#236)
+- render: simplify (#236)
+- render: hidden render-host command, render config section, pool in the API state and jobs context (#236)
+- templates: the token function is Sync, so a pooled render future is Send (#236)
+- render: the zirv-flow-render crate, pool client and child-side serve loop (#236)
+- templates: wire types for an isolated render and a split-out tracking step (#236)
+- release: 0.77.0
+- templates: collapse a nested if (#213)
+- templates: static callable scan, nested event properties, validation caps and sample failures (#213)
+- templates: skip comments and raw-text elements, first href only, real non-ASCII case (#213)
+- templates: validate by sample render, exact merge paths, header and output caps (#213)
+- templates: treat / and NUL after <a as attribute separators (#213)
+- templates: keep the workflow decisions file out of the tree (#213)
+- templates: simplify (#213)
+- templates: render email and webhook content, validate, and post-render link steps
+- templates: add the document types, render context, issue codes and sandbox
+- bench: add the factor A/B script for the ingest p99 with and without re-evaluation (#151)
+- bench: M5 timer lateness benchmark at 1 million waiting enrollments (#169)
+- sim: unit tests for the driver's order, the plans and the generated worlds
+- sim: use is_multiple_of where clippy asks
+- sim: make a seed determine the run and guarantee every coverage mode from it
+- sim: per-kind overlap checks, duplicate outcome events, honest counters, retry delays, later re-claims, population-aware coverage
+- sim: describe the per-seed tests in the nightly job, fix two lints and the module docs
+- sim: seeded destination failures, retries and dead calls, and waits on webhook outcomes that settle once
+- sim: log every committed trait and list write attempt and check them in invariant 1
+- sim: flag a wake that moves an enrollment with no wake_at
+- sim: make the concurrent duplicate overlap deterministic from the lock state and count it per variant
+- sim: put every job execution through at least one injected failure and assert it
+- sim: break ties between equal job labels from seeded data and fingerprint webhook calls by key and body
+- sim: run each CI seed as a test of its own so they run in parallel
+- sim: watch a claimed job's payload instead of re-reading it, tidy names and a SQL literal
+- jobs: check the four flow invariants from the tables after the simulation
+- jobs: drive the real flow runtime over 90 virtual days with crash injection
+- engine: expose the simulation's seeded generator for the PostgreSQL layer
+- flow tests: prove the timeline shows what the real step walk wrote
+- erasure: do not read a node id as a reference to a person
+- flow inspector: keep the newest decisions of a long enrollment
+- flow inspector: order an enrollment's path by when the walk wrote it
+- web: wait for the workspace menu links before reading them in the People route test
+- ingest tests: roll back the shard-take transaction before the next take
+- decisions: drop a needless borrow in end_in_flight
+- flow editor: the Versions view's Publish… does nothing while a lifecycle action runs, and says so
+- decisions: build graph points with GraphPoint::at and of_version instead of repeating the struct literal
+- inspector: share the decision page tail, drop stray escapes in SQL strings and wrap long comments
+- flow editor: the empty Versions view shows the publish in flight
+- flow editor: a late publish result moves no focus on another page
+- flow editor: order every applied flow state and keep lifecycle actions and publish from overlapping
+- Re-bless openapi.json for the retry and skip trace description
+- flow editor: show the issues a refused publish found without setting state in an effect
+- flow editor: make the repeated-announcement test announce the same words twice in a row
+- flow editor: the editor owns the publish request, so a hung publish cannot trap the dialog
+- flow editor: review fixes for publish and lifecycle
+- Read operator retry and skip decisions from the enrollment's trace in the tests; document it
+- flow editor: clear a failed save when the draft is back at the saved state
+- Revert "Keep operator retry and skip decisions on the operator's trace (ruling 43163028)"
+- flow page: one notice helper for lifecycle errors, pass itemsFor directly
+- publish dialog: use the shared LoadingState and draw an issue's words once
+- flow editor: the views test expects the versions list, not the placeholder
+- Fix the inspector route tests: fixtures, a read key for the other workspace, malformed ids are 404
+- Keep operator retry and skip decisions on the operator's trace (ruling 43163028)
+- flow editor: test that an edit made during a failed save is flushed when no timer is pending
+- flow editor: versions list and a read-only view of one version
+- Seed realistic tables in the inspector EXPLAIN test and match the decision index by its condition
+- flow editor: pause, resume and archive for admins
+- flow editor: publish dialog with the dry-run impact preview
+- Fix a redundant field name in the operator route
+- Test the inspector routes and the person timeline of flow decisions
+- Test that flow decisions carry their subjects and that a failed, retried and skipped enrollment stays on one trace
+- Describe the inspector routes in openapi.json and regenerate the client
+- Add the flow inspector routes: enrollments, one enrollment's path, per-node counts
+- Expose cause.kind in the API schema as an enum
+- Add the flow inspector store reads: enrollment list, path and per-node counts
+- Flow decisions carry the flow version and node; operator retry and skip stay on the enrollment trace
+- Add the indexes the flow enrollment inspector reads need
+- flow editor: import the xyflow types the lint rule allows in the connect test
+- flow editor: test that letting go of a drag over a step wires the output
+- flow editor: give the panel a minimum height and let the page scroll in a small window
+- flow editor: a failed save keeps saying it is checking while a newer edit waits
+- flow editor: put every connection issue on the source step's output, whatever its path
+- flow canvas: give an exit step the height its three lines need
+- flow editor: menu placement, issues popover, stale issues, per-step sheet, tabpanel, layout
+- flow editor: placeholder branch title, empty-flow issue text, weight clamp, boolean choices
+- flow editor: simplify the canvas node build, drop dead and needless exports, use tokens in the fl styles
+- lock_merged_and_survivor: re-read merged_into with a plain read after the locks
+- flows: tests for the list, editor, validation, access and keyboard; nav count
+- lock_merged_and_survivor: end each round with one savepoint statement, and say what the race is
+- flows: list, new flow, canvas editor page, routes and nav entry
+- flows: step sheet, per-kind fields and the flow settings view
+- flows: draft state with debounced autosave, undo and validation after save
+- flows: graph model, computed layout, issue messages and step wording
+- ui: add a non-modal Sheet slide-over
+- segments: export ConditionEditor, describeCondition and useCatalog for flow branches
+- web: add @xyflow/react 12.12.0 for the flow editor canvas
+- merge rewrite: lock the merged person and the survivor before writing
+- erasure: delete the pending merge rewrite jobs of the erased group
+- flow audience page: wrap the lock statement's SQL like the others
+- flow audience page: lock the page's people and their survivors together, in id order
+- lock_enrollment: release a round's locks before locking a changed group
+- merge: fold flow_entries in the merge transaction
+- flow.enroll: an audience page locks the people it read before it queues the next page
+- enroll_entries: lock the resolved people and re-check them under the lock
+- flow.enroll: a redelivered occurrence is a replay under the loser's id
+- erasure: rewrite the unique key of a page job with its cursor
+- flow control: exit_batch and exit_people share one exit statement
+- flow.enroll: erased people leave no decision, merged-away people enroll as the survivor
+- flow.enroll test: the publish waits for the publisher's own backend
+- webhook.call: an exited or merged-away enrollment ends done without a call
+- flow.step: lock the person and its survivor, FOR UPDATE, and re-read a changed person
+- privacy: erasure strips the person from pending flow.enroll jobs
+- people: a merge exits the merged-away person's enrollments with reason merge
+- fmt
+- flow lifecycle: say a bulk exit is point-in-time
+- flow.step: a released enrollment records its resumed decision
+- flow lifecycle: tests that the keyset cursor excludes the people at and before it
+- flow bulk exit: read the flow state under the flow row lock, in the transaction that queues the job
+- flow.step: a held enrollment on a live flow takes its job at once
+- flow lifecycle: page batches by a keyset cursor, refuse operator controls on a paused or archived flow, skip only placed failures
+- Simplify the flow lifecycle batches: one lock helper, one resume update, typed held-input check
+- api: test the mapping of a refused operator control
+- jobs: list flow.settle and flow.lifecycle in the registry test
+- api: Admin retry, skip and bulk-exit controls for flow enrollments
+- flows: goals and exit criteria, held steps while paused, archive and bulk exit batches
+- engine: leaving the trigger segment exits under a leaves_segment criterion
+- core: check at most two signature values per request
+- webhook.call: no person lock across the call, no redirects, tell the flow on the last attempt
+- connectors: a redirect limit of zero returns the 3xx unfollowed
+- signature: accept a request when any one signature header value verifies
+- simplify webhook delivery: reuse the secret plaintext helper and the signing purpose
+- connectors: name the type a post test records
+- jobs: list webhook.call in the registry tests
+- jobs: the webhook.call job kind, with signed delivery, retry and outcome events
+- jobs: let a handler ask the worker to wait before the next attempt
+- connectors: a POST through the guarded client
+- api: an Admin API to create and rotate the workspace webhook signing secret
+- store: signing keys with a grace window, the webhook subject lock and the outcome events
+- core: the webhook envelope, headers and signature value, and the reserved outcome event names
+- store: lock the segment's refresh before a publish fans out
+- flow triggers: drop the wall-clock bound from the 100,000-person test
+- flow triggers: enroll only the members present at the publish
+- Fix the type complexity lint in the event enroll grouping
+- Simplify the flow triggers: fold parallel vectors, inline one-use helpers, share the refresh outcome
+- Manual start and API trigger routes
+- Schedule triggers and the publish fan-out
+- Event triggers: enroll through flow.enroll once per apply batch
+- flow.enroll: enroll people in batches of 1,000, and start flows from segment changes
+- api: check the metrics body for the raw path and method, not a bare 1234
+- web: regenerate the API client for the in-flight enrollment description
+- jobs: store and decide every engine exit reason, and treat a conversion as no walk end
+- webhooks: read the receive path's time from the state clock so the window-edge test is fixed-time
+- flows: lock the person before the enrollment and wake only waiting enrollments
+- flows: keep a failed step's start state, rewrite flow traits, defer early timers, erase flow jobs
+- flows: regenerate the OpenAPI document and web client with the flow test schemas
+- flows test mode: one conversion per enrollment, roll back a failed step whole, distinct schema names
+- engine: record the settings conversion once per enrollment and settle only live enrollments
+- jobs: use chrono directly and drop the engine time re-exports
+- store: erase a person's enrollments, waits and entries with them
+- flows: regenerate the OpenAPI document and web client for the settings fields
+- flows test mode: apply the flow goal and exit criteria, stop at a failed effect, replay a real person
+- engine: format the settings outcome
+- engine: decide what the flow goal and exit criteria do to an enrollment
+- jobs: format the flow.step tests
+- api: reuse the explain snapshot loader and one condition parser in test mode
+- jobs: add the flow.step kind and the publish dry-run count of in-flight enrollments
+- api: take the engine through the workspace dependency table
+- flows: document the test endpoint and regenerate the web client
+- flows: serve POST /flows/{id}/test and cover it end to end
+- flows: add the test-mode walk over a snapshot on a virtual clock
+- store: add the flow runtime tables, enroll, step records, waits and event matching
+- engine: bind a simulated event to the wait it matched on arrival, and state the nightly crash coverage exactly
+- engine: stop the simulation on an unusable seed or population, and pin the race-only defect to the first invariant
+- engine: drop a one-use helper and a duplicated report loop from the simulation
+- engine: reuse the key helpers and one world builder in the simulation tests
+- zirv-flow-api: use core's flow limits instead of local copies
+- store: keep each flows test beside the code it covers
+- api: keep the flow issues in the boxed problem extras so the error stays small
+- store: format the refused-transition message
+- api: publish the flows routes in openapi.json and regenerate the web client
+- api: add the flows API, publish validation, the dry-run impact preview and the workspace time zone
+- store: name the state in a refused transition, not an unreadable verb
+- engine: add the pure zirv-flow-engine crate with the step interpreter
+- store: add flows with immutable versions, the lifecycle and the workspace time zone
+- core: limit flow exit criteria and skip the weight sum of an oversized split
+- core: refuse unknown flow keys, bound validation work and output, and tighten URL, time and cycle checks
+- core: flow graph types, settings and structural publish validation
+- Initial commit
+
