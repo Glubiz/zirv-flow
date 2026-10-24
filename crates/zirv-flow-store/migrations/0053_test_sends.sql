@@ -4,13 +4,25 @@
 -- says `messages.test` is false for every stored row, and that stays true. Applied migrations are
 -- never edited, because sqlx checks their checksums; this one only adds tables.
 --
--- Neither table stores an address. `test_sends.recipient_hash` is the keyed identifier HMAC the
--- `suppressions` table is keyed by, and the allowlist holds the same hash plus a masked hint (the
--- first character, `***`, then `@domain`). The log is not person-scoped: it names no person, so the
+-- The log stores no address. `test_sends.recipient_hash` is the keyed identifier HMAC the
+-- `suppressions` table is keyed by. The log is not person-scoped: it names no person, so the
 -- erasure scan has no column to find. Erasing a person deletes the rows whose `recipient_hash` is
--- one of the person's erased identifier hashes; the allowlist is admin configuration that an
--- admin added, holds only a hash and a hint, and is not touched by a person's erasure. Rows older
--- than 13 months are deleted by the `events.retention` job.
+-- one of the person's erased identifier hashes. Rows older than 13 months are deleted by the
+-- `events.retention` job.
+--
+-- The allowlist holds, besides the hash and a masked hint, the normalised address sealed with the
+-- keyring like a credential secret: an `encrypted_secrets` row of its own purpose
+-- (`test_send_address`) whose id is the entry id, so the associated data binds the workspace and
+-- the entry. No job payload carries an address; the API finds an entry by the hash of the address
+-- asked for and the job opens the sealed one. Erasing a person deletes the entries whose hash is
+-- one of the person's erased identifier hashes, because they now hold that person's address.
+
+-- The CHECK is replaced, not extended.
+ALTER TABLE encrypted_secrets DROP CONSTRAINT encrypted_secrets_purpose_check;
+ALTER TABLE encrypted_secrets ADD CONSTRAINT encrypted_secrets_purpose_check
+    CHECK (purpose IN ('connector_credential', 'oauth_token', 'ai_provider_key', 'webhook_secret',
+                       'webhook_signing', 'destination_credential', 'dkim_key',
+                       'workspace_credential', 'test_send_address'));
 
 CREATE TABLE test_sends (
     -- Also the idempotency key at the destination.
@@ -50,5 +62,7 @@ CREATE TABLE test_send_allowlist (
     -- The first character, `***`, then `@domain`.
     display_hint text NOT NULL,
     created_at   timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (workspace_id, address_hash)
+    UNIQUE (workspace_id, address_hash),
+    -- The sealed address; deleting the secret deletes the entry.
+    FOREIGN KEY (workspace_id, id) REFERENCES encrypted_secrets (workspace_id, id) ON DELETE CASCADE
 );

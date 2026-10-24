@@ -287,11 +287,13 @@ pub use templates::{
     read_template_field_catalog, save_template_draft, template_where_used, update_template,
 };
 pub use test_sends::{
-    AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend, TEST_SEND_JOB_KIND,
-    TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome, TestSendReservation,
-    WORKSPACE_HOURLY_LIMIT, add_allowlist_entry, delete_allowlist_entry, delete_test_sends_before,
-    delete_test_sends_by_hash, find_test_send, finish_test_send, is_allowlisted, is_test_send,
-    list_allowlist, list_test_sends, masked_hint, reserve_test_send,
+    ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
+    TEST_SEND_JOB_KIND, TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome,
+    TestSendReservation, WORKSPACE_HOURLY_LIMIT, abandon_orphaned_test_sends, add_allowlist_entry,
+    delete_allowlist_by_hash, delete_allowlist_entry, delete_test_sends_before,
+    delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
+    is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
+    reserve_test_send,
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,

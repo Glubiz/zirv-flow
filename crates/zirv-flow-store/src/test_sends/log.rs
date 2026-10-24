@@ -24,6 +24,8 @@ pub const TEST_SEND_RETENTION_MONTHS: i32 = 13;
 
 /// Rows deleted per statement by the lifecycle deletes.
 const BATCH: i64 = 5_000;
+/// Rows one abandon sweep ends.
+const ABANDON_BATCH: i64 = 100;
 
 /// How a test send ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,8 +131,8 @@ const COLUMNS: &str = "id, template_id, template_version, member_id, destination
     sender_identity_id, recipient_hash, recipient_member_id, render_context, outcome, reason, created_at, \
     completed_at";
 
-/// A test send to reserve a slot for. The address, when the recipient is an allowlisted one, is
-/// passed to the job in its payload only: no table keeps it.
+/// A test send to reserve a slot for. It carries no address: the job finds the recipient by the
+/// row's hash.
 pub struct NewTestSend<'a> {
     pub id: Uuid,
     pub workspace: WorkspaceId,
@@ -145,8 +147,6 @@ pub struct NewTestSend<'a> {
     /// The person whose values render the template; none for the sample. Travels in the job
     /// payload only, so the log names no person.
     pub person: Option<Uuid>,
-    /// The allowlisted address to send to; none when the recipient is a member.
-    pub address: Option<&'a str>,
     pub now: OffsetDateTime,
     pub trace: &'a TraceContext,
 }
@@ -235,7 +235,6 @@ pub async fn reserve_test_send(
         "workspace_id": new.workspace.as_uuid(),
         "test_send_id": new.id,
         "person_id": new.person,
-        "address": new.address,
     });
     enqueue(&mut *connection, &job).await?;
     row.into_send()
@@ -338,6 +337,36 @@ pub async fn finish_test_send(
     .await
     .map_err(StoreError::query)?;
     Ok(done.rows_affected() > 0)
+}
+
+/// The reason of a row whose job is dead or gone.
+pub const ABANDONED: &str = "abandoned";
+
+/// Ends the `queued` rows that have no live `template.test_send` job: a job the reaper buried or
+/// that was deleted never runs again, so nothing else would end its row. Each ends `failed:
+/// abandoned`. A `ready` or `running` job counts as live (a running one even with an expired
+/// lease, until the reaper buries it), and the job is found by the test send's id in its payload,
+/// which a deferral copy carries. Returns the ids, at most one batch.
+pub async fn abandon_orphaned_test_sends(
+    connection: &mut PgConnection,
+    now: OffsetDateTime,
+) -> Result<Vec<Uuid>, StoreError> {
+    sqlx::query_scalar(
+        "UPDATE test_sends t SET outcome = 'failed', reason = $1, completed_at = $2 \
+         WHERE t.id IN ( \
+            SELECT s.id FROM test_sends s WHERE s.outcome = 'queued' AND NOT EXISTS ( \
+                SELECT 1 FROM jobs j WHERE j.kind = $3 AND j.state IN ('ready', 'running') \
+                AND j.payload ->> 'test_send_id' = s.id::text) \
+            ORDER BY s.created_at, s.id LIMIT $4 FOR UPDATE OF s SKIP LOCKED) \
+         AND t.outcome = 'queued' RETURNING t.id",
+    )
+    .bind(ABANDONED)
+    .bind(now)
+    .bind(TEST_SEND_JOB_KIND)
+    .bind(ABANDON_BATCH)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
 }
 
 /// Deletes the rows older than the retention as of `now`, in batches; how many.
@@ -450,7 +479,6 @@ mod tests {
             recipient_hash: [1; 32],
             recipient_member: None,
             person: None,
-            address: None,
             now,
             trace,
         }
@@ -635,5 +663,87 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_queued_row_whose_job_is_dead_or_gone_ends_abandoned_and_a_live_one_stays(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool).await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let now = datetime!(2031-05-06 07:00 UTC);
+        let [dead, gone, ready, running, ended] =
+            [(); 5].map(|()| new(ws, None, now - Duration::minutes(5), &trace));
+        for send in [&dead, &gone, &ready, &running, &ended] {
+            reserve(&pool, send).await;
+        }
+        let job_of = |id: Uuid, state: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query("UPDATE jobs SET state = $2 WHERE payload ->> 'test_send_id' = $1")
+                    .bind(id.to_string())
+                    .bind(state)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        job_of(dead.id, "dead").await;
+        sqlx::query("DELETE FROM jobs WHERE payload ->> 'test_send_id' = $1")
+            .bind(gone.id.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE jobs SET state = 'running', lease_token = gen_random_uuid(), \
+                lease_expires_at = now() - interval '1 hour', attempts = 1 \
+             WHERE payload ->> 'test_send_id' = $1",
+        )
+        .bind(running.id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        finish_test_send(
+            &mut connection,
+            ws,
+            ended.id,
+            TestSendOutcome::Sent,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+        job_of(ended.id, "dead").await;
+
+        let mut abandoned = abandon_orphaned_test_sends(&mut connection, now)
+            .await
+            .unwrap();
+
+        abandoned.sort();
+        let mut expected = vec![dead.id, gone.id];
+        expected.sort();
+        assert_eq!(abandoned, expected);
+        for id in [dead.id, gone.id] {
+            let row = find_test_send(&mut connection, ws, id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.outcome, TestSendOutcome::Failed);
+            assert_eq!(row.reason.as_deref(), Some(ABANDONED));
+            assert_eq!(row.completed_at, Some(now));
+        }
+        for id in [ready.id, running.id] {
+            let row = find_test_send(&mut connection, ws, id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.outcome, TestSendOutcome::Queued);
+        }
+        let again = abandon_orphaned_test_sends(&mut connection, now)
+            .await
+            .unwrap();
+        assert!(again.is_empty());
     }
 }
