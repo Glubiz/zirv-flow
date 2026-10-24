@@ -125,12 +125,24 @@ struct MessageRow {
     address_hash: Option<Vec<u8>>,
 }
 
+/// `text` cut to at most `max` bytes, never inside a character.
+fn truncated(text: &str, max: usize) -> &str {
+    let end = text
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+        .take_while(|at| *at <= max)
+        .last()
+        .unwrap_or(0);
+    &text[..end]
+}
+
 /// The dedupe key of a feedback event: the destination, the message, the event name and the
 /// provider's event id when it has one. A provider that retries a webhook repeats all of them.
 fn dedupe_key(feedback: &ProviderFeedback<'_>) -> String {
     let id = feedback
         .provider_event_id
-        .map_or("", |id| &id[..id.len().min(MAX_PROVIDER_EVENT_ID)]);
+        .map_or("", |id| truncated(id, MAX_PROVIDER_EVENT_ID));
     format!(
         "fb:{}:{}:{}:{}",
         feedback.destination,
@@ -367,6 +379,26 @@ mod tests {
     use crate::{is_suppressed, suppressing_scope};
 
     const NOW: OffsetDateTime = datetime!(2031-05-06 07:08:09 UTC);
+
+    #[test]
+    fn a_dedupe_key_never_cuts_inside_a_multibyte_character() {
+        let id = "\u{20ac}".repeat(100);
+        let trace = TraceContext::root(zirv_flow_core::Cause::api("t"));
+        let key = dedupe_key(&ProviderFeedback {
+            workspace: WorkspaceId::new(),
+            destination: Uuid::nil(),
+            message: Uuid::nil(),
+            event: FeedbackEvent::Delivered,
+            provider_event_id: Some(&id),
+            now: NOW,
+            fallback_trace: &trace,
+        });
+
+        assert!(key.ends_with(&"\u{20ac}".repeat(42)));
+        assert!(!key.ends_with(&"\u{20ac}".repeat(43)));
+        assert_eq!(truncated("abc", 8), "abc");
+        assert_eq!(truncated("\u{20ac}", 2), "");
+    }
 
     struct Sent {
         person: Uuid,

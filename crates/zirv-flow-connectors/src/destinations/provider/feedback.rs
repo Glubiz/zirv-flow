@@ -8,8 +8,8 @@ use zirv_flow_core::signature::Scheme;
 use super::classify::literal_of;
 use crate::manifest::{FeedbackSpec, VerificationSpec};
 
-/// The longest provider event id kept for deduplication, in characters.
-const MAX_EVENT_ID_CHARS: usize = 128;
+/// The longest provider event id kept for deduplication, in bytes.
+const MAX_EVENT_ID_BYTES: usize = 128;
 /// The longest message id read.
 const MAX_MESSAGE_ID_CHARS: usize = 64;
 
@@ -82,15 +82,18 @@ pub fn read(spec: &FeedbackSpec, body: &Value) -> FeedbackRead {
         Some(id) if !id.is_empty() && id.chars().count() <= MAX_MESSAGE_ID_CHARS => id,
         _ => return FeedbackRead::Malformed,
     };
-    let event_id = spec
+    let found = spec
         .event_id
         .as_deref()
-        .and_then(|pointer| text_at(body, pointer))
-        .filter(|id| {
-            !id.is_empty()
-                && id.chars().count() <= MAX_EVENT_ID_CHARS
-                && !id.chars().any(char::is_control)
-        });
+        .and_then(|pointer| text_at(body, pointer));
+    // An id longer than the store keeps cannot be deduplicated: the event is treated as unmapped.
+    if found
+        .as_ref()
+        .is_some_and(|id| id.len() > MAX_EVENT_ID_BYTES)
+    {
+        return FeedbackRead::Ignored;
+    }
+    let event_id = found.filter(|id| !id.is_empty() && !id.chars().any(char::is_control));
     FeedbackRead::Event(Feedback {
         kind,
         message_id,
@@ -200,6 +203,16 @@ mod tests {
             FeedbackRead::Malformed
         );
         assert_eq!(read(&spec(), &json!([1, 2])), FeedbackRead::Malformed);
+    }
+
+    #[test]
+    fn an_event_id_over_128_bytes_makes_the_event_unmapped() {
+        let long = "\u{20ac}".repeat(128);
+        let body = json!({"event": "delivered", "id": long, "meta": {"message_id": "m-1"}});
+        let fits = json!({"event": "delivered", "id": "\u{20ac}".repeat(42), "meta": {"message_id": "m-1"}});
+
+        assert_eq!(read(&spec(), &body), FeedbackRead::Ignored);
+        assert!(matches!(read(&spec(), &fits), FeedbackRead::Event(_)));
     }
 
     #[test]
