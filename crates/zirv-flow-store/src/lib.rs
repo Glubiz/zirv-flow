@@ -280,8 +280,9 @@ pub use templates::{
     read_template_field_catalog, save_template_draft, template_where_used, update_template,
 };
 pub use tracking::{
-    Engagement, TrackedMessage, Unsubscribed, find_message_link, find_tracked_message,
-    record_engagement, record_message_links, unsubscribe_message,
+    Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,
+    find_message_link, find_tracked_message, record_engagement, record_message_links,
+    save_preferences, unsubscribe_message,
 };
 pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,

@@ -36,6 +36,7 @@ mod state;
 mod templates;
 mod trace;
 mod traces;
+mod tracking;
 mod users;
 mod version;
 mod web;
@@ -89,6 +90,22 @@ fn routes() -> Router<AppState> {
         .route("/api/v1/ingest/track", post(ingest::track))
         .route("/api/v1/ingest/batch", post(ingest::batch))
         .route("/hooks/{id}", post(webhooks::receive::receive))
+        // The public routes of a sent message: no `Principal` and no CSRF, the signed token
+        // authorises the one message (see `tracking`).
+        .route("/t/o/{token}", get(tracking::open))
+        .route("/t/c/{token}", get(tracking::click))
+        .route(
+            "/u/{token}",
+            get(tracking::unsubscribe_page)
+                .post(tracking::unsubscribe)
+                .layer(DefaultBodyLimit::max(tracking::UNSUBSCRIBE_BODY_LIMIT)),
+        )
+        .route(
+            "/u/{token}/preferences",
+            get(tracking::preferences_page)
+                .post(tracking::preferences_save)
+                .layer(DefaultBodyLimit::max(tracking::PREFERENCES_BODY_LIMIT)),
+        )
         .route(
             "/api/v1/workspaces/{ws}/webhooks",
             get(webhooks::ops::list).post(webhooks::ops::create),

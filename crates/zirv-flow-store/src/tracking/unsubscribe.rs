@@ -3,8 +3,9 @@
 use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use time::OffsetDateTime;
+use uuid::Uuid;
 use zirv_flow_core::TraceContext;
-use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus};
+use zirv_flow_core::consent::{ChangeSource, Channel, ConsentStatus, Dimensions};
 
 use super::TrackedMessage;
 use super::engagement::{enrollment_trace, write_event};
@@ -79,6 +80,79 @@ pub async fn unsubscribe_message(
     }
 }
 
+/// One choice a person made on the preference page: subscribe to or leave a scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreferenceChange {
+    /// The topic; none for the channel as a whole.
+    pub topic: Option<Uuid>,
+    /// The dimension values the choice is scoped to; a dimension left out means all its values.
+    pub dimensions: Dimensions,
+    pub subscribed: bool,
+}
+
+/// What [`save_preferences`] did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreferencesSaved {
+    /// How many choices changed what is recorded.
+    pub changed: usize,
+    /// Whether a choice named a topic or dimension value that no longer exists, or the person is
+    /// gone. Nothing is written in that case.
+    pub unavailable: bool,
+}
+
+/// Records the choices of the preference page with the source `unsubscribe_link`, in one
+/// transaction under the trace the message's enrollment began. A choice that repeats what is held
+/// changes nothing. If any choice cannot be recorded, none is.
+pub async fn save_preferences(
+    pool: &PgPool,
+    message: &TrackedMessage,
+    choices: &[PreferenceChange],
+    now: OffsetDateTime,
+    fallback_trace: &TraceContext,
+) -> Result<PreferencesSaved, StoreError> {
+    let mut tx = begin(pool).await?;
+    let workspace = message.workspace();
+    let trace = enrollment_trace(&mut tx, workspace, message.enrollment_id)
+        .await?
+        .unwrap_or_else(|| fallback_trace.clone());
+    let mut changed = 0;
+    for choice in choices {
+        let change = ConsentChange {
+            person: message.person_id,
+            channel: Channel::Email,
+            topic: choice.topic,
+            dimensions: choice.dimensions.clone(),
+            status: if choice.subscribed {
+                ConsentStatus::Subscribed
+            } else {
+                ConsentStatus::Unsubscribed
+            },
+            source: ChangeSource::UnsubscribeLink,
+            evidence: json!({"message_id": message.id}),
+            occurred_at: now,
+            actor: None,
+        };
+        match set_consent(&mut tx, workspace, &change, &trace).await? {
+            ConsentOutcome::Changed { .. } => changed += 1,
+            ConsentOutcome::Unchanged | ConsentOutcome::Superseded => {}
+            ConsentOutcome::NoSuchPerson
+            | ConsentOutcome::NoSuchTopic
+            | ConsentOutcome::NoSuchDimension
+            | ConsentOutcome::NoSuchDimensionValue => {
+                return Ok(PreferencesSaved {
+                    changed: 0,
+                    unavailable: true,
+                });
+            }
+        }
+    }
+    commit(tx).await?;
+    Ok(PreferencesSaved {
+        changed,
+        unavailable: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -146,6 +220,42 @@ mod tests {
             .await,
             1
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn preference_choices_are_recorded_together_and_a_repeat_changes_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "prefs").await;
+        let (_, id) = message(&pool, ws).await;
+        let tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
+        let now = datetime!(2031-05-06 07:08:09 UTC);
+        let choices = [PreferenceChange {
+            topic: None,
+            dimensions: Dimensions::new(),
+            subscribed: false,
+        }];
+
+        let first = save_preferences(&pool, &tracked, &choices, now, &trace())
+            .await
+            .unwrap();
+        let again = save_preferences(&pool, &tracked, &choices, now, &trace())
+            .await
+            .unwrap();
+
+        assert_eq!((first.changed, first.unavailable), (1, false));
+        assert_eq!((again.changed, again.unavailable), (0, false));
+        let bad = [
+            choices[0].clone(),
+            PreferenceChange {
+                topic: Some(Uuid::now_v7()),
+                dimensions: Dimensions::new(),
+                subscribed: true,
+            },
+        ];
+        let refused = save_preferences(&pool, &tracked, &bad, now, &trace())
+            .await
+            .unwrap();
+        assert!(refused.unavailable);
     }
 
     #[sqlx::test]
