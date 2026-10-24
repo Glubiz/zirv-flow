@@ -89,11 +89,12 @@ use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct DeliverySend;
 
-/// How long a send waits for a rate-limit token before it fails as `rate_limited`: a destination
-/// that grants none for this long is not coming back for this message.
 /// The note on the unconfirmed ending of a resumed message whose address changed since the call
 /// that may have been accepted.
 const ADDRESS_CHANGED: &str = "address_changed";
+
+/// How long a send waits for a rate-limit token before it fails as `rate_limited`: a destination
+/// that grants none for this long is not coming back for this message.
 const MAX_RATE_WAIT: time::Duration = time::Duration::hours(6);
 
 /// What a run of the job came to.
