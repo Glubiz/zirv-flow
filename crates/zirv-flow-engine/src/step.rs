@@ -296,6 +296,22 @@ impl Run<'_> {
                 );
                 next()
             }
+            NodeKind::ActionSync {
+                destination,
+                operation,
+                trait_keys,
+            } => {
+                self.effect(
+                    node,
+                    Some("sync"),
+                    EffectKind::Sync {
+                        destination: *destination,
+                        operation: *operation,
+                        trait_keys: trait_keys.clone(),
+                    },
+                );
+                next()
+            }
             NodeKind::ActionSend {
                 template,
                 destination,
@@ -445,7 +461,7 @@ mod tests {
     use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
     use serde_json::json;
     use zirv_flow_core::flow::{
-        Arm, Edge, GRAPH_VERSION, ListChange, TraitChange, UntilTime, Weekday,
+        Arm, Edge, GRAPH_VERSION, ListChange, SyncOperation, TraitChange, UntilTime, Weekday,
     };
 
     use crate::state::ArrivedEvent;
@@ -644,6 +660,59 @@ mod tests {
         );
         let external: Vec<bool> = transition.effects.iter().map(Effect::is_external).collect();
         assert_eq!(external, [false, false, true, false]);
+    }
+
+    #[test]
+    fn a_sync_node_makes_one_external_effect_under_a_stable_sync_key() {
+        let destination = Uuid::from_u128(21);
+        let g = graph(
+            vec![
+                (
+                    "push",
+                    NodeKind::ActionSync {
+                        destination,
+                        operation: SyncOperation::Upsert,
+                        trait_keys: vec!["plan".into()],
+                    },
+                ),
+                (
+                    "drop",
+                    NodeKind::ActionSync {
+                        destination,
+                        operation: SyncOperation::Remove,
+                        trait_keys: vec![],
+                    },
+                ),
+                ("end", NodeKind::Exit {}),
+            ],
+            &[("push", "next", "drop"), ("drop", "next", "end")],
+        );
+        let state = start(&g);
+
+        let first = run(&g, &state, StepInput::Start);
+        let replay = run(&g, &state, StepInput::Start);
+
+        assert_eq!(first, replay, "a replay yields the same effects and keys");
+        assert_eq!(first.outcome, Outcome::Completed);
+        let id = enrollment();
+        assert_eq!(first.effects.len(), 2);
+        assert_eq!(
+            first.effects[0].kind,
+            EffectKind::Sync {
+                destination,
+                operation: SyncOperation::Upsert,
+                trait_keys: vec!["plan".into()],
+            }
+        );
+        assert_eq!(
+            first.effects[0].effect_key.as_deref(),
+            Some(format!("{id}:push:sync").as_str())
+        );
+        assert_eq!(
+            first.effects[1].effect_key.as_deref(),
+            Some(format!("{id}:drop:sync").as_str())
+        );
+        assert!(first.effects.iter().all(Effect::is_external));
     }
 
     #[test]
