@@ -133,13 +133,20 @@ pub async fn read_send_limits(
 }
 
 /// Replaces both settings. Run it in a transaction: the old settings are deleted and the new ones
-/// written, so a reader sees one set or the other.
+/// written, so a reader sees one set or the other. Replaces of one workspace are serialised by a
+/// lock on its row that the transaction holds to its end, so two concurrent replaces leave one
+/// writer's settings.
 pub async fn replace_send_limits(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     caps: &[NewFrequencyCap],
     quiet_hours: Option<&QuietHours>,
 ) -> Result<(), StoreError> {
+    sqlx::query("SELECT id FROM workspaces WHERE id = $1 FOR UPDATE")
+        .bind(workspace.as_uuid())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
     sqlx::query("DELETE FROM frequency_caps WHERE workspace_id = $1")
         .bind(workspace.as_uuid())
         .execute(&mut *connection)
@@ -169,7 +176,10 @@ pub async fn replace_send_limits(
     if let Some(quiet) = quiet_hours {
         sqlx::query(
             "INSERT INTO quiet_hours (workspace_id, start_time, end_time, days)
-             VALUES ($1, $2, $3, $4)",
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (workspace_id) DO UPDATE SET
+                 start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time,
+                 days = EXCLUDED.days",
         )
         .bind(workspace.as_uuid())
         .bind(quiet.start)
@@ -249,6 +259,38 @@ mod tests {
             read_send_limits(&mut conn, ws).await.unwrap(),
             SendLimits::default()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn concurrent_replaces_both_succeed_and_leave_one_writers_settings(pool: sqlx::PgPool) {
+        let ws = workspace(&pool).await;
+        let quiet = QuietHours {
+            start: time!(21:00),
+            end: time!(08:00),
+            days: vec!["mon".to_owned()],
+        };
+        let write = |first: i32| {
+            let pool = pool.clone();
+            let quiet = quiet.clone();
+            async move {
+                let caps = [cap(first, CapMode::Skip), cap(first + 1, CapMode::Skip)];
+                let mut tx = pool.begin().await.unwrap();
+                replace_send_limits(&mut tx, ws, &caps, Some(&quiet))
+                    .await
+                    .unwrap();
+                tx.commit().await.unwrap();
+            }
+        };
+        let (a, b) = (tokio::spawn(write(1)), tokio::spawn(write(7)));
+        a.await.unwrap();
+        b.await.unwrap();
+
+        let mut conn = pool.acquire().await.unwrap();
+        let read = read_send_limits(&mut conn, ws).await.unwrap();
+        let limits: Vec<i32> = read.caps.iter().map(|c| c.limit).collect();
+        assert!(limits == vec![1, 2] || limits == vec![7, 8], "{limits:?}");
+        assert_eq!(read.quiet_hours, Some(quiet));
     }
 
     #[sqlx::test]
