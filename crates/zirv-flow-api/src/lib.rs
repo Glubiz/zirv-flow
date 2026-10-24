@@ -9,6 +9,7 @@ mod cookies;
 mod credentials;
 mod destinations;
 mod events;
+mod feedback;
 mod flows;
 mod health;
 mod imports;
@@ -90,6 +91,12 @@ fn routes() -> Router<AppState> {
         .route("/api/v1/ingest/track", post(ingest::track))
         .route("/api/v1/ingest/batch", post(ingest::batch))
         .route("/hooks/{id}", post(webhooks::receive::receive))
+        // The public feedback webhook of an email provider destination: no `Principal` and no
+        // CSRF, the provider's signature authorises the one event (see `feedback`).
+        .route(
+            "/api/v1/destinations/{id}/feedback",
+            post(feedback::receive::receive),
+        )
         // The public routes of a sent message: no `Principal` and no CSRF, the signed token
         // authorises the one message (see `tracking`).
         .route("/t/o/{token}", get(tracking::open))
@@ -538,6 +545,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/destinations/{id}/check",
             post(destinations::actions::check),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/destinations/{id}/domain-status",
+            get(destinations::domain_status::get),
         )
         .route(
             "/api/v1/workspaces/{ws}/credential-kinds",

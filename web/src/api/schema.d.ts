@@ -59,6 +59,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/destinations/{id}/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Receives one signed feedback event of an email provider. The destination's manifest names the
+         *     signature header, its prefix and the optional timestamp header and tolerance; the signed
+         *     message is `"{timestamp}.{body}"` for a timestamped provider and the raw body otherwise, signed
+         *     with HMAC-SHA256 under the signing secret the destination's credential holds. A delivery is
+         *     recorded as `email.delivered`, a bounce as `email.bounced` (with `kind` `hard` or `soft`) and a
+         *     complaint as `email.complained`. A hard bounce suppresses the address the message was sent to
+         *     in every workspace of the organization, a complaint in the destination's workspace only, and a
+         *     soft bounce nobody. A repeat of an event writes nothing.
+         */
+        post: operations["receive_destination_feedback"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ingest/batch": {
         parameters: {
             query?: never;
@@ -1022,6 +1048,28 @@ export interface paths {
          *     `destination.checked`.
          */
         post: operations["check_destination"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/destinations/{id}/domain-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Asks a provider destination for the state of one sending domain and shows it next to ours.
+         *     Anyone who can read the workspace may ask. It is read-only: the provider's answer is shown and
+         *     never promotes the domain, whose status only the DNS check sets. A destination whose manifest
+         *     declares no domain-status request is a 404 with code `domain_status_unsupported`.
+         */
+        get: operations["get_destination_domain_status"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4148,7 +4196,8 @@ export interface components {
         CreateDestinationRequest: {
             /**
              * Format: int32
-             * @description The most deliveries at once, 1 to 100000. Default: the rate.
+             * @description The most deliveries at once, 1 to 100000. Default: the rate; for a `provider`
+             *     destination, the manifest's burst when it declares a rate limit.
              */
             burst?: number | null;
             /** @description The plain settings, checked against the type's field specs. */
@@ -4174,7 +4223,8 @@ export interface components {
             name: string;
             /**
              * Format: int32
-             * @description Deliveries per second, 1 to 100000. Default 10.
+             * @description Deliveries per second, 1 to 100000. Default 10; for a `provider` destination, the rate
+             *     of its manifest's `destination.rate_limit` when it declares one.
              */
             rate?: number | null;
         };
@@ -4838,6 +4888,25 @@ export interface components {
              */
             status: string;
         };
+        DomainStatusBody: {
+            domain: string;
+            /** Format: uuid */
+            domain_id: string;
+            provider_only: components["schemas"]["ProviderOnlyRecordBody"][];
+            records: components["schemas"]["DomainStatusRecordBody"][];
+            /** @description The domain's own status, `verified` or `unverified`. Only the DNS check changes it. */
+            status: string;
+        };
+        /** @description One record of the domain: our status and the provider's. */
+        DomainStatusRecordBody: {
+            /** @description The DNS name of the record. */
+            host: string;
+            /** @description `dkim`, `spf` or `dmarc`. */
+            kind: string;
+            provider?: null | components["schemas"]["ProviderRecordBody"];
+            /** @description Our status of the record, from the DNS check: `pending`, `ok`, `mismatch` or `missing`. */
+            status: string;
+        };
         /** @description The result of a draft run. */
         DraftBody: {
             /**
@@ -5422,6 +5491,13 @@ export interface components {
             input_tokens: number;
             /** Format: int64 */
             output_tokens: number;
+        };
+        FeedbackAccepted: {
+            /**
+             * @description Always 1: the event was recorded, or dropped as one that needs nothing (an event type the
+             *     manifest does not map, a repeat, a message that is not ours).
+             */
+            accepted: number;
         };
         FieldBody: {
             /** @description One of `string`, `number`, `boolean`, `timestamp`, `json`, `unknown`. */
@@ -6846,6 +6922,26 @@ export interface components {
             /** @description `openai_compatible` or `anthropic`. */
             kind: string;
             models: components["schemas"]["ModelBody"][];
+        };
+        /** @description A record the provider lists that is none of ours (a return-path or tracking record). */
+        ProviderOnlyRecordBody: {
+            name: string;
+            record_type: string;
+            status: string;
+        };
+        /** @description What the provider reports for one record. */
+        ProviderRecordBody: {
+            /**
+             * @description The record's DNS type as the provider names it, such as `TXT`.
+             * @example TXT
+             */
+            record_type: string;
+            /**
+             * @description `verified`, `pending` or `failed`, as the manifest maps the provider's own value; `unknown`
+             *     when it maps none.
+             * @example verified
+             */
+            status: string;
         };
         /** @description The draft a publish is for. */
         PublishConsentPolicyRequest: {
@@ -8859,6 +8955,90 @@ export interface operations {
             };
             /** @description An equivalent job is already queued */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    receive_destination_feedback: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The id of the provider destination, in the URL given to the provider */
+                id: string;
+            };
+            cookie?: never;
+        };
+        /** @description One JSON event of the provider, at most ingest.max_webhook_bytes */
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Recorded, or dropped as needing nothing: an event type the manifest does not map, a repeat, or a message that is not this destination's */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackAccepted"];
+                };
+            };
+            /** @description The signed body is not JSON (code invalid_payload) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The signature or timestamp is missing, malformed, outside the tolerance or wrong (code invalid_signature); nothing was written */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such destination, or it is not a provider destination */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is over ingest.max_webhook_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The destination is over its rate limit */
+            429: {
+                headers: {
+                    /** @description Whole seconds until a request fits */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The database or the secret keyring is unavailable; nothing was recorded, so retry */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12948,6 +13128,106 @@ export interface operations {
                 };
             };
             /** @description The destination did not answer in time */
+            504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_destination_domain_status: {
+        parameters: {
+            query: {
+                /** @description The sending domain to ask the provider about */
+                domain_id: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Destination id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Our record status and the provider's, side by side */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainStatusBody"];
+                };
+            };
+            /** @description No valid domain_id query parameter */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, destination or sending domain, no access, or the destination declares no domain-status request (code `domain_status_unsupported`) */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The destination is archived (`destination_archived`), or its type is not in this build (`destination_kind_unavailable`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The provider failed or answered with an error; `code` says which */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key to open the credential */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The provider did not answer in time */
             504: {
                 headers: {
                     [name: string]: unknown;

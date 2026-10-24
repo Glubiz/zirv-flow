@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{validate_config, validate_credential_names};
+use zirv_flow_connectors::destinations::{
+    provider_default_rate, validate_config, validate_credential_names,
+};
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_store::{Destination, DestinationUpdate, NewDestination, PgPool, StoreError};
 
@@ -24,7 +26,7 @@ use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 use crate::sources::crud::check_name;
 use crate::sources::{field_problems, invalid};
-use crate::workspace_credentials::resolve::lock_for_use;
+use crate::workspace_credentials::resolve::{check_manifest_credential, lock_for_use};
 
 /// The rate a destination gets when the request names none, in deliveries per second.
 pub(crate) const DEFAULT_RATE: i32 = 10;
@@ -96,9 +98,11 @@ pub(crate) struct CreateDestinationRequest {
     /// The workspace credential the destination uses (`/credentials`). Required when the
     /// destination type has required credential fields, which the credential must hold.
     credential_id: Option<Uuid>,
-    /// Deliveries per second, 1 to 100000. Default 10.
+    /// Deliveries per second, 1 to 100000. Default 10; for a `provider` destination, the rate
+    /// of its manifest's `destination.rate_limit` when it declares one.
     rate: Option<i32>,
-    /// The most deliveries at once, 1 to 100000. Default: the rate.
+    /// The most deliveries at once, 1 to 100000. Default: the rate; for a `provider`
+    /// destination, the manifest's burst when it declares a rate limit.
     burst: Option<i32>,
 }
 
@@ -152,8 +156,30 @@ pub(crate) async fn create_destination(
         validate_credential_names(spec, &BTreeSet::new())
             .map_err(|errors| field_problems("credential", errors))?;
     }
-    let rate = check_limit("rate", request.rate.unwrap_or(DEFAULT_RATE))?;
-    let burst = check_limit("burst", request.burst.unwrap_or(rate))?;
+    // A provider manifest may declare the rate its API tolerates: it feeds the bucket of a
+    // destination created without one.
+    let declared = (spec.kind == "provider")
+        .then(|| provider_default_rate(&request.config))
+        .flatten();
+    let rate = check_limit(
+        "rate",
+        request
+            .rate
+            .or(declared.map(|(rate, _)| rate))
+            .unwrap_or(DEFAULT_RATE),
+    )?;
+    let burst = check_limit(
+        "burst",
+        request
+            .burst
+            .or(request
+                .rate
+                .is_none()
+                .then_some(declared)
+                .flatten()
+                .map(|(_, burst)| burst))
+            .unwrap_or(rate),
+    )?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let linked = match request.credential_id {
@@ -165,6 +191,9 @@ pub(crate) async fn create_destination(
         ),
         None => None,
     };
+    if spec.kind == "provider" {
+        check_manifest_credential(&request.config, linked.as_ref())?;
+    }
     let destination = zirv_flow_store::create_destination(
         &mut *tx,
         workspace,
@@ -264,6 +293,21 @@ pub(crate) async fn update_destination(
         ),
         None => None,
     };
+    // A provider manifest names the credential fields it reads: check the state this save
+    // leaves, a new manifest or a new credential, against it.
+    if spec.kind == "provider" && (request.config.is_some() || linked.is_some()) {
+        let effective = match (&linked, locked.credential_id) {
+            (Some(credential), _) => Some(credential.clone()),
+            (None, Some(current)) => {
+                zirv_flow_store::lock_credential_for_use(&mut tx, workspace, current).await?
+            }
+            (None, None) => None,
+        };
+        check_manifest_credential(
+            request.config.as_ref().unwrap_or(&locked.config),
+            effective.as_ref(),
+        )?;
+    }
     let destination = zirv_flow_store::update_destination(
         &mut *tx,
         workspace,
