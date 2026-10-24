@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { client, unwrap, useResource, type components, type Resource } from "../../api";
 import type { Message } from "./messageView";
@@ -63,7 +63,9 @@ export function useMessageLog(workspaceId: string, personId: string, filter: Mes
   // button disables must not append one page twice.
   const inFlight = useRef(false);
   const current = useRef({ base, nextBefore });
-  current.current = { base, nextBefore };
+  useEffect(() => {
+    current.current = { base, nextBefore };
+  }, [base, nextBefore]);
 
   const loadOlder = useCallback(() => {
     if (base === null || nextBefore === null || inFlight.current) return;
