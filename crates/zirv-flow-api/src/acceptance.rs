@@ -13329,9 +13329,7 @@ email,b@example.com,
         .await;
         let evaluate = |person: String| {
             let (router, owner, ws) = (router.clone(), &owner, ws.clone());
-            async move {
-                evaluate_policy_as(&router, &ws, owner, json!({"person_id": person})).await
-            }
+            async move { evaluate_policy_as(&router, &ws, owner, json!({"person_id": person})).await }
         };
         let closed_reply = evaluate(closed).await;
         let recent_reply = evaluate(recent).await;
@@ -13342,10 +13340,18 @@ email,b@example.com,
         assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
         assert_eq!(published.body["rules"].as_array().unwrap().len(), 3);
         // The account state decides first.
-        assert_eq!(closed_reply.body["allowed"], false, "{:?}", closed_reply.body);
+        assert_eq!(
+            closed_reply.body["allowed"], false,
+            "{:?}",
+            closed_reply.body
+        );
         assert_eq!(closed_reply.body["rule"]["name"], "Account closed");
         // A message sent an hour ago is inside the cooldown: the third rule denies and is named.
-        assert_eq!(recent_reply.body["allowed"], false, "{:?}", recent_reply.body);
+        assert_eq!(
+            recent_reply.body["allowed"], false,
+            "{:?}",
+            recent_reply.body
+        );
         assert_eq!(
             recent_reply.body["rule"]["name"],
             "Cooldown since the last message"
