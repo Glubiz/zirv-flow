@@ -47,6 +47,10 @@ pub const EMAIL_FAILED_EVENT: &str = "email.failed";
 /// bounce (the recipient cannot receive mail) or a soft one (a temporary refusal that outlasted the
 /// retries). Its `bounce` property says which.
 pub const EMAIL_BOUNCED_EVENT: &str = "email.bounced";
+/// The event a provider's feedback writes when it reports a message delivered.
+pub const EMAIL_DELIVERED_EVENT: &str = "email.delivered";
+/// The event a provider's feedback writes when the recipient complained about a message.
+pub const EMAIL_COMPLAINED_EVENT: &str = "email.complained";
 /// The event the open pixel writes (architecture 10.2). Its `machine` property says whether the
 /// open looks automated, and `machine_reason` why.
 pub const EMAIL_OPENED_EVENT: &str = "email.opened";
@@ -313,6 +317,8 @@ mod tests {
             "email.sent",
             "email.skipped",
             "email.opened",
+            EMAIL_DELIVERED_EVENT,
+            EMAIL_COMPLAINED_EVENT,
             "Email.Failed",
             "EMAIL.",
         ] {

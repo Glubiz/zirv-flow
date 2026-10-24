@@ -400,7 +400,14 @@ async fn decide(
             || message_in_flight(&pool, workspace, job.message).await?);
     // The attempt number fences the mark: a stale attempt clears only its own.
     let mark = number - 1;
-    mark_message_sending(&pool, workspace, job.message, mark).await?;
+    mark_message_sending(
+        &pool,
+        workspace,
+        job.message,
+        mark,
+        gates::address_hash(&key, &address).as_ref(),
+    )
+    .await?;
     let call = deliver::Call {
         workspace,
         destination: &destination,
@@ -1408,6 +1415,17 @@ mod tests {
         assert_eq!(message.sender_identity_id, Some(env.sender));
         assert_eq!(message.category.as_deref(), Some("marketing"));
         assert_eq!(message.deciding_rule.as_deref(), Some("recorded_consent"));
+        let stored: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT address_hash FROM messages WHERE id = $1")
+                .bind(queued.message)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some(crate_hash("ada@example.com").as_slice()),
+            "marking the message sending stores the keyed hash of the address it went to"
+        );
         assert_eq!(
             gate_names(&message),
             [
@@ -3148,7 +3166,7 @@ mod tests {
             "a 4xx is a definitive non-acceptance and clears the mark"
         );
         // An attempt that wrote its pre-call mark and was cut off before it knew the outcome.
-        mark_message_sending(&env.pool, env.ws, queued.message, 1)
+        mark_message_sending(&env.pool, env.ws, queued.message, 1, None)
             .await
             .unwrap();
         sink.reply_at(SmtpSinkStage::Mail, "550 5.7.1 sender refused");

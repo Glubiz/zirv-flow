@@ -170,7 +170,8 @@ pub use lists::{
 pub use messages::{
     GateRecord, Message, MessageStatus, NewMessage, clear_message_in_flight, find_message,
     insert_message, list_person_messages, mark_message_sending, mark_message_unconfirmed,
-    message_in_flight, message_status, message_unconfirmed, read_send_address,
+    message_address_hash, message_in_flight, message_status, message_unconfirmed,
+    read_send_address,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{
