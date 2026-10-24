@@ -14,8 +14,11 @@
 //! 1. the template is a live email template, its version (or the draft) exists:
 //!    `failed: template_unavailable`;
 //! 2. the sender identity is live on a verified domain: `sender_unverified`;
-//! 3. the recipient: a member's `users.email` (read now) or the address the job carries, whose
-//!    keyed hash must be the row's: `failed: recipient_unavailable`;
+//! 3. the recipient, checked again now: a member who is still a member, with their current
+//!    `users.email`, or an allowlisted address whose entry still exists and whose sealed address is
+//!    opened with the keyring; the keyed hash of either must be the row's:
+//!    `failed: recipient_unavailable`. A keyring that does not open the entry fails like a
+//!    credential that cannot be opened (a retry, then `failed: credential_unavailable`);
 //! 4. suppression of the recipient hash, in the workspace and the organization, is never skipped:
 //!    `suppressed`, no call. Consent, policy, quiet hours and the frequency cap are skipped;
 //! 5. the render host renders the chosen version (or the draft) for the sample person or the
@@ -28,9 +31,9 @@
 //!    retry; any other retryable verdict retries the job under the same key, and on the last
 //!    attempt the row ends `failed` with the verdict's fixed reason.
 //!
-//! A job that finds its row no longer `queued` sends nothing. The only address the system holds
-//! for an allowlisted recipient is in the payload of the queued job, which is deleted when the
-//! job completes; the job always completes on its last attempt.
+//! A job that finds its row no longer `queued`, or gone (retention or an erasure), sends nothing
+//! and ends quietly. No job payload holds an address; the leader's sweep ends a `queued` row
+//! whose job is dead or gone as `failed: abandoned`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,11 +46,12 @@ use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_render::RenderContext;
+use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, NewJob, SOFT_BOUNCE, TEST_SEND_JOB_KIND, TestSend,
     TestSendOutcome, find_destination, find_person, find_template, find_template_draft,
-    find_template_version, find_user, finish_test_send, list_identities,
-    read_template_field_catalog, suppressing_scope,
+    find_template_version, find_user, finish_test_send, list_identities, membership_role,
+    open_allowlist_address, read_template_field_catalog, suppressing_scope,
 };
 use zirv_flow_templates::FieldCatalog;
 
@@ -67,13 +71,12 @@ const MAX_RATE_WAIT: time::Duration = time::Duration::hours(6);
 
 pub(crate) struct TemplateTestSend;
 
-/// The payload of the job: ids, the optional person whose values render the template, and, for an
-/// allowlisted recipient, the address (the one place it is held, until the job completes).
+/// The payload of the job: ids and the optional person whose values render the template. It holds
+/// no address: the recipient is found from the row's hash.
 struct Payload {
     workspace: WorkspaceId,
     id: Uuid,
     person: Option<Uuid>,
-    address: Option<String>,
     deferrals: u32,
     first_wait: Option<OffsetDateTime>,
 }
@@ -89,7 +92,6 @@ impl Payload {
             workspace: text("workspace_id")?.parse().ok()?,
             id: Uuid::parse_str(text("test_send_id")?).ok()?,
             person: optional_id("person_id")?,
-            address: text("address").map(str::to_owned),
             deferrals: payload
                 .get("deferrals")
                 .and_then(Value::as_u64)
@@ -148,7 +150,7 @@ impl JobKind for TemplateTestSend {
                 Ok(())
             }
             Err(error) if last => {
-                // The job completes either way, so the payload (and the address in it) goes.
+                // The job completes either way.
                 warn!("a test send ends failed on its last attempt");
                 if let Some(pool) = ctx.pool() {
                     let mut connection = pool.acquire().await.map_err(|_| error)?;
@@ -209,23 +211,34 @@ async fn decide(
         Err(_) => return end(TestSendOutcome::SenderUnverified, gates::SENDER_UNVERIFIED),
     };
 
-    // The recipient: a member's verified address now, or the address the job carries. Either must
-    // hash to the row's recipient hash.
+    // The recipient, checked again now: a member must still be a member and the address is the
+    // account's current one; an allowlisted address must still be on the list, and is opened
+    // from its sealed entry. Either must hash to the row's recipient hash.
     let key = ctx
         .identifier_key()
         .ok_or_else(|| JobError::new("the worker has no identifier key"))?;
-    let address = match (&job.address, row.recipient_member_id) {
-        (Some(address), _) => Some(address.clone()),
-        (None, Some(member)) => find_user(ctx.conn(), UserId::from_uuid(member))
-            .await?
-            .map(|user| user.email),
-        (None, None) => None,
+    let address = match row.recipient_member_id {
+        Some(member) => {
+            let user = UserId::from_uuid(member);
+            if membership_role(ctx.conn(), workspace, user)
+                .await?
+                .is_none()
+            {
+                None
+            } else {
+                find_user(ctx.conn(), user).await?.map(|user| user.email)
+            }
+        }
+        None => match open_allowed_address(ctx, workspace, &row.recipient_hash).await? {
+            Ok(address) => address,
+            Err(step) => return Ok(step),
+        },
     };
     let Some((address, hash)) = address.and_then(|address| {
         let hash = gates::address_hash(&key, &address)?;
         (hash.as_slice() == row.recipient_hash.as_slice()).then_some((address, hash))
     }) else {
-        return end(TestSendOutcome::Failed, "recipient_unavailable");
+        return end(TestSendOutcome::Failed, RECIPIENT_UNAVAILABLE);
     };
 
     // Suppression is the one person gate a test never skips.
@@ -346,6 +359,42 @@ async fn decide(
     }
 }
 
+/// The code of a row whose recipient is not a member or on the allowlist any more.
+const RECIPIENT_UNAVAILABLE: &str = "recipient_unavailable";
+
+/// Opens the allowlisted address with this hash. `Ok(Ok(None))` when the entry is gone. A keyring
+/// that is missing or does not open the entry is a credential that cannot be opened: the job is
+/// retried like a transport error and, on the last attempt, the row ends `failed:
+/// credential_unavailable`.
+async fn open_allowed_address(
+    ctx: &mut JobContext<'_>,
+    workspace: WorkspaceId,
+    hash: &[u8],
+) -> Result<Result<Option<String>, Step>, JobError> {
+    let Ok(hash) = <[u8; 32]>::try_from(hash) else {
+        return Ok(Ok(None));
+    };
+    let unopenable = |ctx: &JobContext<'_>| {
+        if ctx.attempts() < ctx.max_attempts() {
+            Err(JobError::new("the allowlisted address cannot be opened"))
+        } else {
+            Ok(Err(Step::End {
+                outcome: TestSendOutcome::Failed,
+                reason: Some("credential_unavailable"),
+            }))
+        }
+    };
+    let Some(keyring) = ctx.keyring().cloned() else {
+        return unopenable(ctx);
+    };
+    match open_allowlist_address(ctx.conn(), &keyring, workspace, &hash).await {
+        Ok(Some(address)) => Ok(Ok(String::from_utf8(address.expose().to_vec()).ok())),
+        Ok(None) => Ok(Ok(None)),
+        Err(OpenError::Store(error)) => Err(error.into()),
+        Err(OpenError::NotFound | OpenError::Unopenable) => unopenable(ctx),
+    }
+}
+
 /// No token yet: this job ends and a copy runs when the bucket will hold one. The copy has its own
 /// unique key and the attempts this job has left.
 async fn defer(
@@ -385,9 +434,11 @@ mod tests {
     use zirv_flow_connectors::destinations::{FakeSent, fake_ledger_calls, fake_ledger_sent};
     use zirv_flow_core::consent::SuppressionReason;
     use zirv_flow_core::egress::EgressPolicy;
+    use zirv_flow_core::people::{Identifier, identifier_hash};
     use zirv_flow_core::tracking::{TokenKind, verify};
     use zirv_flow_core::{
-        Cause, HmacKey, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+        Cause, HmacKey, HmacPurpose, HmacRoot, Keyring, MasterKey, Slug, TraceContext,
+        WorkspaceName,
     };
     use zirv_flow_render::{ChildCommand, PoolConfig, RenderPool};
     use zirv_flow_store::sending_fixtures::plant_verified_sender;
@@ -409,27 +460,23 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_is_parsed_with_or_without_a_person_and_an_address() {
+    fn a_payload_is_parsed_with_or_without_a_person() {
         let ws = WorkspaceId::new();
         let id = Uuid::now_v7();
         let person = Uuid::now_v7();
 
         let plain = Payload::parse(&json!({
-            "workspace_id": ws, "test_send_id": id, "person_id": null, "address": null
+            "workspace_id": ws, "test_send_id": id, "person_id": null
         }))
         .unwrap();
         let full = Payload::parse(&json!({
             "workspace_id": ws, "test_send_id": id, "person_id": person,
-            "address": "a@example.test", "deferrals": 2, "first_wait": "2031-05-06T07:08:09Z"
+            "deferrals": 2, "first_wait": "2031-05-06T07:08:09Z"
         }))
         .unwrap();
 
-        assert_eq!(
-            (plain.person, plain.address, plain.deferrals),
-            (None, None, 0)
-        );
+        assert_eq!((plain.person, plain.deferrals), (None, 0));
         assert_eq!(full.person, Some(person));
-        assert_eq!(full.address.as_deref(), Some("a@example.test"));
         assert_eq!(full.deferrals, 2);
         assert!(full.first_wait.is_some());
         assert!(Payload::parse(&json!({"workspace_id": ws})).is_none());
@@ -506,6 +553,7 @@ mod tests {
         destination: Uuid,
         ledger: String,
         trace: TraceContext,
+        keyring: Option<Arc<Keyring>>,
     }
 
     impl Env {
@@ -522,6 +570,13 @@ mod tests {
             let sender = plant_verified_sender(&pool, ws, "example.com")
                 .await
                 .unwrap();
+            let keyring = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+            zirv_flow_store::secrets::insert_hmac_root_if_absent(
+                &pool,
+                &zirv_flow_core::seal(&keyring, b"root", b"aad"),
+            )
+            .await
+            .unwrap();
             let ledger = format!("tsend-{}", Uuid::now_v7());
             let mut config = config;
             config["ledger"] = json!(ledger);
@@ -551,8 +606,40 @@ mod tests {
                 sender,
                 destination,
                 ledger,
+                keyring: Some(keyring),
                 trace: TraceContext::root(Cause::api("t")),
             }
+        }
+
+        /// Puts `address` on the allowlist as the API does: normalised, hashed and sealed. The
+        /// id of the entry.
+        async fn allow(&self, address: &str) -> Uuid {
+            let keyring = self.keyring.as_ref().expect("a keyring");
+            let identifier = Identifier::parse("email", address).unwrap();
+            let id = Uuid::now_v7();
+            let sealed = zirv_flow_core::seal(
+                keyring,
+                identifier.value().as_bytes(),
+                &zirv_flow_core::secret_aad(
+                    self.ws,
+                    zirv_flow_core::SecretId::from_uuid(id),
+                    zirv_flow_core::SecretPurpose::TestSendAddress,
+                ),
+            );
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let added = zirv_flow_store::add_allowlist_entry(
+                &mut tx,
+                &keyring.key_ids(),
+                self.ws,
+                id,
+                &identifier_hash(&identifier_key(), &identifier),
+                "q***@x",
+                &sealed,
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            added.map_or(Uuid::nil(), |entry| entry.id)
         }
 
         async fn member(&self, email: &str) -> Uuid {
@@ -563,6 +650,14 @@ mod tests {
                 .execute(&self.pool)
                 .await
                 .unwrap();
+            sqlx::query(
+                "INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+            )
+            .bind(self.ws.as_uuid())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .unwrap();
             id
         }
 
@@ -626,6 +721,9 @@ mod tests {
             version: Option<i32>,
         ) -> Uuid {
             let id = Uuid::now_v7();
+            if member.is_none() {
+                self.allow(address).await;
+            }
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let reservation = reserve_test_send(
                 &mut tx,
@@ -640,7 +738,6 @@ mod tests {
                     recipient_hash: hash_of(address),
                     recipient_member: member,
                     person,
-                    address: member.is_none().then_some(address),
                     now: self.clock.now(),
                     trace: &self.trace,
                 },
@@ -681,7 +778,7 @@ mod tests {
                     .with_tracking(Some(PUBLIC_URL.to_owned()), Some(tracking_key()))
                     .with_rate_gates(Arc::clone(&self.gates))
                     .with_outbound(
-                        None,
+                        self.keyring.clone(),
                         Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap()),
                         Arc::default(),
                     );
@@ -1063,7 +1160,7 @@ mod tests {
         again.workspace_id = Some(env.ws);
         again.unique_key = Some("again".into());
         again.payload = json!({
-            "workspace_id": env.ws.as_uuid(), "test_send_id": id, "address": "qa@example.org"
+            "workspace_id": env.ws.as_uuid(), "test_send_id": id
         });
         zirv_flow_store::enqueue(&env.pool, &again).await.unwrap();
         env.attempt().await.unwrap();
@@ -1143,6 +1240,197 @@ mod tests {
         let row = env.row(id).await;
         assert_eq!(row.outcome, TestSendOutcome::Failed);
         assert_eq!(row.reason.as_deref(), Some("destination_unavailable"));
+        assert!(fake_ledger_calls(&env.ledger).is_empty());
+    }
+
+    /// The text of every job payload, whatever its state.
+    async fn payloads(env: &Env) -> Vec<String> {
+        sqlx::query_scalar("SELECT payload::text FROM jobs")
+            .fetch_all(&env.pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_job_payload_holds_an_address_queued_running_deferred_or_dead(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        sqlx::query("UPDATE destinations SET rate = 1, burst = 1 WHERE id = $1")
+            .bind(env.destination)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let template = env.html_template().await;
+        let first = env.reserve(template, "qa@example.org", None).await;
+        env.reserve(template, "qa@example.org", None).await;
+        let no_address = |payloads: &[String]| {
+            assert!(!payloads.is_empty());
+            for payload in payloads {
+                assert!(
+                    !payload.contains('@') && !payload.contains("example.org"),
+                    "{payload}"
+                );
+            }
+        };
+        no_address(&payloads(&env).await);
+
+        // Running: the claimed payload.
+        let claimed = env.claim().await.expect("a job");
+        no_address(&[claimed.payload.to_string()]);
+        env.execute(claimed).await.unwrap();
+        assert_eq!(env.row(first).await.outcome, TestSendOutcome::Sent);
+
+        // Deferred: the second send finds the bucket empty and queues a copy.
+        env.attempt().await.unwrap();
+        let waiting = payloads(&env).await;
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0].contains("deferrals"), "{}", waiting[0]);
+        no_address(&waiting);
+
+        // Dead: a job the reaper buried.
+        sqlx::query("UPDATE jobs SET state = 'dead'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        no_address(&payloads(&env).await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_request_spelled_with_a_kelvin_sign_reaches_the_stored_normalised_address(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        env.allow("ak@x.test").await;
+        // The same address, spelled with the Kelvin sign: it hashes as `ak@x.test`.
+        let id = env
+            .reserve_with(
+                template,
+                "a\u{212A}@x.test",
+                None,
+                None,
+                env.sender,
+                Some(1),
+            )
+            .await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.row(id).await.outcome, TestSendOutcome::Sent);
+        let sent = env.sent();
+        assert_eq!((sent.len(), sent[0].to.as_str()), (1, "ak@x.test"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_allowlist_entry_removed_after_the_request_ends_the_row_with_no_call(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let id = env.reserve(template, "qa@example.org", None).await;
+        let entry = sqlx::query_scalar::<_, Uuid>("SELECT id FROM test_send_allowlist")
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+        let mut connection = env.pool.acquire().await.unwrap();
+        assert!(
+            zirv_flow_store::delete_allowlist_entry(&mut connection, env.ws, entry)
+                .await
+                .unwrap()
+        );
+        drop(connection);
+
+        env.attempt().await.unwrap();
+
+        let row = env.row(id).await;
+        assert_eq!(row.outcome, TestSendOutcome::Failed);
+        assert_eq!(row.reason.as_deref(), Some("recipient_unavailable"));
+        assert!(fake_ledger_calls(&env.ledger).is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_removed_after_the_request_ends_the_row_with_no_call(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let member = env.member("ada@example.com").await;
+        let id = env.reserve(template, "ada@example.com", Some(member)).await;
+        sqlx::query("DELETE FROM memberships WHERE user_id = $1")
+            .bind(member)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        let row = env.row(id).await;
+        assert_eq!(row.outcome, TestSendOutcome::Failed);
+        assert_eq!(row.reason.as_deref(), Some("recipient_unavailable"));
+        assert!(fake_ledger_calls(&env.ledger).is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_member_who_changed_their_address_is_sent_to_nothing_stale(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let member = env.member("ada@example.com").await;
+        let id = env.reserve(template, "ada@example.com", Some(member)).await;
+        sqlx::query("UPDATE users SET email = 'other@example.com' WHERE id = $1")
+            .bind(member)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(
+            env.row(id).await.reason.as_deref(),
+            Some("recipient_unavailable")
+        );
+        assert!(fake_ledger_calls(&env.ledger).is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_whose_row_was_erased_sends_nothing_and_ends_quietly(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let id = env.reserve(template, "qa@example.org", None).await;
+        sqlx::query("DELETE FROM test_sends WHERE id = $1")
+            .bind(id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.attempt().await.unwrap();
+
+        assert!(fake_ledger_calls(&env.ledger).is_empty());
+        assert_eq!(env.count("SELECT count(*) FROM jobs").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_missing_or_wrong_keyring_fails_like_a_credential_that_cannot_be_opened(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let id = env.reserve(template, "qa@example.org", None).await;
+        sqlx::query("UPDATE jobs SET max_attempts = 2")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        env.keyring = None;
+
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.row(id).await.outcome, TestSendOutcome::Queued);
+        env.keyring = Some(Arc::new(Keyring::new(MasterKey::generate(), None).unwrap()));
+        env.attempt().await.unwrap();
+
+        let row = env.row(id).await;
+        assert_eq!(row.outcome, TestSendOutcome::Failed);
+        assert_eq!(row.reason.as_deref(), Some("credential_unavailable"));
         assert!(fake_ledger_calls(&env.ledger).is_empty());
     }
 }
