@@ -181,7 +181,7 @@ macro_rules! names_erased_person {
 /// wait for it. So after the mark no matching job changes state, and the delete that follows sees
 /// the rows as they were marked. Marking only the running jobs would miss one that is ready at
 /// the mark, claimed before the delete's snapshot and failed back to ready after it.
-async fn purge_jobs(
+pub(super) async fn purge_jobs(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],

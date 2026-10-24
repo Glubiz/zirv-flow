@@ -16,7 +16,7 @@ use zirv_flow_core::consent::SuppressionReason;
 use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
-use super::delete::{DeleteReason, delete_person};
+use super::delete::{DeleteReason, delete_person, purge_jobs};
 use crate::{
     Actor, NewAuditEntry, NewJob, NewSuppression, PgPool, StoreError, add_suppression,
     append_audit, begin, commit, enqueue,
@@ -400,11 +400,15 @@ pub async fn replay_erasures(
             report.requests += 1;
             report.suppressions += suppress(&mut tx, ws, &hashes, &kinds).await?;
             // Every id the erased group had: a backup from before a merge restores them apart.
-            for id in std::iter::once(person).chain(people) {
+            let ids: Vec<Uuid> = std::iter::once(person).chain(people).collect();
+            for &id in &ids {
                 if delete_person(&mut tx, ws, id, DeleteReason::Erasure, trace).await? {
                     report.people += 1;
                 }
             }
+            // A job restored from a backup can name a ledger person whose row is not there, and
+            // `delete_person` purges jobs only for a person it found.
+            purge_jobs(&mut tx, ws, &ids, &[]).await?;
             crate::delete_test_sends_by_hash(&mut tx, ws, &hashes).await?;
             crate::delete_allowlist_by_hash(&mut tx, ws, &hashes).await?;
             all_hashes.extend(hashes);
@@ -860,6 +864,51 @@ mod tests {
                 .unwrap();
         assert_eq!(sends, [hash(BYSTANDER_EMAIL).to_vec()]);
         assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_purges_a_restored_test_send_job_whose_person_is_gone(pool: PgPool) {
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+        // A backup brings the jobs back; the erased person's row is not among the restored rows.
+        for (who, key) in [(person, "erased"), (bystander, "kept")] {
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
+                    cause_id, trace_id) \
+                 VALUES (gen_random_uuid(), $1, 'template.test_send', \
+                    jsonb_build_object('person_id', $2::text), $3, 'api', 't', gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(who)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let gone: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE id = $1")
+            .bind(person)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gone, 0, "the person is not there to delete");
+
+        replay_erasures(&pool, Some(ws), None, &trace())
+            .await
+            .unwrap();
+
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, ["kept"]);
     }
 
     #[sqlx::test]
