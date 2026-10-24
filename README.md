@@ -2281,7 +2281,7 @@ hash stored on the message when it was sent, so a message sent before this was r
 nobody. Events for an unknown message, or one sent through another destination, get a `202` and are
 counted in `zirv_flow_provider_feedback_total{outcome}`.
 
-`GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (any reader) shows the
+`GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (admins only) shows the
 provider's status of each DNS record next to ours. It only reads: it never marks a domain verified.
 
 ## Render host
