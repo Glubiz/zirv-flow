@@ -12,6 +12,7 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use tower::ServiceExt;
+    use uuid::Uuid;
     use zirv_flow_core::UserId;
 
     use crate::admin::{self, Context};
@@ -13321,5 +13322,289 @@ email,b@example.com,
         assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
         assert_eq!(published.body["rules"][1]["name"], "Two");
         assert_eq!(draft.body["revision"], 2, "a refused save writes nothing");
+    }
+
+    /// Writes a message of `person` in `ws`; `ended` makes it sent (true) or skipped by
+    /// `no_consent` with a consent rule (false), and `None` leaves it pending.
+    async fn seed_message(
+        pool: &PgPool,
+        ws: &str,
+        person: &str,
+        template: Uuid,
+        age_seconds: i64,
+        ended: Option<bool>,
+    ) -> Uuid {
+        use zirv_flow_store::{GateRecord, MessageStatus, NewMessage};
+        let id = Uuid::now_v7();
+        let dimensions = zirv_flow_core::consent::Dimensions::new();
+        let rule = Uuid::from_u128(77);
+        let consent = GateRecord::blocked("consent", "no_consent").with_detail("rule", rule);
+        let sent = [
+            GateRecord::passed("consent"),
+            GateRecord::passed("delivery"),
+        ];
+        let skipped = [GateRecord::passed("address"), consent];
+        let (status, reason, gates): (_, _, &[GateRecord]) = match ended {
+            Some(true) => (MessageStatus::Sent, None, &sent),
+            Some(false) => (MessageStatus::Skipped, Some("no_consent"), &skipped),
+            None => (MessageStatus::Pending, None, &[]),
+        };
+        let new = NewMessage {
+            id,
+            workspace: ws.parse().unwrap(),
+            person: person.parse().unwrap(),
+            enrollment: Uuid::now_v7(),
+            flow: None,
+            flow_version: None,
+            node: "mail",
+            template,
+            template_version: Some(2),
+            destination: Uuid::from_u128(5),
+            sender_identity: None,
+            category: Some("marketing"),
+            topic: None,
+            dimensions: &dimensions,
+            status,
+            reason,
+            deciding_rule: (ended == Some(false)).then_some("Cooldown after a complaint"),
+            gates,
+            attempts: 1,
+            now: time::OffsetDateTime::now_utc() - time::Duration::seconds(age_seconds),
+        };
+        assert!(zirv_flow_store::insert_message(pool, &new).await.unwrap());
+        id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_message_log_reads_by_role_pages_filters_and_follows_merges(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, member_id, "member").await;
+        let (_, outsider) = user(&pool, &router, "outsider@example.com").await;
+        let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
+        let (_, ingest_key) = make_key(&router, &owner, &ws, &["ingest"]).await;
+        let (survivor, merged) = seed_profile(&pool, &ws).await;
+        let (news, receipt) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let oldest = seed_message(&pool, &ws, &merged, news, 500, Some(true)).await;
+        let second = seed_message(&pool, &ws, &survivor, receipt, 400, Some(true)).await;
+        let third = seed_message(&pool, &ws, &survivor, news, 300, Some(false)).await;
+        let waiting = seed_message(&pool, &ws, &survivor, news, 200, None).await;
+        let newest = seed_message(&pool, &ws, &survivor, news, 100, Some(true)).await;
+        let until = time::OffsetDateTime::now_utc() + time::Duration::hours(3);
+        zirv_flow_store::record_message_deferral(
+            &pool,
+            ws.parse().unwrap(),
+            waiting,
+            "quiet_hours",
+            until,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let uri = |rest: &str| people_uri(&ws, &format!("/{survivor}/messages{rest}"));
+        let ids = |reply: &Reply| -> Vec<String> {
+            reply.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let all = call(&router, "GET", &uri(""), None, Auth::Session(&owner)).await;
+        let as_member = call(&router, "GET", &uri(""), None, Auth::Session(&member)).await;
+        let as_key = call(&router, "GET", &uri(""), None, Auth::Key(&read_key)).await;
+        let as_outsider = call(&router, "GET", &uri(""), None, Auth::Session(&outsider)).await;
+        let as_ingest = call(&router, "GET", &uri(""), None, Auth::Key(&ingest_key)).await;
+        let anonymous = call(&router, "GET", &uri(""), None, Auth::Anonymous).await;
+
+        assert_eq!(all.status, StatusCode::OK, "{:?}", all.body);
+        let expected: Vec<String> = [newest, waiting, third, second, oldest]
+            .iter()
+            .map(Uuid::to_string)
+            .collect();
+        assert_eq!(ids(&all), expected, "newest first, merged people included");
+        for allowed in [&as_member, &as_key] {
+            assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
+            assert_eq!(ids(allowed), expected);
+        }
+        assert_eq!(as_outsider.status, StatusCode::NOT_FOUND);
+        assert_eq!(as_ingest.status, StatusCode::FORBIDDEN);
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        // The skipped message names its reason, the deciding rule and the gates in order.
+        let skipped = &all.body["messages"][2];
+        assert_eq!(skipped["status"], "skipped");
+        assert_eq!(skipped["reason"], "no_consent");
+        assert_eq!(skipped["deciding_rule"], "Cooldown after a complaint");
+        assert_eq!(skipped["consent_rule_id"], Uuid::from_u128(77).to_string());
+        assert_eq!(skipped["template"]["version"], 2);
+        assert_eq!(skipped["template"]["category"], "marketing");
+        let gates: Vec<(&str, &str)> = skipped["gate_results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| (g["gate"].as_str().unwrap(), g["result"].as_str().unwrap()))
+            .collect();
+        assert_eq!(gates, [("address", "passed"), ("consent", "blocked")]);
+        // The message that waits says until when, and why.
+        let pending = &all.body["messages"][1];
+        assert_eq!(pending["deferred_why"], "quiet_hours");
+        assert!(pending["deferred_until"].is_string());
+        assert!(all.body["messages"][0]["deferred_until"].is_null());
+        // No address and no identifier hash, anywhere.
+        let text = all.body.to_string();
+        assert!(!text.contains('@'), "{text}");
+        assert!(!text.contains("hash"), "{text}");
+
+        let first = call(
+            &router,
+            "GET",
+            &uri("?limit=2"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = first.body["next_before"].as_str().unwrap().to_owned();
+        let next = call(
+            &router,
+            "GET",
+            &uri(&format!("?limit=2&before={cursor}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let cursor = next.body["next_before"].as_str().unwrap().to_owned();
+        let last = call(
+            &router,
+            "GET",
+            &uri(&format!("?limit=2&before={cursor}")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let paged: Vec<String> = [&first, &next, &last].into_iter().flat_map(ids).collect();
+        assert_eq!(paged, expected, "three pages, no overlap and no gap");
+        assert!(last.body["next_before"].is_null());
+
+        let get = |query: String| {
+            let router = router.clone();
+            let owner = &owner;
+            let uri = uri(&query);
+            async move { call(&router, "GET", &uri, None, Auth::Session(owner)).await }
+        };
+        let only_skipped = get("?result=skipped".into()).await;
+        let only_waiting = get("?result=deferred".into()).await;
+        let only_receipts = get(format!("?template_id={receipt}")).await;
+        let none = get("?result=failed".into()).await;
+        assert_eq!(ids(&only_skipped), [third.to_string()]);
+        assert_eq!(ids(&only_waiting), [waiting.to_string()]);
+        assert_eq!(ids(&only_receipts), [second.to_string()]);
+        assert_eq!(none.body["messages"], json!([]));
+        for bad in ["?limit=0", "?result=maybe", "?template_id=x", "?before=%21"] {
+            let reply = get(bad.into()).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+        // A merged-away person reads as the survivor.
+        let from_merged = call(
+            &router,
+            "GET",
+            &people_uri(&ws, &format!("/{merged}/messages")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(ids(&from_merged), expected);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_in_progress_result_holds_sending_and_pending_rows_that_do_not_wait(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (person, _) = seed_profile(&pool, &ws).await;
+        let template = Uuid::from_u128(1);
+        let sent = seed_message(&pool, &ws, &person, template, 400, Some(true)).await;
+        let idle = seed_message(&pool, &ws, &person, template, 300, None).await;
+        let sending = seed_message(&pool, &ws, &person, template, 200, None).await;
+        let waiting = seed_message(&pool, &ws, &person, template, 100, None).await;
+        sqlx::query("UPDATE messages SET status = 'sending' WHERE id = $1")
+            .bind(sending)
+            .execute(&pool)
+            .await
+            .unwrap();
+        zirv_flow_store::record_message_deferral(
+            &pool,
+            ws.parse().unwrap(),
+            waiting,
+            "frequency_cap",
+            time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let ids = |reply: &Reply| -> Vec<String> {
+            reply.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let get = |query: &str| {
+            let router = router.clone();
+            let owner = &owner;
+            let uri = people_uri(&ws, &format!("/{person}/messages{query}"));
+            async move { call(&router, "GET", &uri, None, Auth::Session(owner)).await }
+        };
+
+        let deferred = get("?result=deferred").await;
+        let progress = get("?result=in_progress").await;
+        let paged = get("?result=in_progress&limit=1").await;
+        let cursor = paged.body["next_before"].as_str().unwrap().to_owned();
+        let rest = get(&format!("?result=in_progress&limit=1&before={cursor}")).await;
+
+        assert_eq!(ids(&deferred), [waiting.to_string()]);
+        assert_eq!(ids(&progress), [sending.to_string(), idle.to_string()]);
+        assert_eq!(ids(&paged), [sending.to_string()]);
+        assert_eq!(ids(&rest), [idle.to_string()]);
+        assert!(!ids(&progress).contains(&sent.to_string()));
+        assert!(progress.body["messages"][1]["deferred_until"].is_null());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_of_another_workspace_or_an_unknown_one_has_no_message_log(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let a = workspace(&router, &owner, "Alpha").await;
+        let b = workspace(&router, &owner, "Beta").await;
+        let (person, _) = seed_profile(&pool, &a).await;
+        seed_message(&pool, &a, &person, Uuid::from_u128(1), 10, Some(true)).await;
+
+        let foreign = call(
+            &router,
+            "GET",
+            &people_uri(&b, &format!("/{person}/messages")),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let unknown = call(
+            &router,
+            "GET",
+            &people_uri(&a, &format!("/{}/messages", Uuid::now_v7())),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
     }
 }

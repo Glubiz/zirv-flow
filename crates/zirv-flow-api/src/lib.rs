@@ -386,6 +386,10 @@ fn routes() -> Router<AppState> {
             get(people::timeline::get),
         )
         .route(
+            "/api/v1/workspaces/{ws}/people/{id}/messages",
+            get(people::messages::list),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/event-schemas",
             get(events::schemas::list).post(events::schemas::create),
         )

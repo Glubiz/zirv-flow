@@ -2226,6 +2226,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/people/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A person's message log, newest first, in pages. Each message names its template, flow step and
+         *     destination, the gates it went through in order, the exact reason it was skipped or failed, the
+         *     consent rule that decided, and, for a message that waits, when it runs again. A person that was
+         *     merged into another reads as the survivor, with the merged people's messages included. No
+         *     address and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`
+         *     (waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or
+         *     `failed`) and by `template_id`.
+         */
+        get: operations["list_person_messages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/people/{id}/timeline": {
         parameters: {
             query?: never;
@@ -6030,6 +6055,31 @@ export interface components {
              */
             threshold_seconds?: number | null;
         };
+        /** @description What one gate of the send found. Codes and ids only. */
+        GateResultBody: {
+            /**
+             * @description `enrollment`, `template`, `sender`, `address`, `consent`, `suppression`, `quiet_hours`,
+             *     `frequency_cap`, `render`, `rate_limit` or `delivery`.
+             * @example consent
+             */
+            gate: string;
+            /** @description A code that adds to the reason. */
+            note?: string | null;
+            /** @description The code that stopped the message. */
+            reason?: string | null;
+            /**
+             * @description `passed`, `blocked`, `deferred`, `in_flight` or `unconfirmed`.
+             * @example blocked
+             */
+            result: string;
+            /**
+             * Format: uuid
+             * @description The consent policy rule that decided, by id.
+             */
+            rule_id?: string | null;
+            /** @description For a deferral, when the message runs again. */
+            run_at?: string | null;
+        };
         /** @description Why the walk stopped before the graph or the script ended. */
         HaltBody: {
             /** @description The most events one load keeps (`unable_to_evaluate` only). */
@@ -6489,6 +6539,93 @@ export interface components {
             merged_at: string;
             /** Format: uuid */
             merged_person_id: string;
+        };
+        MessageBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The workspace's consent policy, when a rule of it denied the send.
+             */
+            consent_policy_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The consent policy rule that denied the send, by id.
+             */
+            consent_rule_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description What decided the consent gate: `recorded_consent`, `topic_default`, `transactional`, a
+             *     suppression's scope, or the name of the consent policy rule that denied the send.
+             */
+            deciding_rule?: string | null;
+            /**
+             * Format: date-time
+             * @description For a pending message that waits: when it runs again.
+             */
+            deferred_until?: string | null;
+            /** @description For a pending message that waits: `quiet_hours`, `frequency_cap` or `rate_limit`. */
+            deferred_why?: string | null;
+            destination: components["schemas"]["MessageDestinationBody"];
+            flow?: null | components["schemas"]["MessageFlowBody"];
+            /** @description In the order the send ran them. */
+            gate_results: components["schemas"]["GateResultBody"][];
+            /** Format: uuid */
+            id: string;
+            node: components["schemas"]["MessageNodeBody"];
+            /**
+             * @description The code a skipped or failed message ended with, such as `no_consent`.
+             * @example no_consent
+             */
+            reason?: string | null;
+            /**
+             * @description `pending`, `sending`, `sent`, `skipped` or `failed`.
+             * @example skipped
+             */
+            status: string;
+            template: components["schemas"]["MessageTemplateBody"];
+            /**
+             * @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`; none when the message has
+             *     no recorded decisions.
+             */
+            trace_id?: string | null;
+        };
+        MessageDestinationBody: {
+            /** Format: uuid */
+            id: string;
+            name?: string | null;
+        };
+        MessageFlowBody: {
+            /** Format: uuid */
+            id: string;
+            name?: string | null;
+            /** Format: int32 */
+            version?: number | null;
+        };
+        MessageNodeBody: {
+            id: string;
+            /** @description The step's name, when the flow version gives it one. */
+            name?: string | null;
+        };
+        MessageTemplateBody: {
+            /** @description `marketing` or `transactional`. */
+            category?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** @description None when the template no longer exists. */
+            name?: string | null;
+            /**
+             * Format: int32
+             * @description The version that was sent; none when the message ended before one was read.
+             */
+            version?: number | null;
+        };
+        MessagesBody: {
+            /** @description Newest first. */
+            messages: components["schemas"]["MessageBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
         };
         MethodsBody: {
             /** @description True when e-mail and password sign-in is accepted. */
@@ -17763,6 +17900,85 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_person_messages: {
+        parameters: {
+            query?: {
+                /** @description Messages per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description `sent`, `skipped`, `deferred`, `in_progress` or `failed` */
+                result?: string;
+                /** @description Only messages of this template */
+                template_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of messages */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagesBody"];
+                };
+            };
+            /** @description A parameter is out of range or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person (an erased person included), or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
