@@ -48,9 +48,10 @@ pub async fn find_tracked_message<'e>(
     .map_err(StoreError::query)
 }
 
-/// Records the links click tracking rewrote in a message, as `(index, URL)` pairs. Writing the
-/// same index again replaces its URL, so a retried send leaves one row per link and the redirect
-/// follows the message that went out last.
+/// Records the links click tracking rewrote in a message, as `(index, URL)` pairs. Rows are
+/// immutable: an index already recorded keeps its first URL, because the token in an email that
+/// was already delivered must keep leading where that email pointed. A retry adds only the
+/// indexes it has beyond the first render.
 pub async fn record_message_links<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
@@ -66,7 +67,7 @@ pub async fn record_message_links<'e>(
         "INSERT INTO message_links (workspace_id, message_id, link_index, url) \
          SELECT $1, $2, t.link_index, t.url \
          FROM unnest($3::int4[], $4::text[]) AS t(link_index, url) \
-         ON CONFLICT (message_id, link_index) DO UPDATE SET url = EXCLUDED.url",
+         ON CONFLICT (message_id, link_index) DO NOTHING",
     )
     .bind(workspace.as_uuid())
     .bind(message)
@@ -153,10 +154,41 @@ pub(super) mod tests {
         );
         assert_eq!(
             find_message_link(&pool, id, 1).await.unwrap().as_deref(),
-            Some("https://a.test/three")
+            Some("https://a.test/two")
         );
         assert_eq!(find_message_link(&pool, id, 2).await.unwrap(), None);
         assert_eq!(find_message_link(&pool, other, 0).await.unwrap(), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retry_keeps_the_first_url_and_adds_new_indexes(pool: PgPool) {
+        let ws = workspace(&pool, "links-imm").await;
+        let (_, id) = message(&pool, ws).await;
+        record_message_links(&pool, ws, id, &[(0, "https://a.test/first".to_owned())])
+            .await
+            .unwrap();
+
+        record_message_links(
+            &pool,
+            ws,
+            id,
+            &[
+                (0, "https://a.test/changed".to_owned()),
+                (1, "https://a.test/added".to_owned()),
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            find_message_link(&pool, id, 0).await.unwrap().as_deref(),
+            Some("https://a.test/first")
+        );
+        assert_eq!(
+            find_message_link(&pool, id, 1).await.unwrap().as_deref(),
+            Some("https://a.test/added")
+        );
     }
 
     #[sqlx::test]
