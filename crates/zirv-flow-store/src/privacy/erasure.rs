@@ -235,7 +235,8 @@ pub enum EraseOutcome {
 /// 3. deletes the workspace's pending inbox rows with an identifier that hashes to any hash
 ///    of the ledger row, locked `FOR UPDATE` so a concurrent drain has either applied them
 ///    already (and the deletion below covers what it wrote) or never sees them;
-/// 4. deletes the group, and any other id the ledger names that still exists;
+/// 4. deletes the group, and any other id the ledger names that still exists, and the
+///    workspace's test-send log rows whose recipient hash is one of the ledger's;
 /// 5. completes the ledger row and audits `privacy.erased` with the request id only.
 ///
 /// When the person is already gone, steps 2 and 3 still run from the ledger's hashes. Inbox
@@ -303,6 +304,8 @@ pub async fn erase_person(
     }
 
     suppress(connection, workspace, &hashes, &kinds).await?;
+    // The test-send log names no person: it is found by the recipient hash, like a suppression.
+    crate::delete_test_sends_by_hash(connection, workspace, &hashes).await?;
     let wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
     let inbox_rows =
         delete_inbox_rows(connection, workspace, &matching_rows(&inbox, &wanted)).await?;
@@ -400,6 +403,7 @@ pub async fn replay_erasures(
                     report.people += 1;
                 }
             }
+            crate::delete_test_sends_by_hash(&mut tx, ws, &hashes).await?;
             all_hashes.extend(hashes);
         }
         if let Some(key) = key {
@@ -687,6 +691,54 @@ mod tests {
         );
         assert!(item_identifiers(&json!({"identifiers": 5})).is_empty());
         assert!(item_identifiers(&json!({})).is_empty());
+    }
+
+    /// Plants a test-send log row for the recipient hash.
+    async fn test_send_to(pool: &PgPool, ws: WorkspaceId, recipient: &[u8; 32]) {
+        sqlx::query(
+            "INSERT INTO test_sends (id, workspace_id, template_id, destination_id, \
+                sender_identity_id, recipient_hash, render_context) \
+             VALUES ($1, $2, $1, $1, $1, $3, 'sample')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(recipient.as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_deletes_the_test_sends_to_their_hashes_and_leaves_the_allowlist(
+        pool: PgPool,
+    ) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        test_send_to(&pool, ws, &hash(EMAIL)).await;
+        test_send_to(&pool, ws, &hash(EMAIL)).await;
+        test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
+        // The allowlist is admin configuration: a hash and a masked hint an admin added, which a
+        // person's erasure does not touch.
+        let mut connection = pool.acquire().await.unwrap();
+        crate::add_allowlist_entry(&mut connection, ws, Uuid::now_v7(), &hash(EMAIL), "a***@x")
+            .await
+            .unwrap();
+        drop(connection);
+
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+
+        let remaining: Vec<Vec<u8>> = sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, [hash(BYSTANDER_EMAIL).to_vec()]);
+        let allowed: i64 = sqlx::query_scalar("SELECT count(*) FROM test_send_allowlist")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(allowed, 1);
+        assert!(rows_referencing_person(&pool, person).await.is_empty());
     }
 
     #[sqlx::test]

@@ -321,7 +321,10 @@ mod tests {
 
         assert_eq!(context.person["plan"], json!("sample"));
         assert_eq!(context.person["age"], json!(1));
-        assert_eq!(context.person["email"], json!(zirv_flow_templates::SAMPLE_EMAIL));
+        assert_eq!(
+            context.person["email"],
+            json!(zirv_flow_templates::SAMPLE_EMAIL)
+        );
         assert_eq!(context, RenderContext::sample_person(&catalog()));
     }
 
