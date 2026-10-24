@@ -112,15 +112,13 @@ pub async fn check_frequency_caps(
         CapVerdict::Reserved
     };
     if verdict == CapVerdict::Reserved {
-        sqlx::query(
-            "UPDATE messages SET cap_slot_at = $3 WHERE workspace_id = $1 AND id = $2",
-        )
-        .bind(workspace.as_uuid())
-        .bind(message)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(StoreError::query)?;
+        sqlx::query("UPDATE messages SET cap_slot_at = $3 WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace.as_uuid())
+            .bind(message)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::query)?;
     }
     commit(tx).await?;
     Ok(verdict)
