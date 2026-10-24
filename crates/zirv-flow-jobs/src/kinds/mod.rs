@@ -8,6 +8,7 @@ use crate::{ErasedKind, JobError};
 
 mod ai_transcripts;
 mod delivery_send;
+mod delivery_sync;
 mod events_retention;
 mod flow_enroll;
 mod flow_lifecycle;
@@ -59,6 +60,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &flow_lifecycle::FlowLifecycle,
     &webhook_call::WebhookCall,
     &delivery_send::DeliverySend,
+    &delivery_sync::DeliverySync,
     &sending_domain_verify::SendingDomainVerify,
 ];
 
