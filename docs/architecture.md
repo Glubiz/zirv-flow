@@ -1109,8 +1109,8 @@ send time** (consent can change while a person waits):
 | 2 | Channel address present and valid (registry channel-address trait) | `skipped: no_address` |
 | 3 | Effective consent under the workspace consent policy (below); the default is the topic's policy (explicit opt-in, or allowed unless opted out) | `skipped: no_consent` |
 | 4 | Suppression check on the address hash, in both scopes: the workspace and the organization (below) | `skipped: suppressed` |
-| 5 | Frequency cap per person, channel, window; check-and-record under a per-person transaction advisory lock | `skipped: frequency_cap` or deferred (configurable) |
-| 6 | Quiet hours in the recipient's time zone | deferred to the next allowed time |
+| 5 | Quiet hours in the recipient's time zone | deferred to the next allowed time |
+| 6 | Frequency cap per person, channel, window, for a message that sends now; check-and-record under a per-person transaction advisory lock | `skipped: frequency_cap` or deferred (configurable) |
 | 7 | Template render (section 11; sandboxed, strict undefined) | `failed: render_error` |
 | 8 | Destination rate limit | deferred until a token is available |
 | 9 | Deliver with idempotency key | `sent`, retried, or `failed` |
@@ -1231,7 +1231,7 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   unique key.
 - The job creates the `messages` row (v7 id) on its first run. The message id is
   the idempotency key across every retry.
-- Gates 1 to 8 run in the job transaction. Gate 5 is check-and-record under a
+- Gates 1 to 8 run in the job transaction. Gate 6 is check-and-record under a
   per-person transaction advisory lock, and the message's reserved slot counts.
 - Delivery runs outside any database lock, following the webhook pattern: read,
   call, then lock and write the outcome.
@@ -1268,8 +1268,8 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   enrollment ended or the flow is paused or archived: a decision, no row), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared
   `require_verified_sender`, run in a transaction of its own so no lock outlives it), `address`,
-  `consent` (skipped for a transactional template), `suppression`, the `frequency_cap` and
-  `quiet_hours` stubs, `render` (the pool; every failure is `failed: render_error`),
+  `consent` (skipped for a transactional template), `suppression`, `quiet_hours`,
+  `frequency_cap` (both #221), `render` (the pool; every failure is `failed: render_error`),
   `rate_limit` and `delivery`. The sender check comes before the gates that read the person
   because it needs nothing about them.
 - **Rate limit.** The destination is loaded again for every message, and an archived one is
@@ -1338,6 +1338,44 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Erasure and merge.** `messages` is deleted with the person; a queued `delivery.send` is purged
   by `person_id`. On a merge messages stay on the old id, and the log reads through
   `person_merges`.
+
+**As built (caps and quiet hours, #221).**
+
+- **Settings.** Migration `0050_send_limits.sql`: `frequency_caps` (channel, window in whole hours up
+  to 31 days, limit, `skip` or `defer`; several per workspace, all must pass) and `quiet_hours` (at
+  most one row per workspace: local start and end, the weekdays a period starts on). The API is
+  `GET` (Read) and `PUT` (Admin, audited as `send_settings.updated`) on
+  `/api/v1/workspaces/{ws}/sending/settings`; the `PUT` replaces both in one transaction and refuses
+  with JSON pointers. Windows are ISO 8601 durations, parsed by the segments crate's parser.
+- **Gate 5, quiet hours.** The zone is the person's `timezone` trait, else `workspaces.timezone`; a
+  trait that is not a zone falls back and puts the note `timezone_fallback` on the gate record and
+  a `message.send` / `noted` decision. A message inside a quiet period (a period belongs to the day
+  it starts on) is deferred to its end, resolved with `resolve_local`. A transactional message
+  skips both gates. The gate results record `quiet_hours` then `frequency_cap`.
+- **Gate 6, the slot.** `messages.cap_slot_at` is the instant a message reserved its slot, with a
+  partial index for the count. The check runs in a short transaction of its own on the pool, not
+  the job's: it takes `pg_advisory_xact_lock(7001, hashtext(workspace:person))`, counts the person's
+  non-test, non-skipped messages on the channel whose slot is inside each cap's window (excluding
+  the message itself, which counts as itself), and either sets the slot or blocks without
+  reserving. A job transaction would hold the lock across the destination call and roll the
+  reservation back on a retry. The first cap in `skip` mode that is full skips the message
+  (`frequency_cap`); otherwise caps in `defer` mode hold it until the latest of the instants enough
+  slots leave their windows. A re-run after a rate-limit wait moves its one slot to the time it
+  sends, so every window sees it from then. Quiet hours are judged first, so only a message that
+  sends now reserves a slot. Test sends and transactional messages hold none and are not counted;
+  merged people are not walked (the cap counts the person's own id).
+- **Deferral.** A gate's deferral re-enqueues a copy at `run_at` under `<effect key>:defer:<n>` with
+  the remaining attempt budget, so it never consumes `max_attempts`. It writes a `deferred` entry
+  (gate, `run_at`, note) to the message's gate results in a statement of its own, which the ending
+  write keeps ahead of the run's own gates, and a `message.send` / `deferred` decision with the
+  gate as reason; no event, and the row stays `pending`. A quiet-hours deferral releases the slot in
+  the same write, so the deferred run takes one when it really sends. Only a wait for a rate-limit
+  token starts the six-hour clock (`first_wait`); a gate's deferral stores it as null, restarting
+  it after the hold, so a message held overnight is not failed as `rate_limited`. Each run of
+  token waits is bounded, but a send whose token waits alternate with gate holds has no bound on
+  its total wait. A defer-mode release time is read from other messages' slots, which a re-run
+  can move later; the woken message checks again and may defer once more. A resumed (`sending`) message skips gates 3 to 6
+  as before.
 
 ### 10.2 Email, tracking and feedback
 

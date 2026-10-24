@@ -7,6 +7,7 @@
 //! their own on the worker's pool, and the rest are plain reads on the job's connection.
 
 use sqlx::PgConnection;
+use time::OffsetDateTime;
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::HmacKey;
@@ -14,12 +15,13 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::consent::Channel;
 use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_store::{
-    Clock, GateRecord, PgPool, ReadOutcome, SenderError, SuppressionScope, VerifiedSender, begin,
-    consent_read, read_send_address, require_verified_sender, suppressing_scope,
+    CapVerdict, Clock, GateRecord, PgPool, ReadOutcome, SenderError, SuppressionScope,
+    VerifiedSender, begin, check_frequency_caps, consent_read, read_send_address, read_send_limits,
+    require_verified_sender, step_zones, suppressing_scope,
 };
 
 use super::payload::SendJob;
-use super::policy;
+use super::{policy, quiet};
 use crate::JobError;
 
 /// The code of a message the sender gate stopped.
@@ -226,16 +228,98 @@ pub(super) fn address_hash(key: &HmacKey, address: &str) -> Option<[u8; 32]> {
     Some(identifier_hash(key, &identifier))
 }
 
-/// Gate 5, the frequency cap per person, channel and window. #221 fills it; until then it lets
-/// every message through.
-pub(super) fn frequency_cap() -> GateRecord {
-    GateRecord::passed("frequency_cap")
+/// The code of a message the frequency cap gate stopped.
+pub(super) const FREQUENCY_CAP: &str = "frequency_cap";
+/// The note on the quiet-hours gate and its decision when the person's `timezone` trait is not a
+/// zone and the workspace's was used.
+pub(super) const TIMEZONE_FALLBACK: &str = "timezone_fallback";
+
+/// A gate that holds the message back for later instead of ending it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Deferral {
+    /// The gate that deferred.
+    pub(super) gate: &'static str,
+    /// When the message runs again.
+    pub(super) until: OffsetDateTime,
+    /// A code that adds to the gate record, such as `timezone_fallback`.
+    pub(super) note: Option<&'static str>,
+    /// Whether the message gives up the frequency-cap slot it holds: it takes one again when it
+    /// really sends.
+    pub(super) release_slot: bool,
 }
 
-/// Gate 6, quiet hours in the recipient's time zone. #221 fills it; until then it lets every
-/// message through.
-pub(super) fn quiet_hours() -> GateRecord {
-    GateRecord::passed("quiet_hours")
+/// What a gate that does not let the message through does with it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum Stop {
+    /// The message ends skipped.
+    Skip(Blocked),
+    /// The message runs again later.
+    Defer(Deferral),
+}
+
+/// Gate 5, the frequency caps of the person on the channel: check and record.
+///
+/// [`check_frequency_caps`] counts the slots in each cap's window and reserves this message's own
+/// in a short transaction of its own, under a per-person lock, so the lock is gone before the
+/// message is rendered or delivered.
+pub(super) async fn frequency_cap(
+    pool: &PgPool,
+    job: &SendJob,
+    now: OffsetDateTime,
+) -> Result<Result<GateRecord, Stop>, JobError> {
+    let verdict = check_frequency_caps(
+        pool,
+        job.workspace,
+        job.person,
+        job.message,
+        Channel::Email.as_str(),
+        now,
+    )
+    .await?;
+    Ok(match verdict {
+        CapVerdict::Reserved => Ok(GateRecord::passed("frequency_cap")),
+        CapVerdict::Skip => Err(Stop::Skip(Blocked::new("frequency_cap", FREQUENCY_CAP))),
+        CapVerdict::Defer { until } => Err(Stop::Defer(Deferral {
+            gate: "frequency_cap",
+            until,
+            note: None,
+            release_slot: false,
+        })),
+    })
+}
+
+/// Gate 6, quiet hours in the recipient's time zone.
+///
+/// The zone is the person's `timezone` trait, else the workspace's (also for a trait that is not a
+/// zone, which the gate record notes). A message that arrives inside a quiet period waits for its
+/// end and gives up its frequency-cap slot meanwhile.
+pub(super) async fn quiet_hours(
+    connection: &mut PgConnection,
+    job: &SendJob,
+    now: OffsetDateTime,
+) -> Result<Result<GateRecord, Stop>, JobError> {
+    let limits = read_send_limits(connection, job.workspace).await?;
+    let Some(quiet) = limits.quiet_hours else {
+        return Ok(Ok(GateRecord::passed("quiet_hours")));
+    };
+    let (workspace_zone, person_zone) = step_zones(connection, job.workspace, job.person).await?;
+    let (zone, fell_back) = quiet::recipient_zone(&workspace_zone, person_zone.as_deref());
+    let note = fell_back.then_some(TIMEZONE_FALLBACK);
+    Ok(match quiet::quiet_until(now, zone, &quiet) {
+        None => {
+            let record = GateRecord::passed("quiet_hours");
+            Ok(match note {
+                Some(note) => record.with_note(note),
+                None => record,
+            })
+        }
+        Some(until) => Err(Stop::Defer(Deferral {
+            gate: "quiet_hours",
+            until,
+            note,
+            release_slot: true,
+        })),
+    })
 }
 
 /// Whether the category is the transactional one.
@@ -254,12 +338,6 @@ mod tests {
         assert_eq!(blocked.gate.reason, Some("no_address"));
         assert!(!blocked.gate.passed);
         assert_eq!(blocked.rule, None);
-    }
-
-    #[test]
-    fn the_stubs_for_the_caps_let_everything_through_under_their_own_names() {
-        assert_eq!(frequency_cap(), GateRecord::passed("frequency_cap"));
-        assert_eq!(quiet_hours(), GateRecord::passed("quiet_hours"));
     }
 
     #[test]

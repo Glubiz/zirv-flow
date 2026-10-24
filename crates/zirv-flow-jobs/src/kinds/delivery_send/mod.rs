@@ -21,7 +21,16 @@
 //!    transactional template skips it (OQ-11).
 //! 6. `suppression`: the address hash in the workspace and the organization (OQ-19), for marketing
 //!    and transactional mail; otherwise `skipped: suppressed`.
-//! 7. `frequency_cap` and `quiet_hours`: stubs that pass; #221 fills them.
+//! 7. `quiet_hours`: inside the workspace's quiet period in the recipient's zone (the `timezone`
+//!    trait, else the workspace's), the message waits for its end and gives up a slot it holds
+//!    from an earlier run.
+//!    `frequency_cap`: the person's caps on the channel, checked only for a message that sends
+//!    now. The check counts the slots of the person's other messages in each cap's window and
+//!    reserves this message's own (`messages.cap_slot_at`, moved to now on a re-run) in a short
+//!    transaction of its own under a per-person advisory lock, so the lock is gone before
+//!    delivery; otherwise `skipped: frequency_cap`, or the message waits until a slot leaves
+//!    the window when the cap says `defer`.
+//!    A transactional message skips both.
 //! 8. `render`: the pool renders the template; any failure is `failed: render_error`.
 //! 9. `rate_limit`: the destination is loaded again (an archived one is refused whatever a held
 //!    block of tokens says) and a token is taken; with none, the send is queued again at the
@@ -45,6 +54,7 @@ mod deliver;
 mod gates;
 mod payload;
 mod policy;
+mod quiet;
 mod render;
 
 use std::sync::Arc;
@@ -63,8 +73,8 @@ use zirv_flow_store::{
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
     find_flow, find_template, find_template_version, insert_message, lock_webhook_person,
     mark_message_sending, mark_message_unconfirmed, message_in_flight, message_status,
-    message_unconfirmed, read_template_field_catalog, read_webhook_subject, record_send_outcome,
-    throttle_bucket,
+    message_unconfirmed, read_template_field_catalog, read_webhook_subject,
+    record_message_deferral, record_send_outcome, throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -297,11 +307,14 @@ async fn decide(
 
     // Gates 3 to 6 judged the message when it first went out. A retry of a message that may have
     // gone out does not judge it again: a person who withdrew consent since was sent this one.
-    if !resuming
-        && let Some(blocked) =
-            person_gates(ctx, job, &pool, &key, &address, transactional, &mut trail).await?
-    {
-        return Ok(trail.skip(blocked));
+    if !resuming {
+        match person_gates(ctx, job, &key, &address, transactional, now, &mut trail).await? {
+            None => {}
+            Some(gates::Stop::Skip(blocked)) => return Ok(trail.skip(blocked)),
+            Some(gates::Stop::Defer(deferral)) => {
+                return defer(ctx, job, payload, Wait::Gate(deferral), now).await;
+            }
+        }
     }
 
     // Gate 7: render, in the pool.
@@ -339,7 +352,9 @@ async fn decide(
     let clock = ctx.clock().clone();
     match gates.admit(&pool, destination.id, &clock).await? {
         Admission::Granted => trail.pass(GateRecord::passed("rate_limit")),
-        Admission::Wait(wait) => return defer(ctx, job, payload, wait, now).await,
+        Admission::Wait(wait) => {
+            return defer(ctx, job, payload, Wait::RateLimit(wait), now).await;
+        }
         Admission::Gone => {
             return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unavailable"));
         }
@@ -444,30 +459,60 @@ async fn decide(
     }
 }
 
-/// Gates 3 to 6: consent, suppression and the two caps. The gate that blocks, if one does.
+/// Gates 3 to 6: consent, suppression and the two caps. What stops the message, if anything does.
 async fn person_gates(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
-    pool: &PgPool,
     key: &HmacKey,
     address: &str,
     transactional: bool,
+    now: OffsetDateTime,
     trail: &mut Trail,
-) -> Result<Option<Blocked>, JobError> {
+) -> Result<Option<gates::Stop>, JobError> {
+    let pool = ctx
+        .pool()
+        .cloned()
+        .ok_or_else(|| JobError::new("the worker has no pool"))?;
+    let pool = &pool;
     match gates::consent(pool, ctx.clock(), job, transactional).await? {
         Ok(passed) => {
             trail.pass(passed.gate);
             trail.rule = passed.rule;
         }
-        Err(blocked) => return Ok(Some(blocked)),
+        Err(blocked) => return Ok(Some(gates::Stop::Skip(blocked))),
     }
     match gates::suppression(ctx.conn(), job.workspace, key, address).await? {
         Ok(passed) => trail.pass(passed),
-        Err(blocked) => return Ok(Some(blocked)),
+        Err(blocked) => return Ok(Some(gates::Stop::Skip(blocked))),
     }
-    // Gates 5 and 6, which #221 fills.
-    trail.pass(gates::frequency_cap());
-    trail.pass(gates::quiet_hours());
+    // A transactional message is not marketing: a receipt is not capped or held overnight.
+    if transactional {
+        trail.pass(GateRecord::passed("quiet_hours"));
+        trail.pass(GateRecord::passed("frequency_cap"));
+        return Ok(None);
+    }
+    // Quiet hours first: a slot is reserved only for a message that sends now, so a concurrent
+    // send to the person never counts a slot whose message waits.
+    match gates::quiet_hours(ctx.conn(), job, now).await? {
+        Ok(passed) => {
+            if passed.note == Some(gates::TIMEZONE_FALLBACK) {
+                note_zone_fallback(ctx, job).await?;
+            }
+            trail.pass(passed);
+        }
+        Err(stop) => {
+            if let gates::Stop::Defer(deferral) = &stop
+                && deferral.note == Some(gates::TIMEZONE_FALLBACK)
+            {
+                note_zone_fallback(ctx, job).await?;
+            }
+            return Ok(Some(stop));
+        }
+    }
+    match gates::frequency_cap(pool, job, now).await? {
+        Ok(passed) => trail.pass(passed),
+        Err(stop) => return Ok(Some(stop)),
+    }
     Ok(None)
 }
 
@@ -558,32 +603,72 @@ fn decision_ids(job: &SendJob) -> Vec<(&'static str, Uuid)> {
     ]
 }
 
-/// No token yet: this job ends and a copy of it runs at the instant the bucket will hold one. The
-/// copy has its own unique key, since this job still holds the original while it runs, and its
-/// attempts continue this job's (`attempt_base`, and a budget of what is left), so a destination
-/// that keeps the send waiting cannot buy it more attempts than the job had.
+/// Why a send is queued again instead of ending.
+enum Wait {
+    /// No rate-limit token yet: the bucket will hold one after this long.
+    RateLimit(Duration),
+    /// A gate (quiet hours, or a frequency cap in `defer` mode) holds the message until a time.
+    Gate(gates::Deferral),
+}
+
+/// The person's `timezone` trait was not a zone and the workspace's was used for the quiet hours:
+/// a decision says so (ids only), apart from the gate record's note.
+async fn note_zone_fallback(ctx: &mut JobContext<'_>, job: &SendJob) -> Result<(), JobError> {
+    ctx.record_decision(
+        "message.send",
+        "noted",
+        Some(gates::TIMEZONE_FALLBACK),
+        decision_ids(job),
+    )
+    .await
+}
+
+/// The send waits: this job ends and a copy of it runs later, at the instant the bucket will hold
+/// a token or the gate that deferred it lets the message go. The copy has its own unique key,
+/// since this job still holds the original while it runs, and its attempts continue this job's
+/// (`attempt_base`, and a budget of what is left), so a deferral never consumes `max_attempts` and
+/// a destination that keeps the send waiting cannot buy it more attempts than the job had.
+///
+/// Only a wait for a token starts the clock of the six hours a send may wait; a gate's deferral
+/// clears it, so it starts again after the hold. A gate's deferral is also written to the message's log first, in a statement
+/// of its own, and with the quiet hours releases the cap slot the message holds.
 async fn defer(
     ctx: &mut JobContext<'_>,
     job: &SendJob,
     payload: &serde_json::Value,
-    wait: Duration,
+    wait: Wait,
     now: OffsetDateTime,
 ) -> Result<Step, JobError> {
     let attempts = ctx.attempts();
+    let (run_at, reason, rate) = match &wait {
+        Wait::RateLimit(wait) => (now + *wait, "rate_limit", true),
+        Wait::Gate(deferral) => (deferral.until, deferral.gate, false),
+    };
+    if let Wait::Gate(deferral) = &wait {
+        let pool = ctx
+            .pool()
+            .cloned()
+            .ok_or_else(|| JobError::new("the worker has no pool"))?;
+        record_message_deferral(
+            &pool,
+            job.workspace,
+            job.message,
+            deferral.gate,
+            deferral.until,
+            deferral.note,
+            deferral.release_slot,
+        )
+        .await?;
+    }
     let mut next = NewJob::new(SEND_JOB_KIND, ctx.trace().clone());
     next.workspace_id = Some(job.workspace);
-    next.payload = job.deferred(payload, attempts, now);
-    next.run_at = Some(now + wait);
+    next.payload = job.deferred(payload, attempts, now, rate);
+    next.run_at = Some(run_at);
     next.max_attempts = (ctx.max_attempts() - (attempts - 1)).max(1);
     next.unique_key = Some(format!("{}:defer:{}", job.key, job.deferrals + 1));
     ctx.enqueue(&next).await?;
-    ctx.record_decision(
-        "message.send",
-        "deferred",
-        Some("rate_limit"),
-        decision_ids(job),
-    )
-    .await?;
+    ctx.record_decision("message.send", "deferred", Some(reason), decision_ids(job))
+        .await?;
     Ok(Step::Over)
 }
 
@@ -863,7 +948,7 @@ mod tests {
                 self.ws,
                 &NewFlow {
                     id: self.flow,
-                    name: "Mail".to_owned(),
+                    name: format!("Mail {}", self.flow),
                     graph: json!({"v": 1, "nodes": [{"id": "mail", "type": "exit"}], "edges": []}),
                     settings: json!({"trigger": {"type": "manual"}, "reentry": {"mode": "always"}}),
                 },
@@ -1294,8 +1379,8 @@ mod tests {
                 "address:passed",
                 "consent:passed",
                 "suppression:passed",
-                "frequency_cap:passed",
                 "quiet_hours:passed",
+                "frequency_cap:passed",
                 "render:passed",
                 "rate_limit:passed",
                 "delivery:passed",
@@ -3386,5 +3471,566 @@ mod tests {
 
         assert_eq!(message.status, "sent");
         assert_eq!(message.deciding_rule.as_deref(), Some("transactional"));
+    }
+
+    // ---- Frequency caps and quiet hours (gates 5 and 6, #221). ----
+
+    fn hm(hour: u8, minute: u8) -> time::Time {
+        time::Time::from_hms(hour, minute, 0).unwrap()
+    }
+
+    const EVERY_DAY: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+    impl Env {
+        /// Replaces the workspace's caps (window in hours, limit, mode) and quiet hours.
+        async fn limits(
+            &self,
+            caps: &[(i32, i32, zirv_flow_store::CapMode)],
+            quiet: Option<(time::Time, time::Time)>,
+        ) {
+            let caps: Vec<zirv_flow_store::NewFrequencyCap> = caps
+                .iter()
+                .map(
+                    |(window_hours, limit, mode)| zirv_flow_store::NewFrequencyCap {
+                        channel: "email".to_owned(),
+                        window_hours: *window_hours,
+                        limit: *limit,
+                        mode: *mode,
+                    },
+                )
+                .collect();
+            let quiet = quiet.map(|(start, end)| zirv_flow_store::QuietHours {
+                start,
+                end,
+                days: EVERY_DAY.iter().map(|day| (*day).to_owned()).collect(),
+            });
+            let mut connection = self.pool.acquire().await.unwrap();
+            zirv_flow_store::replace_send_limits(&mut connection, self.ws, &caps, quiet.as_ref())
+                .await
+                .unwrap();
+        }
+
+        /// A subscribed person with an email address.
+        async fn subscriber(&self, email: &str) -> Uuid {
+            let person = self.person(email).await;
+            self.subscribe(person).await;
+            person
+        }
+
+        async fn set_zone(&self, person: Uuid, zone: &str) {
+            sqlx::query("UPDATE people SET traits = traits || jsonb_build_object('timezone', $2::text) WHERE id = $1")
+                .bind(person)
+                .bind(zone)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+
+        async fn slot_of(&self, message: Uuid) -> Option<OffsetDateTime> {
+            sqlx::query_scalar("SELECT cap_slot_at FROM messages WHERE id = $1")
+                .bind(message)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap()
+        }
+
+        /// The queued `delivery.send` jobs: (unique key, payload, run_at, max_attempts).
+        async fn send_jobs(&self) -> Vec<(Option<String>, Value, OffsetDateTime, i32)> {
+            sqlx::query_as(
+                "SELECT unique_key, payload, run_at, max_attempts FROM jobs \
+                 WHERE kind = 'delivery.send' ORDER BY run_at",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        /// Makes the queued send due now, as the clock reaches its `run_at`.
+        async fn due(&self) {
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'delivery.send'")
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_in_quiet_hours_waits_for_their_end_releases_its_slot_and_is_sent_once(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        // 07:08 UTC, inside 22:00 to 08:00, with a cap in place so the message holds a slot.
+        env.limits(
+            &[(24, 5, zirv_flow_store::CapMode::Skip)],
+            Some((hm(22, 0), hm(8, 0))),
+        )
+        .await;
+        let person = env.subscriber("ada@example.com").await;
+        let template = env.plain_template("marketing").await;
+        let queued = env.queue(person, template, 3).await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "pending");
+        assert_eq!(env.sent().len(), 0);
+        assert_eq!(
+            env.events("email.sent").await.len(),
+            0,
+            "a deferral is no event"
+        );
+        assert_eq!(
+            env.slot_of(queued.message).await,
+            None,
+            "the quiet-hours deferral released the slot gate 5 took"
+        );
+        assert_eq!(gate_names(&message).last().unwrap(), "quiet_hours:deferred");
+        let entry = message.gate_results.as_array().unwrap().last().unwrap();
+        assert_eq!(entry["run_at"], "2031-05-06T08:00:00Z");
+        let jobs = env.send_jobs().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].2, datetime!(2031-05-06 08:00 UTC));
+        assert_eq!(jobs[0].3, 3, "a deferral keeps the whole attempt budget");
+        assert_eq!(jobs[0].1["deferrals"], 1);
+        assert!(
+            jobs[0].1["first_wait"].is_null(),
+            "the rate clock did not start"
+        );
+        assert_eq!(
+            env.decisions(&["message.send"]).await.last().unwrap(),
+            &(
+                "message.send".to_owned(),
+                "deferred".to_owned(),
+                Some("quiet_hours".to_owned())
+            )
+        );
+
+        // At 08:00 the copy runs, takes a slot again and sends the same message once.
+        env.clock.set(datetime!(2031-05-06 08:00 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "sent");
+        assert_eq!(message.attempts, 1, "the wait cost no attempt");
+        assert_eq!(
+            env.slot_of(queued.message).await,
+            Some(datetime!(2031-05-06 08:00 UTC))
+        );
+        assert_eq!(env.sent().len(), 1);
+        assert_eq!(env.sent()[0].key, queued.message.to_string());
+        assert_eq!(env.events("email.sent").await.len(), 1);
+        assert_eq!(
+            gate_names(&message),
+            [
+                "quiet_hours:deferred",
+                "enrollment:passed",
+                "template:passed",
+                "sender:passed",
+                "address:passed",
+                "consent:passed",
+                "suppression:passed",
+                "quiet_hours:passed",
+                "frequency_cap:passed",
+                "render:passed",
+                "rate_limit:passed",
+                "delivery:passed",
+            ],
+            "the deferral stays in the log after the message ends"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn quiet_hours_are_judged_before_a_full_cap_and_take_no_slot(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[(24, 1, zirv_flow_store::CapMode::Defer)], None)
+            .await;
+        let person = env.subscriber("ada@example.com").await;
+        let template = env.plain_template("marketing").await;
+        assert_eq!(env.send(person, template).await.status, "sent");
+        // 07:08 UTC is inside 22:00 to 08:00, and the cap of one is full.
+        env.limits(
+            &[(24, 1, zirv_flow_store::CapMode::Defer)],
+            Some((hm(22, 0), hm(8, 0))),
+        )
+        .await;
+        env.flow = Uuid::now_v7();
+        env.publish_flow().await;
+        let queued = env.queue(person, template, 3).await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "pending");
+        assert_eq!(gate_names(&message), ["quiet_hours:deferred"]);
+        assert_eq!(
+            env.slot_of(queued.message).await,
+            None,
+            "a message that waits for the night never held a slot"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hold_by_quiet_hours_restarts_the_rate_clock_of_a_send_that_waited_for_a_token(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "ok"}), 1, 1).await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[], Some((hm(21, 0), hm(8, 0)))).await;
+        env.clock.set(datetime!(2031-05-06 20:59:30 UTC));
+        let template = env.plain_template("marketing").await;
+        let first = env.subscriber("first@example.com").await;
+        let second = env.subscriber("second@example.com").await;
+        assert_eq!(env.send(first, template).await.status, "sent");
+        let queued = env.queue(second, template, 5).await;
+
+        // No token yet: the wait for one starts the rate clock.
+        env.attempt().await.unwrap();
+        assert!(env.send_jobs().await[0].1["first_wait"].is_string());
+
+        // The re-run is inside the quiet period and is held until 08:00.
+        env.clock.set(datetime!(2031-05-06 21:01 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+        assert!(env.send_jobs().await[0].1["first_wait"].is_null());
+
+        env.clock.set(datetime!(2031-05-07 08:00 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("sent", None)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_quiet_hours_deferral_longer_than_six_hours_does_not_fail_as_rate_limited(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        // 07:08 UTC, inside 01:00 to 23:00: a wait of almost sixteen hours.
+        env.limits(&[], Some((hm(1, 0), hm(23, 0)))).await;
+        let person = env.subscriber("ada@example.com").await;
+        let template = env.plain_template("marketing").await;
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+        env.clock.set(datetime!(2031-05-06 23:00 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("sent", None)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_zone_overrides_the_workspace_zone_and_an_invalid_one_falls_back_and_says_so(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        // 07:08 UTC is inside 22:00 to 08:00 in UTC, and 16:08 in Tokyo.
+        env.limits(&[], Some((hm(22, 0), hm(8, 0)))).await;
+        let template = env.plain_template("marketing").await;
+        let tokyo = env.subscriber("tokyo@example.com").await;
+        env.set_zone(tokyo, "Asia/Tokyo").await;
+        let broken = env.subscriber("broken@example.com").await;
+        env.set_zone(broken, "Not/AZone").await;
+
+        let sent = env.send(tokyo, template).await;
+        let held = env.queue(broken, template, 5).await;
+        env.attempt().await.unwrap();
+
+        assert_eq!(
+            sent.status, "sent",
+            "the person's zone, not the workspace's"
+        );
+        assert!(
+            sent.gate_results
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|gate| gate.get("note").is_none())
+        );
+        let message = env.message(held.message).await;
+        assert_eq!(
+            message.status, "pending",
+            "the workspace zone applies and it is night there"
+        );
+        let entry = message.gate_results.as_array().unwrap().last().unwrap();
+        assert_eq!(entry["gate"], "quiet_hours");
+        assert_eq!(entry["note"], "timezone_fallback");
+        assert!(env.decisions(&["message.send"]).await.contains(&(
+            "message.send".to_owned(),
+            "noted".to_owned(),
+            Some("timezone_fallback".to_owned())
+        )));
+
+        // Past the end of the quiet period the fallback is on the passed gate record too.
+        env.clock.set(datetime!(2031-05-06 08:00 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+        let message = env.message(held.message).await;
+        assert_eq!(message.status, "sent");
+        let passed = message
+            .gate_results
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|gate| gate["gate"] == "quiet_hours" && gate["result"] == "passed")
+            .unwrap();
+        assert_eq!(passed["note"], "timezone_fallback");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_send_that_waits_for_a_rate_limit_token_keeps_its_slot_and_takes_no_second(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "ok"}), 1, 1).await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[(24, 1, zirv_flow_store::CapMode::Skip)], None)
+            .await;
+        let template = env.plain_template("marketing").await;
+        let first = env.subscriber("first@example.com").await;
+        let second = env.subscriber("second@example.com").await;
+        assert_eq!(env.send(first, template).await.status, "sent");
+        let queued = env.queue(second, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "pending");
+        let taken = env.clock.now();
+        assert_eq!(env.slot_of(queued.message).await, Some(taken));
+
+        env.clock.advance(Span::seconds(5));
+        env.due().await;
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            message.status, "sent",
+            "the cap of one counts the message once, not twice"
+        );
+        assert_eq!(
+            env.slot_of(queued.message).await,
+            Some(env.clock.now()),
+            "the re-run moved its one slot to the time it sends"
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM messages WHERE cap_slot_at IS NOT NULL")
+                .await,
+            2,
+            "one slot for each person"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cap_in_defer_mode_holds_the_second_message_until_the_first_leaves_the_window(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[(24, 1, zirv_flow_store::CapMode::Defer)], None)
+            .await;
+        let person = env.subscriber("ada@example.com").await;
+        let template = env.plain_template("marketing").await;
+        let first = env.queue(person, template, 3).await;
+        env.attempt().await.unwrap();
+        env.flow = Uuid::now_v7();
+        env.publish_flow().await;
+        let second = env.queue(person, template, 3).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(first.message).await.status, "sent");
+        assert_eq!(env.message(second.message).await.status, "pending");
+        assert_eq!(env.slot_of(second.message).await, None);
+        let jobs = env.send_jobs().await;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].2, env.clock.now() + Span::hours(24));
+        assert_eq!(jobs[0].3, 3);
+        assert!(jobs[0].1["first_wait"].is_null());
+        assert_eq!(
+            env.decisions(&["message.send"]).await.last().unwrap(),
+            &(
+                "message.send".to_owned(),
+                "deferred".to_owned(),
+                Some("frequency_cap".to_owned())
+            )
+        );
+
+        env.clock.advance(Span::hours(24));
+        env.due().await;
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(second.message).await.status, "sent");
+        assert_eq!(env.sent().len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_cap_in_skip_mode_skips_the_second_message_and_a_transactional_one_is_exempt(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(
+            &[(24, 1, zirv_flow_store::CapMode::Skip)],
+            Some((hm(1, 0), hm(23, 0))),
+        )
+        .await;
+        env.clock.set(datetime!(2031-05-06 23:30 UTC));
+        let person = env.subscriber("ada@example.com").await;
+        let marketing = env.plain_template("marketing").await;
+        let receipt = env.plain_template("transactional").await;
+
+        assert_eq!(env.send(person, marketing).await.status, "sent");
+        env.flow = Uuid::now_v7();
+        env.publish_flow().await;
+        let skipped = env.send(person, marketing).await;
+        // 23:30 is outside the quiet period; the receipt is exempt from the cap as well.
+        env.flow = Uuid::now_v7();
+        env.publish_flow().await;
+        let exempt = env.send(person, receipt).await;
+
+        assert_eq!(
+            (skipped.status.as_str(), skipped.reason.as_deref()),
+            ("skipped", Some("frequency_cap"))
+        );
+        assert_eq!(
+            gate_names(&skipped).last().unwrap(),
+            "frequency_cap:blocked"
+        );
+        assert_eq!(skipped.attempts, 0);
+        assert_eq!(env.slot_of(skipped.id).await, None);
+        assert_eq!(exempt.status, "sent");
+        assert_eq!(
+            env.slot_of(exempt.id).await,
+            None,
+            "a receipt holds no slot"
+        );
+        assert_eq!(env.sent().len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_transactional_send_is_not_held_by_quiet_hours(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[], Some((hm(1, 0), hm(23, 0)))).await;
+        let person = env.person("receipt@example.com").await;
+        let template = env.plain_template("transactional").await;
+
+        let sent = env.send(person, template).await;
+
+        assert_eq!(sent.status, "sent");
+    }
+
+    /// Sends from `flows` flows to one person at once, each from its own task, with a pool large
+    /// enough that no task waits for a connection another holds.
+    async fn concurrent_sends(
+        pool: PgPool,
+        flows: usize,
+        mode: zirv_flow_store::CapMode,
+    ) -> (Arc<Env>, Vec<Uuid>) {
+        let big = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(64)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let mut env = Env::new(big, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[(24, 1, mode)], None).await;
+        let person = env.subscriber("ada@example.com").await;
+        let template = env.plain_template("marketing").await;
+        let mut messages = Vec::new();
+        for _ in 0..flows {
+            env.flow = Uuid::now_v7();
+            env.publish_flow().await;
+            messages.push(env.queue(person, template, 3).await.message);
+        }
+        let env = Arc::new(env);
+        let runs = (0..flows).map(|_| {
+            let env = Arc::clone(&env);
+            tokio::spawn(async move {
+                let claimed = env.claim().await.expect("a job for every task");
+                env.execute(claimed).await
+            })
+        });
+        for run in futures_util::future::join_all(runs).await {
+            run.unwrap().unwrap();
+        }
+        (env, messages)
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sixteen_flows_sending_to_one_person_at_once_never_exceed_a_cap_of_one_in_skip_mode(
+        pool: PgPool,
+    ) {
+        let (env, messages) = concurrent_sends(pool, 16, zirv_flow_store::CapMode::Skip).await;
+
+        let mut ended = Vec::new();
+        for id in &messages {
+            let message = env.message(*id).await;
+            ended.push((message.status, message.reason));
+        }
+        ended.sort();
+        let mut expected = vec![("skipped".to_owned(), Some("frequency_cap".to_owned())); 15];
+        expected.push(("sent".to_owned(), None));
+        expected.sort();
+        assert_eq!(ended, expected);
+        assert_eq!(env.sent().len(), 1);
+        assert_eq!(
+            env.count("SELECT count(*) FROM messages WHERE cap_slot_at IS NOT NULL")
+                .await,
+            1
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn sixteen_flows_sending_to_one_person_at_once_send_one_and_defer_the_rest_in_defer_mode(
+        pool: PgPool,
+    ) {
+        let (env, messages) = concurrent_sends(pool, 16, zirv_flow_store::CapMode::Defer).await;
+
+        let mut statuses = Vec::new();
+        for id in &messages {
+            statuses.push(env.message(*id).await.status);
+        }
+        statuses.sort();
+        let mut expected = vec!["pending".to_owned(); 15];
+        expected.push("sent".to_owned());
+        expected.sort();
+        assert_eq!(statuses, expected);
+        assert_eq!(env.sent().len(), 1);
+        let jobs = env.send_jobs().await;
+        assert_eq!(
+            jobs.len(),
+            15,
+            "one deferral copy for each message that waits"
+        );
+        assert!(jobs.iter().all(|job| job.1["deferrals"] == 1));
+        assert!(
+            jobs.iter()
+                .all(|job| job.0.as_deref().unwrap().ends_with(":defer:1")),
+            "{jobs:?}"
+        );
     }
 }

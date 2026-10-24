@@ -566,6 +566,10 @@ fn routes() -> Router<AppState> {
                 .patch(sending::identities::update)
                 .delete(sending::identities::remove),
         )
+        .route(
+            "/api/v1/workspaces/{ws}/sending/settings",
+            get(sending::settings::get).put(sending::settings::put),
+        )
         .route("/api/v1/source-kinds", get(sources::kinds::list))
         .route(
             "/api/v1/workspaces/{ws}/sources",

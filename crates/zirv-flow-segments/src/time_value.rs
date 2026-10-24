@@ -7,13 +7,13 @@ use time::{Date, OffsetDateTime, UtcOffset};
 const MAX_HOURS: u64 = 1_095 * 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DurationError {
+pub enum DurationError {
     Invalid,
     TooLong,
 }
 
 /// Parses `P<n>D`, `PT<n>H` or `P<n>DT<n>H` into hours. Between 1 hour and 1,095 days.
-pub(crate) fn parse_duration(text: &str) -> Result<u64, DurationError> {
+pub fn parse_duration(text: &str) -> Result<u64, DurationError> {
     let rest = text.strip_prefix('P').ok_or(DurationError::Invalid)?;
     let (days_part, time_part) = match rest.split_once('T') {
         Some((days, hours)) => (days, Some(hours)),
@@ -54,7 +54,7 @@ fn number(digits: &str) -> Result<u64, DurationError> {
 }
 
 /// The canonical text of a duration: whole days as `P<n>D`, anything else as `PT<n>H`.
-pub(crate) fn format_duration(hours: u64) -> String {
+pub fn format_duration(hours: u64) -> String {
     if hours.is_multiple_of(24) {
         format!("P{}D", hours / 24)
     } else {

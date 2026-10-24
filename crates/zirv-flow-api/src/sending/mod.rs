@@ -1,7 +1,8 @@
-//! Sending domains and sender identities (architecture 10.2 and 16.2): the domains a workspace
-//! sends from with their DKIM, SPF and DMARC records and the status of each, and the sender
-//! identities (from name and address) bound to a domain. Every endpoint is for workspace admins,
-//! and a caller with no access gets 404.
+//! Sending domains, sender identities and send settings (architecture 10.1, 10.2 and 16.2): the
+//! domains a workspace sends from with their DKIM, SPF and DMARC records and the status of each,
+//! the sender identities (from name and address) bound to a domain, and the frequency caps and
+//! quiet hours of the send pipeline. Domains and identities are for workspace admins, and a caller
+//! with no access gets 404; the send settings may be read by anyone who can read the workspace.
 //!
 //! Zirv Flow generates each domain's DKIM key. The private half is sealed into `encrypted_secrets`
 //! (purpose `dkim_key`) in the transaction that creates the domain and is never returned, audited
@@ -11,6 +12,7 @@
 
 pub(crate) mod domains;
 pub(crate) mod identities;
+pub(crate) mod settings;
 
 #[cfg(test)]
 mod acceptance;

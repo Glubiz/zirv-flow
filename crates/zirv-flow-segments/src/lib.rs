@@ -36,6 +36,7 @@ pub use policy::{
 pub use query::{Param, Query};
 pub use snapshot::{PersonSnapshot, SnapshotConsent, SnapshotEvent};
 pub use storage::{SlotColumn, Storage, TraitStorage};
+pub use time_value::{DurationError, format_duration, parse_duration};
 pub use validate::{Context, parse_and_validate, parse_and_validate_in, validate, validate_in};
 pub use zirv_flow_core::segment::{
     ChangeClasses, Definition, Issue, MAX_DEPTH, MAX_ISSUES, MAX_NODES, Node, code,
