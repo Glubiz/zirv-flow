@@ -35,7 +35,8 @@ pub fn masked_hint(address: &str) -> String {
 /// Adds an entry: stores the sealed address as a secret of the entry's own id, then the entry.
 /// `sealed` must be sealed with [`zirv_flow_core::secret_aad`] for this workspace, the entry id
 /// and [`SecretPurpose::TestSendAddress`]. `None` when the hash is on the list already (nothing
-/// is stored then). Run it in a transaction, as [`secrets::insert`] needs.
+/// is stored then). Run it in a transaction, as [`secrets::insert`] needs; adds of one address in
+/// one workspace wait for each other until their transaction ends.
 pub async fn add_allowlist_entry(
     connection: &mut PgConnection,
     allowed_key_ids: &[String],
@@ -45,6 +46,17 @@ pub async fn add_allowlist_entry(
     display_hint: &str,
     sealed: &Sealed,
 ) -> Result<Option<AllowlistEntry>, SecretWriteError> {
+    // Two adds of one address serialize here until the first commits, so the second finds the
+    // entry and stores no secret of its own.
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended( \
+            'test_send_allowlist:' || $1::text || ':' || encode($2, 'hex'), 0))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(address_hash.as_slice())
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     if find_allowlist_entry(&mut *connection, workspace, address_hash)
         .await?
         .is_some()
@@ -207,6 +219,65 @@ mod tests {
         .await
         .unwrap()
         .id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_concurrent_adds_of_one_address_leave_one_entry_and_one_secret(pool: PgPool) {
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        let ws = workspace(&pool, &keys).await;
+        let ids = keys.key_ids();
+        let hash = [9_u8; 32];
+        let (first_id, second_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let mut first_tx = crate::begin(&pool).await.unwrap();
+        let first = add_allowlist_entry(
+            &mut first_tx,
+            &ids,
+            ws,
+            first_id,
+            &hash,
+            "a***@x.test",
+            &sealed_for(&keys, ws, first_id, "ak@x.test"),
+        )
+        .await
+        .unwrap();
+        assert!(first.is_some());
+
+        // The second add starts while the first is uncommitted and has to wait for it.
+        let second = async {
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let added = add_allowlist_entry(
+                &mut tx,
+                &ids,
+                ws,
+                second_id,
+                &hash,
+                "a***@x.test",
+                &sealed_for(&keys, ws, second_id, "ak@x.test"),
+            )
+            .await
+            .unwrap();
+            crate::commit(tx).await.unwrap();
+            added
+        };
+        let commit_first = async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            crate::commit(first_tx).await.unwrap();
+        };
+        let (second, ()) = tokio::join!(second, commit_first);
+
+        assert!(second.is_none(), "the second add finds the entry");
+        let entries: i64 = sqlx::query_scalar("SELECT count(*) FROM test_send_allowlist")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let secrets: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM encrypted_secrets WHERE purpose = 'test_send_address'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((entries, secrets), (1, 1));
     }
 
     #[sqlx::test]
