@@ -119,7 +119,9 @@ impl SendJob {
             first_wait: match payload.get("first_wait") {
                 // A payload queued again before the first wait was stored: it waited since it was
                 // queued.
-                None | Some(Value::Null) => (deferrals > 0).then_some(queued_at),
+                None => (deferrals > 0).then_some(queued_at),
+                // Deferred by a gate, never for a rate-limit token: the six hours do not run.
+                Some(Value::Null) => None,
                 Some(value) => Some(OffsetDateTime::parse(value.as_str()?, &Rfc3339).ok()?),
             },
             attempt_base: i32::try_from(payload.get("attempt_base")?.as_i64()?).ok()?,
@@ -128,13 +130,28 @@ impl SendJob {
 
     /// The payload of the job that carries this send on after a deferral in attempt `attempts` of
     /// the job holding `payload`: one deferral more, the attempts the delivery has made so far, and
-    /// the time of the first wait (`now` on the first deferral, carried over after).
-    pub(super) fn deferred(&self, payload: &Value, attempts: i32, now: OffsetDateTime) -> Value {
+    /// the time of the first wait.
+    ///
+    /// Only a wait for a rate-limit token (`rate`) starts the clock of the six hours a send may
+    /// wait (`now` on the first such deferral, carried over after). A deferral by quiet hours or a
+    /// frequency cap leaves the clock as it was, stopped when it never ran, so a send held
+    /// overnight is not failed as `rate_limited` when it reaches the destination.
+    pub(super) fn deferred(
+        &self,
+        payload: &Value,
+        attempts: i32,
+        now: OffsetDateTime,
+        rate: bool,
+    ) -> Value {
         let mut next = payload.clone();
         if let Some(map) = next.as_object_mut() {
             map.insert("deferrals".to_owned(), json!(self.deferrals + 1));
-            if let Ok(first) = self.first_wait.unwrap_or(now).format(&Rfc3339) {
-                map.insert("first_wait".to_owned(), json!(first));
+            if rate {
+                if let Ok(first) = self.first_wait.unwrap_or(now).format(&Rfc3339) {
+                    map.insert("first_wait".to_owned(), json!(first));
+                }
+            } else if self.first_wait.is_none() {
+                map.insert("first_wait".to_owned(), Value::Null);
             }
             map.insert(
                 "attempt_base".to_owned(),
@@ -234,8 +251,10 @@ mod tests {
 
         let t1 = datetime!(2031-05-07 00:00:00 UTC);
         let t2 = datetime!(2031-05-07 03:00:00 UTC);
-        let first = job.deferred(&payload, 3, t1);
-        let second = SendJob::parse(&first).unwrap().deferred(&first, 1, t2);
+        let first = job.deferred(&payload, 3, t1, true);
+        let second = SendJob::parse(&first)
+            .unwrap()
+            .deferred(&first, 1, t2, true);
 
         let first_job = SendJob::parse(&first).unwrap();
         assert_eq!((first_job.deferrals, first_job.attempt_base), (1, 2));
@@ -252,5 +271,28 @@ mod tests {
             first_job.message, job.message,
             "the message id never changes"
         );
+    }
+
+    #[test]
+    fn a_deferral_by_a_gate_does_not_start_or_move_the_rate_clock() {
+        let dimensions = Dimensions::new();
+        let payload = queued(None, &dimensions).payload().unwrap();
+        let job = SendJob::parse(&payload).unwrap();
+        let t1 = datetime!(2031-05-07 00:00:00 UTC);
+        let t2 = datetime!(2031-05-07 03:00:00 UTC);
+        let t3 = datetime!(2031-05-07 04:00:00 UTC);
+
+        let by_gate = job.deferred(&payload, 1, t1, false);
+        let gated = SendJob::parse(&by_gate).unwrap();
+        assert_eq!((gated.deferrals, gated.first_wait), (1, None));
+
+        let by_gate_again = gated.deferred(&by_gate, 1, t2, false);
+        assert_eq!(SendJob::parse(&by_gate_again).unwrap().first_wait, None);
+
+        // The first wait for a token starts the clock at that time, not at the first deferral.
+        let by_rate = SendJob::parse(&by_gate_again)
+            .unwrap()
+            .deferred(&by_gate_again, 1, t3, true);
+        assert_eq!(SendJob::parse(&by_rate).unwrap().first_wait, Some(t3));
     }
 }
