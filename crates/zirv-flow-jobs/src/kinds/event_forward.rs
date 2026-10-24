@@ -38,7 +38,7 @@ use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
     Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision, PgPool,
     Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job,
-    find_destination, next_due, purge_delivered, settle_row, throttle_bucket,
+    extend_lease, find_destination, next_due, purge_delivered, settle_row, throttle_bucket,
 };
 
 use super::workspace_and_id;
@@ -182,6 +182,17 @@ async fn forward_one(
     credential: &mut Option<Result<Credential, Verdict>>,
     row: &ClaimedRow,
 ) -> Result<(), JobError> {
+    // The claim leases the whole batch for one period, and rows are delivered one at a time. Lease
+    // this row afresh right before its call, so a slow destination does not let another job
+    // generation claim and send it again. A row that was claimed again or re-driven is not ours.
+    {
+        let mut tx = zirv_flow_store::begin(pool).await?;
+        let held = extend_lease(&mut tx, row.id, row.claim_token, LEASE).await?;
+        zirv_flow_store::commit(tx).await?;
+        if !held {
+            return Ok(());
+        }
+    }
     let workspace = WorkspaceId::from_uuid(row.workspace_id);
     let clock = ctx.clock().clone();
     let now = clock.now(ctx.conn()).await?;
@@ -910,4 +921,82 @@ mod tests {
             .await;
         assert!(refused.is_err());
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_row_whose_claim_was_taken_over_is_skipped_and_no_call_is_made(pool: PgPool) {
+        let env = Env::new(pool, "takeover", "ok").await;
+        env.order().await;
+        let mut connection = env.pool.acquire().await.unwrap();
+        let first = zirv_flow_store::claim_due(
+            &mut connection,
+            env.ws,
+            env.destination,
+            BATCH,
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap()
+        .remove(0);
+        // The lease ran out and another job generation claimed the row.
+        sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now()")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let second = zirv_flow_store::claim_due(
+            &mut connection,
+            env.ws,
+            env.destination,
+            BATCH,
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap()
+        .remove(0);
+        drop(connection);
+        assert_ne!(first.claim_token, second.claim_token);
+
+        sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let claimed = env.claim().await.expect("an event.forward job is ready");
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_rate_gates(Arc::clone(&env.gates))
+            .with_outbound(
+                None,
+                Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap()),
+                Arc::default(),
+            );
+        let destination = find_destination(ctx.conn(), env.ws, env.destination)
+            .await
+            .unwrap()
+            .unwrap();
+        let driver = Registry::built_in().get(&destination.kind);
+        let mut credential = None;
+
+        forward_one(
+            &mut ctx,
+            &env.pool,
+            &destination,
+            driver,
+            &mut credential,
+            &first,
+        )
+        .await
+        .unwrap();
+        drop(ctx);
+        drop(tx);
+
+        assert!(fake_ledger_calls(&env.ledger).is_empty(), "no call is made");
+        assert!(env.attempts().await.is_empty());
+        assert_eq!(env.rows().await, [("pending".to_owned(), 2, None)]);
+        let token: Option<Uuid> = sqlx::query_scalar("SELECT claim_token FROM forwarding_outbox")
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+        assert_eq!(token, Some(second.claim_token), "the newer claim is intact");
+    }
+
 }

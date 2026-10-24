@@ -515,6 +515,31 @@ pub async fn enqueue_segment_forwarding(
     enqueue_forwarding(connection, workspace, &refs).await
 }
 
+/// Pushes the next attempt of a claimed row `lease` into the future, right before its call, so a
+/// slow batch does not let the row be claimed again while the call may still run. Fenced on the
+/// claim token and the pending state; returns false when the claim was taken over, the row was
+/// re-driven or erased, and the caller must skip the row.
+pub async fn extend_lease(
+    connection: &mut PgConnection,
+    id: Uuid,
+    claim_token: Uuid,
+    lease: Duration,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query(
+        "UPDATE forwarding_outbox \
+         SET next_attempt_at = clock_timestamp() + make_interval(secs => $3), updated_at = now() \
+         WHERE id = $1 AND state = 'pending' AND claim_token = $2",
+    )
+    .bind(id)
+    .bind(claim_token)
+    .bind(lease.as_secs_f64())
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected()
+        > 0)
+}
+
 /// Gives a claimed row back without counting the attempt, due at `at`: the destination was not
 /// called (a rate-limit wait). Fenced like [`settle_row`].
 pub async fn defer_row(
@@ -1201,6 +1226,65 @@ mod tests {
         assert!(settled && !again, "the second claim wins, once");
     }
 
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_lease_is_extended_only_by_the_current_claim(pool: PgPool) {
+        let (ws, destination) = one_pending_row(&pool, "extend").await;
+        let mut connection = pool.acquire().await.unwrap();
+        let row = claim_due(&mut connection, ws, destination, 10, Duration::from_secs(1))
+            .await
+            .unwrap()
+            .remove(0);
+        async fn due(connection: &mut sqlx::PgConnection) -> OffsetDateTime {
+            sqlx::query_scalar("SELECT next_attempt_at FROM forwarding_outbox")
+                .fetch_one(connection)
+                .await
+                .unwrap()
+        }
+        let short = due(&mut connection).await;
+
+        let stranger = extend_lease(
+            &mut connection,
+            row.id,
+            Uuid::new_v4(),
+            Duration::from_secs(600),
+        )
+        .await
+        .unwrap();
+        let unchanged = due(&mut connection).await;
+        let held = extend_lease(
+            &mut connection,
+            row.id,
+            row.claim_token,
+            Duration::from_secs(600),
+        )
+        .await
+        .unwrap();
+        let extended = due(&mut connection).await;
+
+        assert!(!stranger && held);
+        assert_eq!(unchanged, short);
+        assert!(extended > short + time::Duration::seconds(300));
+        settle_row(
+            &mut connection,
+            row.id,
+            row.claim_token,
+            Settled::Delivered,
+            None,
+        )
+        .await
+        .unwrap();
+        let after_settle = extend_lease(
+            &mut connection,
+            row.id,
+            row.claim_token,
+            Duration::from_secs(600),
+        )
+        .await
+        .unwrap();
+        assert!(!after_settle, "a settled claim holds nothing");
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn at_most_one_job_is_ready_and_a_running_one_leaves_a_successor(pool: PgPool) {
