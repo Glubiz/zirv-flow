@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { ApiError, client, describeError, unwrap, type DefinitionIssue, type ErrorSummary } from "../../api";
 import {
@@ -59,12 +59,6 @@ export function usePolicyDraft(workspaceId: string): PolicyDraft {
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [stale, setStale] = useState(false);
   const [tick, setTick] = useState(0);
-  const keys = useRef<string[]>([]);
-
-  useEffect(() => {
-    keys.current = rules.map((rule) => rule.key);
-  });
-
   useEffect(() => {
     let live = true;
     unwrap(client.GET("/api/v1/workspaces/{ws}/consent/policy/draft", { params: { path: { ws: workspaceId } } })).then(
@@ -111,6 +105,8 @@ export function usePolicyDraft(workspaceId: string): PolicyDraft {
     setBusy("saving");
     setFailure(null);
     setIssues(NO_ISSUES);
+    const sentKeys = rules.map((rule) => rule.key);
+    const sent = fingerprint(rules);
     try {
       const draft = await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/consent/policy/draft", {
@@ -118,8 +114,18 @@ export function usePolicyDraft(workspaceId: string): PolicyDraft {
           body: { revision, rules: rulesToRequest(rules) },
         }),
       );
-      const next = rulesFromApi(draft.rules, keys.current);
-      setRules(next);
+      const next = rulesFromApi(draft.rules, sentKeys);
+      // The new revision and baseline are always taken. The local rules are replaced by the stored
+      // ones only if they are still what was sent; edits made while the save was in flight stay,
+      // and are unsaved changes against the new baseline.
+      setRules((current) =>
+        fingerprint(current) === sent
+          ? next
+          : current.map((rule) => {
+              const at = sentKeys.indexOf(rule.key);
+              return rule.id === null && at >= 0 ? { ...rule, id: next[at]?.id ?? null } : rule;
+            }),
+      );
       setRevision(draft.revision);
       setPublishedVersion(draft.published_version ?? null);
       setSaved(fingerprint(next));
