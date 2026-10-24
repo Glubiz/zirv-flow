@@ -13259,6 +13259,103 @@ email,b@example.com,
         assert_eq!(unknown_topic.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
+    /// The draft the consent UI builds for exit criterion 4: an account-state rule, the built-in
+    /// recorded consent rule and a cooldown since the last message. The web test asserts that the
+    /// builder sends exactly this body.
+    const LAUNCH_POLICY: &str =
+        include_str!("../../../web/src/features/consent/__fixtures__/launch-policy.json");
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_policy_the_web_builder_sends_publishes_and_names_the_rule_that_denies(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        define_trait(&pool, &ws, "account_state", false).await;
+        let draft: Value = serde_json::from_str(LAUNCH_POLICY).unwrap();
+        let closed = explain_person(
+            &pool,
+            &ws,
+            "closed@example.com",
+            json!({"account_state": "closed"}),
+        )
+        .await;
+        let recent = explain_person(
+            &pool,
+            &ws,
+            "recent@example.com",
+            json!({"account_state": "active"}),
+        )
+        .await;
+        let older = explain_person(
+            &pool,
+            &ws,
+            "older@example.com",
+            json!({"account_state": "active"}),
+        )
+        .await;
+        for person in [&recent, &older] {
+            let consented = call(
+                &router,
+                "PUT",
+                &consent_uri(&ws, person),
+                Some(json!({"channel": "email", "status": "subscribed"})),
+                Auth::Session(&owner),
+            )
+            .await;
+            assert_eq!(consented.status, StatusCode::OK, "{:?}", consented.body);
+        }
+        let template = Uuid::from_u128(1);
+        seed_message(&pool, &ws, &recent, template, 3_600, Some(true)).await;
+        seed_message(&pool, &ws, &older, template, 3 * 86_400, Some(true)).await;
+
+        let saved = call(
+            &router,
+            "PUT",
+            &policy_uri(&ws, "/draft"),
+            Some(draft),
+            Auth::Session(&owner),
+        )
+        .await;
+        let published = call(
+            &router,
+            "POST",
+            &policy_uri(&ws, "/publish"),
+            Some(json!({"revision": 1})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let evaluate = |person: String| {
+            let (router, owner, ws) = (router.clone(), &owner, ws.clone());
+            async move {
+                evaluate_policy_as(&router, &ws, owner, json!({"person_id": person})).await
+            }
+        };
+        let closed_reply = evaluate(closed).await;
+        let recent_reply = evaluate(recent).await;
+        let older_reply = evaluate(older).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["rules"][1]["id"], "recorded_consent");
+        assert_eq!(published.status, StatusCode::OK, "{:?}", published.body);
+        assert_eq!(published.body["rules"].as_array().unwrap().len(), 3);
+        // The account state decides first.
+        assert_eq!(closed_reply.body["allowed"], false, "{:?}", closed_reply.body);
+        assert_eq!(closed_reply.body["rule"]["name"], "Account closed");
+        // A message sent an hour ago is inside the cooldown: the third rule denies and is named.
+        assert_eq!(recent_reply.body["allowed"], false, "{:?}", recent_reply.body);
+        assert_eq!(
+            recent_reply.body["rule"]["name"],
+            "Cooldown since the last message"
+        );
+        assert_eq!(recent_reply.body["policy_version"], 1);
+        // Three days ago is outside it, and the person's recorded consent allows the send.
+        assert_eq!(older_reply.body["allowed"], true, "{:?}", older_reply.body);
+        assert_eq!(older_reply.body["rule"], Value::Null);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_save_or_publish_naming_a_stale_revision_is_a_409_and_writes_nothing(
