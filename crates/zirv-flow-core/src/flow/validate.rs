@@ -715,6 +715,95 @@ mod tests {
         assert_eq!(validate(&minimal(), &settings(Trigger::Api {})), []);
     }
 
+    fn sync(operation: SyncOperation, keys: Vec<String>) -> NodeKind {
+        NodeKind::ActionSync {
+            destination: Uuid::nil(),
+            operation,
+            trait_keys: keys,
+        }
+    }
+
+    #[test]
+    fn a_sync_node_lists_valid_distinct_traits_for_an_upsert_and_none_for_a_remove() {
+        let keys = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
+
+        assert!(
+            validate_graph(&around(sync(
+                SyncOperation::Upsert,
+                keys(&["plan", "country"])
+            )))
+            .is_empty()
+        );
+        assert!(validate_graph(&around(sync(SyncOperation::Upsert, Vec::new()))).is_empty());
+        assert!(validate_graph(&around(sync(SyncOperation::Remove, Vec::new()))).is_empty());
+        has(
+            &validate_graph(&around(sync(SyncOperation::Remove, keys(&["plan"])))),
+            code::TRAIT_KEYS_NOT_ALLOWED,
+            Some("m"),
+            None,
+        );
+        has(
+            &validate_graph(&around(sync(
+                SyncOperation::Upsert,
+                keys(&["plan", "plan"]),
+            ))),
+            code::INVALID_TRAIT_KEY,
+            Some("m"),
+            None,
+        );
+        has(
+            &validate_graph(&around(sync(SyncOperation::Upsert, keys(&[" "])))),
+            code::INVALID_TRAIT_KEY,
+            Some("m"),
+            None,
+        );
+    }
+
+    #[test]
+    fn a_sync_node_may_list_fifty_traits_and_not_fifty_one() {
+        let many = |count: usize| (0..count).map(|n| format!("t{n}")).collect();
+
+        assert!(
+            validate_graph(&around(sync(
+                SyncOperation::Upsert,
+                many(MAX_SYNC_TRAIT_KEYS)
+            )))
+            .is_empty()
+        );
+        has(
+            &validate_graph(&around(sync(
+                SyncOperation::Upsert,
+                many(MAX_SYNC_TRAIT_KEYS + 1),
+            ))),
+            code::TOO_MANY_TRAIT_KEYS,
+            Some("m"),
+            None,
+        );
+    }
+
+    #[test]
+    fn the_worked_segment_sync_flows_are_valid_and_pair_an_upsert_with_a_remove() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/flows/segment_sync.json"))
+                .unwrap();
+
+        let mut operations = Vec::new();
+        for side in ["enter", "exit"] {
+            let graph: FlowGraph = serde_json::from_value(fixture[side]["graph"].clone()).unwrap();
+            let settings: FlowSettings =
+                serde_json::from_value(fixture[side]["settings"].clone()).unwrap();
+
+            assert!(validate(&graph, &settings).is_empty(), "{side}");
+            for node in &graph.nodes {
+                if let NodeKind::ActionSync { operation, .. } = &node.kind {
+                    operations.push(*operation);
+                }
+            }
+        }
+
+        assert_eq!(operations, [SyncOperation::Upsert, SyncOperation::Remove]);
+    }
+
     #[test]
     fn a_graph_using_every_node_kind_is_valid() {
         let kinds = vec![
