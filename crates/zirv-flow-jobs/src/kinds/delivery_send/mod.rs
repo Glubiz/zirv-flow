@@ -4343,4 +4343,337 @@ mod tests {
             "{jobs:?}"
         );
     }
+
+    // ---- provider destinations (#223) ----
+
+    /// The fixture manifest of a provider with a timestamped feedback signature, pointed at `fake`.
+    fn provider_config(fake: &zirv_flow_connectors::destinations::FakeProvider) -> Value {
+        let text = include_str!(
+            "../../../../zirv-flow-connectors/tests/fixtures/providers/bearer_timestamped.json"
+        )
+        .replace(
+            "https://api.fixture-provider.example.test",
+            &fake.base_url(),
+        );
+        json!({"manifest": serde_json::from_str::<Value>(&text).unwrap()})
+    }
+
+    /// An environment whose destination is a `provider` one, with a sealed workspace credential
+    /// holding the API token and the feedback signing secret.
+    async fn provider_env(
+        pool: PgPool,
+        name: &str,
+        fake: &zirv_flow_connectors::destinations::FakeProvider,
+    ) -> Env {
+        use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
+        use zirv_flow_store::secrets::insert_unchecked;
+        use zirv_flow_store::{NewWorkspaceCredential, create_credential};
+
+        let mut env = Env::new(pool, name).await;
+        env.render = Some(start_pool("serve", "").await);
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        env.keyring = Some(Arc::clone(&keys));
+        let secret = SecretId::new();
+        let purpose = SecretPurpose::WorkspaceCredential;
+        let sealed = seal(
+            &keys,
+            br#"{"token":"tok-1","feedback_secret":"whsec-1"}"#,
+            &secret_aad(env.ws, secret, purpose),
+        );
+        insert_unchecked(&env.pool, env.ws, purpose, secret, &sealed)
+            .await
+            .unwrap();
+        let credential = create_credential(
+            &env.pool,
+            env.ws,
+            &NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: "provider",
+                name: "Provider",
+                kind: "custom",
+                schema: None,
+                fields: &json!({}),
+                secret_id: secret,
+                hints: &json!({"token": "", "feedback_secret": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        env.destination = create_destination(
+            &env.pool,
+            env.ws,
+            &NewDestination {
+                id: Uuid::now_v7(),
+                kind: "provider",
+                name: "Provider",
+                config: &provider_config(fake),
+                credential_id: Some(credential.id),
+                rate: 100,
+                burst: 100,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        env
+    }
+
+    async fn feedback(
+        env: &Env,
+        message: Uuid,
+        event: zirv_flow_store::FeedbackEvent,
+    ) -> zirv_flow_store::FeedbackOutcome {
+        zirv_flow_store::record_provider_feedback(
+            &env.pool,
+            &zirv_flow_store::ProviderFeedback {
+                workspace: env.ws,
+                destination: env.destination,
+                message,
+                event,
+                provider_event_id: None,
+                now: env.clock.now(),
+                fallback_trace: &TraceContext::root(Cause::api("feedback")),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_send_maps_the_message_and_stores_the_hash_of_the_address_it_went_to(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+
+        let sent = env.send(person, template).await;
+
+        assert_eq!(sent.status, "sent");
+        let accepted = fake.accepted();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].key, sent.id.to_string());
+        assert_eq!(accepted[0].authorization.as_deref(), Some("Bearer tok-1"));
+        assert_eq!(accepted[0].body["to"][0]["email"], "ada@example.com");
+        assert_eq!(accepted[0].body["from"]["email"], "news@example.com");
+        assert_eq!(accepted[0].body["custom"]["message_id"], json!(sent.id));
+        let stored: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT address_hash FROM messages WHERE id = $1")
+                .bind(sent.id)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some(crate_hash("ada@example.com").as_slice())
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_delivery_retried_after_a_lost_reply_shows_zero_duplicates(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::DropAfterAccept);
+
+        // The provider holds the message, but the reply is lost: the job is retried.
+        let first = env.attempt().await.unwrap_err();
+        assert_eq!(first.message(), "the request to the destination failed");
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!((message.status.as_str(), message.attempts), ("sent", 2));
+        assert_eq!(fake.requests(), 2, "the key was sent twice");
+        assert_eq!(
+            fake.accepted().len(),
+            1,
+            "zero duplicates: the provider honoured the key"
+        );
+        assert_eq!(fake.accepted()[0].key, queued.message.to_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_429_with_a_retry_after_slows_the_bucket_and_a_5xx_is_retried(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::Status {
+            status: 429,
+            body: json!({}),
+            retry_after: Some(30),
+        });
+        fake.script(FakeProviderScript::Status {
+            status: 503,
+            body: json!({}),
+            retry_after: None,
+        });
+
+        let limited = env.attempt().await.unwrap_err();
+        let unavailable = env.attempt().await.unwrap_err();
+        env.attempt().await.unwrap();
+
+        assert_eq!(limited.retry_after(), Some(Duration::from_secs(30)));
+        assert_eq!(unavailable.retry_after(), None);
+        assert_eq!(
+            env.attempts_of(queued.message).await,
+            [
+                ("throttled".to_owned(), 1),
+                ("retryable".to_owned(), 2),
+                ("delivered".to_owned(), 3)
+            ]
+        );
+        assert_eq!(fake.accepted().len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_recipient_failure_is_a_hard_bounce_that_suppresses_the_stored_hash_in_the_organization(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        fake.script(FakeProviderScript::Status {
+            status: 422,
+            body: json!({"error": {"code": "mailbox_unknown"}}),
+            retry_after: None,
+        });
+
+        let bounced = env.send(person, template).await;
+
+        assert_eq!(
+            (bounced.status.as_str(), bounced.reason.as_deref()),
+            ("failed", Some("hard_bounce"))
+        );
+        assert_eq!(env.events("email.bounced").await.len(), 1);
+        assert_eq!(
+            env.count(
+                "SELECT count(*) FROM suppressions WHERE scope = 'organization' AND source = 'bounce'"
+            )
+            .await,
+            1
+        );
+        assert!(fake.accepted().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hard_bounce_from_the_feedback_webhook_skips_the_next_send_in_every_workspace_and_a_complaint_only_its_own(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+        use zirv_flow_store::FeedbackEvent;
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let one = provider_env(pool.clone(), "one", &fake).await;
+        let mut two = Env::new(pool, "two").await;
+        two.render = Some(start_pool("serve", "").await);
+        let template_one = one.plain_template("transactional").await;
+        let template_two = two.plain_template("transactional").await;
+        let bounced = one.person("gone@example.com").await;
+        let complained = one.person("angry@example.com").await;
+        let sent_bounced = one.send(bounced, template_one).await;
+        let sent_complained = one.send(complained, template_one).await;
+        assert_eq!(
+            (
+                sent_bounced.status.as_str(),
+                sent_complained.status.as_str()
+            ),
+            ("sent", "sent")
+        );
+
+        feedback(&one, sent_bounced.id, FeedbackEvent::BouncedHard).await;
+        feedback(&one, sent_complained.id, FeedbackEvent::Complained).await;
+
+        // The next send to the bounced address is skipped, from either workspace.
+        let again = one.send(bounced, template_one).await;
+        let gone_in_two = two.person("gone@example.com").await;
+        let elsewhere = two.send(gone_in_two, template_two).await;
+        for message in [&again, &elsewhere] {
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("skipped", Some("suppressed"))
+            );
+            assert_eq!(
+                message.deciding_rule.as_deref(),
+                Some("suppression_organization")
+            );
+        }
+        // The complaint stops its own workspace only.
+        let own = one.send(complained, template_one).await;
+        let angry_in_two = two.person("angry@example.com").await;
+        let other = two.send(angry_in_two, template_two).await;
+        assert_eq!(
+            (
+                own.status.as_str(),
+                own.reason.as_deref(),
+                own.deciding_rule.as_deref()
+            ),
+            ("skipped", Some("suppressed"), Some("suppression_workspace"))
+        );
+        assert_eq!(other.status, "sent");
+        assert_eq!(fake.accepted().len(), 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn feedback_for_a_message_sent_before_the_hash_existed_suppresses_nobody_and_never_reads_the_current_address(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+        use zirv_flow_store::{FeedbackEvent, FeedbackOutcome, SuppressionMade};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let sent = env.send(person, template).await;
+        sqlx::query("UPDATE messages SET address_hash = NULL WHERE id = $1")
+            .bind(sent.id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        let outcome = feedback(&env, sent.id, FeedbackEvent::BouncedHard).await;
+
+        assert!(matches!(
+            outcome,
+            FeedbackOutcome::Recorded {
+                suppression: SuppressionMade::Unable,
+                ..
+            }
+        ));
+        assert_eq!(env.count("SELECT count(*) FROM suppressions").await, 0);
+        let again = env.send(person, template).await;
+        assert_eq!(
+            again.status, "sent",
+            "the person's current address is not suppressed"
+        );
+    }
 }

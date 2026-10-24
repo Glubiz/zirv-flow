@@ -59,6 +59,9 @@ pub enum Script {
     /// Accepts the message, then waits this long before it answers: a client with a shorter
     /// timeout loses the reply of a message the provider holds.
     HangAfterAccept(Duration),
+    /// Accepts the message, then closes the connection without answering: the reply of a message
+    /// the provider holds is lost at once.
+    DropAfterAccept,
 }
 
 /// A message the fake accepted.
@@ -306,6 +309,7 @@ async fn respond(stream: &mut TcpStream, status: u16, body: &str, retry_after: O
 enum Plan {
     Answer(u16, String, Option<u64>),
     AnswerLate(Duration, u16, String),
+    Drop,
 }
 
 fn decide(state: &Mutex<State>, request: &Request) -> Plan {
@@ -356,6 +360,7 @@ fn decide(state: &Mutex<State>, request: &Request) -> Plan {
     state.answers.insert(key, (200, answer.clone()));
     match step {
         Some(Script::HangAfterAccept(wait)) => Plan::AnswerLate(wait, 200, answer),
+        Some(Script::DropAfterAccept) => Plan::Drop,
         _ => Plan::Answer(200, answer, None),
     }
 }
@@ -372,6 +377,8 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) {
             tokio::time::sleep(wait).await;
             respond(&mut stream, status, &body, None).await;
         }
+        // Dropping the stream closes the connection with nothing sent.
+        Plan::Drop => {}
     }
 }
 
@@ -515,6 +522,25 @@ mod tests {
             verify(&scheme, b"whsec", &lookup, &body, 1_700_001_000).is_err(),
             "a replayed old timestamp is outside the tolerance"
         );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_reply_still_counts_the_accepted_message_once_under_its_key() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let url = format!("{}/send", fake.base_url());
+        let policy = EgressPolicy::parse(&["127.0.0.0/8".to_owned()]).unwrap();
+        let client = GuardedClient::new(Arc::new(policy), HttpLimits::default()).unwrap();
+        fake.script(Script::DropAfterAccept);
+
+        let lost = client
+            .post(&url, &[("Idempotency-Key", "k-1")], b"{}".to_vec())
+            .await;
+        let retried = post_json(&url, &[("Idempotency-Key", "k-1")], &json!({})).await;
+
+        assert!(lost.is_err(), "no reply came");
+        assert_eq!(retried.0, 200);
+        assert_eq!(fake.requests(), 2);
+        assert_eq!(fake.accepted().len(), 1);
     }
 
     #[test]
