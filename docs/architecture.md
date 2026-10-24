@@ -1574,7 +1574,7 @@ preview-equals-send test rely on this.
 - **No message row (ruling 1d3048b4).** A test send writes only its `test_sends` row, whose id is the
   idempotency key at the destination. There is no `messages` row (`messages.test` stays false, and the
   applied migrations are never edited, because sqlx checks their checksums; migration
-  `0053_test_sends.sql` only adds tables), no `email.*` event, no rewritten link and no open pixel.
+  `0053_test_sends.sql` adds tables and a secret purpose), no `email.*` event, no rewritten link and no open pixel.
   Caps, policy cooldowns, engagement events and stats read `messages` and events, so they exclude test
   sends structurally: a spent cap does not stop a test and a test spends none.
 - **Request.** `POST /templates/{id}/test-send` (write; admin when `person_id` renders a real person's
@@ -1595,15 +1595,21 @@ preview-equals-send test rely on this.
   leaves the window. The job does not count again (this refines the issue's "again in the job": the
   row already holds the slot).
 - **The job** (`template.test_send`) checks the template and version, the sender (`sender_unverified`),
-  the recipient and its suppression (workspace or organization scope, never skipped: `suppressed`, no
-  call), renders through the render host (`render_failed`), prefixes the subject `[TEST] `, checks the
-  destination (exists, not archived, does email), takes a rate token (waiting re-runs the job later, as
-  the send job does) and calls the destination. Consent, policy, quiet hours and the frequency cap are
+  and the recipient again, now: a member must still be a member and the current `users.email` is used,
+  an allowlisted address must still have its entry, and its sealed address is opened with the keyring
+  and delivered in its normalised form (a request spelled `a\u{212A}@x.test` reaches `ak@x.test`);
+  otherwise no call is made and the row ends `failed: recipient_unavailable`. A missing or wrong
+  keyring fails like a credential that cannot be opened (a retry, then `failed:
+  credential_unavailable`). Then the suppression (workspace or organization scope, never skipped:
+  `suppressed`, no call), the render through the render host (`render_failed`), the `[TEST] ` subject
+  prefix, the destination (exists, not archived, does email), a rate token (waiting re-runs the job
+  later, as the send job does) and the call. Consent, policy, quiet hours and the frequency cap are
   skipped. A lost reply (`delivery_unconfirmed`) ends the row `unconfirmed` with no retry; other
   retryable answers retry under the same key and the last attempt ends the row `failed` with the
-  verdict's fixed reason. A job that finds its row no longer `queued` sends nothing. No
-  `delivery_attempts` row is written. An allowlisted address is held only in the payload of the queued
-  job, which is deleted when the job completes (the job completes on its last attempt too).
+  verdict's fixed reason. A job that finds its row no longer `queued`, or gone, sends nothing and ends
+  quietly. No `delivery_attempts` row is written. The leader's upkeep that ends open messages whose job
+  is gone also ends a `queued` test-send row whose `template.test_send` job is dead or missing as
+  `failed: abandoned`; a ready or running job is left alone.
 - **Inert unsubscribe.** `system.unsubscribe_url`, `system.preferences_url` and the `List-Unsubscribe`
   header are `/u/{token}` URLs minted with the existing codec (kind `u`) for the test send's id. A
   token with no message but a `test_sends` row is answered by every `/u` route (GET, the form POST, the
@@ -1612,9 +1618,11 @@ preview-equals-send test rely on this.
 - **Retention and erasure.** `events.retention` also deletes `test_sends` rows older than 13 months
   (the proposed message retention, 16.3) and reports the count. The log names no person (the rendered
   person's id is not stored), so erasing a person deletes the rows whose `recipient_hash` is one of the
-  person's erased identifier hashes, folded from the ledger (also on replay). The allowlist is admin
-  configuration that an admin added, holds only a hash and a masked hint, and is not touched by a
-  person's erasure; the erasure tests assert both.
+  person's erased identifier hashes, folded from the ledger, and the allowlist entries with such an
+  `address_hash` together with their sealed addresses, because an entry now holds the address. The
+  `template.test_send` jobs whose payload names the person as the render person are purged like any
+  other job that names them (`names_erased_person!`). The replay after a restore does the same by the
+  ledger hashes. The erasure tests assert each rule.
 
 ### 11.8 Document schema migrations
 

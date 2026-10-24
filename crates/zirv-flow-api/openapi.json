@@ -19978,7 +19978,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Allows test sends to an address. The address is hashed here and only the hash and a masked hint\nare stored. Needs the workspace admin role and the CSRF token. Audited as\n`test_send.allowlist_added`, with the entry id and nothing else.",
+        "summary": "Allows test sends to an address. The address is normalised, hashed here and stored as the hash,\na masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as\n`test_send.allowlist_added`, with the entry id and nothing else.",
         "operationId": "add_test_send_allowlist_entry",
         "parameters": [
           {
@@ -22836,7 +22836,7 @@
           },
           "display_hint": {
             "type": "string",
-            "description": "The first character, `***`, then `@domain`. The address itself is not stored.",
+            "description": "The first character, `***`, then `@domain`. The address itself is stored only sealed and never returned.",
             "example": "q***@example.com"
           },
           "id": {

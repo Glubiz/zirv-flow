@@ -2230,13 +2230,18 @@ changed." and does nothing.
 |-------|-------|-|
 | `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
 | `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
-| `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; only a hash and a masked hint (`q***@example.com`) are stored |
+| `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; the list shows only a masked hint (`q***@example.com`) |
 
 Any other recipient is a 422 `recipient_not_allowed`. At most 10 test sends per member and 100 per
 workspace start in any rolling hour; past that the answer is 429 with `Retry-After`. A suppressed
-recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The log
-keeps 13 months; erasing a person deletes the rows sent to their addresses. Neither the log nor the
-allowlist stores an address.
+recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The job
+checks the recipient again when it runs: a member must still be a member (and the account's current
+address is used) and an allowlist entry must still exist, or the row ends `failed` with
+`recipient_unavailable` and nothing is sent. The log keeps 13 months. The log stores no address; an
+allowlist entry holds the hash, the masked hint and the normalised address sealed with the master key
+like a credential, and no job payload ever holds an address. Erasing a person deletes the log rows and
+the allowlist entries sent to or holding their addresses, and purges their queued test-send jobs. The
+leader ends a `queued` row whose job is dead or gone as `failed: abandoned`.
 
 ## Sending domains
 
