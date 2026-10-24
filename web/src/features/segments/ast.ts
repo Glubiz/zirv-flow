@@ -10,9 +10,14 @@ export type TraitNode = components["schemas"]["SegmentTraitNode"];
 export type EventNode = components["schemas"]["SegmentEventNode"];
 export type ConsentNode = components["schemas"]["SegmentConsentNode"];
 
-export type Kind = "all" | "any" | "not" | "trait" | "event" | "list" | "segment" | "consent" | "identifier";
+export type MessagesNode = components["schemas"]["SegmentMessagesNode"];
 
-export const KINDS: readonly Kind[] = ["all", "any", "not", "trait", "event", "list", "segment", "consent", "identifier"];
+export type Kind = "all" | "any" | "not" | "trait" | "event" | "list" | "segment" | "consent" | "messages" | "identifier";
+
+export const KINDS: readonly Kind[] = ["all", "any", "not", "trait", "event", "list", "segment", "consent", "messages", "identifier"];
+
+/** Where a builder is used: a segment, or a consent policy rule, which has two more leaves. */
+export type BuilderMode = "segment" | "policy";
 
 /** A position in the tree, written as the tokens of the JSON pointer the API reports. */
 export type Path = readonly (string | number)[];
@@ -26,6 +31,7 @@ export function kindOf(node: Node): Kind {
   if ("list" in node) return "list";
   if ("segment" in node) return "segment";
   if ("consent" in node) return "consent";
+  if ("messages" in node) return "messages";
   return "identifier";
 }
 
@@ -41,7 +47,7 @@ export function startsWith(path: Path, prefix: Path): boolean {
   return path.length >= prefix.length && prefix.every((token, index) => token === path[index]);
 }
 
-export function defaultNode(kind: Kind): Node {
+export function defaultNode(kind: Kind, mode: BuilderMode = "segment"): Node {
   switch (kind) {
     case "all":
       return { all: [] };
@@ -58,18 +64,21 @@ export function defaultNode(kind: Kind): Node {
     case "segment":
       return { segment: "" };
     case "consent":
-      return { consent: { channel: "email", status: "subscribed" } };
+      // A policy rule asks about the message being sent, so its consent leaf names no channel.
+      return mode === "policy" ? { consent: { status: "none" } } : { consent: { channel: "email", status: "subscribed" } };
+    case "messages":
+      return { messages: { channel: "email", agg: { fn: "count", op: "gte", value: 1 } } };
     case "identifier":
       return { identifier: "email" };
   }
 }
 
 /** Switching between "all" and "any" keeps the children; every other switch starts the node afresh. */
-export function changeKind(node: Node, kind: Kind): Node {
+export function changeKind(node: Node, kind: Kind, mode: BuilderMode = "segment"): Node {
   if (kind === kindOf(node)) return node;
   if ("all" in node && kind === "any") return { any: node.all };
   if ("any" in node && kind === "all") return { all: node.any };
-  return defaultNode(kind);
+  return defaultNode(kind, mode);
 }
 
 /** The children of an "all" or "any" group; null for any other node. */
@@ -143,6 +152,7 @@ function fieldOf(rest: readonly string[]): string {
   if (head === "where") return `where.${second ?? ""}.${third ?? ""}`;
   if (head === "agg") return `agg.${second ?? ""}`;
   if (head === "consent") return `consent.${second ?? ""}`;
+  if (head === "messages") return `messages.${second ?? ""}`;
   if (head === "window") return "window";
   return head;
 }

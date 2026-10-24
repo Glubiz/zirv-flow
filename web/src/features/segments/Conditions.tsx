@@ -1,5 +1,5 @@
-import { Button, SelectField, TextField } from "../../ui";
-import { samePath, type Aggregate, type ConsentNode, type EventNode, type Path, type PropertyFilter, type TraitNode, type Window } from "./ast";
+import { Button, defaultEventFilters, isMachineFilter, MACHINE_HINT, OPENED_EVENT, SelectField, TextField } from "../../ui";
+import { samePath, type Aggregate, type ConsentNode, type EventNode, type MessagesNode, type Path, type PropertyFilter, type TraitNode, type Window } from "./ast";
 import { useBuilder } from "./builderContext";
 import { traitTypes } from "./catalog";
 import { issueMessage } from "./labels";
@@ -168,10 +168,36 @@ const STATUSES: readonly { value: ConsentNode["consent"]["status"]; label: strin
 
 const CHANNELS = ["email"];
 
+const MESSAGE_STATUSES: readonly { value: ConsentNode["consent"]["status"]; label: string }[] = [
+  { value: "granted", label: "Granted" },
+  { value: "denied", label: "Denied" },
+  { value: "none", label: "No answer" },
+];
+
 export function ConsentEditor({ node, path }: { node: ConsentNode; path: Path }) {
-  const { catalog, readOnly, edit } = useBuilder();
+  const { catalog, readOnly, edit, mode } = useBuilder();
   const error = useErrors(path);
   const { status, topic } = node.consent;
+  if (mode === "policy" && node.consent.channel === undefined) {
+    return (
+      <div className="condition-fields">
+        <SelectField
+          label="Status"
+          hint="What the person recorded for the channel and topic of the message being sent"
+          value={status}
+          onChange={(event) => edit(path, { consent: { status: event.target.value as ConsentNode["consent"]["status"] } })}
+          disabled={readOnly}
+          error={error("consent.status")}
+        >
+          {MESSAGE_STATUSES.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </SelectField>
+      </div>
+    );
+  }
   // A segment always names its channel; only a consent policy rule leaves it out.
   const channel = node.consent.channel ?? "";
   const topics = catalog.topics.filter((entry) => entry.channel === channel && !entry.archived);
@@ -297,6 +323,80 @@ function windowKind(window: Window | undefined): WindowKind {
   return "since_trait";
 }
 
+interface WindowFieldsProps {
+  window: Window | undefined;
+  onChange: (window: Window | undefined) => void;
+  /** The date and time fields a window can start from; none offers no such window (a messages condition). */
+  timeTraits?: readonly { key: string }[];
+  error?: string;
+}
+
+/** The time window of an event or messages condition: any time, the last stretch, or between two moments. */
+function WindowFields({ window, onChange, timeTraits, error }: WindowFieldsProps) {
+  const { readOnly } = useBuilder();
+
+  function setWindow(kind: WindowKind) {
+    if (kind === "") {
+      onChange(undefined);
+    } else if (kind === "last") {
+      onChange({ last: "" });
+    } else if (kind === "between") {
+      onChange({ between: ["", ""] });
+    } else {
+      onChange({ since_trait: "" });
+    }
+  }
+
+  return (
+    <>
+      <SelectField label="Time window" value={windowKind(window)} onChange={(event) => setWindow(event.target.value as WindowKind)} disabled={readOnly} error={error}>
+        <option value="">Any time</option>
+        <option value="last">In the last</option>
+        <option value="between">Between two moments</option>
+        {timeTraits ? <option value="since_trait">Since a field's date</option> : null}
+      </SelectField>
+      {window !== undefined && "last" in window ? (
+        <Operand
+          label="Window length"
+          type="timestamp"
+          op="within_last"
+          value={window.last}
+          onChange={(value) => onChange({ last: typeof value === "string" ? value : "" })}
+          disabled={readOnly}
+          error={error}
+        />
+      ) : null}
+      {window !== undefined && "between" in window ? (
+        <Operand
+          label="Window"
+          type="timestamp"
+          op="between"
+          value={window.between}
+          onChange={(value) => onChange({ between: Array.isArray(value) ? (value as string[]) : ["", ""] })}
+          disabled={readOnly}
+          error={error}
+        />
+      ) : null}
+      {window !== undefined && "since_trait" in window ? (
+        <SelectField
+          label="Since the date in"
+          value={window.since_trait}
+          onChange={(event) => onChange({ since_trait: event.target.value })}
+          disabled={readOnly}
+          error={error}
+        >
+          <option value="">Choose a field</option>
+          {(timeTraits ?? []).map((trait) => (
+            <option key={trait.key} value={trait.key}>
+              {trait.key}
+            </option>
+          ))}
+        </SelectField>
+      ) : null}
+    </>
+  );
+}
+
 export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
   const { catalog, readOnly, edit, eventTypes } = useBuilder();
   const error = useErrors(path);
@@ -308,18 +408,6 @@ export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
 
   function update(change: Partial<EventNode>) {
     edit(path, withoutEmpty({ ...node, ...change }));
-  }
-
-  function setWindow(kind: WindowKind) {
-    if (kind === "") {
-      update({ window: undefined });
-    } else if (kind === "last") {
-      update({ window: { last: "" } });
-    } else if (kind === "between") {
-      update({ window: { between: ["", ""] } });
-    } else {
-      update({ window: { since_trait: "" } });
-    }
   }
 
   function setFilter(position: number, next: PropertyFilter) {
@@ -338,12 +426,19 @@ export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
       <SelectField
         label="Event"
         value={node.event}
-        onChange={(event) => edit(path, { event: event.target.value })}
+        onChange={(event) => {
+          const chosen = event.target.value;
+          // Opens a mail client made by itself are not a person looking, so an open starts without them.
+          edit(path, chosen === OPENED_EVENT ? { event: chosen, where: defaultEventFilters(chosen) } : { event: chosen });
+        }}
         disabled={readOnly}
         error={error("event")}
       >
         <option value="">Choose an event</option>
-        {node.event !== "" && !catalog.events.some((entry) => entry.name === node.event) ? <option value={node.event}>{node.event}</option> : null}
+        {node.event !== "" && node.event !== OPENED_EVENT && !catalog.events.some((entry) => entry.name === node.event) ? (
+          <option value={node.event}>{node.event}</option>
+        ) : null}
+        {catalog.events.some((entry) => entry.name === OPENED_EVENT) ? null : <option value={OPENED_EVENT}>{OPENED_EVENT}</option>}
         {catalog.events.map((entry) => (
           <option key={entry.name} value={entry.name}>
             {entry.name}
@@ -351,60 +446,16 @@ export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
         ))}
       </SelectField>
 
-      <SelectField
-        label="Time window"
-        value={windowKind(window)}
-        onChange={(event) => setWindow(event.target.value as WindowKind)}
-        disabled={readOnly}
-        error={error("window")}
-      >
-        <option value="">Any time</option>
-        <option value="last">In the last</option>
-        <option value="between">Between two moments</option>
-        <option value="since_trait">Since a field's date</option>
-      </SelectField>
-      {window !== undefined && "last" in window ? (
-        <Operand
-          label="Window length"
-          type="timestamp"
-          op="within_last"
-          value={window.last}
-          onChange={(value) => update({ window: { last: typeof value === "string" ? value : "" } })}
-          disabled={readOnly}
-          error={error("window")}
-        />
-      ) : null}
-      {window !== undefined && "between" in window ? (
-        <Operand
-          label="Window"
-          type="timestamp"
-          op="between"
-          value={window.between}
-          onChange={(value) => update({ window: { between: Array.isArray(value) ? (value as string[]) : ["", ""] } })}
-          disabled={readOnly}
-          error={error("window")}
-        />
-      ) : null}
-      {window !== undefined && "since_trait" in window ? (
-        <SelectField
-          label="Since the date in"
-          value={window.since_trait}
-          onChange={(event) => update({ window: { since_trait: event.target.value } })}
-          disabled={readOnly}
-          error={error("window")}
-        >
-          <option value="">Choose a field</option>
-          {timeTraits.map((trait) => (
-            <option key={trait.key} value={trait.key}>
-              {trait.key}
-            </option>
-          ))}
-        </SelectField>
-      ) : null}
+      <WindowFields window={window} onChange={(next) => update({ window: next })} timeTraits={timeTraits} error={error("window")} />
 
       <fieldset className="condition-group">
         <legend className="field-label">Property filters</legend>
         {filters.length === 0 ? <p className="faint">Every event of this name counts.</p> : null}
+        {node.event === OPENED_EVENT && filters.some(isMachineFilter) ? (
+          <p className="field-hint">
+            machine = false means {MACHINE_HINT}. Remove the filter to count every open.
+          </p>
+        ) : null}
         {filters.map((filter, at) => {
           const type = properties?.get(filter.prop) ?? null;
           const label = `filter ${at + 1}`;
@@ -555,6 +606,126 @@ function AggregateEditor({
         error={error("agg.value")}
       />
       {readOnly ? null : <Button onClick={() => onChange(undefined)}>Remove the summary</Button>}
+    </div>
+  );
+}
+
+const MESSAGE_AGGS: readonly { fn: "count" | "last_time"; label: string }[] = [
+  { fn: "count", label: "Number of messages sent" },
+  { fn: "last_time", label: "Time of the latest send" },
+];
+
+/** A policy condition on the messages already sent to the person, such as a cooldown since the last one. */
+export function MessagesEditor({ node, path }: { node: MessagesNode; path: Path }) {
+  const { readOnly, edit, dimensions } = useBuilder();
+  const error = useErrors(path);
+  const { channel, agg, window } = node.messages;
+  const filters = Object.entries(node.messages.dimensions ?? {});
+  const choices = dimensions.filter((dimension) => !dimension.builtin && !dimension.archived);
+  const fn = agg.fn === "last_time" ? "last_time" : "count";
+  const type = aggType(fn);
+
+  function update(change: Partial<MessagesNode["messages"]>) {
+    const next: MessagesNode["messages"] = { ...node.messages, ...change };
+    if (next.window === undefined) delete next.window;
+    if (next.dimensions !== undefined && Object.keys(next.dimensions).length === 0) delete next.dimensions;
+    edit(path, { messages: next });
+  }
+
+  function setFilters(next: [string, string][]) {
+    update({ dimensions: Object.fromEntries(next) });
+  }
+
+  return (
+    <div className="condition-fields">
+      <SelectField label="Channel" value={channel} onChange={(event) => update({ channel: event.target.value })} disabled={readOnly} error={error("messages.channel")}>
+        <option value="email">Email</option>
+      </SelectField>
+      <SelectField
+        label="What to look at"
+        hint="Only messages that were sent count"
+        value={fn}
+        onChange={(event) => {
+          const next = event.target.value as "count" | "last_time";
+          const op = keepOrFirst(aggType(next), agg.op, true);
+          update({ agg: { fn: next, op, value: aggType(next) === type ? agg.value : undefined } });
+        }}
+        disabled={readOnly}
+        error={error("messages.agg")}
+      >
+        {MESSAGE_AGGS.map((option) => (
+          <option key={option.fn} value={option.fn}>
+            {option.label}
+          </option>
+        ))}
+      </SelectField>
+      <OpSelect
+        label="Comparison"
+        type={type}
+        op={agg.op}
+        aggregate
+        error={error("messages.agg")}
+        onChange={(op) => update({ agg: { fn, op, ...(shapeOf(type, op) === shapeOf(type, agg.op) ? { value: agg.value } : { value: initialOperand(type, op) }) } })}
+      />
+      <Operand
+        label="Value"
+        type={type}
+        op={agg.op}
+        value={agg.value}
+        onChange={(value) => update({ agg: { fn, op: agg.op, value } })}
+        disabled={readOnly}
+        error={error("messages.agg")}
+      />
+      <WindowFields window={window} onChange={(next) => update({ window: next })} error={error("messages.window")} />
+      <fieldset className="condition-group">
+        <legend className="field-label">Only messages with</legend>
+        {filters.length === 0 ? <p className="faint">Messages of any dimension value count.</p> : null}
+        {filters.map(([key, value], at) => {
+          const label = `dimension ${at + 1}`;
+          const values = choices.find((dimension) => dimension.key === key)?.values.filter((entry) => !entry.archived) ?? [];
+          return (
+            <div key={at} className="filter-row" role="group" aria-label={`Dimension filter ${at + 1}`}>
+              <SelectField
+                label={`Dimension of ${label}`}
+                value={key}
+                onChange={(event) => setFilters(filters.map((entry, index) => (index === at ? [event.target.value, ""] : entry)))}
+                disabled={readOnly}
+                error={error("messages.dimensions")}
+              >
+                <option value="">Choose a dimension</option>
+                {key !== "" && !choices.some((dimension) => dimension.key === key) ? <option value={key}>{key}</option> : null}
+                {choices.map((dimension) => (
+                  <option key={dimension.key} value={dimension.key}>
+                    {dimension.name}
+                  </option>
+                ))}
+              </SelectField>
+              <SelectField
+                label={`Value of ${label}`}
+                value={value}
+                onChange={(event) => setFilters(filters.map((entry, index) => (index === at ? [key, event.target.value] : entry)))}
+                disabled={readOnly}
+              >
+                <option value="">Choose a value</option>
+                {value !== "" && !values.some((entry) => entry.key === value) ? <option value={value}>{value}</option> : null}
+                {values.map((entry) => (
+                  <option key={entry.key} value={entry.key}>
+                    {entry.name}
+                  </option>
+                ))}
+              </SelectField>
+              {readOnly ? null : (
+                <Button onClick={() => setFilters(filters.filter((_, index) => index !== at))}>
+                  Remove <span className="visually-hidden">{label}</span>
+                </Button>
+              )}
+            </div>
+          );
+        })}
+        {readOnly || choices.length === 0 || filters.length >= choices.length ? null : (
+          <Button onClick={() => setFilters([...filters, ["", ""]])}>Add a dimension filter</Button>
+        )}
+      </fieldset>
     </div>
   );
 }

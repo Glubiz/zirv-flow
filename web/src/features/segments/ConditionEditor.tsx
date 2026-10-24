@@ -1,9 +1,9 @@
 import { describeError, type DefinitionIssue } from "../../api";
 import { ErrorState, LoadingState } from "../../ui";
-import { place, type Node } from "./ast";
+import { place, type BuilderMode, type Node } from "./ast";
 import { Builder } from "./Builder";
 import type { PlacedIssue } from "./builderContext";
-import { useCatalog, useEventTypes } from "./catalog";
+import { useCatalog, useEventTypes, type DimensionDef } from "./catalog";
 import { describeNode, namesOf } from "./describe";
 
 export type ConditionNode = Node;
@@ -23,6 +23,10 @@ interface ConditionEditorProps {
   value: Node;
   onChange: (next: Node) => void;
   readOnly?: boolean;
+  /** A segment condition (the default) or a consent policy rule, which also offers the policy-only leaves. */
+  mode?: BuilderMode;
+  /** The workspace dimensions a policy rule can filter sent messages by. */
+  dimensions?: readonly DimensionDef[];
   /** Problems with the condition; each pointer is relative to `value`, as in a segment definition. */
   issues?: readonly DefinitionIssue[];
 }
@@ -31,7 +35,7 @@ interface ConditionEditorProps {
  * Edits one segment condition with the segments builder, for a page that holds a condition of its
  * own, such as the branch of a flow. It loads the fields, events, lists and segments to pick from.
  */
-export function ConditionEditor({ workspaceId, value, onChange, readOnly = false, issues = [] }: ConditionEditorProps) {
+export function ConditionEditor({ workspaceId, value, onChange, readOnly = false, issues = [], mode = "segment", dimensions = [] }: ConditionEditorProps) {
   const catalog = useCatalog(workspaceId);
   const eventTypes = useEventTypes(workspaceId, eventNames(value));
   if (catalog.status === "loading") return <LoadingState label="Loading the fields, events and lists to choose from" />;
@@ -46,6 +50,8 @@ export function ConditionEditor({ workspaceId, value, onChange, readOnly = false
     <Builder
       root={value}
       readOnly={readOnly}
+      mode={mode}
+      dimensions={dimensions}
       selfId={null}
       catalog={catalog.catalog}
       eventTypes={eventTypes}
