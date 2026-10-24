@@ -2018,10 +2018,12 @@ before and after on the same input.
 - **The job.** `event.forward` (one registry line) delivers one destination. At most one is ready per
   destination: the enqueue and a re-drive pull a ready job forward or insert one, and two alternating
   unique keys let a running job leave its successor. The job claims up to 25 due rows
-  (`FOR UPDATE SKIP LOCKED`), counting the attempt and moving `next_attempt_at` a five-minute lease
-  ahead so no lock is held across the call, then delivers through the shared delivery code
-  (`webhook` signing, the guarded client with no redirects, the destination's rate bucket, the
-  attempt row and metrics). Outcomes are written fenced on the attempt number: a delivered row
+  (`FOR UPDATE SKIP LOCKED`), counting the attempt, setting a fresh `claim_token` and moving
+  `next_attempt_at` a five-minute lease ahead so no lock is held across the call. Each row's lease is
+  renewed, fenced on its token, right before its call, and a row whose claim was taken over or
+  re-driven is skipped. It delivers through the shared delivery code (`webhook` signing, the guarded
+  client with no redirects, the destination's rate bucket, the attempt row and metrics). Outcomes
+  are written fenced on the claim token, so an older claim's outcome never lands: a delivered row
   loses its payload; a retryable verdict sets `next_attempt_at` with the worker backoff (5 s doubling
   to an hour, or a longer `Retry-After`); a terminal verdict, or the eighth attempt, makes the row
   `dead`. Each retry and dead letter appends an `event.forward` decision in the same transaction
