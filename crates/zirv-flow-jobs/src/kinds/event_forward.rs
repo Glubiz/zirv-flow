@@ -182,17 +182,6 @@ async fn forward_one(
     credential: &mut Option<Result<Credential, Verdict>>,
     row: &ClaimedRow,
 ) -> Result<(), JobError> {
-    // The claim leases the whole batch for one period, and rows are delivered one at a time. Lease
-    // this row afresh right before its call, so a slow destination does not let another job
-    // generation claim and send it again. A row that was claimed again or re-driven is not ours.
-    {
-        let mut tx = zirv_flow_store::begin(pool).await?;
-        let held = extend_lease(&mut tx, row.id, row.claim_token, LEASE).await?;
-        zirv_flow_store::commit(tx).await?;
-        if !held {
-            return Ok(());
-        }
-    }
     let workspace = WorkspaceId::from_uuid(row.workspace_id);
     let clock = ctx.clock().clone();
     let now = clock.now(ctx.conn()).await?;
@@ -221,6 +210,16 @@ async fn forward_one(
             }
             match credential.as_ref() {
                 Some(Ok(credential)) => {
+                    // The claim leases the whole batch for one period, and rows are delivered one
+                    // at a time. Lease this row afresh right before its call, so a slow
+                    // destination does not let another job generation claim and send it again. A
+                    // row that was claimed again or re-driven is not ours.
+                    let mut tx = zirv_flow_store::begin(pool).await?;
+                    let held = extend_lease(&mut tx, row.id, row.claim_token, LEASE).await?;
+                    zirv_flow_store::commit(tx).await?;
+                    if !held {
+                        return Ok(());
+                    }
                     call(ctx, destination, driver, credential, row, now).await?
                 }
                 Some(Err(verdict)) => early(verdict.clone()),
