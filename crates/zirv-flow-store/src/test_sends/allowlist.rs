@@ -142,7 +142,10 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(list_allowlist(&pool, ws).await.unwrap(), [first.clone()]);
+        assert_eq!(
+            list_allowlist(&pool, ws).await.unwrap(),
+            std::slice::from_ref(&first)
+        );
         assert!(
             delete_allowlist_entry(&mut connection, ws, first.id)
                 .await

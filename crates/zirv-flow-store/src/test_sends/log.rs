@@ -155,7 +155,7 @@ pub struct NewTestSend<'a> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestSendReservation {
     /// The row is written `queued` and its job is enqueued.
-    Reserved(TestSend),
+    Reserved(Box<TestSend>),
     /// A limit is reached; a slot frees `retry_after` seconds from now.
     Limited { retry_after: u64 },
 }
@@ -238,7 +238,8 @@ pub async fn reserve_test_send(
         "address": new.address,
     });
     enqueue(&mut *connection, &job).await?;
-    row.into_send().map(TestSendReservation::Reserved)
+    row.into_send()
+        .map(|send| TestSendReservation::Reserved(Box::new(send)))
 }
 
 /// Seconds until a slot frees, when `counted` (oldest first, all inside the window) fills `limit`:

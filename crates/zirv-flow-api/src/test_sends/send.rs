@@ -238,7 +238,7 @@ pub(crate) async fn test_send(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    Ok((StatusCode::ACCEPTED, Json(row.into())))
+    Ok((StatusCode::ACCEPTED, Json((*row).into())))
 }
 
 /// The workspace's test-send log, newest first, optionally of one template (`template_id`).
