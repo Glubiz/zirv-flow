@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { client, unwrap, useResource, type components, type Resource } from "../../api";
 import type { Message } from "./messageView";
@@ -59,8 +59,15 @@ export function useMessageLog(workspaceId: string, personId: string, filter: Mes
   const messages = base ? [...base.messages, ...(more?.messages ?? [])] : [];
   const nextBefore = base ? (more ? more.nextBefore : (base.next_before ?? null)) : null;
 
+  // A request is out, and the page a response must still belong to; two activations before the
+  // button disables must not append one page twice.
+  const inFlight = useRef(false);
+  const current = useRef({ base, nextBefore });
+  current.current = { base, nextBefore };
+
   const loadOlder = useCallback(() => {
-    if (base === null || nextBefore === null) return;
+    if (base === null || nextBefore === null || inFlight.current) return;
+    inFlight.current = true;
     setLoadingMore(true);
     setMoreError(null);
     unwrap(
@@ -69,16 +76,19 @@ export function useMessageLog(workspaceId: string, personId: string, filter: Mes
       }),
     ).then(
       (page) => {
-        setExtra((current) => ({
+        inFlight.current = false;
+        setLoadingMore(false);
+        if (current.current.base !== base || current.current.nextBefore !== nextBefore) return;
+        setExtra((previous) => ({
           base,
-          messages: [...(current?.base === base ? current.messages : []), ...page.messages],
+          messages: [...(previous?.base === base ? previous.messages : []), ...page.messages],
           nextBefore: page.next_before ?? null,
         }));
-        setLoadingMore(false);
       },
       (failure: unknown) => {
-        setMoreError(failure);
+        inFlight.current = false;
         setLoadingMore(false);
+        if (current.current.base === base) setMoreError(failure);
       },
     );
   }, [base, nextBefore, workspaceId, personId, filter]);

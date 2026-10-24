@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -165,6 +165,30 @@ describe("the message log of a person", () => {
       expect(last?.search).toContain("result=skipped");
       expect(last?.search).toContain("template_id=t1");
     });
+  });
+
+  it("sends one request and adds one page when Load older is activated twice at once", async () => {
+    const calls = mount({
+      [MESSAGES]: async (request) => {
+        if (new URL(request.url).searchParams.get("before") === "cursor-1") {
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return json({ messages: [SENT], next_before: null });
+        }
+        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+      },
+    });
+
+    await screen.findByRole("row", { name: /Skipped/ });
+    const button = screen.getByRole("button", { name: "Load older" });
+    act(() => {
+      button.click();
+      button.click();
+    });
+
+    await waitFor(() => expect(screen.getAllByRole("row")).toHaveLength(3));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(screen.getAllByRole("row")).toHaveLength(3);
+    expect(calls.filter((call) => call.search.includes("before=cursor-1"))).toHaveLength(1);
   });
 
   it("gives every expand button a details region that exists, hidden, while the row is collapsed", async () => {
