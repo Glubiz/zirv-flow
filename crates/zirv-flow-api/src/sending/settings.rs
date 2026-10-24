@@ -120,16 +120,15 @@ fn parse_clock(text: &str) -> Option<Time> {
     Time::from_hms(digits(&bytes[..2])?, digits(&bytes[3..])?, 0).ok()
 }
 
+/// The caps and quiet hours as the store takes them.
+type Checked = (Vec<NewFrequencyCap>, Option<QuietHours>);
+
 /// The settings as the store takes them, or every problem found, each at its JSON pointer.
-fn validate(
-    body: &SendSettingsBody,
-) -> Result<(Vec<NewFrequencyCap>, Option<QuietHours>), ApiError> {
+fn validate(body: &SendSettingsBody) -> Result<Checked, ApiError> {
     check(body).map_err(problems)
 }
 
-fn check(
-    body: &SendSettingsBody,
-) -> Result<(Vec<NewFrequencyCap>, Option<QuietHours>), Vec<(String, String)>> {
+fn check(body: &SendSettingsBody) -> Result<Checked, Vec<(String, String)>> {
     let mut found: Vec<(String, String)> = Vec::new();
     let mut caps = Vec::new();
     if body.frequency_caps.len() > MAX_CAPS {
@@ -350,8 +349,8 @@ mod tests {
     }
 
     fn pointers(body: SendSettingsBody) -> Vec<String> {
-        let found = check(&body).err().expect("the settings are refused");
-        let error = validate(&body).err().expect("the settings are refused");
+        let found = check(&body).expect_err("the settings are refused");
+        let error = validate(&body).expect_err("the settings are refused");
         assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
         found.into_iter().map(|(pointer, _)| pointer).collect()
     }
