@@ -7,6 +7,7 @@
 //! `failed: render_error` and nothing else: the pool replaces a child it killed, and the worker
 //! carries on with the next message.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
@@ -118,12 +119,14 @@ pub(super) fn context_of(
 
 /// Renders `document` for `context`, or says why it could not. With a `tracker` the links are
 /// rewritten to the click route and the open pixel is added; the links come back to be recorded.
-/// Without one the message is left as rendered.
+/// Without one the message is left as rendered. `recorded` is what the message's earlier attempts
+/// recorded: a URL keeps its recorded index, so a token never leads anywhere but to its own link.
 pub(super) async fn render(
     pool: Option<&RenderPool>,
     document: Value,
     context: &RenderContext,
     tracker: Option<&Tracker>,
+    recorded: &[(u16, String)],
 ) -> Result<Tracked, &'static str> {
     let Some(pool) = pool else {
         warn!("email not rendered: the worker has no render pool");
@@ -147,13 +150,12 @@ pub(super) async fn render(
         warn!("email not rendered: the context holds no message id");
         RENDER_ERROR
     })?;
-    let links = Mutex::new(Vec::new());
+    let assigner = Mutex::new(LinkIndexes::new(recorded));
     let base = format!("{}/t/c", tracker.base);
-    let token = |index: usize, url: &str| {
-        let index = u16::try_from(index).unwrap_or(u16::MAX);
-        if let Ok(mut links) = links.lock() {
-            links.push((index, url.to_owned()));
-        }
+    let token = |_position: usize, url: &str| {
+        let index = assigner
+            .lock()
+            .map_or(u16::MAX, |mut assigner| assigner.index_of(url));
         tracker.token(TokenKind::Click, message, index)
     };
     let hooks = Hooks {
@@ -166,13 +168,62 @@ pub(super) async fn render(
         .render_email(&document, context, &hooks)
         .await
         .map_err(failed)?;
-    let links = links.into_inner().unwrap_or_default();
-    if links.len() > usize::from(u16::MAX) {
+    let Ok(assigner) = assigner.into_inner() else {
+        warn!("email not rendered: the link indexes could not be assigned");
+        return Err(RENDER_ERROR);
+    };
+    let Some(links) = assigner.finish() else {
         warn!("email not rendered: the message has more links than a token can name");
         return Err(RENDER_ERROR);
-    }
+    };
     rendered.html = with_pixel(&rendered.html, &tracker.pixel(message));
     Ok(Tracked { rendered, links })
+}
+
+/// Gives each URL of a message its link index. A URL already recorded for the message keeps its
+/// index (rows are immutable, and the token of an earlier attempt must keep leading where that
+/// attempt pointed), a URL seen again in this render reuses the one it got, and any other URL gets
+/// the next free index: one past the highest recorded or assigned.
+struct LinkIndexes {
+    by_url: HashMap<String, u16>,
+    next: u32,
+    added: Vec<(u16, String)>,
+}
+
+impl LinkIndexes {
+    fn new(recorded: &[(u16, String)]) -> Self {
+        let mut by_url = HashMap::new();
+        let mut next = 0;
+        for (index, url) in recorded {
+            by_url.entry(url.clone()).or_insert(*index);
+            next = next.max(u32::from(*index) + 1);
+        }
+        Self {
+            by_url,
+            next,
+            added: Vec::new(),
+        }
+    }
+
+    /// The index of `url`. Past `u16::MAX` it answers `u16::MAX` and [`Self::finish`] refuses.
+    fn index_of(&mut self, url: &str) -> u16 {
+        if let Some(index) = self.by_url.get(url) {
+            return *index;
+        }
+        let Ok(index) = u16::try_from(self.next) else {
+            self.next = self.next.saturating_add(1);
+            return u16::MAX;
+        };
+        self.next += 1;
+        self.by_url.insert(url.to_owned(), index);
+        self.added.push((index, url.to_owned()));
+        index
+    }
+
+    /// The pairs this render adds to the recorded ones, or none when there were too many URLs.
+    fn finish(self) -> Option<Vec<(u16, String)>> {
+        (self.next <= u32::from(u16::MAX) + 1).then_some(self.added)
+    }
 }
 
 /// What a failed render comes to for the message: always [`RENDER_ERROR`], whether the renderer
@@ -321,6 +372,41 @@ mod tests {
     }
 
     #[test]
+    fn a_recorded_url_keeps_its_index_and_a_new_one_gets_the_next_free() {
+        let recorded = [
+            (0, "https://a.test/".to_owned()),
+            (1, "https://b.test/".to_owned()),
+        ];
+        let mut indexes = LinkIndexes::new(&recorded);
+
+        let got: Vec<u16> = ["https://b.test/", "https://c.test/", "https://b.test/"]
+            .into_iter()
+            .map(|url| indexes.index_of(url))
+            .collect();
+
+        assert_eq!(got, [1, 2, 1]);
+        assert_eq!(
+            indexes.finish(),
+            Some(vec![(2, "https://c.test/".to_owned())])
+        );
+    }
+
+    #[test]
+    fn more_distinct_urls_than_a_token_can_name_are_refused() {
+        let mut indexes = LinkIndexes::new(&[]);
+        for n in 0..=u32::from(u16::MAX) {
+            indexes.index_of(&format!("https://a.test/{n}"));
+        }
+        assert!(indexes.finish().is_some(), "65536 URLs fit 0..=65535");
+
+        let mut indexes = LinkIndexes::new(&[]);
+        for n in 0..=u32::from(u16::MAX) + 1 {
+            indexes.index_of(&format!("https://a.test/{n}"));
+        }
+        assert_eq!(indexes.finish(), None);
+    }
+
+    #[test]
     fn the_pixel_goes_before_the_closing_body_tag_or_at_the_end() {
         assert_eq!(with_pixel("<body>x</BODY>", "<i>"), "<body>x<i></BODY>");
         assert_eq!(with_pixel("<p>x</p>", "<i>"), "<p>x</p><i>");
@@ -338,7 +424,7 @@ mod tests {
         let context = RenderContext::default();
 
         assert_eq!(
-            render(None, json!({}), &context, None).await.unwrap_err(),
+            render(None, json!({}), &context, None, &[]).await.unwrap_err(),
             RENDER_ERROR
         );
     }

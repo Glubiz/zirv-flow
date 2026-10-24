@@ -71,7 +71,7 @@ use zirv_flow_store::{
     MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
-    find_flow, find_template, find_template_version, insert_message, lock_webhook_person,
+    find_flow, find_message_links, find_template, find_template_version, insert_message, lock_webhook_person,
     mark_message_sending, mark_message_unconfirmed, message_in_flight, message_status,
     message_unconfirmed, read_template_field_catalog, read_webhook_subject,
     record_message_deferral, record_message_links, record_send_outcome, throttle_bucket,
@@ -333,11 +333,13 @@ async fn decide(
     let context = render::context_of(job, &traits, &address, tracker.as_ref());
     let pool_for_render = ctx.render_pool().cloned();
     let tracked = (!transactional).then_some(()).and(tracker.as_ref());
+    let recorded = find_message_links(&pool, job.message).await?;
     let tracked = match render::render(
         pool_for_render.as_ref(),
         version.document,
         &context,
         tracked,
+        &recorded,
     )
     .await
     {
@@ -1534,6 +1536,81 @@ mod tests {
                 .unwrap()
                 .contains("https://flow.example.test/u/")
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_renders_with_reordered_links_each_redirect_to_their_own_displayed_urls(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::tracking::{TokenKind, verify};
+
+        let env = Env::new(pool, "reorder").await;
+        let render_pool = start_pool("serve", "").await;
+        let person = env.person("ada@example.com").await;
+        let template = env.template("marketing", LINKED).await;
+        let queued = env.queue(person, template, 5).await;
+        let tracker = render::Tracker {
+            base: PUBLIC_URL.to_owned(),
+            key: tracking_key(),
+        };
+        let mut context = zirv_flow_render::RenderContext::default();
+        context.message.id = queued.message.to_string();
+        let page = |urls: &[&str]| {
+            let links: String = urls
+                .iter()
+                .map(|url| format!("<a href=\"{url}\">x</a>"))
+                .collect();
+            json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+                "subject": "Hello", "sender": env.sender, "lang": "en", "category": "marketing",
+                "html": format!("<html><body>{links}</body></html>"), "text": "Hello",
+            }})
+        };
+
+        let mut displayed = Vec::new();
+        for urls in [
+            ["https://a.test/", "https://b.test/"],
+            ["https://b.test/", "https://c.test/"],
+        ] {
+            let recorded = zirv_flow_store::find_message_links(&env.pool, queued.message)
+                .await
+                .unwrap();
+            let tracked = render::render(
+                Some(&render_pool),
+                page(&urls),
+                &context,
+                Some(&tracker),
+                &recorded,
+            )
+            .await
+            .unwrap();
+            record_message_links(&env.pool, env.ws, queued.message, &tracked.links)
+                .await
+                .unwrap();
+            let tokens: Vec<String> = tracked
+                .rendered
+                .html
+                .split("/t/c/")
+                .skip(1)
+                .map(|rest| rest.split('"').next().unwrap().to_owned())
+                .collect();
+            displayed.push((urls, tokens));
+        }
+
+        for (urls, tokens) in displayed {
+            assert_eq!(tokens.len(), urls.len());
+            for (url, token) in urls.iter().zip(&tokens) {
+                let claims = verify(&tracking_key(), TokenKind::Click, token).unwrap();
+                let target = zirv_flow_store::find_message_link(
+                    &env.pool,
+                    claims.message,
+                    claims.link,
+                )
+                .await
+                .unwrap();
+                assert_eq!(target.as_deref(), Some(*url));
+            }
+        }
     }
 
     #[sqlx::test]

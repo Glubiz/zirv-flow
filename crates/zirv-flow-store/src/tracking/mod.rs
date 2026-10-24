@@ -9,7 +9,7 @@ mod links;
 mod unsubscribe;
 
 pub use engagement::{Engagement, record_engagement};
-pub use links::{TrackedMessage, find_message_link, find_tracked_message, record_message_links};
+pub use links::{TrackedMessage, find_message_link, find_message_links, find_tracked_message, record_message_links};
 pub use unsubscribe::{
     PreferenceChange, PreferencesSaved, Unsubscribed, save_preferences, unsubscribe_message,
 };

@@ -93,6 +93,25 @@ pub async fn find_message_link<'e>(
         .map_err(StoreError::query)
 }
 
+/// Every link recorded for `message`, as `(index, URL)` pairs by index. A render reads them first
+/// so a URL keeps its index and a new URL gets one no earlier attempt used.
+pub async fn find_message_links<'e>(
+    executor: impl PgExecutor<'e>,
+    message: Uuid,
+) -> Result<Vec<(u16, String)>, StoreError> {
+    let rows: Vec<(i32, String)> = sqlx::query_as(
+        "SELECT link_index, url FROM message_links WHERE message_id = $1 ORDER BY link_index",
+    )
+    .bind(message)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(index, url)| Some((u16::try_from(index).ok()?, url)))
+        .collect())
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use sqlx::PgPool;
