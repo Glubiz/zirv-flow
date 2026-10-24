@@ -5862,6 +5862,7 @@ dependencies = [
  "zirv-flow-render",
  "zirv-flow-segments",
  "zirv-flow-store",
+ "zirv-flow-templates",
 ]
 
 [[package]]
