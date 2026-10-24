@@ -38,8 +38,8 @@ pub enum CapVerdict {
 ///
 /// The slots counted are those of the person's own other messages on the channel, not a test
 /// send, not skipped, and reserved in `(now - window, now]`. A message that already holds a slot
-/// (it ran before and waited for a rate-limit token) is not counted against itself and keeps its
-/// slot while it is still inside the longest window; a message blocked reserves nothing.
+/// (it ran before and waited for a rate-limit token) is not counted against itself and its slot
+/// moves to `now`, so it counts from when it really sends; a message blocked reserves nothing.
 pub async fn check_frequency_caps(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -67,9 +67,7 @@ pub async fn check_frequency_caps(
 
     let mut skip = false;
     let mut until: Option<OffsetDateTime> = None;
-    let mut longest = 0;
     for (window_hours, limit, mode) in caps {
-        longest = longest.max(window_hours);
         let held: i64 = sqlx::query_scalar(SLOTS_IN_WINDOW_COUNT)
             .bind(workspace.as_uuid())
             .bind(person)
@@ -115,14 +113,11 @@ pub async fn check_frequency_caps(
     };
     if verdict == CapVerdict::Reserved {
         sqlx::query(
-            "UPDATE messages SET cap_slot_at = $3
-             WHERE workspace_id = $1 AND id = $2
-               AND (cap_slot_at IS NULL OR cap_slot_at <= $3 - make_interval(hours => $4))",
+            "UPDATE messages SET cap_slot_at = $3 WHERE workspace_id = $1 AND id = $2",
         )
         .bind(workspace.as_uuid())
         .bind(message)
         .bind(now)
-        .bind(longest)
         .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
@@ -325,8 +320,26 @@ mod tests {
         );
         assert_eq!(
             world.slot(first).await,
-            Some(T0),
-            "the slot is kept, not taken again"
+            Some(T0 + Duration::hours(2)),
+            "one slot, moved to the re-run's time, not a second one"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rerun_moves_its_slot_so_a_short_window_still_sees_it(pool: PgPool) {
+        let world = world(pool, &[(1, 1, CapMode::Skip), (24, 5, CapMode::Skip)]).await;
+        let m = world.message(MessageStatus::Pending).await;
+        let n = world.message(MessageStatus::Pending).await;
+
+        assert_eq!(world.check(m, T0).await, CapVerdict::Reserved);
+        // M waited three hours for a rate-limit token and sends now.
+        let sent = T0 + Duration::hours(3);
+        assert_eq!(world.check(m, sent).await, CapVerdict::Reserved);
+        assert_eq!(
+            world.check(n, sent + Duration::minutes(10)).await,
+            CapVerdict::Skip,
+            "M's slot is inside the hourly window"
         );
     }
 
