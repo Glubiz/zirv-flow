@@ -2242,6 +2242,48 @@ with any other sender is a 422 `sender_unverified`). Workspace admins manage bot
   frees up. Quiet hours are `{start, end, days}` in the recipient's time zone (their `timezone` trait,
   else the workspace's): a message inside one waits for its end. Transactional mail is exempt from both.
 
+## Email provider destinations
+
+An email provider with an HTTP API is a destination of type `provider`, described by a manifest
+instead of code. Its `config` is `{"manifest": {...}}`: the manifest format of the HTTP source
+(`version`, `base_url`, `auth`, `headers`) with a `destination` section, and no `streams`. Auth is
+`none`, `api_key`, `basic` or `bearer`; the manifest's `auth.credential` declares the credential
+fields, including the secret that signs the provider's feedback, and the destination links a
+workspace credential that holds them. The manifest holds no secret. Two fixtures are in
+`crates/zirv-flow-connectors/tests/fixtures/providers/`; no real provider's manifest ships yet.
+
+The `destination` section is data only (unknown keys, scripts and `{{ }}` markers are refused, each
+issue named by its JSON pointer):
+
+- `send`: `method`, `path`, `idempotency_header` (the message id is sent in it, so a retried
+  delivery cannot duplicate at a provider that honours it) and `body`, whose `fields` place `from`,
+  `from_name`, `reply_to`, `to`, `subject`, `html`, `text`, `headers` and `message_id` at JSON
+  pointers, beside `static` values.
+- `rate_limit`: `requests` per `per_seconds`; the default rate of a destination created without one.
+- `errors`: rules (`status` or `"500-503"`, an optional `body` pointer and `values`, and an `action`:
+  `retry`, `terminal` or `recipient_failure`); the first match wins. By default 408, 429 (which
+  honours `Retry-After`) and 5xx retry, any other status is terminal, and a recipient failure is a
+  hard bounce.
+- `domain_status` (optional): the request that asks the provider about a sending domain, and the
+  mapping of its answer to `verified`, `pending` and `failed`.
+- `feedback`: how to read the provider's event type, your message id, the bounce kind and an optional
+  event id, and `verification` (required): the signature header and prefix, an optional timestamp
+  header with `tolerance_seconds`, and the credential field with the signing secret (HMAC-SHA256).
+
+Give the provider `https://<host>/api/v1/destinations/{id}/feedback` as its webhook URL. The request
+is public and the signature authorises it: it is verified with the destination's secret before the
+body is read, and a missing or wrong signature or a timestamp outside the tolerance is a `401` that
+writes nothing. A verified delivery, bounce or complaint is recorded as `email.delivered`,
+`email.bounced` (`kind` is `hard` or `soft`) or `email.complained`, once per provider event (a retry
+writes nothing). A hard bounce suppresses the address in every workspace of the organization and a
+complaint in the destination's workspace; a soft bounce suppresses nobody. The address is the keyed
+hash stored on the message when it was sent, so a message sent before this was recorded suppresses
+nobody. Events for an unknown message, or one sent through another destination, get a `202` and are
+counted in `zirv_flow_provider_feedback_total{outcome}`.
+
+`GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (any reader) shows the
+provider's status of each DNS record next to ours. It only reads: it never marks a domain verified.
+
 ## Render host
 
 Templates render in child processes, never inside the API or a worker, so a template
