@@ -13177,6 +13177,146 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/people/{id}/messages": {
+      "get": {
+        "tags": [
+          "people"
+        ],
+        "summary": "A person's message log, newest first, in pages. Each message names its template, flow step and\ndestination, the gates it went through in order, the exact reason it was skipped or failed, the\nconsent rule that decided, and, for a message that waits, when it runs again. A person that was\nmerged into another reads as the survivor, with the merged people's messages included. No\naddress and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`\n(waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or\n`failed`) and by `template_id`.",
+        "operationId": "list_person_messages",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Person id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Messages per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "result",
+            "in": "query",
+            "description": "`sent`, `skipped`, `deferred`, `in_progress` or `failed`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "template_id",
+            "in": "query",
+            "description": "Only messages of this template",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of messages",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagesBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is out of range or malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or person (an erased person included), or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The read ran past its time limit (`code` is `search_timeout`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/people/{id}/timeline": {
       "get": {
         "tags": [
@@ -28453,6 +28593,55 @@
           }
         }
       },
+      "GateResultBody": {
+        "type": "object",
+        "description": "What one gate of the send found. Codes and ids only.",
+        "required": [
+          "gate",
+          "result"
+        ],
+        "properties": {
+          "gate": {
+            "type": "string",
+            "description": "`enrollment`, `template`, `sender`, `address`, `consent`, `suppression`, `quiet_hours`,\n`frequency_cap`, `render`, `rate_limit` or `delivery`.",
+            "example": "consent"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A code that adds to the reason."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code that stopped the message."
+          },
+          "result": {
+            "type": "string",
+            "description": "`passed`, `blocked`, `deferred`, `in_flight` or `unconfirmed`.",
+            "example": "blocked"
+          },
+          "rule_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The consent policy rule that decided, by id."
+          },
+          "run_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a deferral, when the message runs again."
+          }
+        }
+      },
       "HaltBody": {
         "type": "object",
         "description": "Why the walk stopped before the graph or the script ended.",
@@ -29602,6 +29791,236 @@
           "merged_person_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "MessageBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "created_at",
+          "template",
+          "node",
+          "destination",
+          "status",
+          "gate_results"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "consent_policy_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace's consent policy, when a rule of it denied the send."
+          },
+          "consent_rule_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The consent policy rule that denied the send, by id."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deciding_rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What decided the consent gate: `recorded_consent`, `topic_default`, `transactional`, a\nsuppression's scope, or the name of the consent policy rule that denied the send."
+          },
+          "deferred_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "For a pending message that waits: when it runs again."
+          },
+          "deferred_why": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a pending message that waits: `quiet_hours`, `frequency_cap` or `rate_limit`."
+          },
+          "destination": {
+            "$ref": "#/components/schemas/MessageDestinationBody"
+          },
+          "flow": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MessageFlowBody"
+              }
+            ]
+          },
+          "gate_results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GateResultBody"
+            },
+            "description": "In the order the send ran them."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "node": {
+            "$ref": "#/components/schemas/MessageNodeBody"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code a skipped or failed message ended with, such as `no_consent`.",
+            "example": "no_consent"
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `sending`, `sent`, `skipped` or `failed`.",
+            "example": "skipped"
+          },
+          "template": {
+            "$ref": "#/components/schemas/MessageTemplateBody"
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`; none when the message has\nno recorded decisions."
+          }
+        }
+      },
+      "MessageDestinationBody": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MessageFlowBody": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "MessageNodeBody": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step's name, when the flow version gives it one."
+          }
+        }
+      },
+      "MessageTemplateBody": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`marketing` or `transactional`."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "None when the template no longer exists."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The version that was sent; none when the message ended before one was read."
+          }
+        }
+      },
+      "MessagesBody": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MessageBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
           }
         }
       },

@@ -1940,6 +1940,27 @@ As built (M1 skeleton):
   A malformed id is 400 and a trace with no records in the workspace is 404,
   never saying whether it exists elsewhere.
 
+As built (message log, #231): `GET /api/v1/workspaces/{ws}/people/{id}/messages` (`read`) pages
+a person's `messages` newest first by `(created_at, id)` (`limit`, `before`, and the filters
+`result` = `sent`, `skipped`, `deferred` (pending with a rate-limit wait or a gate hold in force), `in_progress` (sending, or pending and not waiting) or `failed`, and `template_id`). It
+reads through `people.merged_into` and `person_merges`, so a merged-away id reads as its
+survivor; an unknown or erased person is 404. Each message carries the template (name, version,
+category), the flow and step (the step name only when the published graph gives its node one),
+the destination name, `status`, `reason`, `deciding_rule`, `gate_results` in stored order, and
+the trace id found through the `send` decisions' `enrollment` and `message` subjects (none when
+no decision was written). No address and no identifier hash is selected. A pending message says
+when it runs again and why: the waiting `delivery.send` job's `run_at` (a wait for a rate-limit
+token when its payload has a `first_wait`, else the latest `deferred` gate entry's gate), or,
+with no job left, that gate entry while it is still in the future. The consent rule is named by
+its id when the gate result has one; the stored gate results carry no policy version, so the
+API gives the workspace's policy id and no version. The web person page has a Profile and a
+Messages tab (`?tab=messages`); a row expands to the checks in the send job's run order
+(enrollment, template, sender, address, consent, suppression, quiet hours, frequency cap,
+render, rate limit, deliver), each passed, stopped here, held or not reached, from one label
+map in `web/src/ui/sendLabels.ts`. The trace tree words the `send.gate`, `message.send`,
+`message.feedback` and `job.attempt` decisions and links a message to its person's log; the
+destination has no page yet and stays text.
+
 ### 12.5 Event forwarding
 
 M6 adds event-forwarding destinations after core tracking and causality are in
