@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { Button, defaultEventFilters, isMachineFilter, MACHINE_HINT, OPENED_EVENT, SelectField, TextField } from "../../ui";
 import { samePath, type Aggregate, type ConsentNode, type EventNode, type MessagesNode, type Path, type PropertyFilter, type TraitNode, type Window } from "./ast";
 import { useBuilder } from "./builderContext";
@@ -610,6 +612,11 @@ function AggregateEditor({
   );
 }
 
+/** The filter rows that name a dimension, in a form that does not depend on their order. */
+function filterText(rows: readonly (readonly [string, string])[]): string {
+  return JSON.stringify([...rows].sort(([left], [right]) => left.localeCompare(right)));
+}
+
 const MESSAGE_AGGS: readonly { fn: "count" | "last_time"; label: string }[] = [
   { fn: "count", label: "Number of messages sent" },
   { fn: "last_time", label: "Time of the latest send" },
@@ -620,8 +627,15 @@ export function MessagesEditor({ node, path }: { node: MessagesNode; path: Path 
   const { readOnly, edit, dimensions } = useBuilder();
   const error = useErrors(path);
   const { channel, agg, window } = node.messages;
-  const filters = Object.entries(node.messages.dimensions ?? {});
-  const choices = dimensions.filter((dimension) => !dimension.builtin && !dimension.archived);
+  const choices = (dimensions ?? []).filter((dimension) => !dimension.builtin && !dimension.archived);
+  // The filter rows are an ordered list of pairs, so two blank rows stay two rows; the object the
+  // condition holds is built from them when they change, without the blank ones.
+  const [filters, setRows] = useState<[string, string][]>(() => Object.entries(node.messages.dimensions ?? {}));
+  const held = filterText(Object.entries(node.messages.dimensions ?? {}));
+  if (filterText(filters.filter(([key]) => key !== "")) !== held) {
+    // The condition changed from outside these rows (a reload, a discard): follow it.
+    setRows(Object.entries(node.messages.dimensions ?? {}));
+  }
   const fn = agg.fn === "last_time" ? "last_time" : "count";
   const type = aggType(fn);
 
@@ -633,7 +647,8 @@ export function MessagesEditor({ node, path }: { node: MessagesNode; path: Path 
   }
 
   function setFilters(next: [string, string][]) {
-    update({ dimensions: Object.fromEntries(next) });
+    setRows(next);
+    update({ dimensions: Object.fromEntries(next.filter(([key]) => key !== "")) });
   }
 
   return (
@@ -679,8 +694,9 @@ export function MessagesEditor({ node, path }: { node: MessagesNode; path: Path 
       <WindowFields window={window} onChange={(next) => update({ window: next })} error={error("messages.window")} />
       <fieldset className="condition-group">
         <legend className="field-label">Only messages with</legend>
-        {filters.length === 0 ? <p className="faint">Messages of any dimension value count.</p> : null}
-        {filters.map(([key, value], at) => {
+        {dimensions === null ? <p className="faint">Dimension filters are not available until the dimensions load.</p> : null}
+        {dimensions !== null && filters.length === 0 ? <p className="faint">Messages of any dimension value count.</p> : null}
+        {(dimensions === null ? [] : filters).map(([key, value], at) => {
           const label = `dimension ${at + 1}`;
           const values = choices.find((dimension) => dimension.key === key)?.values.filter((entry) => !entry.archived) ?? [];
           return (
@@ -694,11 +710,13 @@ export function MessagesEditor({ node, path }: { node: MessagesNode; path: Path 
               >
                 <option value="">Choose a dimension</option>
                 {key !== "" && !choices.some((dimension) => dimension.key === key) ? <option value={key}>{key}</option> : null}
-                {choices.map((dimension) => (
-                  <option key={dimension.key} value={dimension.key}>
-                    {dimension.name}
-                  </option>
-                ))}
+                {choices
+                  .filter((dimension) => dimension.key === key || !filters.some(([other], index) => index !== at && other === dimension.key))
+                  .map((dimension) => (
+                    <option key={dimension.key} value={dimension.key}>
+                      {dimension.name}
+                    </option>
+                  ))}
               </SelectField>
               <SelectField
                 label={`Value of ${label}`}

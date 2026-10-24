@@ -15,8 +15,11 @@ export interface BuilderApi {
   readOnly: boolean;
   /** A segment, or a consent policy rule, which also has the message and consent-for-this-message leaves. */
   mode: BuilderMode;
-  /** The workspace dimensions a messages condition can filter by; only a policy builder uses them. */
-  dimensions: readonly DimensionDef[];
+  /**
+   * The workspace dimensions a messages condition can filter by; only a policy builder uses them.
+   * Null when they could not be loaded: the filters are then not offered, as an empty catalog would.
+   */
+  dimensions: readonly DimensionDef[] | null;
   /** The segment being edited, which it cannot reference itself; null for a new one. */
   selfId: string | null;
   catalog: Catalog;

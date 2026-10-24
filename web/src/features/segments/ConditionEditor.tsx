@@ -26,7 +26,7 @@ interface ConditionEditorProps {
   /** A segment condition (the default) or a consent policy rule, which also offers the policy-only leaves. */
   mode?: BuilderMode;
   /** The workspace dimensions a policy rule can filter sent messages by. */
-  dimensions?: readonly DimensionDef[];
+  dimensions?: readonly DimensionDef[] | null;
   /** Problems with the condition; each pointer is relative to `value`, as in a segment definition. */
   issues?: readonly DefinitionIssue[];
 }

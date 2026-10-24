@@ -150,8 +150,8 @@ interface BuilderProps {
   root: Node;
   /** A segment (the default) or a consent policy rule, which also has the policy-only leaves. */
   mode?: BuilderMode;
-  /** The workspace dimensions a messages condition can filter by. */
-  dimensions?: readonly DimensionDef[];
+  /** The workspace dimensions a messages condition can filter by; null when they could not be loaded. */
+  dimensions?: readonly DimensionDef[] | null;
   readOnly: boolean;
   selfId: string | null;
   catalog: Catalog;
