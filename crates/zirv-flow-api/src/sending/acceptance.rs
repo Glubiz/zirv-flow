@@ -216,6 +216,16 @@ mod tests {
             .await
         }
 
+        async fn audit_actions_like(&self, prefix: &str) -> Vec<String> {
+            let mut entries = zirv_flow_store::list_audit(&self.pool, 200).await.unwrap();
+            entries.reverse();
+            entries
+                .into_iter()
+                .map(|entry| entry.action)
+                .filter(|action| action.starts_with(prefix))
+                .collect()
+        }
+
         async fn audit_actions(&self) -> Vec<String> {
             let mut entries = zirv_flow_store::list_audit(&self.pool, 200).await.unwrap();
             entries.reverse();
@@ -784,5 +794,172 @@ mod tests {
                 "sending_domain.deleted",
             ]
         );
+    }
+
+    fn settings_body() -> Value {
+        json!({
+            "frequency_caps": [
+                {"channel": "email", "window": "P1D", "limit": 3, "mode": "skip"},
+                {"channel": "email", "window": "PT6H", "limit": 1, "mode": "defer"},
+            ],
+            "quiet_hours": {"start": "21:00", "end": "08:00", "days": ["fri", "mon"]},
+        })
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn send_settings_are_read_by_readers_and_replaced_only_by_admins(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let empty = json!({"frequency_caps": [], "quiet_hours": null});
+
+        let anonymous = fx
+            .send("GET", "/sending/settings", None, Auth::Anonymous)
+            .await;
+        let stranger = fx
+            .send("GET", "/sending/settings", None, Auth::Key(&fx.stranger))
+            .await;
+        let read = fx
+            .send("GET", "/sending/settings", None, Auth::Key(&fx.read))
+            .await;
+        let member = fx
+            .send("GET", "/sending/settings", None, Auth::Session(&fx.member))
+            .await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+        assert_eq!((read.status, &read.body), (StatusCode::OK, &empty));
+        assert_eq!((member.status, &member.body), (StatusCode::OK, &empty));
+
+        let anonymous = fx
+            .send(
+                "PUT",
+                "/sending/settings",
+                Some(settings_body()),
+                Auth::Anonymous,
+            )
+            .await;
+        let read = fx
+            .send(
+                "PUT",
+                "/sending/settings",
+                Some(settings_body()),
+                Auth::Key(&fx.read),
+            )
+            .await;
+        let member = fx
+            .send(
+                "PUT",
+                "/sending/settings",
+                Some(settings_body()),
+                Auth::Session(&fx.member),
+            )
+            .await;
+        let stranger = fx
+            .send(
+                "PUT",
+                "/sending/settings",
+                Some(settings_body()),
+                Auth::Key(&fx.stranger),
+            )
+            .await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(read.status, StatusCode::FORBIDDEN);
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            fx.as_admin("GET", "/sending/settings", None).await.body,
+            empty,
+            "no refused call changed anything"
+        );
+
+        let put = fx
+            .as_admin("PUT", "/sending/settings", Some(settings_body()))
+            .await;
+        assert_eq!(put.status, StatusCode::OK, "{:?}", put.body);
+        let expected = json!({
+            "frequency_caps": [
+                {"channel": "email", "window": "P1D", "limit": 3, "mode": "skip"},
+                {"channel": "email", "window": "PT6H", "limit": 1, "mode": "defer"},
+            ],
+            "quiet_hours": {"start": "21:00", "end": "08:00", "days": ["mon", "fri"]},
+        });
+        assert_eq!(put.body, expected);
+        let read = fx
+            .send("GET", "/sending/settings", None, Auth::Key(&fx.read))
+            .await;
+        assert_eq!(read.body, expected);
+
+        // A second PUT replaces both: nothing of the first is left.
+        let replaced = fx
+            .as_admin("PUT", "/sending/settings", Some(empty.clone()))
+            .await;
+        assert_eq!(replaced.body, empty);
+        assert_eq!(
+            fx.send("GET", "/sending/settings", None, Auth::Key(&fx.read))
+                .await
+                .body,
+            empty
+        );
+        let audit = fx.audit_actions_like("send_settings.").await;
+        assert_eq!(audit, ["send_settings.updated", "send_settings.updated"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn invalid_send_settings_are_refused_at_their_json_pointers_and_change_nothing(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        fx.as_admin("PUT", "/sending/settings", Some(settings_body()))
+            .await;
+        let cap = |window: &str, limit: i64, mode: &str| json!({"channel": "email", "window": window, "limit": limit, "mode": mode});
+        let mut sms = cap("P1D", 1, "skip");
+        sms["channel"] = json!("sms");
+        let quiet = |start: &str, end: &str, days: Value| json!({"quiet_hours": {"start": start, "end": end, "days": days}});
+        let cases = [
+            (
+                json!({"frequency_caps": [sms]}),
+                "/frequency_caps/0/channel",
+            ),
+            (
+                json!({"frequency_caps": [cap("P1D", 0, "skip")]}),
+                "/frequency_caps/0/limit",
+            ),
+            (
+                json!({"frequency_caps": [cap("P32D", 1, "skip")]}),
+                "/frequency_caps/0/window",
+            ),
+            (
+                json!({"frequency_caps": [cap("soon", 1, "skip")]}),
+                "/frequency_caps/0/window",
+            ),
+            (
+                json!({"frequency_caps": [cap("P1D", 1, "skip"), cap("P1D", 1, "later")]}),
+                "/frequency_caps/1/mode",
+            ),
+            (quiet("9pm", "08:00", json!(["mon"])), "/quiet_hours/start"),
+            (quiet("21:00", "21:00", json!(["mon"])), "/quiet_hours/end"),
+            (quiet("21:00", "08:00", json!([])), "/quiet_hours/days"),
+        ];
+
+        for (body, pointer) in cases {
+            let reply = fx.as_admin("PUT", "/sending/settings", Some(body)).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{pointer}: {:?}",
+                reply.body
+            );
+            let fields: Vec<&str> = reply.body["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|error| error["field"].as_str().unwrap())
+                .collect();
+            assert_eq!(fields, [pointer]);
+        }
+        let read = fx.as_admin("GET", "/sending/settings", None).await;
+        assert_eq!(read.body["frequency_caps"].as_array().unwrap().len(), 2);
+        assert_eq!(read.body["quiet_hours"]["start"], "21:00");
+        assert_eq!(fx.audit_actions_like("send_settings.").await.len(), 1);
     }
 }

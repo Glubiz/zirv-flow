@@ -2612,6 +2612,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/sending/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's frequency caps and quiet hours. Anyone who can read the workspace. */
+        get: operations["get_send_settings"];
+        /**
+         * Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or
+         *     quiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.
+         */
+        put: operations["put_send_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
         parameters: {
             query?: never;
@@ -5874,6 +5895,31 @@ export interface components {
             type: "wait.until_time";
             when: components["schemas"]["FlowUntilTime"];
         };
+        /** @description One frequency cap. */
+        FrequencyCapBody: {
+            /**
+             * @description The channel the cap counts: `email`.
+             * @example email
+             */
+            channel: string;
+            /**
+             * Format: int64
+             * @description The most messages one person gets in the window, at least 1.
+             * @example 3
+             */
+            limit: number;
+            /**
+             * @description `skip` ends a message over the limit as `frequency_cap`; `defer` holds it until a slot
+             *     leaves the window.
+             * @example skip
+             */
+            mode: string;
+            /**
+             * @description The window, an ISO 8601 duration in whole hours or days, from `PT1H` to `P31D`.
+             * @example P1D
+             */
+            window: string;
+        };
         /** @description Whether a stream's data is current (architecture 7.5). The state is derived on every read. */
         FreshnessBody: {
             /**
@@ -6854,6 +6900,25 @@ export interface components {
              */
             occurrence_id: string;
         };
+        /** @description The quiet hours of a workspace. */
+        QuietHoursBody: {
+            /**
+             * @description The weekdays (`mon` to `sun`) a quiet period starts on; not empty. A period that wraps
+             *     midnight belongs to the day it starts on.
+             */
+            days: string[];
+            /**
+             * @description When it ends, local `HH:MM`, different from the start. An end at or before the start is on
+             *     the next day.
+             * @example 08:00
+             */
+            end: string;
+            /**
+             * @description When a quiet period starts, local `HH:MM`.
+             * @example 21:00
+             */
+            start: string;
+        };
         ReadBody: {
             /**
              * @description The read rule answer: among the states that cover the message the latest change wins;
@@ -7529,6 +7594,12 @@ export interface components {
             between: string[];
         } | {
             since_trait: string;
+        };
+        /** @description The send limits of a workspace. */
+        SendSettingsBody: {
+            /** @description The frequency caps; all must pass. */
+            frequency_caps?: components["schemas"]["FrequencyCapBody"][];
+            quiet_hours?: null | components["schemas"]["QuietHoursBody"];
         };
         /** @description A sender identity. */
         SenderIdentityBody: {
@@ -19370,6 +19441,119 @@ export interface operations {
             };
             /** @description No such workspace or domain, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_send_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The send settings */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendSettingsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_send_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SendSettingsBody"];
+            };
+        };
+        responses: {
+            /** @description The settings as stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendSettingsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unknown channel or mode, a limit below 1, a window that does not parse or is over 31 days, an invalid time, equal start and end, or no days; each error names its JSON pointer */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

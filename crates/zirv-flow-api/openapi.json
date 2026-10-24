@@ -15857,6 +15857,166 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/sending/settings": {
+      "get": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "The workspace's frequency caps and quiet hours. Anyone who can read the workspace.",
+        "operationId": "get_send_settings",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The send settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSettingsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or\nquiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.",
+        "operationId": "put_send_settings",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendSettingsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The settings as stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendSettingsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown channel or mode, a limit below 1, a window that does not parse or is over 31 days, an invalid time, equal start and end, or no days; each error names its JSON pointer",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
       "post": {
         "tags": [
@@ -27326,6 +27486,40 @@
         },
         "additionalProperties": false
       },
+      "FrequencyCapBody": {
+        "type": "object",
+        "description": "One frequency cap.",
+        "required": [
+          "channel",
+          "window",
+          "limit",
+          "mode"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "The channel the cap counts: `email`.",
+            "example": "email"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The most messages one person gets in the window, at least 1.",
+            "example": 3,
+            "minimum": 1
+          },
+          "mode": {
+            "type": "string",
+            "description": "`skip` ends a message over the limit as `frequency_cap`; `defer` holds it until a slot\nleaves the window.",
+            "example": "skip"
+          },
+          "window": {
+            "type": "string",
+            "description": "The window, an ISO 8601 duration in whole hours or days, from `PT1H` to `P31D`.",
+            "example": "P1D"
+          }
+        }
+      },
       "FreshnessBody": {
         "type": "object",
         "description": "Whether a stream's data is current (architecture 7.5). The state is derived on every read.",
@@ -29699,6 +29893,34 @@
           }
         }
       },
+      "QuietHoursBody": {
+        "type": "object",
+        "description": "The quiet hours of a workspace.",
+        "required": [
+          "start",
+          "end",
+          "days"
+        ],
+        "properties": {
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The weekdays (`mon` to `sun`) a quiet period starts on; not empty. A period that wraps\nmidnight belongs to the day it starts on."
+          },
+          "end": {
+            "type": "string",
+            "description": "When it ends, local `HH:MM`, different from the start. An end at or before the start is on\nthe next day.",
+            "example": "08:00"
+          },
+          "start": {
+            "type": "string",
+            "description": "When a quiet period starts, local `HH:MM`.",
+            "example": "21:00"
+          }
+        }
+      },
       "ReadBody": {
         "type": "object",
         "required": [
@@ -31649,6 +31871,30 @@
           }
         ],
         "description": "Which events count; with no window, all retained events."
+      },
+      "SendSettingsBody": {
+        "type": "object",
+        "description": "The send limits of a workspace.",
+        "properties": {
+          "frequency_caps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FrequencyCapBody"
+            },
+            "description": "The frequency caps; all must pass."
+          },
+          "quiet_hours": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QuietHoursBody",
+                "description": "The quiet hours; null or absent for none."
+              }
+            ]
+          }
+        }
       },
       "SenderIdentityBody": {
         "type": "object",

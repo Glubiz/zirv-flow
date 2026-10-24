@@ -2207,6 +2207,12 @@ with any other sender is a 422 `sender_unverified`). Workspace admins manage bot
   nothing and the check is retried. `POST .../sending-domains/{id}/verify` queues a check now;
   otherwise the scheduler re-checks every `sending.recheck_hours` (default 6).
 - `POST /api/v1/workspaces/{ws}/sender-identities` binds a from name and an address on the domain.
+- `GET` and `PUT /api/v1/workspaces/{ws}/sending/settings` read (any reader) and replace (admins) the
+  workspace's frequency caps and quiet hours. A cap is `{channel, window, limit, mode}`: at most
+  `limit` messages to one person in any `window` (an ISO 8601 duration in whole hours or days, up to
+  `P31D`), and a message over it is `skip`ped (`frequency_cap`) or, in `defer` mode, held until a slot
+  frees up. Quiet hours are `{start, end, days}` in the recipient's time zone (their `timezone` trait,
+  else the workspace's): a message inside one waits for its end. Transactional mail is exempt from both.
 
 ## Render host
 
