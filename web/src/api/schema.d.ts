@@ -2239,7 +2239,8 @@ export interface paths {
          *     consent rule that decided, and, for a message that waits, when it runs again. A person that was
          *     merged into another reads as the survivor, with the merged people's messages included. No
          *     address and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`
-         *     or `failed`) and by `template_id`.
+         *     (waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or
+         *     `failed`) and by `template_id`.
          */
         get: operations["list_person_messages"];
         put?: never;
@@ -17915,7 +17916,7 @@ export interface operations {
                 limit?: number;
                 /** @description The next_before of the previous page */
                 before?: string;
-                /** @description `sent`, `skipped`, `deferred` or `failed` */
+                /** @description `sent`, `skipped`, `deferred`, `in_progress` or `failed` */
                 result?: string;
                 /** @description Only messages of this template */
                 template_id?: string;

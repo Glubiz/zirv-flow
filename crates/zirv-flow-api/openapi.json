@@ -13182,7 +13182,7 @@
         "tags": [
           "people"
         ],
-        "summary": "A person's message log, newest first, in pages. Each message names its template, flow step and\ndestination, the gates it went through in order, the exact reason it was skipped or failed, the\nconsent rule that decided, and, for a message that waits, when it runs again. A person that was\nmerged into another reads as the survivor, with the merged people's messages included. No\naddress and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`\nor `failed`) and by `template_id`.",
+        "summary": "A person's message log, newest first, in pages. Each message names its template, flow step and\ndestination, the gates it went through in order, the exact reason it was skipped or failed, the\nconsent rule that decided, and, for a message that waits, when it runs again. A person that was\nmerged into another reads as the survivor, with the merged people's messages included. No\naddress and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`\n(waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or\n`failed`) and by `template_id`.",
         "operationId": "list_person_messages",
         "parameters": [
           {
@@ -13228,7 +13228,7 @@
           {
             "name": "result",
             "in": "query",
-            "description": "`sent`, `skipped`, `deferred` or `failed`",
+            "description": "`sent`, `skipped`, `deferred`, `in_progress` or `failed`",
             "required": false,
             "schema": {
               "type": "string"

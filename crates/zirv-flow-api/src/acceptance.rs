@@ -13522,6 +13522,63 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_in_progress_result_holds_sending_and_pending_rows_that_do_not_wait(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (person, _) = seed_profile(&pool, &ws).await;
+        let template = Uuid::from_u128(1);
+        let sent = seed_message(&pool, &ws, &person, template, 400, Some(true)).await;
+        let idle = seed_message(&pool, &ws, &person, template, 300, None).await;
+        let sending = seed_message(&pool, &ws, &person, template, 200, None).await;
+        let waiting = seed_message(&pool, &ws, &person, template, 100, None).await;
+        sqlx::query("UPDATE messages SET status = 'sending' WHERE id = $1")
+            .bind(sending)
+            .execute(&pool)
+            .await
+            .unwrap();
+        zirv_flow_store::record_message_deferral(
+            &pool,
+            ws.parse().unwrap(),
+            waiting,
+            "frequency_cap",
+            time::OffsetDateTime::now_utc() + time::Duration::hours(1),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let ids = |reply: &Reply| -> Vec<String> {
+            reply.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let get = |query: &str| {
+            let router = router.clone();
+            let owner = &owner;
+            let uri = people_uri(&ws, &format!("/{person}/messages{query}"));
+            async move { call(&router, "GET", &uri, None, Auth::Session(owner)).await }
+        };
+
+        let deferred = get("?result=deferred").await;
+        let progress = get("?result=in_progress").await;
+        let paged = get("?result=in_progress&limit=1").await;
+        let cursor = paged.body["next_before"].as_str().unwrap().to_owned();
+        let rest = get(&format!("?result=in_progress&limit=1&before={cursor}")).await;
+
+        assert_eq!(ids(&deferred), [waiting.to_string()]);
+        assert_eq!(ids(&progress), [sending.to_string(), idle.to_string()]);
+        assert_eq!(ids(&paged), [sending.to_string()]);
+        assert_eq!(ids(&rest), [idle.to_string()]);
+        assert!(!ids(&progress).contains(&sent.to_string()));
+        assert!(progress.body["messages"][1]["deferred_until"].is_null());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_person_of_another_workspace_or_an_unknown_one_has_no_message_log(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

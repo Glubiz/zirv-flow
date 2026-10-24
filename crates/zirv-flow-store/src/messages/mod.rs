@@ -18,6 +18,6 @@ pub use log::{
     message_address_hash, message_in_flight, message_status, message_unconfirmed,
 };
 pub use person_log::{
-    LoggedMessage, MessageLogCursor, MessageLogFilter, MessageLogPage, WaitReason,
+    LoggedMessage, MessageLogCursor, MessageLogFilter, MessageLogPage, WaitFilter, WaitReason,
     load_person_message_log,
 };

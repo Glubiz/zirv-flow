@@ -174,10 +174,10 @@ pub use lists::{
 };
 pub use messages::{
     GateRecord, LoggedMessage, Message, MessageLogCursor, MessageLogFilter, MessageLogPage,
-    MessageStatus, NewMessage, WaitReason, clear_message_in_flight, find_message, insert_message,
-    list_person_messages, load_person_message_log, mark_message_sending, mark_message_unconfirmed,
-    message_address_hash, message_in_flight, message_status, message_unconfirmed,
-    read_send_address,
+    MessageStatus, NewMessage, WaitFilter, WaitReason, clear_message_in_flight, find_message,
+    insert_message, list_person_messages, load_person_message_log, mark_message_sending,
+    mark_message_unconfirmed, message_address_hash, message_in_flight, message_status,
+    message_unconfirmed, read_send_address,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{

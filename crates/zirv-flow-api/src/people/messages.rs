@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::TraceId;
-use zirv_flow_store::{LoggedMessage, MessageLogCursor, MessageLogFilter};
+use zirv_flow_store::{LoggedMessage, MessageLogCursor, MessageLogFilter, WaitFilter};
 
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -210,17 +210,21 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
                 );
             }
             "result" => {
-                filter.statuses = Some(match value.as_ref() {
-                    "sent" => vec!["sent"],
-                    "skipped" => vec!["skipped"],
-                    "deferred" => vec!["pending"],
-                    "failed" => vec!["failed"],
+                (filter.statuses, filter.wait) = match value.as_ref() {
+                    "sent" => (Some(vec!["sent"]), None),
+                    "skipped" => (Some(vec!["skipped"]), None),
+                    "deferred" => (Some(vec!["pending"]), Some(WaitFilter::Deferred)),
+                    "in_progress" => (
+                        Some(vec!["pending", "sending"]),
+                        Some(WaitFilter::InProgress),
+                    ),
+                    "failed" => (Some(vec!["failed"]), None),
                     _ => {
                         return Err(ApiError::bad_request(
-                            "result must be sent, skipped, deferred or failed",
+                            "result must be sent, skipped, deferred, in_progress or failed",
                         ));
                     }
-                });
+                };
             }
             "template_id" => {
                 filter.template = Some(
@@ -240,7 +244,8 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
 /// consent rule that decided, and, for a message that waits, when it runs again. A person that was
 /// merged into another reads as the survivor, with the merged people's messages included. No
 /// address and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`
-/// or `failed`) and by `template_id`.
+/// (waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or
+/// `failed`) and by `template_id`.
 #[utoipa::path(
     get,
     operation_id = "list_person_messages",
@@ -251,7 +256,7 @@ fn parse_page(query: &str) -> Result<Page, ApiError> {
         ("id" = Uuid, Path, description = "Person id"),
         ("limit" = Option<u32>, Query, description = "Messages per page, 1 to 200; default 50"),
         ("before" = Option<String>, Query, description = "The next_before of the previous page"),
-        ("result" = Option<String>, Query, description = "`sent`, `skipped`, `deferred` or `failed`"),
+        ("result" = Option<String>, Query, description = "`sent`, `skipped`, `deferred`, `in_progress` or `failed`"),
         ("template_id" = Option<Uuid>, Query, description = "Only messages of this template")
     ),
     responses(
@@ -323,6 +328,11 @@ mod tests {
             let (filter, ..) = parse_page(&format!("result={result}")).unwrap();
             assert_eq!(filter.statuses, Some(vec![status]));
         }
+        let (deferred, ..) = parse_page("result=deferred").unwrap();
+        let (progress, ..) = parse_page("result=in_progress").unwrap();
+        assert_eq!(deferred.wait, Some(WaitFilter::Deferred));
+        assert_eq!(progress.wait, Some(WaitFilter::InProgress));
+        assert_eq!(progress.statuses, Some(vec!["pending", "sending"]));
         let id = Uuid::now_v7();
         let (filter, ..) = parse_page(&format!("template_id={id}")).unwrap();
         assert_eq!(filter.template, Some(id));
