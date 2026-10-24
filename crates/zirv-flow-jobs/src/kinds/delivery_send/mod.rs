@@ -1550,6 +1550,12 @@ mod tests {
         let person = env.person("ada@example.com").await;
         let template = env.template("marketing", LINKED).await;
         let queued = env.queue(person, template, 5).await;
+        // The links belong to the message row the job's first run writes.
+        let claimed = env.claim().await.expect("the send is ready");
+        let job = SendJob::parse(&claimed.payload).unwrap();
+        start_message(&env.pool, &job, env.clock.now())
+            .await
+            .unwrap();
         let tracker = render::Tracker {
             base: PUBLIC_URL.to_owned(),
             key: tracking_key(),
