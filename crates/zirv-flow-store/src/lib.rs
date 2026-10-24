@@ -25,6 +25,7 @@ mod pool;
 mod privacy;
 pub mod secrets;
 mod segments;
+mod send_limits;
 mod sending;
 mod sessions;
 mod sources;
@@ -214,6 +215,10 @@ pub use segments::{
     membership_trace, read_segment_catalog, reconcile_segment_schedules, reevaluation_order,
     run_person_batch, run_segment_preview, segment_catalog, segment_catalog_details, segment_cron,
     segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
+};
+pub use send_limits::{
+    CAP_LOCK_CLASS, CapMode, CapVerdict, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits,
+    check_frequency_caps, read_send_limits, record_message_deferral, replace_send_limits,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use sending::fixtures as sending_fixtures;
