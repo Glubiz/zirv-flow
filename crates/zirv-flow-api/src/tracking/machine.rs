@@ -6,9 +6,10 @@
 //! nor the IP address is.
 //!
 //! The user agent is matched against a few generic markers and against the operator's own list
-//! (`tracking.prefetch_user_agents`). A generic marker matches only a whole token of the
-//! lower-cased user agent, split on non-alphanumeric characters, so `bot` inside a longer word
-//! is a person. An operator entry is a case-insensitive substring match, because operators
+//! (`tracking.prefetch_user_agents`). A generic marker matches a token of the lower-cased user
+//! agent, split on non-alphanumeric characters, that ends with it, so a fused fetcher name is
+//! caught and `bot` in the middle of a longer word is a person. An operator entry is a
+//! case-insensitive substring match, because operators
 //! supply exact fragments. No product, provider or client is named here; an operator
 //! who knows the fetchers in front of their audience adds them to the list.
 
@@ -37,7 +38,7 @@ pub(super) fn machine_reason(
         let agent = agent.to_lowercase();
         let marked = agent
             .split(|c: char| !c.is_alphanumeric())
-            .any(|token| GENERIC_MARKERS.contains(&token))
+            .any(|token| GENERIC_MARKERS.iter().any(|marker| token.ends_with(marker)))
             || operator
                 .iter()
                 .any(|fragment| !fragment.is_empty() && agent.contains(fragment.as_str()));
@@ -63,14 +64,15 @@ mod tests {
     }
 
     #[test]
-    fn a_generic_marker_in_the_user_agent_marks_the_open() {
+    fn a_generic_marker_ending_a_user_agent_token_marks_the_open() {
         for agent in [
             "Some-Image-Proxy/2.0",
             "Link PREFETCH agent",
             "mail-preview",
             "Security Scanner 1",
             "web-crawler",
-            "examplebot-bot/1",
+            "examplebot/1",
+            "someimageproxy",
         ] {
             assert_eq!(
                 machine_reason(Some(agent), &[], Some(DELIVERED), later(3600)),
@@ -81,11 +83,10 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_inside_a_longer_word_does_not_mark_the_open() {
+    fn a_marker_in_the_middle_of_a_word_does_not_mark_the_open() {
         for agent in [
             "Mozilla/5.0 Robotic",
             "abottle/1",
-            "reproxy-less",
             "Mozilla bots",
         ] {
             assert_eq!(
