@@ -10,6 +10,9 @@
 //! signs), and sends. `headers` are extra headers a template rendered; they never replace the
 //! four the destination owns, nor a header the connection owns.
 //!
+//! The `event` channel carries forwarded events (`event.forward`): the body is the mapped payload as
+//! JSON text and the idempotency key is the outbox row's.
+//!
 //! The configuration is the URL. The credential holds the signing secret and, during a rotation,
 //! the previous one. The response body is never read. A 2xx answer is a delivery; any other
 //! status is [`DestinationError::Answered`] with the raw `Retry-After`, and the pipeline's

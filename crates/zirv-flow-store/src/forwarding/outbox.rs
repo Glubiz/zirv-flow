@@ -1306,4 +1306,94 @@ mod tests {
         assert!(!replay.contains("enqueue_forwarding"));
         assert!(!replay.contains("forwards"));
     }
+
+    /// Ingest cost of the outbox step: the same batches pushed through `apply_event_batch` into
+    /// three workspaces, interleaved so drift hits all alike: the enqueue switched off (what the
+    /// path cost before the outbox), no rule, and one active rule that matches about 10% of the
+    /// events. Prints the p50 and p99 batch time of each. Run with `--ignored --nocapture`.
+    #[sqlx::test]
+    #[ignore = "measurement; requires PostgreSQL; run it by hand with --nocapture"]
+    async fn ingest_batch_time_with_the_outbox_switched_off_with_no_rule_and_with_a_rule(
+        pool: PgPool,
+    ) {
+        let batches: usize = std::env::var("ZIRV_MEASURE_BATCHES").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        let warm_up: usize = 20.min(batches);
+        const SIZE: usize = 500;
+        let (off_ws, _) = fixture(&pool, "measure-off").await;
+        let (none_ws, _) = fixture(&pool, "measure-none").await;
+        let (rule_ws, rule_destination) = fixture(&pool, "measure-rule").await;
+        add_rule(
+            &pool,
+            rule_ws,
+            rule_destination,
+            "order",
+            json!([]),
+            json!({"who": {"from": "person.id"}, "plan": {"from": "event.properties", "pointer": "/plan"}}),
+        )
+        .await;
+        let key = redaction_key();
+        let batch = |number: usize| -> Vec<EventRecord> {
+            (0..SIZE)
+                .map(|n| {
+                    let global = number * SIZE + n;
+                    let name = if global % 10 == 0 { "order" } else { "view" };
+                    let mut event = record(
+                        name,
+                        json!({"plan": "pro", "n": global}),
+                        &format!("m-{global}"),
+                    );
+                    event.identifiers = vec![("email".into(), format!("u{}@example.com", global % 2000))];
+                    event
+                })
+                .collect()
+        };
+        // (workspace, enqueue switched off)
+        let cases = [(off_ws, true), (none_ws, false), (rule_ws, false)];
+        let mut times: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // One case alone (`off`, `none` or `rule`), for a run too long to interleave.
+        let only = std::env::var("ZIRV_MEASURE_CASE").ok().and_then(|case| {
+            ["off", "none", "rule"].iter().position(|name| *name == case)
+        });
+        for number in 0..warm_up + batches {
+            let records = batch(number);
+            for step in 0..3 {
+                let index = (number + step) % 3;
+                if only.is_some_and(|only| only != index) {
+                    continue;
+                }
+                let (ws, off) = cases[index];
+                DISABLED.store(off, std::sync::atomic::Ordering::Relaxed);
+                let started = std::time::Instant::now();
+                apply_event_batch(&pool, ws, &key, &records).await.unwrap();
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                if number >= warm_up {
+                    times[index].push(elapsed);
+                }
+            }
+        }
+        DISABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let forwarded = rows(&pool, rule_ws).await;
+        assert_eq!(rows(&pool, off_ws).await + rows(&pool, none_ws).await, 0);
+        if only.is_none() || only == Some(2) {
+            assert_eq!(forwarded as usize, (warm_up + batches) * SIZE / 10);
+        }
+        for (label, series) in ["switched off", "no rule", "one rule, 10%"]
+            .iter()
+            .zip(times.iter_mut())
+        {
+            if series.is_empty() {
+                continue;
+            }
+            series.sort_by(f64::total_cmp);
+            let at = |q: f64| series[((series.len() as f64 - 1.0) * q).round() as usize];
+            println!(
+                "ingest {label:>14}: p50 {:.2} ms  p99 {:.2} ms  mean {:.2} ms  ({} batches of {SIZE})",
+                at(0.5),
+                at(0.99),
+                series.iter().sum::<f64>() / series.len() as f64,
+                series.len()
+            );
+        }
+    }
 }

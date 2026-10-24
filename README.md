@@ -2284,6 +2284,54 @@ counted in `zirv_flow_provider_feedback_total{outcome}`.
 `GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (admins only) shows the
 provider's status of each DNS record next to ours. It only reads: it never marks a domain verified.
 
+## Event forwarding
+
+A forwarding rule sends the events of one name to a destination, mapped to the payload you choose.
+Only a destination type that carries events accepts a rule (`webhook` does; an email provider does
+not: `422 destination_unsupported`). A workspace has at most 20 active rules (`422 too_many_rules`).
+
+A rule has an exact `event_name`, an optional `filter` and a `mapping`:
+
+- `filter` is the segment `where` list (`[{"prop": "total", "op": "gt", "value": 10}]`), all of which
+  must hold. It supports `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`, `exists`,
+  `not_exists`, `gt`, `gte`, `lt`, `lte` and `between`, and is checked by the segment validator, so
+  a property needs a published event schema. A comparison needs the property to be present and of
+  the value's type.
+- `mapping` is an object of output key to source: `{"from": "event.id"}`, `event.name`,
+  `event.time`, `event.received_at`, `person.id`, `{"from": "event.properties", "pointer":
+  "/order/total"}` (a missing property is `null`), or `{"value": "shop"}` (a string, number or
+  boolean). There are no expressions and no person traits.
+
+The matching events are copied into an outbox in the transaction that stores them, so a rolled-back
+write forwards nothing and a late-committing one is never skipped. This covers client events, synced
+events, `webhook.*` and `email.*` events and `segment.entered` and `segment.exited`; a replay adds
+none. With no active rule the cost is one indexed lookup per batch. An `event.forward` job per
+destination delivers the rows with the webhook's signing, the guarded client and the destination's
+rate limit, under the idempotency key `sha256(event id:destination id)`, which every retry and
+re-drive reuses (the webhook sends it as `X-Zirv-Idempotency-Key`), so delivery is at least once.
+A retryable answer backs off (5 s doubling to an hour, or the `Retry-After`); a terminal answer, or
+the eighth attempt, makes the row a dead letter. Each retry and each dead letter appends a decision
+(`event.forward`) with ids and a fixed code. Delivered rows lose their payload at once and are
+removed after seven days.
+
+All of these are for workspace admins and are audited:
+
+- `GET`, `POST /api/v1/workspaces/{ws}/forwarding/rules` and `GET`, `PATCH`, `DELETE
+  /api/v1/workspaces/{ws}/forwarding/rules/{id}`.
+- `GET /api/v1/workspaces/{ws}/forwarding/dead-letters?destination_id=&limit=&before=` lists dead
+  rows newest first with the error code, attempts and times; never the payload.
+- `GET /api/v1/workspaces/{ws}/forwarding/status` gives each destination's queue `depth`, the
+  `oldest_lag_seconds` of its oldest waiting row and its `dead` count.
+- `POST /api/v1/workspaces/{ws}/forwarding/re-drive` with `{"id": ...}` (one row), `{"destination_id":
+  ...}` or `{}` (every dead row) puts rows back in the queue with fresh attempts. It writes no
+  event and starts no flow.
+
+The metrics `zirv_flow_destination_forwarding_depth` and
+`zirv_flow_destination_forwarding_lag_seconds` carry the same numbers, labelled by workspace and
+destination id; attempts and outcomes are in `zirv_flow_destination_attempts_total` and
+`zirv_flow_destination_outcomes_total`. Erasing a person deletes their outbox rows (the call that
+erases them at the destination is separate), and a merge moves them to the survivor.
+
 ## Render host
 
 Templates render in child processes, never inside the API or a worker, so a template

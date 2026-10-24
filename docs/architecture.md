@@ -1909,6 +1909,74 @@ outbox step is set-based per batch. With no active forwarding destination in the
 workspace, it costs at most one cached or indexed lookup. Ingest is measured
 before and after on the same input.
 
+**As built (forwarding, #225).**
+
+- **Tables (migration 0054).** `forwarding_rules` holds the workspace, the destination, a name (unique
+  ignoring case), the exact `event_name`, the `filter` (the segment `where` list) and the `mapping`
+  (output key to source), an `active` flag and the times. A workspace has at most 20 active rules
+  (422 `too_many_rules`, counted under an advisory lock). `forwarding_outbox` holds the workspace,
+  destination, rule and event ids, `person_id`, the idempotency key (`sha256` of `event id:destination
+  id`), the mapped `payload`, `state` (`pending`, `delivered`, `dead`), `attempts` of the current
+  cycle, `attempt_offset` (the attempts of earlier cycles, so the numbers in `delivery_attempts`, which
+  names the row as a `forwarding` subject, never repeat), a fixed `last_error` code, `next_attempt_at`
+  and the times, with `UNIQUE (destination_id, event_id)`. Partial indexes serve the due-row claim and
+  the depth and lag reads, the dead-letter list, the purge of delivered rows, and the job lookup.
+- **The mapping and the filter** are typed in `zirv-flow-core::forwarding` and evaluated in SQL by the
+  outbox insert: sources are `event.id`, `event.name`, `event.time`, `event.received_at`, `person.id`,
+  `event.properties` at a JSON pointer (at most eight tokens; a missing value is `null`) and static
+  strings, numbers and booleans. Keys, pointers and values are bound, never spliced. A filter uses the
+  segment AST `where` form with the operators `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`,
+  `exists`, `not_exists`, `gt`, `gte`, `lt`, `lte` and `between`; the API validates it with the segment
+  validator against the published schema of the event name. Comparisons need the property present and
+  of the value's type. The rule's destination must declare the `event` channel
+  (`webhook` does, the email destinations do not: 422 `destination_unsupported`).
+- **The enqueue.** `enqueue_forwarding(connection, workspace, refs)` runs in the writer's transaction
+  after its inserts. It is called by `EventBatch::finish` (ingest, sync, inbound webhooks and the
+  apply-batch path), the `webhook.*` writer, the `email.*` send, feedback and engagement writers, and
+  after a segment pass for its `segment.entered` and `segment.exited` events (which are written by SQL
+  and read back by name, time and segment). With no active rule in the workspace it costs one indexed
+  `EXISTS`; otherwise it runs one `INSERT ... SELECT ... ON CONFLICT (destination_id, event_id) DO
+  NOTHING` per active rule over the whole batch, joined to `events` by its primary key. Replay writes
+  no outbox row. A source scan test fails when a file that inserts events is not on the list of
+  writers that call the enqueue.
+- **The job.** `event.forward` (one registry line) delivers one destination. At most one is ready per
+  destination: the enqueue and a re-drive pull a ready job forward or insert one, and two alternating
+  unique keys let a running job leave its successor. The job claims up to 25 due rows
+  (`FOR UPDATE SKIP LOCKED`), counting the attempt and moving `next_attempt_at` a five-minute lease
+  ahead so no lock is held across the call, then delivers through the shared delivery code
+  (`webhook` signing, the guarded client with no redirects, the destination's rate bucket, the
+  attempt row and metrics). Outcomes are written fenced on the attempt number: a delivered row
+  loses its payload; a retryable verdict sets `next_attempt_at` with the worker backoff (5 s doubling
+  to an hour, or a longer `Retry-After`); a terminal verdict, or the eighth attempt, makes the row
+  `dead`. Each retry and dead letter appends an `event.forward` decision in the same transaction
+  (destination, rule, event and outbox ids and the reason code). A rate-limit wait gives the row
+  back without spending an attempt. When rows remain, the job leaves its successor, due at the
+  earliest `next_attempt_at`. It never calls `enqueue_arrivals` and never writes an event. The
+  leader gives a destination with waiting rows and no job a new one. Delivered rows are purged
+  after seven days.
+- **Re-drive.** `POST .../forwarding/re-drive` sets one row (dead or pending), a destination's dead
+  rows or every dead row of the workspace to `pending`, due now, with the cycle's attempts moved
+  into `attempt_offset`, and ensures a job. It starts no flow.
+- **API and metrics.** Rule CRUD, the dead-letter list (ids, code, attempts and times; no payload),
+  the status (per destination `depth`, `oldest_lag_seconds`, `dead`) and re-drive are Admin,
+  workspace-level and audited (`forwarding.rule_created`, `rule_updated`, `rule_deleted`,
+  `redriven`). The leader publishes `zirv_flow_destination_forwarding_depth` and
+  `zirv_flow_destination_forwarding_lag_seconds`, and the attempts and outcomes are the
+  `zirv_flow_destination_attempts_total` and `zirv_flow_destination_outcomes_total` of the shared
+  delivery code; labels are ids only.
+- **Erasure and merge.** `delete_person` deletes the person's outbox rows and the erasure scan test
+  covers the table; the job payload names only the destination, so `names_erased_person!` has
+  nothing to purge. A merge re-points `forwarding_outbox.person_id` through `REWRITE_TARGETS`. The
+  destination's own erase call is #227.
+- **Ingest cost (#209).** `apply_event_batch` over 200 batches of 500 events after 20 warm-up
+  batches, local PostgreSQL, release build without LTO, each case alone on a fresh database
+  (`ZIRV_MEASURE_CASE`, an ignored test in `forwarding/outbox.rs`): enqueue switched off
+  (the cost before the outbox) p50 1991 ms, p99 2179 ms; no active rule p50 1971 ms, p99 2351 ms; one
+  active rule matching 10% of the events p50 1915 ms, p99 2215 ms. The no-rule case is within the
+  run-to-run noise of about 5% (its p50 is 1% lower and its p99 8% higher than switched off, and the
+  rule case is lower than both, so the order is noise): the one `EXISTS` is below what the
+  500 events of the batch cost.
+
 ## 13. LLM assistance
 
 Assistance is optional and operator-configured. It turns natural language into
