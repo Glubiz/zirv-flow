@@ -10,7 +10,7 @@
 use serde_json::{Map, Value};
 
 use super::issue::{child, code, index};
-use super::model::{Auth, CredentialSpec, RateLimitSpec};
+use super::model::{Auth, CredentialSpec, KeyLocation, RateLimitSpec};
 use super::parse::{MAX_NAME, MAX_PATH, Obj, Walk, is_forbidden_header, is_token, rate_limit};
 
 /// The most error rules a manifest lists.
@@ -806,6 +806,16 @@ pub(super) fn cross_check(
             walk.add(code::FORBIDDEN_HEADER, format!("/headers/{name}"));
         }
     }
+    // The same goes for an api_key auth header: it is applied after the idempotency header and
+    // would replace the message id with the credential.
+    if let Some(Auth::ApiKey {
+        location: KeyLocation::Header,
+        name,
+    }) = auth
+        && name.eq_ignore_ascii_case(&provider.send.idempotency_header)
+    {
+        walk.add(code::FORBIDDEN_HEADER, "/auth/name".to_owned());
+    }
     let secret_at = "/destination/feedback/verification/secret_field".to_owned();
     match credential.map(CredentialSpec::schema) {
         None => walk.add(code::REQUIRED, "/auth/credential".to_owned()),
@@ -1087,6 +1097,22 @@ mod tests {
             code::INVALID_HEADER,
             "/destination/send/idempotency_header"
         ));
+    }
+
+    #[test]
+    fn an_api_key_header_named_like_the_idempotency_header_is_refused_ignoring_case() {
+        let mut value = manifest();
+        value["auth"] = json!({
+            "type": "api_key", "in": "header", "name": "idempotency-KEY",
+            "credential": {"fields": [
+                {"key": "api_key", "label": "Key", "type": "string", "required": true, "secret": true},
+                {"key": "feedback_secret", "label": "Feedback secret", "type": "string", "required": true, "secret": true}
+            ]}
+        });
+        assert!(has(&value, code::FORBIDDEN_HEADER, "/auth/name"));
+
+        value["auth"]["in"] = json!("query");
+        assert!(!has(&value, code::FORBIDDEN_HEADER, "/auth/name"));
     }
 
     #[test]
