@@ -2,7 +2,7 @@
 //! with the names a reader needs, the gate results as stored, when a waiting message runs again
 //! and the trace its decisions sit on. No address and no identifier hash is read.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use serde_json::Value;
 use sqlx::prelude::FromRow;
@@ -13,9 +13,7 @@ use zirv_flow_core::WorkspaceId;
 
 use crate::StoreError;
 use crate::bounded::begin_bounded;
-
-/// The job kind that sends a message, as the flow runtime queues it.
-const SEND_JOB_KIND: &str = "delivery.send";
+use crate::flows::SEND_JOB_KIND;
 
 /// What a message list may be narrowed to.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
