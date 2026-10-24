@@ -20,14 +20,36 @@ pub enum Unsubscribed {
     /// The message's scope was unsubscribed already (or a newer record decides it): nothing new
     /// was written.
     Unchanged,
-    /// The person, topic or a dimension value of the message no longer exists.
+    /// The person of the message no longer exists.
     Unavailable,
+}
+
+/// The properties of an `email.unsubscribed` event for a scope: the topic id and the dimension
+/// keys with their value keys. Ids and keys only, never an address.
+fn scope_properties(topic: Option<Uuid>, dimensions: &Dimensions) -> Map<String, Value> {
+    let mut properties = Map::new();
+    if let Some(topic) = topic {
+        properties.insert("topic_id".to_owned(), Value::from(topic.to_string()));
+    }
+    if !dimensions.is_empty() {
+        let scope: Map<String, Value> = dimensions
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::from(value.clone())))
+            .collect();
+        properties.insert("dimensions".to_owned(), Value::Object(scope));
+    }
+    properties
 }
 
 /// Denies consent for the message's channel, topic and dimension values with the source
 /// `unsubscribe_link`, under the trace the message's enrollment began, and writes the
 /// `email.unsubscribed` event. Repeating it writes nothing: [`set_consent`] leaves a status that
 /// is held already, so there is no second event or decision.
+///
+/// An unsubscribe always works. When the message's topic or a dimension value no longer exists,
+/// the broadest scope that still exists is denied instead: the message's channel with no topic
+/// and no dimension values. The change's evidence then says `"fallback": "channel"`. Only a
+/// person who is gone makes the result [`Unsubscribed::Unavailable`].
 pub async fn unsubscribe_message(
     pool: &PgPool,
     message: &TrackedMessage,
@@ -37,45 +59,55 @@ pub async fn unsubscribe_message(
     let mut tx = begin(pool).await?;
     let workspace = message.workspace();
     let trace = message_trace(&mut tx, message, fallback_trace).await?;
-    let change = ConsentChange {
-        person: message.person_id,
-        channel: Channel::Email,
-        topic: message.topic_id,
-        dimensions: dimensions_of(&message.dimensions),
-        status: ConsentStatus::Unsubscribed,
-        source: ChangeSource::UnsubscribeLink,
-        evidence: json!({"message_id": message.id}),
-        occurred_at: now,
-        actor: None,
-    };
-    match set_consent(&mut tx, workspace, &change, &trace).await? {
-        ConsentOutcome::Changed { person_id, .. } => {
-            let mut properties = Map::new();
-            if let Some(topic) = message.topic_id {
-                properties.insert("topic_id".to_owned(), Value::from(topic.to_string()));
-            }
-            write_event(
-                &mut tx,
-                message,
-                person_id,
-                "email.unsubscribed",
-                properties,
-                now,
-                &trace,
-            )
-            .await?;
-            commit(tx).await?;
-            Ok(Unsubscribed::Changed)
-        }
-        ConsentOutcome::Unchanged | ConsentOutcome::Superseded => {
-            commit(tx).await?;
-            Ok(Unsubscribed::Unchanged)
-        }
-        ConsentOutcome::NoSuchPerson
-        | ConsentOutcome::NoSuchTopic
-        | ConsentOutcome::NoSuchDimension
-        | ConsentOutcome::NoSuchDimensionValue => Ok(Unsubscribed::Unavailable),
+    let scoped = (message.topic_id, dimensions_of(&message.dimensions));
+    let broadest = (None, Dimensions::new());
+    let mut attempts = vec![(scoped.clone(), false)];
+    if scoped != broadest {
+        attempts.push((broadest, true));
     }
+    for ((topic, dimensions), fell_back) in attempts {
+        let evidence = if fell_back {
+            json!({"message_id": message.id, "fallback": "channel"})
+        } else {
+            json!({"message_id": message.id})
+        };
+        let change = ConsentChange {
+            person: message.person_id,
+            channel: Channel::Email,
+            topic,
+            dimensions: dimensions.clone(),
+            status: ConsentStatus::Unsubscribed,
+            source: ChangeSource::UnsubscribeLink,
+            evidence,
+            occurred_at: now,
+            actor: None,
+        };
+        match set_consent(&mut tx, workspace, &change, &trace).await? {
+            ConsentOutcome::Changed { person_id, .. } => {
+                write_event(
+                    &mut tx,
+                    message,
+                    person_id,
+                    "email.unsubscribed",
+                    scope_properties(topic, &dimensions),
+                    now,
+                    &trace,
+                )
+                .await?;
+                commit(tx).await?;
+                return Ok(Unsubscribed::Changed);
+            }
+            ConsentOutcome::Unchanged | ConsentOutcome::Superseded => {
+                commit(tx).await?;
+                return Ok(Unsubscribed::Unchanged);
+            }
+            ConsentOutcome::NoSuchPerson => break,
+            ConsentOutcome::NoSuchTopic
+            | ConsentOutcome::NoSuchDimension
+            | ConsentOutcome::NoSuchDimensionValue => {}
+        }
+    }
+    Ok(Unsubscribed::Unavailable)
 }
 
 /// One choice a person made on the preference page: subscribe to or leave a scope.
@@ -100,7 +132,9 @@ pub struct PreferencesSaved {
 
 /// Records the choices of the preference page with the source `unsubscribe_link`, in one
 /// transaction under the trace the message's enrollment began. A choice that repeats what is held
-/// changes nothing. If any choice cannot be recorded, none is.
+/// changes nothing. If any choice cannot be recorded, none is. Each choice that changed to
+/// denied also writes an `email.unsubscribed` event, as the unsubscribe route does, with its
+/// scope; an opt-in writes no event.
 pub async fn save_preferences(
     pool: &PgPool,
     message: &TrackedMessage,
@@ -129,7 +163,21 @@ pub async fn save_preferences(
             actor: None,
         };
         match set_consent(&mut tx, workspace, &change, &trace).await? {
-            ConsentOutcome::Changed { .. } => changed += 1,
+            ConsentOutcome::Changed { person_id, .. } => {
+                changed += 1;
+                if !choice.subscribed {
+                    write_event(
+                        &mut tx,
+                        message,
+                        person_id,
+                        "email.unsubscribed",
+                        scope_properties(choice.topic, &choice.dimensions),
+                        now,
+                        &trace,
+                    )
+                    .await?;
+                }
+            }
             ConsentOutcome::Unchanged | ConsentOutcome::Superseded => {}
             ConsentOutcome::NoSuchPerson
             | ConsentOutcome::NoSuchTopic
@@ -256,7 +304,57 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_message_whose_topic_is_gone_changes_nothing(pool: PgPool) {
+    async fn a_save_writes_one_event_per_opt_out_and_none_per_opt_in(pool: PgPool) {
+        let ws = workspace(&pool, "prefs-events").await;
+        let (_, id) = message(&pool, ws).await;
+        let tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
+        let topic = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO topics (id, workspace_id, key, name, channel, policy) \
+             VALUES ($1, $2, 'news', 'News', 'email', 'opt_in')",
+        )
+        .bind(topic)
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let choices = [
+            PreferenceChange {
+                topic: Some(topic),
+                dimensions: Dimensions::new(),
+                subscribed: true,
+            },
+            PreferenceChange {
+                topic: None,
+                dimensions: Dimensions::new(),
+                subscribed: false,
+            },
+        ];
+
+        let saved = save_preferences(
+            &pool,
+            &tracked,
+            &choices,
+            datetime!(2031-05-06 07:08:09 UTC),
+            &trace(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((saved.changed, saved.unavailable), (2, false));
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM events WHERE name = 'email.unsubscribed'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_whose_topic_is_gone_falls_back_to_the_channel(pool: PgPool) {
         let ws = workspace(&pool, "unsub2").await;
         let (_, id) = message(&pool, ws).await;
         sqlx::query("UPDATE messages SET topic_id = $1 WHERE id = $2")
@@ -266,6 +364,42 @@ mod tests {
             .await
             .unwrap();
         let tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
+
+        let result = unsubscribe_message(
+            &pool,
+            &tracked,
+            datetime!(2031-05-06 07:08:09 UTC),
+            &trace(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, Unsubscribed::Changed);
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM events WHERE name = 'email.unsubscribed'"
+            )
+            .await,
+            1
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT count(*) FROM consent_changes WHERE evidence->>'fallback' = 'channel'"
+            )
+            .await,
+            1
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_whose_person_is_gone_is_unavailable(pool: PgPool) {
+        let ws = workspace(&pool, "unsub3").await;
+        let (_, id) = message(&pool, ws).await;
+        let mut tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
+        tracked.person_id = Uuid::now_v7();
 
         let result = unsubscribe_message(
             &pool,

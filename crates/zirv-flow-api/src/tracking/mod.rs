@@ -552,6 +552,35 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_one_click_post_for_a_removed_dimension_value_denies_the_channel(pool: PgPool) {
+        let mut fixture = Fixture::new(pool, "fallback", "sent", 3600).await;
+        fixture.message = Uuid::now_v7();
+        fixture
+            .insert_message(
+                fixture.message,
+                "sent",
+                3600,
+                None,
+                r#"{"vertical":"gone"}"#,
+            )
+            .await;
+        let uri = format!("/u/{}", fixture.token(TokenKind::Unsubscribe, 0));
+
+        let reply = fixture
+            .call("POST", &uri, None, "List-Unsubscribe=One-Click")
+            .await;
+
+        assert_eq!(reply.status, StatusCode::OK);
+        assert!(reply.body.is_empty());
+        assert!(!fixture.allowed(None, &Dimensions::new()).await);
+        assert_eq!(fixture.events("email.unsubscribed").await.len(), 1);
+        let page = fixture.call("POST", &uri, None, "").await;
+        assert_eq!(page.status, StatusCode::OK);
+        assert!(page.text().contains("You are unsubscribed"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_open_is_a_machine_open_soon_after_delivery_or_from_a_listed_agent(pool: PgPool) {
         let fixture = Fixture::with_agents(
             pool.clone(),
