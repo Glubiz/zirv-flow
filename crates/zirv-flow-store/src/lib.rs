@@ -34,6 +34,7 @@ mod stream_offsets;
 mod suppressions;
 mod sync_runs;
 mod templates;
+mod tracking;
 mod webhooks;
 mod workspace_credentials;
 mod workspaces;
@@ -277,6 +278,10 @@ pub use templates::{
     create_template, document_sender, find_template, find_template_draft, find_template_version,
     list_template_versions, list_templates, lock_template, publish_template,
     read_template_field_catalog, save_template_draft, template_where_used, update_template,
+};
+pub use tracking::{
+    Engagement, TrackedMessage, Unsubscribed, find_message_link, find_tracked_message,
+    record_engagement, record_message_links, unsubscribe_message,
 };
 pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,
