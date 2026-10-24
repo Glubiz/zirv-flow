@@ -107,6 +107,16 @@ pub async fn enqueue_forwarding(
     Ok(())
 }
 
+/// [`enqueue_forwarding`] for the one event a writer has just stored.
+pub(crate) async fn enqueue_forwarding_of(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    occurred_at: OffsetDateTime,
+) -> Result<(), StoreError> {
+    enqueue_forwarding(connection, workspace, &[ForwardRef { id, occurred_at }]).await
+}
+
 /// Makes sure one `event.forward` job of `destination` is ready, due at `run_at` (now when
 /// `None`): a ready job is pulled forward when it is due later, and a new one is inserted when
 /// none is ready. A running job does not count, since it may already have looked for rows. Two

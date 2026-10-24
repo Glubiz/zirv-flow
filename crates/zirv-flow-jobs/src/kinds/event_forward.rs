@@ -193,20 +193,16 @@ async fn forward_one(
         Some(driver) => {
             if driver.spec().capabilities.rate_limit {
                 let gates = std::sync::Arc::clone(ctx.rate_gates());
-                match gates.admit(pool, destination.id, &clock).await? {
-                    Admission::Granted => {}
-                    Admission::Wait(wait) => {
-                        let mut tx = zirv_flow_store::begin(pool).await?;
-                        defer_row(&mut tx, row.id, row.attempts, now + wait).await?;
-                        zirv_flow_store::commit(tx).await?;
-                        return Ok(());
-                    }
-                    Admission::Gone => {
-                        let mut tx = zirv_flow_store::begin(pool).await?;
-                        defer_row(&mut tx, row.id, row.attempts, now + GONE_WAIT).await?;
-                        zirv_flow_store::commit(tx).await?;
-                        return Ok(());
-                    }
+                let wait = match gates.admit(pool, destination.id, &clock).await? {
+                    Admission::Granted => None,
+                    Admission::Wait(wait) => Some(wait),
+                    Admission::Gone => Some(GONE_WAIT),
+                };
+                if let Some(wait) = wait {
+                    let mut tx = zirv_flow_store::begin(pool).await?;
+                    defer_row(&mut tx, row.id, row.attempts, now + wait).await?;
+                    zirv_flow_store::commit(tx).await?;
+                    return Ok(());
                 }
             }
             if credential.is_none() {
@@ -216,17 +212,7 @@ async fn forward_one(
                 Some(Ok(credential)) => {
                     call(ctx, destination, driver, credential, row, now).await?
                 }
-                Some(Err(Verdict::Retry {
-                    status,
-                    reason,
-                    message,
-                    retry_after,
-                })) => early(Verdict::Retry {
-                    status: *status,
-                    reason,
-                    message,
-                    retry_after: *retry_after,
-                }),
+                Some(Err(verdict)) => early(verdict.clone()),
                 _ => early(Verdict::Terminal {
                     status: None,
                     reason: "destination_auth",

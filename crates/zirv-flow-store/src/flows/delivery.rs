@@ -198,15 +198,8 @@ pub async fn record_webhook_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    crate::enqueue_forwarding(
-        connection,
-        outcome.workspace,
-        &[crate::ForwardRef {
-            id: event,
-            occurred_at: outcome.now,
-        }],
-    )
-    .await?;
+    crate::forwarding::enqueue_forwarding_of(connection, outcome.workspace, event, outcome.now)
+        .await?;
     // The flow and version the call belongs to, for the trace to link from; an erased enrollment has
     // none.
     let pinned: Option<(Uuid, i32)> = sqlx::query_as(

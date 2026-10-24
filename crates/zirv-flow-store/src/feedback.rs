@@ -260,13 +260,11 @@ pub async fn record_provider_feedback(
         .execute(&mut *tx)
         .await
         .map_err(StoreError::query)?;
-        crate::enqueue_forwarding(
+        crate::forwarding::enqueue_forwarding_of(
             &mut tx,
             feedback.workspace,
-            &[crate::ForwardRef {
-                id: event_id,
-                occurred_at: feedback.now,
-            }],
+            event_id,
+            feedback.now,
         )
         .await?;
         enqueue_arrivals(

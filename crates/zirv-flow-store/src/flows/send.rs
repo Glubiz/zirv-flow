@@ -132,15 +132,8 @@ pub async fn record_send_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    crate::enqueue_forwarding(
-        connection,
-        message.workspace,
-        &[crate::ForwardRef {
-            id: event,
-            occurred_at: message.now,
-        }],
-    )
-    .await?;
+    crate::forwarding::enqueue_forwarding_of(connection, message.workspace, event, message.now)
+        .await?;
 
     let subject_ids = |extra: Option<(&'static str, Uuid)>| {
         let mut ids = vec![

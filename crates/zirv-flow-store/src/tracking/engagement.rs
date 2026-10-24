@@ -101,15 +101,7 @@ pub(super) async fn write_event(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    crate::enqueue_forwarding(
-        connection,
-        message.workspace(),
-        &[crate::ForwardRef {
-            id: event,
-            occurred_at: now,
-        }],
-    )
-    .await?;
+    crate::forwarding::enqueue_forwarding_of(connection, message.workspace(), event, now).await?;
     enqueue_arrivals(
         connection,
         message.workspace(),

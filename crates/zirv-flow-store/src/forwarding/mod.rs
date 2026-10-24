@@ -17,6 +17,7 @@ mod sql;
 #[cfg(test)]
 pub(crate) use rules::tests as support;
 
+pub(crate) use outbox::enqueue_forwarding_of;
 pub use outbox::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingStat,
     QueueStatus, Redrive, Settled, claim_due, defer_row, enqueue_forwarding,
