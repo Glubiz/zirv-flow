@@ -168,6 +168,15 @@ impl Destination for ProviderDestination {
                 reason: "is not usable".to_owned(),
             });
         }
+        // The URL parser reads `.` and `..` (also as `%2e`) as dot segments and would move the
+        // request off the mapped path. The encoder percent-encodes `%`, so no other spelling of a
+        // key reaches the path as a dot segment: matching the raw key is enough.
+        if profile::is_dot_segment(call.key) {
+            return Err(DestinationError::Config {
+                field: "key".to_owned(),
+                reason: "is a path dot segment".to_owned(),
+            });
+        }
         let body = profile::build_body(spec, call.key, call.traits)?;
         let url = joined(&manifest.base_url, &profile::path_for(spec, call.key))?;
         let method = match spec.method {
@@ -1097,6 +1106,25 @@ mod tests {
         assert_eq!(remove, Err(DestinationError::Unsupported));
         assert!(matches!(empty, Err(DestinationError::Config { .. })));
         assert!(matches!(long, Err(DestinationError::Config { .. })));
+        assert_eq!(fake.requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_dot_segment_key_is_refused_without_a_call() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_for(PROFILES, &fake);
+        let none = traits(json!({}));
+
+        for key in [".", ".."] {
+            for operation in [SyncOperation::Upsert, SyncOperation::Remove] {
+                match sync(&config, operation, key, &none, "e-1").await {
+                    Err(error @ DestinationError::Config { .. }) => {
+                        assert_eq!(error.disposition(), Disposition::Terminal);
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
         assert_eq!(fake.requests(), 0);
     }
 

@@ -9,11 +9,18 @@ use crate::manifest::{KEY_PLACEHOLDER, ProfileSpec, TraitPlacement, place};
 /// The longest external key a request carries.
 pub(super) const MAX_KEY_BYTES: usize = 512;
 
+/// Whether `key`, placed as a path segment, would be a dot segment. The encoder percent-encodes
+/// every byte outside the unreserved set, `%` included, so only the exact keys `.` and `..` can
+/// reach the path as one.
+pub(super) fn is_dot_segment(key: &str) -> bool {
+    key == "." || key == ".."
+}
+
 /// `key` as one path segment: every byte outside the unreserved set is percent-encoded, so a `/`,
 /// `?` or `#` cannot end the segment or start a query or fragment, and `.` and `..` cannot
 /// navigate.
 pub(super) fn encode_segment(key: &str) -> String {
-    if key == "." || key == ".." {
+    if is_dot_segment(key) {
         return key.replace('.', "%2E");
     }
     let mut out = String::with_capacity(key.len());
@@ -130,6 +137,47 @@ mod tests {
             "a%252Fb",
             "a percent sign is encoded itself"
         );
+    }
+
+    fn decoded(segment: &str) -> String {
+        let bytes = segment.as_bytes();
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'%' {
+                let pair = std::str::from_utf8(&bytes[at + 1..at + 3]).unwrap();
+                out.push(u8::from_str_radix(pair, 16).unwrap());
+                at += 3;
+            } else {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_keys_url_ends_in_one_segment_that_decodes_to_the_key_under_the_base_path() {
+        let base = url::Url::parse("https://api.example.test/v1/").unwrap();
+
+        for key in [
+            "ada@example.test",
+            "a/b?c#d",
+            "a%2eb",
+            "%2e%2e",
+            ".%2E",
+            "a..b",
+        ] {
+            let path = path_for(&spec("/profiles/{key}/attrs", None, None), key);
+            let url = super::super::joined(&base, &path).unwrap();
+            let segments: Vec<&str> = url.path_segments().unwrap().collect();
+
+            assert_eq!(segments.len(), 4, "{key}");
+            assert_eq!(segments[..2], ["v1", "profiles"], "{key}");
+            assert_eq!(segments[3], "attrs", "{key}");
+            assert_eq!(decoded(segments[2]), key, "{key}");
+            assert!(url.query().is_none() && url.fragment().is_none());
+        }
     }
 
     #[test]
