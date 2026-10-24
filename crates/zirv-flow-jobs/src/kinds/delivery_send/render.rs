@@ -7,7 +7,7 @@
 //! `failed: render_error` and nothing else: the pool replaces a child it killed, and the worker
 //! carries on with the next message.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
@@ -185,14 +185,14 @@ pub(super) async fn render(
 /// attempt pointed), a URL seen again in this render reuses the one it got, and any other URL gets
 /// the next free index: one past the highest recorded or assigned.
 struct LinkIndexes {
-    by_url: HashMap<String, u16>,
+    by_url: BTreeMap<String, u16>,
     next: u32,
     added: Vec<(u16, String)>,
 }
 
 impl LinkIndexes {
     fn new(recorded: &[(u16, String)]) -> Self {
-        let mut by_url = HashMap::new();
+        let mut by_url = BTreeMap::new();
         let mut next = 0;
         for (index, url) in recorded {
             by_url.entry(url.clone()).or_insert(*index);
