@@ -63,7 +63,8 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
     lists: lists.status === "ready" ? lists.data : [],
     segments: segments.status === "ready" ? segments.data : [],
   };
-  const dimensionList: readonly Dimension[] = dimensions.status === "ready" ? dimensions.data : [];
+  // While they load there is nothing to offer; when they failed, the editors say so and do not offer an empty catalog.
+  const dimensionList: readonly Dimension[] | null = dimensions.status === "error" ? null : dimensions.status === "ready" ? dimensions.data : [];
 
   const [view, setView] = useState<View>("rules");
   const [open, setOpen] = useState<string | null>(null);
@@ -74,6 +75,9 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
   const [decided, setDecided] = useState<Evaluation | null>(null);
   const focusAfter = useRef<{ key: string; by: -1 | 1 } | null>(null);
   const list = useRef<HTMLOListElement>(null);
+  const main = useRef<HTMLElement>(null);
+  // Where the focus goes once a deleted rule is gone: a rule card's key, or null for "Add a rule".
+  const focusAfterDelete = useRef<{ key: string | null } | null>(null);
 
   // After a rule moves, the focus stays on the button that moved it, or on its partner when that one cannot go further.
   useEffect(() => {
@@ -84,6 +88,15 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
     const same = card?.querySelector<HTMLButtonElement>(`[data-move="${wanted.by === -1 ? "up" : "down"}"]`);
     const other = card?.querySelector<HTMLButtonElement>(`[data-move="${wanted.by === -1 ? "down" : "up"}"]`);
     (same && !same.disabled ? same : other)?.focus();
+  });
+
+  // Deleting a rule unmounts the button that opened the dialog, so the focus is put on the next card, else the previous one, else "Add a rule".
+  useEffect(() => {
+    const wanted = focusAfterDelete.current;
+    if (wanted === null) return;
+    focusAfterDelete.current = null;
+    const card = Array.from(list.current?.querySelectorAll<HTMLElement>("[data-rule]") ?? []).find((element) => element.dataset["rule"] === wanted.key);
+    (card?.querySelector<HTMLButtonElement>("[data-toggle]") ?? main.current?.querySelector<HTMLButtonElement>("[data-add-rule]"))?.focus();
   });
 
   if (draft.load.status === "loading") {
@@ -217,7 +230,7 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
         </div>
       ) : (
         <div className="policy-layout" role="tabpanel" id="policy-panel-rules" aria-labelledby={canManage ? "policy-tab-rules" : undefined}>
-          <section aria-labelledby="rules-h" className="policy-main">
+          <section aria-labelledby="rules-h" className="policy-main" ref={main}>
             <div className="policy-intro">
               <div>
                 <h2 id="rules-h" className="panel-title">
@@ -229,11 +242,18 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
                 </p>
               </div>
               {canWrite ? (
-                <Button onClick={addRule} disabled={draft.rules.length >= MAX_RULES}>
+                <Button data-add-rule onClick={addRule} disabled={draft.rules.length >= MAX_RULES}>
                   <PlusIcon size={16} /> Add a rule
                 </Button>
               ) : null}
             </div>
+            {dimensions.status === "error" ? (
+              <ErrorState
+                {...describeError(dimensions.error)}
+                title="The dimensions could not be loaded"
+                onRetry={dimensions.reload}
+              />
+            ) : null}
             <ol className="rules" ref={list} aria-label="Rules in the order they are checked">
               {draft.rules.map((rule, at) => (
                 <RuleCard
@@ -262,7 +282,7 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
               <span>The send goes on to the suppression check.</span>
             </div>
           </section>
-          {canManage ? <EvaluatePanel workspaceId={workspaceId} dimensions={dimensionList} onResult={setDecided} /> : null}
+          {canManage ? <EvaluatePanel workspaceId={workspaceId} dimensions={dimensionList ?? []} onResult={setDecided} /> : null}
         </div>
       )}
 
@@ -274,6 +294,9 @@ function PolicyView({ workspaceId }: { workspaceId: string }) {
             <Button
               variant="primary"
               onClick={() => {
+                const at = draft.rules.findIndex((rule) => rule.key === deletingRule.key);
+                const neighbour = draft.rules[at + 1] ?? draft.rules[at - 1];
+                focusAfterDelete.current = { key: neighbour?.key ?? null };
                 draft.remove(deletingRule.key);
                 setAnnouncement(`Deleted ${deletingRule.name}.`);
                 setDeleting(null);

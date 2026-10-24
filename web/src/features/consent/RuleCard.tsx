@@ -18,7 +18,8 @@ interface RuleCardProps {
   readOnly: boolean;
   /** The condition in words, for the closed card. */
   summary: string;
-  dimensions: readonly Dimension[];
+  /** Null when the dimensions could not be loaded. */
+  dimensions: readonly Dimension[] | null;
   /** Codes of the problems with the rule itself, and the problems with its condition. */
   ruleIssues: readonly string[];
   conditionIssues: readonly DefinitionIssue[];
@@ -125,6 +126,7 @@ export function RuleCard({
           <button
             type="button"
             className="icon-btn"
+            data-toggle
             aria-expanded={open}
             aria-controls={bodyId}
             aria-label={

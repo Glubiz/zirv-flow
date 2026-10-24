@@ -328,4 +328,113 @@ describe("consent policy builder", () => {
     expect(within(list).getByText("Version 2")).toBeInTheDocument();
     expect(within(list).getByText("Version 1")).toBeInTheDocument();
   });
+
+  it("keeps edits made while a save is in flight, and they stay unsaved changes", async () => {
+    let release: (response: Response) => void = () => undefined;
+    const held = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const calls = mockApi(routes("admin", { [`PUT ${WS}/consent/policy/draft`]: () => held }));
+    const user = userEvent.setup();
+    mount();
+
+    await addRule(user, "Quiet week");
+    await user.click(screen.getByRole("button", { name: "Save draft" }));
+    await waitFor(() => expect(savedBodies(calls)).toHaveLength(1));
+
+    // The save has not answered yet: the rule is renamed.
+    const name = screen.getByLabelText("Rule name");
+    await user.clear(name);
+    await user.type(name, "Quiet fortnight");
+    release(
+      json(
+        draftBody(
+          [BUILTIN, { id: COOLDOWN_ID, name: "Quiet week", builtin: false, condition: { v: 1, all: [] } }],
+          1,
+        ),
+      ),
+    );
+
+    expect(await screen.findByText("Draft saved.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Rule name")).toHaveValue("Quiet fortnight");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save draft" })).toBeEnabled();
+  });
+
+  it("shows an error with a retry when the dimensions fail to load, not an empty picker", async () => {
+    let fail = true;
+    mockApi(
+      routes("admin", {
+        [`GET ${WS}/consent/dimensions`]: () => (fail ? problem(500, "Internal Server Error", "dimensions are down") : json([TOPIC_DIMENSION, VERTICAL])),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await addRule(user, "Sports cap");
+    const condition = screen.getByRole("group", { name: "Condition" });
+    await user.selectOptions(within(condition).getByLabelText("Type"), "messages");
+    const alert = await screen.findByText("The dimensions could not be loaded");
+    expect(alert).toBeInTheDocument();
+    expect(screen.getByText("dimensions are down")).toBeInTheDocument();
+    expect(within(condition).queryByRole("button", { name: "Add a dimension filter" })).not.toBeInTheDocument();
+    expect(within(condition).getByText(/not available until the dimensions load/)).toBeInTheDocument();
+
+    fail = false;
+    await user.click(within(alert.closest("[role=alert]") as HTMLElement).getByRole("button", { name: /try again/i }));
+    await waitFor(() => expect(screen.queryByText("The dimensions could not be loaded")).not.toBeInTheDocument());
+    await user.click(within(condition).getByRole("button", { name: "Add a dimension filter" }));
+    const options = within(within(condition).getByLabelText("Dimension of dimension 1")).getAllByRole("option");
+    expect(options.map((option) => option.textContent)).toContain("Vertical");
+  });
+
+  it("offers two dimension filter rows and not the dimension another row uses", async () => {
+    mockApi(
+      routes("admin", {
+        [`GET ${WS}/consent/dimensions`]: () =>
+          json([TOPIC_DIMENSION, VERTICAL, { key: "brand", name: "Brand", builtin: false, archived: false, values: [{ key: "acme", name: "Acme", archived: false }] }]),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await addRule(user, "Sports cap");
+    const condition = screen.getByRole("group", { name: "Condition" });
+    await user.selectOptions(within(condition).getByLabelText("Type"), "messages");
+    const add = await within(condition).findByRole("button", { name: "Add a dimension filter" });
+    await user.click(add);
+    await user.click(within(condition).getByRole("button", { name: "Add a dimension filter" }));
+    expect(within(condition).getAllByRole("group", { name: /Dimension filter/ })).toHaveLength(2);
+
+    await user.selectOptions(within(condition).getByLabelText("Dimension of dimension 1"), "vertical");
+    const second = within(condition).getByLabelText("Dimension of dimension 2");
+    const offered = within(second).getAllByRole("option").map((option) => (option as HTMLOptionElement).value);
+    expect(offered).toEqual(["", "brand"]);
+    expect(within(condition).getAllByRole("group", { name: /Dimension filter/ })).toHaveLength(2);
+  });
+
+  it("moves the focus to the next rule after a delete, else the previous, else Add a rule", async () => {
+    const rule = (id: string, name: string) => ({ id, name, builtin: false, condition: { v: 1, all: [] } });
+    const rules = [BUILTIN, rule("77777777-0000-4000-8000-000000000001", "First"), rule("77777777-0000-4000-8000-000000000002", "Second")];
+    mockApi(routes("admin", { [`GET ${WS}/consent/policy/draft`]: () => json(draftBody(rules, 1, 1)) }));
+    const user = userEvent.setup();
+    mount();
+
+    async function remove(name: string) {
+      const card = (await screen.findByRole("heading", { name: new RegExp(name) })).closest("li")!;
+      await user.click(within(card).getByRole("button", { name: `Edit ${name}` }));
+      await user.click(within(card).getByRole("button", { name: `Delete ${name}` }));
+      const dialog = await screen.findByRole("dialog", { name: `Delete ${name}?` });
+      await user.click(within(dialog).getByRole("button", { name: "Delete rule" }));
+    }
+
+    // The middle rule: the focus goes to the card after it.
+    await remove("First");
+    expect(screen.getByText("Deleted First.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^(Edit|Close) Second$/ })).toHaveFocus();
+
+    // The last rule: the focus goes to the card before it.
+    await remove("Second");
+    expect(screen.getByRole("button", { name: /Show how Recorded consent decides|Hide how Recorded consent decides/ })).toHaveFocus();
+  });
 });
