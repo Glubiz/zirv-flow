@@ -1273,6 +1273,10 @@ data only.
   reads it by message id. A null hash (a message sent before the column) suppresses nobody, is recorded as a
   `suppression.feedback` decision `unable` / `address_hash_missing` and counted (`unable_to_suppress`); the
   person's current address is never used instead. The column goes with its row on erasure.
+  A retry that is carried (an earlier call may have been accepted) never re-points it: if the current address
+  hashes differently from the stored hash, nothing is sent and the message ends `delivery_unconfirmed` with the
+  gate note `address_changed`, keeping the stored hash. A retry that is not carried, or a row with no stored
+  hash, follows the current address.
 - **Suppression scopes.** A hard bounce adds an `organization` suppression (reason `hard_bounce`), a
   complaint a `workspace` one (reason `complaint`), both with source `feedback`; a soft bounce and a delivery
   suppress nobody. The send job's suppression gate then skips the next send with `suppressed`.

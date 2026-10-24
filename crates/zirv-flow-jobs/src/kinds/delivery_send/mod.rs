@@ -72,8 +72,8 @@ use zirv_flow_store::{
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
     find_flow, find_message_links, find_template, find_template_version, insert_message,
-    lock_webhook_person, mark_message_sending, mark_message_unconfirmed, message_in_flight,
-    message_status, message_unconfirmed, read_template_field_catalog, read_webhook_subject,
+    lock_webhook_person, mark_message_sending, mark_message_unconfirmed, message_address_hash,
+    message_in_flight, message_status, message_unconfirmed, read_template_field_catalog, read_webhook_subject,
     record_message_deferral, record_message_links, record_send_outcome, throttle_bucket,
 };
 
@@ -90,7 +90,10 @@ pub(crate) struct DeliverySend;
 
 /// How long a send waits for a rate-limit token before it fails as `rate_limited`: a destination
 /// that grants none for this long is not coming back for this message.
-const MAX_RATE_WAIT: time::Duration = time::Duration::hours(6);
+/// The note on the unconfirmed ending of a resumed message whose address changed since the call
+/// that may have been accepted.
+const ADDRESS_CHANGED: &str = "address_changed";
+const MAX_RATE_WAIT:time::Duration = time::Duration::hours(6);
 
 /// What a run of the job came to.
 enum Step {
@@ -398,16 +401,24 @@ async fn decide(
     let carried = resuming
         && (message_unconfirmed(&pool, workspace, job.message).await?
             || message_in_flight(&pool, workspace, job.message).await?);
+    let current_hash = gates::address_hash(&key, &address);
+    // An earlier call that may have been accepted went to the stored address. If the person's
+    // address changed since, the resumed call must not go to the new one under the same
+    // idempotency key, and the stored hash must keep naming the address that may have received
+    // the message (a bounce for it must not suppress the new one). A message with no stored hash
+    // keeps the earlier behaviour.
+    if carried
+        && let (Some(current), Some(Some(stored))) = (
+            current_hash,
+            message_address_hash(&pool, workspace, job.message).await?,
+        )
+        && current != stored
+    {
+        return Ok(trail.unconfirmed("delivery", Some(ADDRESS_CHANGED)));
+    }
     // The attempt number fences the mark: a stale attempt clears only its own.
     let mark = number - 1;
-    mark_message_sending(
-        &pool,
-        workspace,
-        job.message,
-        mark,
-        gates::address_hash(&key, &address).as_ref(),
-    )
-    .await?;
+    mark_message_sending(&pool, workspace, job.message, mark, current_hash.as_ref()).await?;
     let call = deliver::Call {
         workspace,
         destination: &destination,
@@ -4504,6 +4515,103 @@ mod tests {
             "zero duplicates: the provider honoured the key"
         );
         assert_eq!(fake.accepted()[0].key, queued.message.to_string());
+    }
+
+    /// Gives the person a newer email identity, which the send address then follows.
+    async fn move_address(env: &Env, person: Uuid, address: &str) {
+        sqlx::query(
+            "INSERT INTO identities (id, workspace_id, person_id, kind, value, created_at)
+             VALUES ($1, $2, $3, 'email', $4, now() + interval '1 hour')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(env.ws.as_uuid())
+        .bind(person)
+        .bind(address)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn stored_hash(env: &Env, message: Uuid) -> Option<Vec<u8>> {
+        sqlx::query_scalar("SELECT address_hash FROM messages WHERE id = $1")
+            .bind(message)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_carried_provider_retry_does_not_send_to_a_changed_address_or_move_the_hash(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::DropAfterAccept);
+        env.attempt().await.unwrap_err();
+        // A provider call cut off by a transport failure is judged not accepted; the carried state
+        // is what a crash after an accepted call leaves, so the test sets it.
+        mark_message_unconfirmed(&env.pool, env.ws, queued.message)
+            .await
+            .unwrap();
+        move_address(&env, person, "bob@example.com").await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "failed");
+        assert_eq!(message.reason.as_deref(), Some(DELIVERY_UNCONFIRMED));
+        assert_eq!(fake.requests(), 1, "no second call");
+        assert_eq!(
+            stored_hash(&env, queued.message).await.as_deref(),
+            Some(crate_hash("ada@example.com").as_slice())
+        );
+        assert!(
+            serde_json::to_string(&message.gate_results)
+                .unwrap()
+                .contains("address_changed")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_uncarried_provider_retry_sends_to_the_changed_address_and_the_hash_follows(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::Status {
+            status: 503,
+            body: json!({}),
+            retry_after: None,
+        });
+        env.attempt().await.unwrap_err();
+        move_address(&env, person, "bob@example.com").await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "sent");
+        assert_eq!(fake.accepted().len(), 1);
+        assert_eq!(fake.accepted()[0].body["to"][0]["email"], "bob@example.com");
+        assert_eq!(
+            stored_hash(&env, queued.message).await.as_deref(),
+            Some(crate_hash("bob@example.com").as_slice())
+        );
     }
 
     #[sqlx::test]
