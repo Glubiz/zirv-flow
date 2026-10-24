@@ -171,6 +171,15 @@ interface CardProps {
   onArchiveValue: (value: DimensionValue, archived: boolean) => void;
 }
 
+function ArchiveToggle({ name, archived, busy, onArchive }: { name: string; archived: boolean; busy: boolean; onArchive: (archived: boolean) => void }) {
+  const verb = archived ? "Restore" : "Archive";
+  return (
+    <Button onClick={() => onArchive(!archived)} disabled={busy} aria-label={`${verb} ${name}`}>
+      {verb}
+    </Button>
+  );
+}
+
 function DimensionCard({ workspaceId, dimension, canManage, busy, onRename, onArchive, onAddValue, onRenameValue, onArchiveValue }: CardProps) {
   const editable = canManage && !dimension.builtin;
   return (
@@ -185,15 +194,7 @@ function DimensionCard({ workspaceId, dimension, canManage, busy, onRename, onAr
               <Button onClick={onRename} aria-label={`Rename ${dimension.name}`}>
                 Rename
               </Button>
-              {dimension.archived ? (
-                <Button onClick={() => onArchive(false)} disabled={busy === `dimension:${dimension.key}`} aria-label={`Restore ${dimension.name}`}>
-                  Restore
-                </Button>
-              ) : (
-                <Button onClick={() => onArchive(true)} disabled={busy === `dimension:${dimension.key}`} aria-label={`Archive ${dimension.name}`}>
-                  Archive
-                </Button>
-              )}
+              <ArchiveToggle name={dimension.name} archived={dimension.archived} busy={busy === `dimension:${dimension.key}`} onArchive={onArchive} />
             </>
           ) : null}
         </div>
@@ -216,23 +217,12 @@ function DimensionCard({ workspaceId, dimension, canManage, busy, onRename, onAr
                     <Button onClick={() => onRenameValue(value)} aria-label={`Rename ${value.name}`}>
                       Rename
                     </Button>
-                    {value.archived ? (
-                      <Button
-                        onClick={() => onArchiveValue(value, false)}
-                        disabled={busy === `value:${dimension.key}:${value.key}`}
-                        aria-label={`Restore ${value.name}`}
-                      >
-                        Restore
-                      </Button>
-                    ) : (
-                      <Button
-                        onClick={() => onArchiveValue(value, true)}
-                        disabled={busy === `value:${dimension.key}:${value.key}`}
-                        aria-label={`Archive ${value.name}`}
-                      >
-                        Archive
-                      </Button>
-                    )}
+                    <ArchiveToggle
+                      name={value.name}
+                      archived={value.archived}
+                      busy={busy === `value:${dimension.key}:${value.key}`}
+                      onArchive={(archived) => onArchiveValue(value, archived)}
+                    />
                   </>
                 ) : null}
               </li>

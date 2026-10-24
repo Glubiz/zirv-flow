@@ -15,6 +15,7 @@ import {
   WEEKDAYS,
   windowText,
   type CapDraft,
+  type QuietDraft,
   type SendSettings,
   type SettingsDraft,
 } from "./model";
@@ -72,6 +73,10 @@ function SettingsForm({ workspaceId, stored, zone, canManage, onSaved }: FormPro
 
   function setCap(key: number, change: Partial<CapDraft>) {
     setDraft((current) => ({ ...current, caps: current.caps.map((cap) => (cap.key === key ? { ...cap, ...change } : cap)) }));
+  }
+
+  function setQuiet(change: (quiet: QuietDraft) => Partial<QuietDraft>) {
+    setDraft((current) => ({ ...current, quiet: current.quiet && { ...current.quiet, ...change(current.quiet) } }));
   }
 
   async function submit(event: SyntheticEvent) {
@@ -206,14 +211,14 @@ function SettingsForm({ workspaceId, stored, zone, canManage, onSaved }: FormPro
                   label="Quiet period starts"
                   type="time"
                   value={quiet.start}
-                  onChange={(event) => setDraft((current) => ({ ...current, quiet: current.quiet && { ...current.quiet, start: event.target.value } }))}
+                  onChange={(event) => setQuiet(() => ({ start: event.target.value }))}
                   disabled={readOnly}
                 />
                 <TextField
                   label="Quiet period ends"
                   type="time"
                   value={quiet.end}
-                  onChange={(event) => setDraft((current) => ({ ...current, quiet: current.quiet && { ...current.quiet, end: event.target.value } }))}
+                  onChange={(event) => setQuiet(() => ({ end: event.target.value }))}
                   disabled={readOnly}
                   error={tried ? problems.quiet.end : undefined}
                 />
@@ -227,14 +232,7 @@ function SettingsForm({ workspaceId, stored, zone, canManage, onSaved }: FormPro
                       checked={quiet.days.includes(day.id)}
                       disabled={readOnly}
                       onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          quiet:
-                            current.quiet && {
-                              ...current.quiet,
-                              days: event.target.checked ? [...current.quiet.days, day.id] : current.quiet.days.filter((entry) => entry !== day.id),
-                            },
-                        }))
+                        setQuiet((current) => ({ days: event.target.checked ? [...current.days, day.id] : current.days.filter((entry) => entry !== day.id) }))
                       }
                     />
                     <span>{day.label}</span>

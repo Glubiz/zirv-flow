@@ -3,7 +3,7 @@ import { useState, type ChangeEvent, type SyntheticEvent } from "react";
 import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, TextAreaField } from "../../ui";
 import type { Dimension } from "./DimensionDialog";
-import { importProblemLabel } from "./labels";
+import { importProblemLabel, plural } from "./labels";
 
 type Outcome = components["schemas"]["ConsentImportBody"];
 
@@ -15,24 +15,15 @@ interface ConsentImportDialogProps {
   onImported: (message: string) => void;
 }
 
-function plural(count: number, one: string, many: string): string {
-  return `${count} ${count === 1 ? one : many}`;
-}
-
-/** The columns of a consent file for this workspace: the fixed four, then one per declared dimension. */
-export function importHeader(dimensions: readonly Dimension[]): string {
-  const declared = dimensions.filter((dimension) => !dimension.builtin && !dimension.archived);
-  return ["person_id", "channel", "topic", "status", ...declared.map((dimension) => `dimension:${dimension.key}`)].join(",");
-}
-
 /** Imports consent states from a CSV, with a preview first. A dimension column scopes a row to one value. */
 export function ConsentImportDialog({ workspaceId, dimensions, onClose, onImported }: ConsentImportDialogProps) {
   const [text, setText] = useState("");
   const [preview, setPreview] = useState<{ text: string; outcome: Outcome } | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const header = importHeader(dimensions);
+  // The columns of a consent file: the fixed four, then one per dimension the workspace declared and has not archived.
   const declared = dimensions.filter((dimension) => !dimension.builtin && !dimension.archived);
+  const header = ["person_id", "channel", "topic", "status", ...declared.map((dimension) => `dimension:${dimension.key}`)].join(",");
 
   const current = preview !== null && preview.text === text ? preview.outcome : null;
 

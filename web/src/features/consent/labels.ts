@@ -73,3 +73,7 @@ const IMPORT_PROBLEMS: Record<string, string> = {
 export function importProblemLabel(code: string): string {
   return IMPORT_PROBLEMS[code] ?? code;
 }
+
+export function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
