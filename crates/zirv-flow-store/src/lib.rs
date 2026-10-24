@@ -35,6 +35,7 @@ mod stream_offsets;
 mod suppressions;
 mod sync_runs;
 mod templates;
+mod test_sends;
 mod tracking;
 mod webhooks;
 mod workspace_credentials;
@@ -285,6 +286,15 @@ pub use templates::{
     create_template, document_sender, find_template, find_template_draft, find_template_version,
     list_template_versions, list_templates, lock_template, publish_template,
     read_template_field_catalog, save_template_draft, template_where_used, update_template,
+};
+pub use test_sends::{
+    ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
+    TEST_SEND_JOB_KIND, TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome,
+    TestSendReservation, WORKSPACE_HOURLY_LIMIT, abandon_orphaned_test_sends, add_allowlist_entry,
+    delete_allowlist_by_hash, delete_allowlist_entry, delete_test_sends_before,
+    delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
+    is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
+    reserve_test_send, test_send_may_go,
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,

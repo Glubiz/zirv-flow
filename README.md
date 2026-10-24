@@ -2217,6 +2217,32 @@ prefetch_user_agents = ["my-gateway-fetcher"]
 
 or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
+## Template test sends
+
+A test send sends one template through a real destination to one person who agreed to receive it: a
+member of the workspace, at the address on their account, or an address an admin put on the allowlist.
+The subject starts with `[TEST] `, links are not rewritten, there is no open pixel, and nothing is
+written to the message log, the events or the caps. `{{ system.unsubscribe_url }}` and the
+`List-Unsubscribe` header point to a `/u/{token}` link that answers "This was a test send. Nothing was
+changed." and does nothing.
+
+| Route | Needs | |
+|-------|-------|-|
+| `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
+| `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
+| `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; the list shows only a masked hint (`q***@example.com`) |
+
+Any other recipient is a 422 `recipient_not_allowed`. At most 10 test sends per member and 100 per
+workspace start in any rolling hour; past that the answer is 429 with `Retry-After`. A suppressed
+recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The job
+checks the recipient again when it runs: a member must still be a member (and the account's current
+address is used) and an allowlist entry must still exist, or the row ends `failed` with
+`recipient_unavailable` and nothing is sent. The log keeps 13 months. The log stores no address; an
+allowlist entry holds the hash, the masked hint and the normalised address sealed with the master key
+like a credential, and no job payload ever holds an address. Erasing a person deletes the log rows and
+the allowlist entries sent to or holding their addresses, and purges their queued test-send jobs. The
+leader ends a `queued` row whose job is dead or gone as `failed: abandoned`.
+
 ## Sending domains
 
 An email template publishes only with a sender identity on a verified sending domain (a publish

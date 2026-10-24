@@ -95,7 +95,15 @@ pub(super) async fn admit_message(
     let claims = admit(state, TokenKind::Unsubscribe, token)?;
     match find_tracked_message(&state.pool, claims.message).await {
         Ok(Some(message)) => Ok(message),
-        Ok(None) => Err(Box::new(pages::not_found())),
+        Ok(None) => match zirv_flow_store::is_test_send(&state.pool, claims.message).await {
+            // A test send has no message: its link answers, and changes and writes nothing.
+            Ok(true) => Err(Box::new(pages::test_send())),
+            Ok(false) => Err(Box::new(pages::not_found())),
+            Err(error) => {
+                warn!(%error, "an unsubscribe-link test send could not be read");
+                Err(Box::new(pages::unavailable()))
+            }
+        },
         Err(error) => {
             warn!(%error, "an unsubscribe-link message could not be read");
             Err(Box::new(pages::unavailable()))
@@ -532,6 +540,70 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sources, ["unsubscribe_link"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_unsubscribe_token_of_a_test_send_answers_an_inert_page_and_writes_nothing(
+        pool: PgPool,
+    ) {
+        let fixture = Fixture::new(pool, "inert", "sent", 3600).await;
+        let test_send = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO test_sends (id, workspace_id, template_id, destination_id, \
+                sender_identity_id, recipient_hash, render_context) \
+             VALUES ($1, $2, $1, $1, $1, $3, 'sample')",
+        )
+        .bind(test_send)
+        .bind(fixture.ws.as_uuid())
+        .bind(vec![0_u8; 32])
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+        let token = sign(&fixture.key, TokenKind::Unsubscribe, test_send, 0);
+        let uri = format!("/u/{token}");
+        let before = fixture.count("SELECT count(*) FROM consent").await;
+
+        let replies = [
+            fixture.call("GET", &uri, None, "").await,
+            fixture.call("POST", &uri, None, "").await,
+            fixture
+                .call("POST", &uri, None, "List-Unsubscribe=One-Click")
+                .await,
+            fixture
+                .call("GET", &format!("{uri}/preferences"), None, "")
+                .await,
+            fixture
+                .call("POST", &format!("{uri}/preferences"), None, "topic=x")
+                .await,
+        ];
+
+        for reply in replies {
+            assert_eq!(reply.status, StatusCode::OK);
+            assert!(
+                reply
+                    .text()
+                    .contains("This was a test send. Nothing was changed."),
+                "{}",
+                reply.text()
+            );
+        }
+        assert_eq!(fixture.count("SELECT count(*) FROM consent").await, before);
+        assert_eq!(
+            fixture.count("SELECT count(*) FROM consent_changes").await,
+            0
+        );
+        assert_eq!(fixture.count("SELECT count(*) FROM events").await, 0);
+        assert_eq!(fixture.count("SELECT count(*) FROM test_sends").await, 1);
+        let unknown = sign(&fixture.key, TokenKind::Unsubscribe, Uuid::now_v7(), 0);
+        let missing = fixture
+            .call("GET", &format!("/u/{unknown}"), None, "")
+            .await;
+        assert_eq!(
+            missing.status,
+            StatusCode::NOT_FOUND,
+            "a stranger is still a 404"
+        );
     }
 
     #[sqlx::test]

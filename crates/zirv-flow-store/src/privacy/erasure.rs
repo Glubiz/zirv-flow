@@ -16,7 +16,7 @@ use zirv_flow_core::consent::SuppressionReason;
 use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
-use super::delete::{DeleteReason, delete_person};
+use super::delete::{DeleteReason, delete_person, purge_jobs};
 use crate::{
     Actor, NewAuditEntry, NewJob, NewSuppression, PgPool, StoreError, add_suppression,
     append_audit, begin, commit, enqueue,
@@ -235,7 +235,8 @@ pub enum EraseOutcome {
 /// 3. deletes the workspace's pending inbox rows with an identifier that hashes to any hash
 ///    of the ledger row, locked `FOR UPDATE` so a concurrent drain has either applied them
 ///    already (and the deletion below covers what it wrote) or never sees them;
-/// 4. deletes the group, and any other id the ledger names that still exists;
+/// 4. deletes the group, and any other id the ledger names that still exists, and the
+///    workspace's test-send log rows whose recipient hash is one of the ledger's;
 /// 5. completes the ledger row and audits `privacy.erased` with the request id only.
 ///
 /// When the person is already gone, steps 2 and 3 still run from the ledger's hashes. Inbox
@@ -303,6 +304,10 @@ pub async fn erase_person(
     }
 
     suppress(connection, workspace, &hashes, &kinds).await?;
+    // The test-send log names no person: it is found by the recipient hash, like a suppression.
+    // So is an allowlist entry, which holds the address itself, sealed.
+    crate::delete_test_sends_by_hash(connection, workspace, &hashes).await?;
+    crate::delete_allowlist_by_hash(connection, workspace, &hashes).await?;
     let wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
     let inbox_rows =
         delete_inbox_rows(connection, workspace, &matching_rows(&inbox, &wanted)).await?;
@@ -395,11 +400,17 @@ pub async fn replay_erasures(
             report.requests += 1;
             report.suppressions += suppress(&mut tx, ws, &hashes, &kinds).await?;
             // Every id the erased group had: a backup from before a merge restores them apart.
-            for id in std::iter::once(person).chain(people) {
+            let ids: Vec<Uuid> = std::iter::once(person).chain(people).collect();
+            for &id in &ids {
                 if delete_person(&mut tx, ws, id, DeleteReason::Erasure, trace).await? {
                     report.people += 1;
                 }
             }
+            // A job restored from a backup can name a ledger person whose row is not there, and
+            // `delete_person` purges jobs only for a person it found.
+            purge_jobs(&mut tx, ws, &ids, &[]).await?;
+            crate::delete_test_sends_by_hash(&mut tx, ws, &hashes).await?;
+            crate::delete_allowlist_by_hash(&mut tx, ws, &hashes).await?;
             all_hashes.extend(hashes);
         }
         if let Some(key) = key {
@@ -687,6 +698,217 @@ mod tests {
         );
         assert!(item_identifiers(&json!({"identifiers": 5})).is_empty());
         assert!(item_identifiers(&json!({})).is_empty());
+    }
+
+    /// Plants a test-send log row for the recipient hash.
+    async fn test_send_to(pool: &PgPool, ws: WorkspaceId, recipient: &[u8; 32]) {
+        sqlx::query(
+            "INSERT INTO test_sends (id, workspace_id, template_id, destination_id, \
+                sender_identity_id, recipient_hash, render_context) \
+             VALUES ($1, $2, $1, $1, $1, $3, 'sample')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(recipient.as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Seals `address` into an allowlist entry for its hash, as the API does.
+    async fn allowlist(
+        pool: &PgPool,
+        keys: &zirv_flow_core::Keyring,
+        ws: WorkspaceId,
+        address: &str,
+    ) {
+        let id = Uuid::now_v7();
+        let sealed = zirv_flow_core::seal(
+            keys,
+            address.as_bytes(),
+            &zirv_flow_core::secret_aad(
+                ws,
+                zirv_flow_core::SecretId::from_uuid(id),
+                zirv_flow_core::SecretPurpose::TestSendAddress,
+            ),
+        );
+        let mut tx = begin(pool).await.unwrap();
+        crate::add_allowlist_entry(
+            &mut tx,
+            &keys.key_ids(),
+            ws,
+            id,
+            &hash(address),
+            "a***@x",
+            &sealed,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        commit(tx).await.unwrap();
+    }
+
+    /// A keyring and the HMAC root it wraps, so sealed secrets can be written.
+    async fn keyring(pool: &PgPool) -> zirv_flow_core::Keyring {
+        let keys =
+            zirv_flow_core::Keyring::new(zirv_flow_core::MasterKey::generate(), None).unwrap();
+        crate::secrets::insert_hmac_root_if_absent(
+            pool,
+            &zirv_flow_core::seal(&keys, b"root", b"aad"),
+        )
+        .await
+        .unwrap();
+        keys
+    }
+
+    /// The erasure rule of each test-send table, by what the table holds. `test_sends` holds a
+    /// recipient hash; `test_send_allowlist` holds an address hash and, through its entry id, the
+    /// address sealed; both are found by the hashes of the erased person's identifiers.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_deletes_the_test_sends_and_allowlist_entries_of_their_hashes(
+        pool: PgPool,
+    ) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let keys = keyring(&pool).await;
+        test_send_to(&pool, ws, &hash(EMAIL)).await;
+        test_send_to(&pool, ws, &hash(EMAIL)).await;
+        test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
+        allowlist(&pool, &keys, ws, EMAIL).await;
+        allowlist(&pool, &keys, ws, BYSTANDER_EMAIL).await;
+
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+
+        let remaining: Vec<Vec<u8>> = sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, [hash(BYSTANDER_EMAIL).to_vec()]);
+        let allowed: Vec<Vec<u8>> =
+            sqlx::query_scalar("SELECT address_hash FROM test_send_allowlist")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
+        let sealed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM encrypted_secrets WHERE purpose = 'test_send_address'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sealed, 1, "the erased address is not kept sealed either");
+        assert!(rows_referencing_person(&pool, person).await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_person_purges_the_test_send_jobs_that_render_them(pool: PgPool) {
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        for (who, key) in [(person, "erased"), (bystander, "kept")] {
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
+                    cause_id, trace_id) \
+                 VALUES (gen_random_uuid(), $1, 'template.test_send', \
+                    jsonb_build_object('person_id', $2::text), $3, 'api', 't', gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(who)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, ["kept"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_deletes_test_sends_and_allowlist_entries_by_the_ledger_hashes(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let keys = keyring(&pool).await;
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+        // A backup from before the erasure brings the rows back.
+        test_send_to(&pool, ws, &hash(EMAIL)).await;
+        test_send_to(&pool, ws, &hash(BYSTANDER_EMAIL)).await;
+        allowlist(&pool, &keys, ws, EMAIL).await;
+        allowlist(&pool, &keys, ws, BYSTANDER_EMAIL).await;
+
+        replay_erasures(&pool, Some(ws), None, &trace())
+            .await
+            .unwrap();
+
+        let sends: Vec<Vec<u8>> = sqlx::query_scalar("SELECT recipient_hash FROM test_sends")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let allowed: Vec<Vec<u8>> =
+            sqlx::query_scalar("SELECT address_hash FROM test_send_allowlist")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(sends, [hash(BYSTANDER_EMAIL).to_vec()]);
+        assert_eq!(allowed, [hash(BYSTANDER_EMAIL).to_vec()]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_purges_a_restored_test_send_job_whose_person_is_gone(pool: PgPool) {
+        let Seeded {
+            ws,
+            person,
+            bystander,
+            ..
+        } = seed_everything(&pool).await;
+        let request = request(&pool, ws, person).await;
+        erase(&pool, ws, request.id).await;
+        // A backup brings the jobs back; the erased person's row is not among the restored rows.
+        for (who, key) in [(person, "erased"), (bystander, "kept")] {
+            sqlx::query(
+                "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, \
+                    cause_id, trace_id) \
+                 VALUES (gen_random_uuid(), $1, 'template.test_send', \
+                    jsonb_build_object('person_id', $2::text), $3, 'api', 't', gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(who)
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let gone: i64 = sqlx::query_scalar("SELECT count(*) FROM people WHERE id = $1")
+            .bind(person)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(gone, 0, "the person is not there to delete");
+
+        replay_erasures(&pool, Some(ws), None, &trace())
+            .await
+            .unwrap();
+
+        let left: Vec<String> =
+            sqlx::query_scalar("SELECT unique_key FROM jobs WHERE kind = 'template.test_send'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, ["kept"]);
     }
 
     #[sqlx::test]

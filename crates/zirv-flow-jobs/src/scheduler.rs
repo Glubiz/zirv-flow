@@ -10,12 +10,13 @@ use tracing::{info, warn};
 use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
-    Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError, advance_schedule, begin,
-    database_now, delete_expired_import_data, destination_report, dirty_backlog, dirty_heads,
-    disable_schedule, due_schedules, due_sending_domains, end_orphaned_messages, enqueue,
-    enqueue_domain_verify, enqueue_drain, enqueue_reevaluate, ensure_decision_partitions,
-    ensure_event_partitions, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
-    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
+    Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError,
+    abandon_orphaned_test_sends, advance_schedule, begin, database_now, delete_expired_import_data,
+    destination_report, dirty_backlog, dirty_heads, disable_schedule, due_schedules,
+    due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify, enqueue_drain,
+    enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
+    expire_contact_idempotency, expire_exports, fail_orphaned_runs, inbox_heads,
+    prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
     reconcile_segment_schedules, stream_freshness, try_lead,
 };
 
@@ -318,7 +319,8 @@ impl Scheduler {
         }
     }
 
-    /// Ends the open messages whose `delivery.send` job is dead or gone: on gaining leadership,
+    /// Ends the open messages whose `delivery.send` job is dead or gone, and the `queued` test
+    /// sends whose `template.test_send` job is: on gaining leadership,
     /// then at most every minute. A job the reaper buried never runs again, so nothing else would
     /// end its message. A failure is logged and retried at the next check.
     async fn keep_messages(&mut self, now: OffsetDateTime) {
@@ -338,6 +340,19 @@ impl Scheduler {
             }
             Ok(_) => {}
             Err(error) => warn!("could not end the messages whose send job is gone: {error}"),
+        }
+        match self.pool.acquire().await {
+            Ok(mut connection) => match abandon_orphaned_test_sends(&mut connection, now).await {
+                Ok(ended) if !ended.is_empty() => {
+                    warn!(
+                        "ended {} test send(s) whose job is dead or gone",
+                        ended.len()
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => warn!("could not end the test sends whose job is gone: {error}"),
+            },
+            Err(error) => warn!("could not end the test sends whose job is gone: {error}"),
         }
     }
 

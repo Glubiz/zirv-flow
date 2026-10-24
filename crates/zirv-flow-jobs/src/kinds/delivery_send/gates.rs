@@ -25,7 +25,7 @@ use super::{policy, quiet};
 use crate::JobError;
 
 /// The code of a message the sender gate stopped.
-pub(super) const SENDER_UNVERIFIED: &str = "sender_unverified";
+pub(crate) const SENDER_UNVERIFIED: &str = "sender_unverified";
 /// The code of a message the address gate stopped.
 pub(super) const NO_ADDRESS: &str = "no_address";
 /// The code of a message the consent gate stopped.
@@ -33,20 +33,20 @@ pub(super) const NO_CONSENT: &str = "no_consent";
 /// The note on a consent gate that a published rule that no longer compiles stopped.
 pub(super) const POLICY_RULE_UNEVALUABLE: &str = "policy_rule_unevaluable";
 /// The code of a message the suppression gate stopped.
-pub(super) const SUPPRESSED: &str = "suppressed";
+pub(crate) const SUPPRESSED: &str = "suppressed";
 
 /// A gate that stopped the message.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct Blocked {
+pub(crate) struct Blocked {
     /// What the gate recorded; its reason is the code the message is skipped with.
-    pub(super) gate: GateRecord,
+    pub(crate) gate: GateRecord,
     /// What decided, for the message log: `recorded_consent`, `topic_default`, the name of a
     /// consent policy rule, a suppression's scope, or none.
-    pub(super) rule: Option<String>,
+    pub(crate) rule: Option<String>,
 }
 
 impl Blocked {
-    pub(super) fn new(gate: &'static str, reason: &'static str) -> Self {
+    pub(crate) fn new(gate: &'static str, reason: &'static str) -> Self {
         Self {
             gate: GateRecord::blocked(gate, reason),
             rule: None,
@@ -68,7 +68,7 @@ pub(super) struct Passed {
 /// would stop an operator archiving an identity or a DNS re-check unverifying a domain for as long
 /// as the destination takes to answer. A message already on the wire when the domain stops
 /// verifying is allowed to complete.
-pub(super) async fn sender(
+pub(crate) async fn sender(
     pool: &PgPool,
     workspace: WorkspaceId,
     identity: Option<Uuid>,
@@ -223,7 +223,7 @@ pub(super) async fn suppression(
 
 /// The suppression hash of `address`, as the gate takes it; none for text that is not an email
 /// address.
-pub(super) fn address_hash(key: &HmacKey, address: &str) -> Option<[u8; 32]> {
+pub(crate) fn address_hash(key: &HmacKey, address: &str) -> Option<[u8; 32]> {
     let identifier = Identifier::parse("email", address).ok()?;
     Some(identifier_hash(key, &identifier))
 }

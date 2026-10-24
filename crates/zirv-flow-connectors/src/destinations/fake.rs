@@ -109,6 +109,7 @@ impl Destination for Fake {
                     "server_error",
                     "rejected",
                     "lose_first_answer",
+                    "lose_reply",
                 ]),
                 required: false,
                 secret: false,
@@ -181,6 +182,14 @@ impl Destination for Fake {
                 retry_after: Some("120".to_owned()),
             }),
             "server_error" => Err(DestinationError::Upstream(503)),
+            // The message is accepted and the reply is lost after the whole message was handed
+            // over, on every call: the answer a mail server that hung up gives.
+            "lose_reply" => {
+                if let Some(ledger) = ledger {
+                    record(ledger, message);
+                }
+                Err(DestinationError::Unconfirmed)
+            }
             "rejected" => Err(DestinationError::Upstream(422)),
             // The message is accepted and the answer is lost on its way back: the first call
             // under a key fails as a server error, and a retry is the same message.
@@ -302,6 +311,10 @@ mod tests {
             deliver("rejected").await.unwrap_err().disposition(),
             Disposition::Terminal
         );
+        assert!(matches!(
+            deliver("lose_reply").await.unwrap_err(),
+            DestinationError::Unconfirmed
+        ));
     }
 
     #[tokio::test]

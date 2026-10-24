@@ -66,6 +66,16 @@ pub(super) fn not_found() -> Response {
     )
 }
 
+/// What every `/u` route answers for the token of a test send: nothing was sent to a person, so
+/// nothing is changed or written.
+pub(super) fn test_send() -> Response {
+    page(
+        StatusCode::OK,
+        "Test send",
+        "<h1>Test send</h1><p>This was a test send. Nothing was changed.</p>",
+    )
+}
+
 pub(super) fn rate_limited(retry_after: u64) -> Response {
     let mut response = page(
         StatusCode::TOO_MANY_REQUESTS,
