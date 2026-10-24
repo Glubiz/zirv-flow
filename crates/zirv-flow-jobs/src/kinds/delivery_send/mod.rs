@@ -1538,6 +1538,54 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn after_an_unsubscribe_the_next_send_is_skipped_for_no_consent_and_the_decision_keeps_the_trace(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "unsubnext").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.template("marketing", LINKED).await;
+        let first = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap();
+        assert_eq!(env.message(first.message).await.status, "sent");
+        let tracked = zirv_flow_store::find_tracked_message(&env.pool, first.message)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = zirv_flow_store::unsubscribe_message(
+            &env.pool,
+            &tracked,
+            env.clock.now(),
+            &TraceContext::root(Cause::api("unsubscribe")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, zirv_flow_store::Unsubscribed::Changed);
+        let second = env.queue(person, template, 5).await;
+        env.attempt().await.unwrap();
+        let message = env.message(second.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("skipped", Some("no_consent"))
+        );
+        let (trace, enrollment_trace): (Uuid, Uuid) = sqlx::query_as(
+            "SELECT d.trace_id, e.trace_id FROM decision_records d, enrollments e              WHERE d.action = 'consent.change' AND d.reason = 'unsubscribe_link' AND e.id = $1              ORDER BY d.recorded_at DESC LIMIT 1",
+        )
+        .bind(first.enrolled.enrollment)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            trace, enrollment_trace,
+            "the decision keeps the message's trace"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_transactional_message_has_no_tracking(pool: PgPool) {
         let mut env = Env::new(pool, "plainmail").await;
         env.render = Some(start_pool("serve", "").await);
