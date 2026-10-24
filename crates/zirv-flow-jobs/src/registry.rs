@@ -130,6 +130,7 @@ mod tests {
                 "flow.lifecycle",
                 "webhook.call",
                 "delivery.send",
+                "event.forward",
                 "sending_domain.verify"
             ]
         );
@@ -180,6 +181,7 @@ mod tests {
                 "flow.lifecycle",
                 "webhook.call",
                 "delivery.send",
+                "event.forward",
                 "sending_domain.verify",
                 "test.first",
                 "test.second"
