@@ -21,13 +21,15 @@
 //!    transactional template skips it (OQ-11).
 //! 6. `suppression`: the address hash in the workspace and the organization (OQ-19), for marketing
 //!    and transactional mail; otherwise `skipped: suppressed`.
-//! 7. `frequency_cap`: the person's caps on the channel. The check counts the slots of the person's
-//!    other messages in each cap's window and reserves this message's own (`messages.cap_slot_at`)
-//!    in a short transaction of its own under a per-person advisory lock, so the lock is gone
-//!    before delivery; otherwise `skipped: frequency_cap`, or the message waits until a slot leaves
+//! 7. `quiet_hours`: inside the workspace's quiet period in the recipient's zone (the `timezone`
+//!    trait, else the workspace's), the message waits for its end and gives up a slot it holds
+//!    from an earlier run.
+//!    `frequency_cap`: the person's caps on the channel, checked only for a message that sends
+//!    now. The check counts the slots of the person's other messages in each cap's window and
+//!    reserves this message's own (`messages.cap_slot_at`, moved to now on a re-run) in a short
+//!    transaction of its own under a per-person advisory lock, so the lock is gone before
+//!    delivery; otherwise `skipped: frequency_cap`, or the message waits until a slot leaves
 //!    the window when the cap says `defer`.
-//!    `quiet_hours`: inside the workspace's quiet period in the recipient's zone (the `timezone`
-//!    trait, else the workspace's), the message waits for its end and gives up its slot.
 //!    A transactional message skips both.
 //! 8. `render`: the pool renders the template; any failure is `failed: render_error`.
 //! 9. `rate_limit`: the destination is loaded again (an archived one is refused whatever a held
@@ -485,14 +487,12 @@ async fn person_gates(
     }
     // A transactional message is not marketing: a receipt is not capped or held overnight.
     if transactional {
-        trail.pass(GateRecord::passed("frequency_cap"));
         trail.pass(GateRecord::passed("quiet_hours"));
+        trail.pass(GateRecord::passed("frequency_cap"));
         return Ok(None);
     }
-    match gates::frequency_cap(pool, job, now).await? {
-        Ok(passed) => trail.pass(passed),
-        Err(stop) => return Ok(Some(stop)),
-    }
+    // Quiet hours first: a slot is reserved only for a message that sends now, so a concurrent
+    // send to the person never counts a slot whose message waits.
     match gates::quiet_hours(ctx.conn(), job, now).await? {
         Ok(passed) => {
             if passed.note == Some(gates::TIMEZONE_FALLBACK) {
@@ -508,6 +508,10 @@ async fn person_gates(
             }
             return Ok(Some(stop));
         }
+    }
+    match gates::frequency_cap(pool, job, now).await? {
+        Ok(passed) => trail.pass(passed),
+        Err(stop) => return Ok(Some(stop)),
     }
     Ok(None)
 }
@@ -626,7 +630,7 @@ async fn note_zone_fallback(ctx: &mut JobContext<'_>, job: &SendJob) -> Result<(
 /// a destination that keeps the send waiting cannot buy it more attempts than the job had.
 ///
 /// Only a wait for a token starts the clock of the six hours a send may wait; a gate's deferral
-/// leaves it alone. A gate's deferral is also written to the message's log first, in a statement
+/// clears it, so it starts again after the hold. A gate's deferral is also written to the message's log first, in a statement
 /// of its own, and with the quiet hours releases the cap slot the message holds.
 async fn defer(
     ctx: &mut JobContext<'_>,
@@ -1375,8 +1379,8 @@ mod tests {
                 "address:passed",
                 "consent:passed",
                 "suppression:passed",
-                "frequency_cap:passed",
                 "quiet_hours:passed",
+                "frequency_cap:passed",
                 "render:passed",
                 "rate_limit:passed",
                 "delivery:passed",
@@ -3628,13 +3632,81 @@ mod tests {
                 "address:passed",
                 "consent:passed",
                 "suppression:passed",
-                "frequency_cap:passed",
                 "quiet_hours:passed",
+                "frequency_cap:passed",
                 "render:passed",
                 "rate_limit:passed",
                 "delivery:passed",
             ],
             "the deferral stays in the log after the message ends"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn quiet_hours_are_judged_before_a_full_cap_and_take_no_slot(pool: PgPool) {
+        let mut env = Env::new(pool, "one").await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[(24, 1, zirv_flow_store::CapMode::Defer)], None)
+            .await;
+        let person = env.subscriber("ada@example.com").await;
+        let template = env.plain_template("marketing").await;
+        assert_eq!(env.send(person, template).await.status, "sent");
+        // 07:08 UTC is inside 22:00 to 08:00, and the cap of one is full.
+        env.limits(
+            &[(24, 1, zirv_flow_store::CapMode::Defer)],
+            Some((hm(22, 0), hm(8, 0))),
+        )
+        .await;
+        env.flow = Uuid::now_v7();
+        env.publish_flow().await;
+        let queued = env.queue(person, template, 3).await;
+
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(message.status, "pending");
+        assert_eq!(gate_names(&message), ["quiet_hours:deferred"]);
+        assert_eq!(
+            env.slot_of(queued.message).await,
+            None,
+            "a message that waits for the night never held a slot"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hold_by_quiet_hours_restarts_the_rate_clock_of_a_send_that_waited_for_a_token(
+        pool: PgPool,
+    ) {
+        let mut env = Env::with(pool, "one", json!({"mode": "ok"}), 1, 1).await;
+        env.render = Some(start_pool("serve", "").await);
+        env.limits(&[], Some((hm(21, 0), hm(8, 0)))).await;
+        env.clock.set(datetime!(2031-05-06 20:59:30 UTC));
+        let template = env.plain_template("marketing").await;
+        let first = env.subscriber("first@example.com").await;
+        let second = env.subscriber("second@example.com").await;
+        assert_eq!(env.send(first, template).await.status, "sent");
+        let queued = env.queue(second, template, 5).await;
+
+        // No token yet: the wait for one starts the rate clock.
+        env.attempt().await.unwrap();
+        assert!(env.send_jobs().await[0].1["first_wait"].is_string());
+
+        // The re-run is inside the quiet period and is held until 08:00.
+        env.clock.set(datetime!(2031-05-06 21:01 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+        assert!(env.send_jobs().await[0].1["first_wait"].is_null());
+
+        env.clock.set(datetime!(2031-05-07 08:00 UTC));
+        env.due().await;
+        env.attempt().await.unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("sent", None)
         );
     }
 
@@ -3755,8 +3827,8 @@ mod tests {
         );
         assert_eq!(
             env.slot_of(queued.message).await,
-            Some(taken),
-            "the re-run did not reserve again"
+            Some(env.clock.now()),
+            "the re-run moved its one slot to the time it sends"
         );
         assert_eq!(
             env.count("SELECT count(*) FROM messages WHERE cap_slot_at IS NOT NULL")

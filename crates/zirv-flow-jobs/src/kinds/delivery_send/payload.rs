@@ -134,8 +134,8 @@ impl SendJob {
     ///
     /// Only a wait for a rate-limit token (`rate`) starts the clock of the six hours a send may
     /// wait (`now` on the first such deferral, carried over after). A deferral by quiet hours or a
-    /// frequency cap leaves the clock as it was, stopped when it never ran, so a send held
-    /// overnight is not failed as `rate_limited` when it reaches the destination.
+    /// frequency cap stops the clock and clears it: the send is admitted again after the hold, so
+    /// a send held overnight is not failed as `rate_limited` when it reaches the destination.
     pub(super) fn deferred(
         &self,
         payload: &Value,
@@ -150,7 +150,8 @@ impl SendJob {
                 if let Ok(first) = self.first_wait.unwrap_or(now).format(&Rfc3339) {
                     map.insert("first_wait".to_owned(), json!(first));
                 }
-            } else if self.first_wait.is_none() {
+            } else {
+                // A hold by a gate restarts the rate clock: the send is admitted again after it.
                 map.insert("first_wait".to_owned(), Value::Null);
             }
             map.insert(
@@ -274,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deferral_by_a_gate_does_not_start_or_move_the_rate_clock() {
+    fn a_deferral_by_a_gate_does_not_start_and_restarts_the_rate_clock() {
         let dimensions = Dimensions::new();
         let payload = queued(None, &dimensions).payload().unwrap();
         let job = SendJob::parse(&payload).unwrap();
@@ -294,5 +295,11 @@ mod tests {
             .unwrap()
             .deferred(&by_gate_again, 1, t3, true);
         assert_eq!(SendJob::parse(&by_rate).unwrap().first_wait, Some(t3));
+
+        // A hold by a gate after a wait for a token clears the clock.
+        let held = SendJob::parse(&by_rate)
+            .unwrap()
+            .deferred(&by_rate, 1, t3, false);
+        assert_eq!(SendJob::parse(&held).unwrap().first_wait, None);
     }
 }
