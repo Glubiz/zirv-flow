@@ -1,0 +1,57 @@
+{
+  "version": "v1",
+  "base_url": "https://api.fixture-provider.example.test",
+  "auth": {
+    "type": "api_key",
+    "in": "header",
+    "name": "X-Api-Key",
+    "credential": {
+      "fields": [
+        { "key": "api_key", "label": "API key", "type": "string", "required": true, "secret": true },
+        { "key": "hook_secret", "label": "Webhook secret", "type": "string", "required": true, "secret": true }
+      ]
+    }
+  },
+  "destination": {
+    "send": {
+      "method": "PUT",
+      "path": "/send",
+      "idempotency_header": "X-Request-Id",
+      "body": {
+        "fields": {
+          "from": "/message/from",
+          "from_name": "/message/from_name",
+          "reply_to": "/message/reply_to",
+          "to": "/message/to",
+          "subject": "/message/subject",
+          "html": "/message/html",
+          "text": "/message/text",
+          "headers": "/message/headers",
+          "message_id": "/message/tag"
+        }
+      }
+    },
+    "errors": [
+      {
+        "status": "400-499",
+        "body": { "pointer": "/reason", "values": ["invalid_address", "address_blocked"] },
+        "action": "recipient_failure"
+      },
+      { "status": 409, "action": "retry" }
+    ],
+    "feedback": {
+      "event_type": "/type",
+      "events": {
+        "delivered": ["delivery"],
+        "bounced": ["bounce"],
+        "complained": ["spam"]
+      },
+      "message_id": "/message/tag",
+      "bounce_kind": { "pointer": "/bounce/severity", "hard": ["hard", 5], "soft": ["soft"] },
+      "verification": {
+        "signature_header": "X-Provider-Sig",
+        "secret_field": "hook_secret"
+      }
+    }
+  }
+}

@@ -299,17 +299,20 @@ pub async fn message_address_hash<'e>(
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Option<Option<[u8; 32]>>, StoreError> {
-    let row: Option<(Option<Vec<u8>>,)> = sqlx::query_as(
-        "SELECT address_hash FROM messages WHERE workspace_id = $1 AND id = $2",
-    )
-    .bind(workspace.as_uuid())
-    .bind(id)
-    .fetch_optional(executor)
-    .await
-    .map_err(StoreError::query)?;
+    let row: Option<(Option<Vec<u8>>,)> =
+        sqlx::query_as("SELECT address_hash FROM messages WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .fetch_optional(executor)
+            .await
+            .map_err(StoreError::query)?;
     row.map(|(hash,)| hash.map(<[u8; 32]>::try_from).transpose())
         .transpose()
-        .map_err(|_| StoreError::query(sqlx::Error::Decode("a message address hash is not 32 bytes".into())))
+        .map_err(|_| {
+            StoreError::query(sqlx::Error::Decode(
+                "a message address hash is not 32 bytes".into(),
+            ))
+        })
 }
 
 /// Clears the in-flight note of a `sending` message: the call is known not to have been accepted
