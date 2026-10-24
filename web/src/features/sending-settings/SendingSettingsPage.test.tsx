@@ -12,6 +12,7 @@ const WS = "/api/v1/workspaces/ws1";
 const STORED = {
   frequency_caps: [{ channel: "email", window: "P1D", limit: 3, mode: "skip" }],
   quiet_hours: { start: "21:00", end: "08:00", days: ["mon", "tue", "wed", "thu", "fri"] },
+  revision: 4,
 };
 
 function access(role: "admin" | "member"): Record<string, Handler> {
@@ -71,8 +72,69 @@ describe("sending limits", () => {
         { channel: "email", window: "P1D", limit: 10, mode: "skip" },
       ],
       quiet_hours: { start: "21:00", end: "08:00", days: ["mon", "tue", "wed", "thu"] },
+      revision: 4,
     });
     expect(await screen.findByText(/Saved\./)).toBeInTheDocument();
+  });
+
+  it("keeps the saved notice when the save reloads the settings it stored", async () => {
+    let stored: unknown = STORED;
+    mockApi({
+      ...access("admin"),
+      [`GET ${WS}/sending/settings`]: () => json(stored),
+      [`PUT ${WS}/sending/settings`]: async (request) => {
+        const body = (await request.json()) as { revision: number };
+        stored = { ...body, revision: body.revision + 1 };
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const limit = await screen.findByLabelText("Limit of cap 1");
+    await user.clear(limit);
+    await user.type(limit, "5");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+
+    expect(await screen.findByText(/Saved\./)).toBeInTheDocument();
+    // The reload brought back what was stored, and the form shows it.
+    await waitFor(() => expect(screen.getByLabelText("Limit of cap 1")).toHaveValue(5));
+    expect(screen.getByText(/Saved\./)).toBeInTheDocument();
+  });
+
+  it("keeps the draft and offers the latest settings when they changed since the page was opened", async () => {
+    let stored: unknown = STORED;
+    let stale = true;
+    const calls = mockApi({
+      ...access("admin"),
+      [`GET ${WS}/sending/settings`]: () => json(stored),
+      [`PUT ${WS}/sending/settings`]: () => {
+        if (stale) {
+          stored = { frequency_caps: [], quiet_hours: null, revision: 5 };
+          return problem(409, "Conflict", "the send settings are not at the revision named", undefined, "send_settings_revision_mismatch");
+        }
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const limit = await screen.findByLabelText("Limit of cap 1");
+    await user.clear(limit);
+    await user.type(limit, "9");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/changed since this page was opened/);
+    expect(screen.getByLabelText("Limit of cap 1")).toHaveValue(9);
+    expect(screen.queryByText(/Saved\./)).not.toBeInTheDocument();
+    expect(calls.find((call) => call.method === "PUT")?.body).toMatchObject({ revision: 4 });
+
+    stale = false;
+    await user.click(within(alert).getByRole("button", { name: "Load the latest limits" }));
+    expect(await screen.findByText(/No caps\./)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Hold messages during quiet hours")).not.toBeChecked();
   });
 
   it("removes the quiet hours and every cap by sending nothing for them", async () => {
@@ -89,7 +151,7 @@ describe("sending limits", () => {
     await user.click(screen.getByRole("button", { name: "Save limits" }));
 
     await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true));
-    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({ frequency_caps: [], quiet_hours: null });
+    expect(calls.find((call) => call.method === "PUT")?.body).toEqual({ frequency_caps: [], quiet_hours: null, revision: 4 });
   });
 
   it("explains what is wrong before sending and sends nothing", async () => {
@@ -144,7 +206,7 @@ describe("sending limits", () => {
     let fail = true;
     mockApi({
       ...access("admin"),
-      [`GET ${WS}/sending/settings`]: () => (fail ? problem(500, "Internal Server Error", "internal error") : json({ frequency_caps: [], quiet_hours: null })),
+      [`GET ${WS}/sending/settings`]: () => (fail ? problem(500, "Internal Server Error", "internal error") : json({ frequency_caps: [], quiet_hours: null, revision: 0 })),
     });
     const user = userEvent.setup();
     mount();

@@ -3829,9 +3829,20 @@ mod tests {
                 days: EVERY_DAY.iter().map(|day| (*day).to_owned()).collect(),
             });
             let mut connection = self.pool.acquire().await.unwrap();
-            zirv_flow_store::replace_send_limits(&mut connection, self.ws, &caps, quiet.as_ref())
+            let revision = zirv_flow_store::read_send_limits(&mut connection, self.ws)
                 .await
-                .unwrap();
+                .unwrap()
+                .revision;
+            zirv_flow_store::replace_send_limits(
+                &mut connection,
+                self.ws,
+                revision,
+                &caps,
+                quiet.as_ref(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         }
 
         /// A subscribed person with an email address.

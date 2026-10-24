@@ -79,9 +79,10 @@ export function draftFromApi(settings: SendSettings): SettingsDraft {
   };
 }
 
-/** The whole settings document, as the `PUT` replaces it. */
-export function draftToApi(draft: SettingsDraft): SendSettings {
+/** The whole settings document, as the `PUT` replaces it, naming the revision the form was loaded at. */
+export function draftToApi(draft: SettingsDraft, revision: number): SendSettings {
   return {
+    revision,
     frequency_caps: draft.caps.map((cap) => ({
       channel: cap.channel,
       window: windowOf(Number(cap.hours)),

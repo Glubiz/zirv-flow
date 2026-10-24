@@ -78,6 +78,11 @@ pub(crate) struct SendSettingsBody {
     /// The quiet hours; null or absent for none.
     #[serde(default)]
     quiet_hours: Option<QuietHoursBody>,
+    /// The revision of the settings: counts the replaces, 0 when they were never replaced. A
+    /// replace names the revision it read; settings replaced since are a 409
+    /// `send_settings_revision_mismatch` and nothing is written. The response carries the new
+    /// revision.
+    revision: i32,
 }
 
 impl From<&SendLimits> for SendSettingsBody {
@@ -98,6 +103,7 @@ impl From<&SendLimits> for SendSettingsBody {
                 end: clock_text(quiet.end),
                 days: quiet.days.clone(),
             }),
+            revision: limits.revision,
         }
     }
 }
@@ -254,7 +260,9 @@ pub(crate) async fn update_send_settings(
 ) -> Result<SendSettingsBody, ApiError> {
     let (caps, quiet) = validate(request)?;
     let mut tx = zirv_flow_store::begin(pool).await?;
-    replace_send_limits(&mut tx, workspace, &caps, quiet.as_ref()).await?;
+    replace_send_limits(&mut tx, workspace, request.revision, &caps, quiet.as_ref())
+        .await?
+        .ok_or_else(ApiError::send_settings_revision_mismatch)?;
     let stored = read_send_limits(&mut tx, workspace).await?;
     admin::audit(
         &mut tx,
@@ -296,7 +304,8 @@ pub(crate) async fn get(
 }
 
 /// Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or
-/// quiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.
+/// quiet hours left out are removed. The body names the revision that was read; settings replaced
+/// since are refused with a 409. Workspace admins only. Audited as `send_settings.updated`.
 #[utoipa::path(
     put,
     operation_id = "put_send_settings",
@@ -309,6 +318,7 @@ pub(crate) async fn get(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The settings are not at the revision named (`send_settings_revision_mismatch`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "An unknown channel or mode, a limit below 1, a window that does not parse or is over 31 days, an invalid time, equal start and end, or no days; each error names its JSON pointer", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -377,6 +387,7 @@ mod tests {
         let (caps, quiet) = validate(&SendSettingsBody {
             frequency_caps: vec![cap("P1D", 3), cap("PT12H", 1), cap("P31D", 10)],
             quiet_hours: Some(self::quiet("21:00", "08:00", &["fri", "mon", "fri"])),
+            revision: 0,
         })
         .unwrap();
 
@@ -403,6 +414,7 @@ mod tests {
                 sloppy,
             ],
             quiet_hours: Some(quiet("25:00", "08:00", &["mon", "someday"])),
+            revision: 0,
         };
 
         assert_eq!(
@@ -425,10 +437,12 @@ mod tests {
         let same = SendSettingsBody {
             frequency_caps: Vec::new(),
             quiet_hours: Some(quiet("08:00", "08:00", &["mon"])),
+            revision: 0,
         };
         let none = SendSettingsBody {
             frequency_caps: Vec::new(),
             quiet_hours: Some(quiet("08:00", "09:00", &[])),
+            revision: 0,
         };
 
         assert_eq!(pointers(same), ["/quiet_hours/end"]);
@@ -440,6 +454,7 @@ mod tests {
         let body = SendSettingsBody {
             frequency_caps: vec![cap("PT36H", 2), cap("P2D", 5)],
             quiet_hours: Some(quiet("21:05", "08:00", &["sat", "sun"])),
+            revision: 0,
         };
         let (caps, quiet) = validate(&body).unwrap();
         let limits = SendLimits {
@@ -454,6 +469,7 @@ mod tests {
                 })
                 .collect(),
             quiet_hours: quiet,
+            revision: 4,
         };
 
         let back = SendSettingsBody::from(&limits);
@@ -461,5 +477,7 @@ mod tests {
         assert_eq!(back.frequency_caps[0].window, "PT36H");
         assert_eq!(back.frequency_caps[1].window, "P2D");
         assert_eq!(back.quiet_hours.unwrap().start, "21:05");
+        assert_eq!(back.revision, 4);
+        assert_eq!(back.revision, 4);
     }
 }

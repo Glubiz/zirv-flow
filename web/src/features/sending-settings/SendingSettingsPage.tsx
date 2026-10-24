@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { useParams } from "react-router";
 
-import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, ErrorState, InlineError, LoadingState, PageHeader, Panel, SelectField, TextField } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import {
@@ -28,6 +28,7 @@ export function SendingSettingsPage() {
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/sending/settings", { params: { path: { ws } } })),
     [ws],
   );
+  const [notice, setNotice] = useState<string | null>(null);
   const workspace = useResource(() => unwrap(client.GET("/api/v1/workspaces/{ws}", { params: { path: { ws } } })), [ws]);
 
   return (
@@ -45,7 +46,9 @@ export function SendingSettingsPage() {
           stored={settings.data}
           zone={workspace.status === "ready" ? workspace.data.timezone : null}
           canManage={canManage}
-          onSaved={settings.reload}
+          notice={notice}
+          onNotice={setNotice}
+          onReload={settings.reload}
         />
       ) : null}
     </div>
@@ -57,15 +60,18 @@ interface FormProps {
   stored: SendSettings;
   zone: string | null;
   canManage: boolean;
-  onSaved: () => void;
+  /** Held by the page: a save reloads the settings, which remounts the form. */
+  notice: string | null;
+  onNotice: (notice: string | null) => void;
+  onReload: () => void;
 }
 
-function SettingsForm({ workspaceId, stored, zone, canManage, onSaved }: FormProps) {
+function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, onReload }: FormProps) {
   const [original] = useState<SettingsDraft>(() => draftFromApi(stored));
   const [draft, setDraft] = useState<SettingsDraft>(original);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
   const [tried, setTried] = useState(false);
   const problems = check(draft);
   const dirty = !sameDraft(draft, original);
@@ -82,21 +88,26 @@ function SettingsForm({ workspaceId, stored, zone, canManage, onSaved }: FormPro
   async function submit(event: SyntheticEvent) {
     event.preventDefault();
     setTried(true);
-    setNotice(null);
+    onNotice(null);
     if (hasProblems(problems)) return;
     setBusy(true);
     setFailure(null);
+    setStale(false);
     try {
       await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/sending/settings", {
           params: { path: { ws: workspaceId } },
-          body: draftToApi(draft),
+          body: draftToApi(draft, stored.revision),
         }),
       );
-      setNotice("Saved. The limits apply to messages that reach the check from now on.");
-      onSaved();
+      onNotice("Saved. The limits apply to messages that reach the check from now on.");
+      onReload();
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "send_settings_revision_mismatch") {
+        setStale(true);
+      } else {
+        setFailure(describeError(error));
+      }
     } finally {
       setBusy(false);
     }
@@ -254,6 +265,18 @@ function SettingsForm({ workspaceId, stored, zone, canManage, onSaved }: FormPro
       </Panel>
 
       {failure ? <InlineError {...failure} /> : null}
+      {stale ? (
+        <div className="form-error" role="alert">
+          <span className="strong">The sending limits changed</span>
+          <span>
+            The limits changed since this page was opened, so nothing was saved. Your edits are still here. Loading the latest
+            limits discards them.
+          </span>
+          <div>
+            <Button onClick={onReload}>Load the latest limits</Button>
+          </div>
+        </div>
+      ) : null}
       {notice ? (
         <p className="notice" role="status">
           {notice}
