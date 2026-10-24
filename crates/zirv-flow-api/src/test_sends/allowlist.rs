@@ -10,10 +10,11 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::people::{Identifier, identifier_hash};
+use zirv_flow_core::{SecretId, SecretPurpose, seal, secret_aad};
 use zirv_flow_store::AllowlistEntry;
 
 use crate::AppState;
-use crate::admin;
+use crate::admin::{self, write_refusal};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -21,7 +22,7 @@ use crate::problem::{ApiError, Problem};
 #[derive(Serialize, ToSchema)]
 pub(crate) struct AllowlistEntryBody {
     id: Uuid,
-    /// The first character, `***`, then `@domain`. The address itself is not stored.
+    /// The first character, `***`, then `@domain`. The address itself is stored only sealed and never returned.
     #[schema(example = "q***@example.com")]
     display_hint: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -78,8 +79,8 @@ pub(crate) async fn allowlist_list(
     }))
 }
 
-/// Allows test sends to an address. The address is hashed here and only the hash and a masked hint
-/// are stored. Needs the workspace admin role and the CSRF token. Audited as
+/// Allows test sends to an address. The address is normalised, hashed here and stored as the hash,
+/// a masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as
 /// `test_send.allowlist_added`, with the entry id and nothing else.
 #[utoipa::path(
     post,
@@ -106,26 +107,45 @@ pub(crate) async fn allowlist_add(
     ApiJson(body): ApiJson<AllowlistAddRequest>,
 ) -> Result<(StatusCode, Json<AllowlistEntryBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let key = state.identifier_key.as_deref().ok_or_else(|| {
-        ApiError::new(
+    let (Some(key), Some(keyring)) = (state.identifier_key.as_deref(), state.keyring()) else {
+        return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "test sends are unavailable: the server has no master key",
-        )
-    })?;
+        ));
+    };
     let identifier = Identifier::parse("email", &body.address)
         .map_err(|_| ApiError::unprocessable("the address is not a valid email address"))?;
     let hash = identifier_hash(key, &identifier);
-    let hint = zirv_flow_store::masked_hint(&body.address);
+    let hint = zirv_flow_store::masked_hint(identifier.value());
     let id = Uuid::now_v7();
+    // The normalised address, the form the hash was made from, sealed like a credential secret.
+    let sealed = seal(
+        keyring,
+        identifier.value().as_bytes(),
+        &secret_aad(
+            workspace.id,
+            SecretId::from_uuid(id),
+            SecretPurpose::TestSendAddress,
+        ),
+    );
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let entry = zirv_flow_store::add_allowlist_entry(&mut tx, workspace.id, id, &hash, &hint)
-        .await?
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::CONFLICT,
-                "the address is on the allowlist already",
-            )
-        })?;
+    let entry = zirv_flow_store::add_allowlist_entry(
+        &mut tx,
+        &keyring.key_ids(),
+        workspace.id,
+        id,
+        &hash,
+        &hint,
+        &sealed,
+    )
+    .await
+    .map_err(write_refusal)?
+    .ok_or_else(|| {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            "the address is on the allowlist already",
+        )
+    })?;
     admin::audit(
         &mut tx,
         &principal.context(),

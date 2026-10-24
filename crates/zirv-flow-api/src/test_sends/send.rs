@@ -174,7 +174,11 @@ pub(crate) async fn test_send(
     };
     let identifier = Identifier::parse("email", &address).map_err(|_| recipient_not_allowed())?;
     let hash = identifier_hash(key, &identifier);
-    if member.is_none() && !zirv_flow_store::is_allowlisted(&mut tx, workspace.id, &hash).await? {
+    if member.is_none()
+        && zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
+            .await?
+            .is_none()
+    {
         return Err(recipient_not_allowed());
     }
 
@@ -193,7 +197,6 @@ pub(crate) async fn test_send(
             recipient_hash: hash,
             recipient_member: member,
             person: body.person_id,
-            address: member.is_none().then_some(address.as_str()),
             now,
             trace: &trace,
         },

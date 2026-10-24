@@ -139,9 +139,18 @@ mod tests {
         let ws = workspace(pool, "ours").await;
         let other_ws = workspace(pool, "theirs").await;
         let clock = ManualClock::new(datetime!(2031-05-06 07:00 UTC));
-        let root = HmacRoot::bootstrap_from(&MasterKey::generate());
+        let master = MasterKey::generate();
+        let root = HmacRoot::bootstrap_from(&master);
+        let keyring = std::sync::Arc::new(zirv_flow_core::Keyring::new(master, None).unwrap());
+        zirv_flow_store::secrets::insert_hmac_root_if_absent(
+            pool,
+            &zirv_flow_core::seal(&keyring, b"root", b"aad"),
+        )
+        .await
+        .unwrap();
         let state = AppState::new(pool.clone(), std::sync::Arc::new(String::new))
             .with_hmac_root(&root)
+            .with_keyring(keyring)
             .with_clock(Clock::Manual(clock.clone()));
         let router = router(state);
         let key = |workspace: WorkspaceId, scope: Scope| {
@@ -568,6 +577,24 @@ mod tests {
             )
             .await;
         assert_eq!(sent.status, StatusCode::ACCEPTED);
+        let payloads: Vec<String> = sqlx::query_scalar("SELECT payload::text FROM jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(!payloads.is_empty());
+        assert!(
+            payloads
+                .iter()
+                .all(|payload| !payload.contains('@') && !payload.contains("qa.person")),
+            "no job payload holds an address: {payloads:?}"
+        );
+        let sealed: Vec<u8> = sqlx::query_scalar(
+            "SELECT ciphertext FROM encrypted_secrets WHERE purpose = 'test_send_address'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!sealed.windows(9).any(|window| window == b"qa.person"));
 
         for table in ["test_sends", "test_send_allowlist", "audit_log"] {
             let text: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
