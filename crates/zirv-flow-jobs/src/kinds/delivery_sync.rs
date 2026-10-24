@@ -33,7 +33,6 @@ use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::{
     DestinationContext, ProfileCall, Registry, provider_profile_key_source,
-    provider_profile_support,
 };
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::manifest::KeySource;
@@ -137,9 +136,7 @@ fn plan(found: Option<Destination>, operation: SyncOperation) -> Result<Plan, &'
                 .contains(&"profile_sync")
         })
         .ok_or("destination_unavailable")?;
-    if !provider_profile_support(&destination.config).supports(operation) {
-        return Err("operation_unsupported");
-    }
+    // The manifest declares the operation exactly when it names where the key comes from.
     let source = provider_profile_key_source(&destination.config, operation)
         .ok_or("operation_unsupported")?;
     Ok(Plan {

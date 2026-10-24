@@ -135,33 +135,18 @@ impl Destination for ProviderDestination {
             SendMethod::Put => Method::PUT,
             SendMethod::Patch => Method::PATCH,
         };
-        let mut request = Request::new(method, url);
-        let headers = manifest
-            .headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
-            .chain([(CONTENT_TYPE.as_str(), "application/json")]);
-        add_headers(&mut request, headers)?;
-        // The idempotency header replaces any header of the same name: the request carries exactly
-        // one value, the message id.
-        request.headers_mut().insert(
-            HeaderName::from_bytes(send.idempotency_header.as_bytes())
-                .map_err(|_| unbuildable())?,
-            HeaderValue::from_str(message.idempotency_key).map_err(|_| unbuildable())?,
-        );
+        let mut request = prepared(
+            method,
+            url,
+            &manifest,
+            (&send.idempotency_header, message.idempotency_key),
+            credential,
+        )?;
+        add_headers(&mut request, [(CONTENT_TYPE.as_str(), "application/json")])?;
         *request.body_mut() = Some(body.to_string().into_bytes().into());
-        apply_auth(&mut request, &manifest.auth, credential)?;
 
-        let response = ctx.http().execute(request).await?;
-        let status = response.status().as_u16();
-        if (200..300).contains(&status) {
-            // The body is dropped unread.
-            return Ok(Delivered {
-                status: Some(status),
-                remote_id: None,
-            });
-        }
-        Err(failure(&provider.errors, response).await)
+        // The body of a success is dropped unread.
+        respond(ctx, request, &provider.errors).await
     }
 
     async fn sync(
@@ -191,35 +176,20 @@ impl Destination for ProviderDestination {
             ProfileMethod::Patch => Method::PATCH,
             ProfileMethod::Delete => Method::DELETE,
         };
-        let mut request = Request::new(method, url);
-        add_headers(
-            &mut request,
-            manifest
-                .headers
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
+        let mut request = prepared(
+            method,
+            url,
+            &manifest,
+            (&spec.idempotency_header, call.idempotency_key),
+            credential,
         )?;
-        request.headers_mut().insert(
-            HeaderName::from_bytes(spec.idempotency_header.as_bytes())
-                .map_err(|_| unbuildable())?,
-            HeaderValue::from_str(call.idempotency_key).map_err(|_| unbuildable())?,
-        );
         if let Some(body) = body {
             request
                 .headers_mut()
                 .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
             *request.body_mut() = Some(body.to_string().into_bytes().into());
         }
-        apply_auth(&mut request, &manifest.auth, credential)?;
 
-        let response = ctx.http().execute(request).await?;
-        let status = response.status().as_u16();
-        if (200..300).contains(&status) {
-            return Ok(Delivered {
-                status: Some(status),
-                remote_id: None,
-            });
-        }
         // The operation's own rules come first, then the destination's. A profile has no
         // recipient address: a rule that says so ends the operation, as any terminal answer does.
         let rules: Vec<ErrorRule> = spec
@@ -234,7 +204,7 @@ impl Destination for ProviderDestination {
                 ..rule.clone()
             })
             .collect();
-        Err(failure(&rules, response).await)
+        respond(ctx, request, &rules).await
     }
 }
 
@@ -437,6 +407,50 @@ fn unbuildable() -> DestinationError {
         field: "manifest".to_owned(),
         reason: "does not make a valid request".to_owned(),
     }
+}
+
+/// A request to `url` with the manifest's headers, the idempotency header (which replaces any
+/// header of the same name: the request carries exactly one value) and the manifest's auth. The
+/// caller places the body.
+fn prepared(
+    method: Method,
+    url: Url,
+    manifest: &Manifest,
+    (idempotency_header, idempotency_key): (&str, &str),
+    credential: &Credential,
+) -> Result<Request, DestinationError> {
+    let mut request = Request::new(method, url);
+    add_headers(
+        &mut request,
+        manifest
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str())),
+    )?;
+    request.headers_mut().insert(
+        HeaderName::from_bytes(idempotency_header.as_bytes()).map_err(|_| unbuildable())?,
+        HeaderValue::from_str(idempotency_key).map_err(|_| unbuildable())?,
+    );
+    apply_auth(&mut request, &manifest.auth, credential)?;
+    Ok(request)
+}
+
+/// Sends `request`: a 2xx is delivered (its body dropped unread), anything else is classified by
+/// `rules`.
+async fn respond(
+    ctx: &DestinationContext,
+    request: Request,
+    rules: &[ErrorRule],
+) -> Result<Delivered, DestinationError> {
+    let response = ctx.http().execute(request).await?;
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) {
+        return Ok(Delivered {
+            status: Some(status),
+            remote_id: None,
+        });
+    }
+    Err(failure(rules, response).await)
 }
 
 /// `base` with `path` appended to its own path (`/v1` + `/messages` is `/v1/messages`).
