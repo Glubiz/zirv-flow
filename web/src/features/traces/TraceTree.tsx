@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 
 import { formatDateTime } from "../../ui";
+import { subjectHref } from "./href";
+import { recordLabel } from "./labels";
 
 /** The part of a decision record the tree reads; the trace endpoint and an enrollment's path both fit it. */
 export interface TraceTreeRecord {
@@ -21,6 +24,8 @@ interface TraceTreeProps {
   label: string;
   /** What a record is about in words, such as the step it names; shown after the action. */
   describe?: (record: TraceTreeRecord) => string | null;
+  /** With the workspace, a record links from the ids it names: a message to the log of its person, a flow to its page. */
+  workspaceId?: string;
   /**
    * True when the oldest records were left out. The first record shown is then not the start of the trace, so its
    * cause is not the root's: the tree has a neutral root and every record names its own cause.
@@ -90,11 +95,35 @@ function Row({ record, cited, children }: { record: TraceTreeRecord; cited: Trac
   );
 }
 
-function Line({ record, describe, tag }: { record: TraceTreeRecord; describe?: TraceTreeProps["describe"]; tag?: boolean }) {
+/** The links a record offers from its subject ids: the message log of the person a message went to, the flow. */
+function subjectLinks(workspaceId: string, record: TraceTreeRecord): { href: string; text: string }[] {
+  const found: { href: string; text: string }[] = [];
+  for (const [name, id] of Object.entries(record.subject_ids)) {
+    if (typeof id !== "string" || name === "person") continue;
+    const link = subjectHref(workspaceId, name, id, record.subject_ids);
+    if (link && !found.some((item) => item.href === link.href)) found.push(link);
+  }
+  return found;
+}
+
+function Line({
+  record,
+  describe,
+  tag,
+  workspaceId,
+}: {
+  record: TraceTreeRecord;
+  describe?: TraceTreeProps["describe"];
+  tag?: boolean;
+  workspaceId?: string;
+}) {
   const about = describe?.(record) ?? null;
+  const words = recordLabel(record);
+  const links = workspaceId === undefined ? [] : subjectLinks(workspaceId, record);
   return (
     <>
       <span className="mono">{record.action}</span> <span className="mono">{record.outcome}</span>
+      {words ? <span className="strong"> {words}</span> : null}
       {about ? <span> {about}</span> : null}
       {record.reason ? <span className="muted"> · {record.reason}</span> : null}
       {record.attempt != null ? <span className="muted"> · attempt {record.attempt}</span> : null}
@@ -102,12 +131,18 @@ function Line({ record, describe, tag }: { record: TraceTreeRecord; describe?: T
       <time className="faint" dateTime={record.recorded_at}>
         {formatDateTime(record.recorded_at)}
       </time>
+      {links.map((link) => (
+        <span key={link.href}>
+          {" · "}
+          <Link to={link.href}>{link.text}</Link>
+        </span>
+      ))}
     </>
   );
 }
 
 /** The decisions of one trace as a tree: what started it, and under it what was decided, with each operator decision opening a branch. */
-export function TraceTree({ records, label, describe, truncated = false, cited }: TraceTreeProps) {
+export function TraceTree({ records, label, describe, truncated = false, cited, workspaceId }: TraceTreeProps) {
   const { root, trunk, branches } = build(records);
   if (!root) return null;
   if (truncated) {
@@ -118,7 +153,7 @@ export function TraceTree({ records, label, describe, truncated = false, cited }
           <ul className="trace-tree">
             {records.map((record) => (
               <Row key={record.id} record={record} cited={cited}>
-                <Line record={record} describe={describe} tag />
+                <Line record={record} describe={describe} workspaceId={workspaceId} tag />
               </Row>
             ))}
           </ul>
@@ -133,17 +168,17 @@ export function TraceTree({ records, label, describe, truncated = false, cited }
         <ul className="trace-tree">
           {trunk.map((record) => (
             <Row key={record.id} record={record} cited={cited}>
-              <Line record={record} describe={describe} />
+              <Line record={record} describe={describe} workspaceId={workspaceId} />
             </Row>
           ))}
           {branches.map((branch) => (
             <Row key={branch.record.id} record={branch.record} cited={cited}>
-              <Line record={branch.record} describe={describe} tag />
+              <Line record={branch.record} describe={describe} workspaceId={workspaceId} tag />
               {branch.children.length > 0 ? (
                 <ul className="trace-tree">
                   {branch.children.map((record) => (
                     <Row key={record.id} record={record} cited={cited}>
-                      <Line record={record} describe={describe} />
+                      <Line record={record} describe={describe} workspaceId={workspaceId} />
                     </Row>
                   ))}
                 </ul>

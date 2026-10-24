@@ -199,7 +199,7 @@ describe("the words of a message", () => {
     expect(gateRows(held).find((row) => row.state === "held")?.code).toBe("quiet_hours");
     expect(resultOf(held).kind).toBe("deferred");
     expect(explain(held)).toMatch(/Held by the quiet hours until .* Every check runs again then\./);
-    expect(resultOf({ ...held, deferred_until: null } as unknown as Message).kind).toBe("waiting");
+    expect(resultOf({ ...held, deferred_until: null }).kind).toBe("waiting");
   });
 
   it("explains a recorded-consent skip with the built-in rule, not a policy rule", () => {
