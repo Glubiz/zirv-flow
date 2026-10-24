@@ -712,7 +712,10 @@ mod tests {
         let decisions = count(&pool, "SELECT count(*) FROM decision_records").await;
         let again = record_provider_feedback(&pool, &hard).await.unwrap();
 
-        assert!(matches!(first, FeedbackOutcome::Recorded { event: None, .. }));
+        assert!(matches!(
+            first,
+            FeedbackOutcome::Recorded { event: None, .. }
+        ));
         assert_eq!(again, FeedbackOutcome::Duplicate);
         assert!(decisions > 0);
         assert_eq!(
