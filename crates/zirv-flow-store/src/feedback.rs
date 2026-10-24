@@ -197,36 +197,38 @@ pub async fn record_provider_feedback(
         .unwrap_or_else(|| feedback.fallback_trace.clone());
 
     let key = dedupe_key(feedback);
+    // The dedupe key is claimed first, whatever the person's state, so a retry of an event for a
+    // person who is gone writes nothing again.
     let event_id = Uuid::now_v7();
-    if person_live {
-        let first = sqlx::query(
-            "INSERT INTO event_dedupe \
+    let first = sqlx::query(
+        "INSERT INTO event_dedupe \
                 (workspace_id, message_id, event_id, event_occurred_at, person_id) \
              VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id, message_id) DO NOTHING",
+    )
+    .bind(row.workspace_id)
+    .bind(&key)
+    .bind(event_id)
+    .bind(feedback.now)
+    .bind(person_live.then_some(row.person_id))
+    .execute(&mut *tx)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected()
+        == 1;
+    if !first {
+        sqlx::query(
+            "UPDATE event_dedupe SET duplicates = duplicates + 1 \
+                 WHERE workspace_id = $1 AND message_id = $2",
         )
         .bind(row.workspace_id)
         .bind(&key)
-        .bind(event_id)
-        .bind(feedback.now)
-        .bind(row.person_id)
         .execute(&mut *tx)
         .await
-        .map_err(StoreError::query)?
-        .rows_affected()
-            == 1;
-        if !first {
-            sqlx::query(
-                "UPDATE event_dedupe SET duplicates = duplicates + 1 \
-                 WHERE workspace_id = $1 AND message_id = $2",
-            )
-            .bind(row.workspace_id)
-            .bind(&key)
-            .execute(&mut *tx)
-            .await
-            .map_err(StoreError::query)?;
-            commit(tx).await?;
-            return Ok(FeedbackOutcome::Duplicate);
-        }
+        .map_err(StoreError::query)?;
+        commit(tx).await?;
+        return Ok(FeedbackOutcome::Duplicate);
+    }
+    if person_live {
         let mut properties = Map::new();
         properties.insert("message_id".to_owned(), json!(feedback.message));
         properties.insert("enrollment_id".to_owned(), json!(row.enrollment_id));
@@ -683,6 +685,47 @@ mod tests {
             1
         );
         assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retry_for_a_person_who_is_gone_writes_one_set_of_decisions(pool: PgPool) {
+        let ws = workspace(&pool, "fb-gone").await;
+        let sent = sent(&pool, ws, Some([4_u8; 32])).await;
+        let survivor = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(survivor)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+            .bind(survivor)
+            .bind(sent.person)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let trace = trace();
+        let hard = feedback(ws, &sent, FeedbackEvent::BouncedHard, Some("e-1"), &trace);
+
+        let first = record_provider_feedback(&pool, &hard).await.unwrap();
+        let decisions = count(&pool, "SELECT count(*) FROM decision_records").await;
+        let again = record_provider_feedback(&pool, &hard).await.unwrap();
+
+        assert!(matches!(first, FeedbackOutcome::Recorded { event: None, .. }));
+        assert_eq!(again, FeedbackOutcome::Duplicate);
+        assert!(decisions > 0);
+        assert_eq!(
+            count(&pool, "SELECT count(*) FROM decision_records").await,
+            decisions,
+            "the retry appends no decision"
+        );
+        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
+        assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 1);
+        assert_eq!(
+            count(&pool, "SELECT duplicates::bigint FROM event_dedupe").await,
+            1
+        );
     }
 
     #[sqlx::test]

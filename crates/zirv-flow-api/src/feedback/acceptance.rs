@@ -798,7 +798,6 @@ mod tests {
         assert_eq!(stranger.status, StatusCode::NOT_FOUND);
     }
 
-
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_domain_status_needs_the_admin_role_like_the_other_destination_routes(
@@ -824,7 +823,10 @@ mod tests {
         assert_eq!(listing.status, StatusCode::FORBIDDEN);
         assert_eq!(status.status, listing.status);
         assert_eq!(status.body["detail"], listing.body["detail"]);
-        assert!(fx.fake.domain_queries().is_empty(), "the provider was not asked");
+        assert!(
+            fx.fake.domain_queries().is_empty(),
+            "the provider was not asked"
+        );
     }
 
     #[sqlx::test]
@@ -842,7 +844,11 @@ mod tests {
         let reply = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.admin), None).await;
 
         assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{:?}", reply.body);
-        assert_eq!(fx.fake.domain_queries().len(), 1, "the redirect was not followed");
+        assert_eq!(
+            fx.fake.domain_queries().len(),
+            1,
+            "the redirect was not followed"
+        );
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

@@ -1266,7 +1266,9 @@ data only.
   asked for) go under the trace the message's enrollment began, so they keep the original cause.
 - **Deduplication.** One event per (destination, message, event, provider event id when the manifest maps
   one). The key is `events.message_id` and the existing `event_dedupe` row, so a provider's retry writes
-  nothing and bumps `duplicates`.
+  nothing and bumps `duplicates`. The key is claimed first, whatever the state of the person (live, merged
+  away or erased; `event_dedupe.person_id` is null then), so a retry for a person who is gone appends no
+  decision again.
 - **Address hash (supervisor ruling 86c6f5a4).** Migration 0052 adds `messages.address_hash`, the keyed
   identifier HMAC suppressions use (never the address), written in the statement that marks the message
   `sending`, from the address the message actually goes to (the hash the suppression gate computed). Feedback

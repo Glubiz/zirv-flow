@@ -73,8 +73,9 @@ use zirv_flow_store::{
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
     find_flow, find_message_links, find_template, find_template_version, insert_message,
     lock_webhook_person, mark_message_sending, mark_message_unconfirmed, message_address_hash,
-    message_in_flight, message_status, message_unconfirmed, read_template_field_catalog, read_webhook_subject,
-    record_message_deferral, record_message_links, record_send_outcome, throttle_bucket,
+    message_in_flight, message_status, message_unconfirmed, read_template_field_catalog,
+    read_webhook_subject, record_message_deferral, record_message_links, record_send_outcome,
+    throttle_bucket,
 };
 
 pub(crate) use payload::Queued;
@@ -93,7 +94,7 @@ pub(crate) struct DeliverySend;
 /// The note on the unconfirmed ending of a resumed message whose address changed since the call
 /// that may have been accepted.
 const ADDRESS_CHANGED: &str = "address_changed";
-const MAX_RATE_WAIT:time::Duration = time::Duration::hours(6);
+const MAX_RATE_WAIT: time::Duration = time::Duration::hours(6);
 
 /// What a run of the job came to.
 enum Step {

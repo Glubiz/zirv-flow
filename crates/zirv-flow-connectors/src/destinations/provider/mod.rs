@@ -504,7 +504,10 @@ mod tests {
 
         let accepted = fake.accepted();
         assert_eq!(accepted.len(), 1);
-        assert_eq!((accepted[0].key.as_str(), accepted[0].key_headers), ("msg-1", 1));
+        assert_eq!(
+            (accepted[0].key.as_str(), accepted[0].key_headers),
+            ("msg-1", 1)
+        );
     }
 
     #[test]

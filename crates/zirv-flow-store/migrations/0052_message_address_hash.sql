@@ -12,3 +12,8 @@
 -- back to the person's current address. The column goes with its row when the person is erased.
 ALTER TABLE messages ADD COLUMN address_hash bytea
     CHECK (address_hash IS NULL OR octet_length(address_hash) = 32);
+
+-- A provider feedback event is deduplicated whatever the state of the person (live, merged away or
+-- erased), so its `event_dedupe` row may name no person: the person of an erased or merged message
+-- gets no event, and a retry of the feedback must still find the row and write nothing again.
+ALTER TABLE event_dedupe ALTER COLUMN person_id DROP NOT NULL;
