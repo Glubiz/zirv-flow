@@ -131,10 +131,10 @@ struct Row {
 }
 
 /// The columns and the joins up to the send job's kind, which is bound next.
-const SELECT: &str = "SELECT m.id, m.enrollment_id, m.created_at, m.completed_at, m.template_id,         t.name AS template_name, m.template_version, m.category, m.flow_id, f.name AS flow_name,         m.flow_version, m.node_id,         (SELECT jsonb_path_query_first(v.graph, '$.nodes[*] ? (@.id == $id).name',                 jsonb_build_object('id', m.node_id)) #>> '{}'            FROM flow_versions v           WHERE v.workspace_id = m.workspace_id AND v.flow_id = m.flow_id             AND v.version = m.flow_version) AS node_name,         m.destination_id, d.name AS destination_name, m.status, m.reason, m.deciding_rule,         m.gate_results,         CASE WHEN j.rate THEN 'rate_limit' WHEN k.hold THEN h.gate END AS wait_why,         CASE WHEN j.rate THEN j.run_at WHEN k.hold THEN COALESCE(j.run_at, h.until) END             AS wait_until      FROM messages m      LEFT JOIN templates t ON t.workspace_id = m.workspace_id AND t.id = m.template_id      LEFT JOIN flows f ON f.workspace_id = m.workspace_id AND f.id = m.flow_id      LEFT JOIN destinations d ON d.workspace_id = m.workspace_id AND d.id = m.destination_id      LEFT JOIN LATERAL (         SELECT jb.run_at,                COALESCE(jsonb_typeof(jb.payload -> 'first_wait') = 'string', false) AS rate           FROM jobs jb          WHERE m.status = 'pending' AND jb.workspace_id = m.workspace_id AND jb.kind = ";
+const SELECT: &str = "SELECT m.id, m.enrollment_id, m.created_at, m.completed_at, m.template_id,         t.name AS template_name, m.template_version, m.category, m.flow_id, f.name AS flow_name,         m.flow_version, m.node_id,         (SELECT jsonb_path_query_first(v.graph, '$.nodes[*] ? (@.id == $id).name',                 jsonb_build_object('id', m.node_id)) #>> '{}'            FROM flow_versions v           WHERE v.workspace_id = m.workspace_id AND v.flow_id = m.flow_id             AND v.version = m.flow_version) AS node_name,         m.destination_id, d.name AS destination_name, m.status, m.reason, m.deciding_rule,         m.gate_results,         CASE WHEN j.rate THEN 'rate_limit' WHEN k.hold THEN h.gate END AS wait_why,         CASE WHEN j.rate THEN j.run_at WHEN k.hold THEN COALESCE(j.run_at, h.until) END             AS wait_until      FROM messages m      LEFT JOIN templates t ON t.workspace_id = m.workspace_id AND t.id = m.template_id      LEFT JOIN flows f ON f.workspace_id = m.workspace_id AND f.id = m.flow_id      LEFT JOIN destinations d ON d.workspace_id = m.workspace_id AND d.id = m.destination_id      LEFT JOIN LATERAL (         SELECT jb.run_at,                COALESCE(jsonb_typeof(jb.payload -> 'first_wait') = 'string'                    OR (jb.payload -> 'first_wait' IS NULL                        AND jsonb_typeof(jb.payload -> 'deferrals') = 'number'                        AND (jb.payload ->> 'deferrals')::numeric > 0), false) AS rate           FROM jobs jb          WHERE m.status = 'pending' AND jb.workspace_id = m.workspace_id AND jb.kind = ";
 
 /// The waiting-time part of the query: the pending message's live send job, its latest gate
-/// hold, and whether that hold is in force. A rate-limit wait needs the job's `first_wait`; a
+/// hold, and whether that hold is in force. A rate-limit wait needs the job's `first_wait`, or, in the older payload that has none, a deferral (as `SendJob::parse` reads it); a
 /// gate hold needs the job to be queued for the hold's time (a job that is due, or backing off
 /// from a failure, is not held), or, without a ready job, the hold to lie in the future.
 const WAIT_JOINS: &str = " AND jb.state = 'ready' AND jb.payload ->> 'message_id' = m.id::text          ORDER BY jb.run_at LIMIT 1) j ON true      LEFT JOIN LATERAL (         SELECT e ->> 'gate' AS gate, (e ->> 'run_at')::timestamptz AS until           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(m.gate_results) = 'array'                                          THEN m.gate_results ELSE '[]'::jsonb END)                WITH ORDINALITY AS a(e, n)          WHERE m.status = 'pending' AND e ->> 'result' = 'deferred'          ORDER BY n DESC LIMIT 1) h ON true      LEFT JOIN LATERAL (         SELECT h.gate IN ('quiet_hours', 'frequency_cap') AND h.until IS NOT NULL AND                CASE WHEN j.run_at IS NULL THEN h.until > now()                     ELSE j.run_at > now() AND abs(extract(epoch FROM j.run_at - h.until)) < 1                END AS hold) k ON true      WHERE m.workspace_id = ";
@@ -526,7 +526,7 @@ mod tests {
         let now = OffsetDateTime::now_utc();
         let whole = |offset: time::Duration| (now + offset).replace_nanosecond(0).unwrap();
         let mut ids = Vec::new();
-        for index in 0..5_i64 {
+        for index in 0..6_i64 {
             let id = Uuid::now_v7();
             ids.push(id);
             let new = NewMessage {
@@ -592,6 +592,19 @@ mod tests {
             .unwrap();
         job(ids[3], hold, None).await;
         // 4: sending.
+        // 5: waits for a token in the older payload shape, which has a deferral and no `first_wait`.
+        let older = whole(time::Duration::minutes(2));
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, state, run_at, trace_id, cause_kind, cause_id) \n             VALUES ($1, $2, $3, jsonb_build_object('message_id', $4::text, 'deferrals', 1), 'ready', $5,                      gen_random_uuid(), 'api', 't')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(SEND_JOB_KIND)
+        .bind(ids[5])
+        .bind(older)
+        .execute(&pool)
+        .await
+        .unwrap();
         let with = |wait| MessageLogFilter {
             statuses: None,
             template: None,
@@ -623,7 +636,8 @@ mod tests {
         assert_eq!(wait_of(ids[2]), (Some(WaitReason::RateLimit), Some(token)));
         assert_eq!(wait_of(ids[3]), (Some(WaitReason::QuietHours), Some(hold)));
         assert_eq!(wait_of(ids[4]), (None, None));
-        assert_eq!(ids_of(&deferred), [ids[3], ids[2]]);
+        assert_eq!(wait_of(ids[5]), (Some(WaitReason::RateLimit), Some(older)));
+        assert_eq!(ids_of(&deferred), [ids[5], ids[3], ids[2]]);
         assert_eq!(ids_of(&in_progress), [ids[4], ids[1], ids[0]]);
         assert_eq!(ids_of(&first), [ids[4], ids[1]]);
         assert_eq!(ids_of(&second), [ids[0]], "paging keeps its place");
