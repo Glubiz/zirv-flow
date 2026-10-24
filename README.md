@@ -2217,6 +2217,27 @@ prefetch_user_agents = ["my-gateway-fetcher"]
 
 or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
+## Template test sends
+
+A test send sends one template through a real destination to one person who agreed to receive it: a
+member of the workspace, at the address on their account, or an address an admin put on the allowlist.
+The subject starts with `[TEST] `, links are not rewritten, there is no open pixel, and nothing is
+written to the message log, the events or the caps. `{{ system.unsubscribe_url }}` and the
+`List-Unsubscribe` header point to a `/u/{token}` link that answers "This was a test send. Nothing was
+changed." and does nothing.
+
+| Route | Needs | |
+|-------|-------|-|
+| `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
+| `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
+| `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; only a hash and a masked hint (`q***@example.com`) are stored |
+
+Any other recipient is a 422 `recipient_not_allowed`. At most 10 test sends per member and 100 per
+workspace start in any rolling hour; past that the answer is 429 with `Retry-After`. A suppressed
+recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The log
+keeps 13 months; erasing a person deletes the rows sent to their addresses. Neither the log nor the
+allowlist stores an address.
+
 ## Sending domains
 
 An email template publishes only with a sender identity on a verified sending domain (a publish

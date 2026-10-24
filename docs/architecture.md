@@ -1569,6 +1569,53 @@ preview-equals-send test rely on this.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
 - **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
 
+**As built (test sends, #224).**
+
+- **No message row (ruling 1d3048b4).** A test send writes only its `test_sends` row, whose id is the
+  idempotency key at the destination. There is no `messages` row (`messages.test` stays false, and the
+  applied migrations are never edited, because sqlx checks their checksums; migration
+  `0053_test_sends.sql` only adds tables), no `email.*` event, no rewritten link and no open pixel.
+  Caps, policy cooldowns, engagement events and stats read `messages` and events, so they exclude test
+  sends structurally: a spent cap does not stop a test and a test spends none.
+- **Request.** `POST /templates/{id}/test-send` (write; admin when `person_id` renders a real person's
+  values, as a preview does until `view_pii`) names an optional `version` (absent: the draft), a
+  `destination_id` and `sender_identity_id` as a send node does, `to` and an optional `person_id`. It
+  answers 202 with the log row; `GET /test-sends` lists the log (read, newest first, paged, filterable
+  by `template_id`). The audit entry `template.test_sent` holds ids only.
+- **Recipients.** `to` is `{"member": <user id>}`, a member of the workspace, whose `users.email` is the
+  verified address (an admin or a verified sign-in sets it, and no member can change it), or
+  `{"address"}`, which must hash (the keyed identifier hash the suppressions use) to an entry of the
+  workspace allowlist. Anything else is 422 `recipient_not_allowed`, whichever way it is reached. The
+  allowlist (`GET`, `POST`, `DELETE /test-send-allowlist`, admin, add and delete audited with no
+  address or hash) stores the hash and a masked hint (`q***@example.com`).
+- **Rate limit.** At most 10 tests per member and 100 per workspace in any rolling hour. The API counts
+  the log rows in the window and inserts the `queued` row, which is the reservation, in one transaction
+  under an advisory lock keyed by the workspace, so two requests for the last slot cannot both win. A
+  refusal is 429 `test_send_rate_limited` with `Retry-After`, the seconds until the oldest counted row
+  leaves the window. The job does not count again (this refines the issue's "again in the job": the
+  row already holds the slot).
+- **The job** (`template.test_send`) checks the template and version, the sender (`sender_unverified`),
+  the recipient and its suppression (workspace or organization scope, never skipped: `suppressed`, no
+  call), renders through the render host (`render_failed`), prefixes the subject `[TEST] `, checks the
+  destination (exists, not archived, does email), takes a rate token (waiting re-runs the job later, as
+  the send job does) and calls the destination. Consent, policy, quiet hours and the frequency cap are
+  skipped. A lost reply (`delivery_unconfirmed`) ends the row `unconfirmed` with no retry; other
+  retryable answers retry under the same key and the last attempt ends the row `failed` with the
+  verdict's fixed reason. A job that finds its row no longer `queued` sends nothing. No
+  `delivery_attempts` row is written. An allowlisted address is held only in the payload of the queued
+  job, which is deleted when the job completes (the job completes on its last attempt too).
+- **Inert unsubscribe.** `system.unsubscribe_url`, `system.preferences_url` and the `List-Unsubscribe`
+  header are `/u/{token}` URLs minted with the existing codec (kind `u`) for the test send's id. A
+  token with no message but a `test_sends` row is answered by every `/u` route (GET, the form POST, the
+  one-click POST, the preference center) with the page "This was a test send. Nothing was changed.",
+  and nothing is changed or written.
+- **Retention and erasure.** `events.retention` also deletes `test_sends` rows older than 13 months
+  (the proposed message retention, 16.3) and reports the count. The log names no person (the rendered
+  person's id is not stored), so erasing a person deletes the rows whose `recipient_hash` is one of the
+  person's erased identifier hashes, folded from the ledger (also on replay). The allowlist is admin
+  configuration that an admin added, holds only a hash and a masked hint, and is not touched by a
+  person's erasure; the erasure tests assert both.
+
 ### 11.8 Document schema migrations
 
 A migration is a pure function from schema `N` to `N + 1`, and reads chain them.

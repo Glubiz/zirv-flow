@@ -3169,6 +3169,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/templates/{id}/test-send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sends a template to one workspace member or allowlisted address through a real destination,
+         *     marked `[TEST]`, with no tracking and no trace in the message log. The reply is the log row,
+         *     `queued`; poll the log for the outcome. At most 10 tests per member and 100 per workspace start in
+         *     any rolling hour. Needs the write role, or the admin role with `person_id`, and the CSRF token.
+         *     Audited as `template.test_sent`, with ids only.
+         */
+        post: operations["test_send_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/templates/{id}/versions": {
         parameters: {
             query?: never;
@@ -3215,6 +3238,65 @@ export interface paths {
          *     per flow however many versions name it. The draft of a flow is not a version and is not listed.
          */
         get: operations["template_where_used"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-send-allowlist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's test-send allowlist, oldest first. */
+        get: operations["list_test_send_allowlist"];
+        put?: never;
+        /**
+         * Allows test sends to an address. The address is hashed here and only the hash and a masked hint
+         *     are stored. Needs the workspace admin role and the CSRF token. Audited as
+         *     `test_send.allowlist_added`, with the entry id and nothing else.
+         */
+        post: operations["add_test_send_allowlist_entry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-send-allowlist/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Removes an entry from the allowlist. Needs the workspace admin role and the CSRF token. Audited
+         *     as `test_send.allowlist_removed`, with the entry id and nothing else.
+         */
+        delete: operations["delete_test_send_allowlist_entry"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-sends": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's test-send log, newest first, optionally of one template (`template_id`). */
+        get: operations["list_test_sends"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3737,6 +3819,27 @@ export interface components {
              * @description Spent so far this month (UTC), in micro-units.
              */
             spent_micros: number;
+        };
+        AllowlistAddRequest: {
+            /**
+             * @description The email address a test send may go to.
+             * @example qa@example.com
+             */
+            address: string;
+        };
+        AllowlistBody: {
+            entries: components["schemas"]["AllowlistEntryBody"][];
+        };
+        AllowlistEntryBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description The first character, `***`, then `@domain`. The address itself is not stored.
+             * @example q***@example.com
+             */
+            display_hint: string;
+            /** Format: uuid */
+            id: string;
         };
         ApiKeyBody: {
             /** Format: date-time */
@@ -8353,6 +8456,96 @@ export interface components {
              * @description A source that uses this credential.
              */
             source_id?: string | null;
+        };
+        /** @description A test send as the log shows it. It holds no address, no hash and no person. */
+        TestSendBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            destination_id: string;
+            /**
+             * Format: uuid
+             * @description Also the idempotency key at the destination.
+             */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The user who asked; null for an API key.
+             */
+            member_id?: string | null;
+            /**
+             * @description `queued`, `sent`, `suppressed`, `sender_unverified`, `render_failed`, `unconfirmed` or
+             *     `failed`.
+             * @example queued
+             */
+            outcome: string;
+            /** @description A fixed code that says why a test did not go out. */
+            reason?: string | null;
+            /**
+             * Format: uuid
+             * @description The workspace member the test went to; null for an allowlisted address.
+             */
+            recipient_member_id?: string | null;
+            /**
+             * @description `person` when a person's values rendered the template, else `sample`.
+             * @example sample
+             */
+            render_context: string;
+            /** Format: uuid */
+            sender_identity_id: string;
+            /** Format: uuid */
+            template_id: string;
+            /**
+             * Format: int32
+             * @description The published version sent; null for the draft.
+             */
+            template_version?: number | null;
+        };
+        /** @description Who a test goes to. Exactly one of the two fields is given. */
+        TestSendRecipient: {
+            /**
+             * @description An address on the workspace's test-send allowlist.
+             * @example qa@example.com
+             */
+            address?: string | null;
+            /**
+             * Format: uuid
+             * @description A member of this workspace; the test goes to the address on their account.
+             */
+            member?: string | null;
+        };
+        TestSendRequest: {
+            /**
+             * Format: uuid
+             * @description The destination to send through, as a send node names it.
+             */
+            destination_id: string;
+            /**
+             * Format: uuid
+             * @description Render with this person's values; needs the workspace admin role, as a preview does.
+             *     Absent: the sample person. The person is not recorded in the log.
+             */
+            person_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The sender identity, as a send node names it. It must be live on a verified domain, or the
+             *     test ends `sender_unverified`.
+             */
+            sender_identity_id: string;
+            to: components["schemas"]["TestSendRecipient"];
+            /**
+             * Format: int32
+             * @description The published version to send. Absent: the current draft.
+             */
+            version?: number | null;
+        };
+        TestSendsBody: {
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+            /** @description Newest first. */
+            test_sends: components["schemas"]["TestSendBody"][];
         };
         TimelineBody: {
             /** @description Newest first. */
@@ -22051,6 +22244,98 @@ export interface operations {
             };
         };
     };
+    test_send_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestSendRequest"];
+            };
+        };
+        responses: {
+            /** @description The log row, queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, a missing CSRF token, or a person asked for without the admin role (`code` is `template_preview_values_forbidden`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template, version, destination or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The template is archived (`template_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The recipient is neither a member nor allowlisted (`recipient_not_allowed`), the template or destination does not do email, or the body is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The member or the workspace reached its hourly limit; `Retry-After` is the seconds until a slot frees (`test_send_rate_limited`) */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_template_versions: {
         parameters: {
             query?: never;
@@ -22199,6 +22484,253 @@ export interface operations {
                 };
             };
             /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_send_allowlist: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    add_test_send_allowlist_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AllowlistAddRequest"];
+            };
+        };
+        responses: {
+            /** @description The entry */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistEntryBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is on the list already */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_test_send_allowlist_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Entry id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or entry, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_sends: {
+        parameters: {
+            query?: {
+                /** @description Only the tests of this template */
+                template_id?: string;
+                /** @description Rows per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of the log */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendsBody"];
+                };
+            };
+            /** @description limit or template_id is out of range or malformed, or before is not a cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
             404: {
                 headers: {
                     [name: string]: unknown;
