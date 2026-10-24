@@ -1280,11 +1280,11 @@ data only.
 - **Suppression scopes.** A hard bounce adds an `organization` suppression (reason `hard_bounce`), a
   complaint a `workspace` one (reason `complaint`), both with source `feedback`; a soft bounce and a delivery
   suppress nobody. The send job's suppression gate then skips the next send with `suppressed`.
-- **Domain status.** `GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (any reader)
+- **Domain status.** `GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (admins only, as the other destination routes)
   asks the provider with the manifest's request and answers each of our three records with our status next to
   the provider's, and the provider's other records apart. It is read-only: it never marks a domain verified
   (404 `domain_status_unsupported` when the manifest declares no request; 502 with a fixed code when the
-  provider fails).
+  provider fails or redirects: redirects are never followed).
 - **Tests.** Two fixture manifests (`tests/fixtures/providers/`, made-up provider, one timestamped and one
   body-only signature) and a fake provider under `test-support` (`FakeProvider`: honours idempotency keys,
   injects errors, 429 with `Retry-After`, a lost or late reply, answers domain status, posts signed feedback).

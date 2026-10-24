@@ -89,6 +89,8 @@ struct State {
     accepted: Vec<Accepted>,
     requests: usize,
     domain_queries: Vec<String>,
+    /// When set, the domain-status request is answered with a redirect to this location.
+    domain_redirect: Option<String>,
 }
 
 /// A running fake provider. The server stops when this is dropped.
@@ -159,6 +161,11 @@ impl FakeProvider {
     /// Queues what the fake does with a later send request of a new key, in order.
     pub fn script(&self, step: Script) {
         self.lock().script.push_back(step);
+    }
+
+    /// Makes the domain-status request answer a redirect to `location`, or stops doing so.
+    pub fn set_domain_redirect(&self, location: Option<&str>) {
+        self.lock().domain_redirect = location.map(str::to_owned);
     }
 
     /// Replaces the document the domain-status request answers.
@@ -312,6 +319,7 @@ enum Plan {
     Answer(u16, String, Option<u64>),
     AnswerLate(Duration, u16, String),
     Drop,
+    Redirect(String),
 }
 
 fn decide(state: &Mutex<State>, request: &Request) -> Plan {
@@ -320,6 +328,9 @@ fn decide(state: &Mutex<State>, request: &Request) -> Plan {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if request.method == "GET" {
         state.domain_queries.push(request.query.clone());
+        if let Some(location) = state.domain_redirect.clone() {
+            return Plan::Redirect(location);
+        }
         return match state.domain_status.clone() {
             Some(document) => Plan::Answer(200, document.to_string(), None),
             None => Plan::Answer(404, json!({"error": "not found"}).to_string(), None),
@@ -387,6 +398,13 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) {
         }
         // Dropping the stream closes the connection with nothing sent.
         Plan::Drop => {}
+        Plan::Redirect(location) => {
+            let head = format!(
+                "HTTP/1.1 302 X\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(head.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        }
     }
 }
 

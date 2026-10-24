@@ -142,8 +142,10 @@ fn combine(
 }
 
 /// Asks a provider destination for the state of one sending domain and shows it next to ours.
-/// Anyone who can read the workspace may ask. It is read-only: the provider's answer is shown and
-/// never promotes the domain, whose status only the DNS check sets. A destination whose manifest
+/// It needs the Admin role, as the other destination endpoints do: it calls the provider with the
+/// stored credential, and a redirect from the provider is an upstream error, never followed. It is
+/// read-only: the provider's answer is shown and never
+/// promotes the domain, whose status only the DNS check sets. A destination whose manifest
 /// declares no domain-status request is a 404 with code `domain_status_unsupported`.
 #[utoipa::path(
     get,
@@ -159,7 +161,7 @@ fn combine(
         (status = 200, description = "Our record status and the provider's, side by side", body = DomainStatusBody),
         (status = 400, description = "No valid domain_id query parameter", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A missing scope", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a workspace admin, or a missing scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, destination or sending domain, no access, or the destination declares no domain-status request (code `domain_status_unsupported`)", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The destination is archived (`destination_archived`), or its type is not in this build (`destination_kind_unavailable`)", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The provider failed or answered with an error; `code` says which", body = Problem, content_type = "application/problem+json"),
@@ -175,7 +177,7 @@ pub(crate) async fn get(
     RawQuery(query): RawQuery,
 ) -> Result<Json<DomainStatusBody>, ApiError> {
     let domain_id = domain_id_of(query.as_deref())?;
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let destination = zirv_flow_store::find_destination(&state.pool, workspace.id, path_id(&id)?)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -194,7 +196,10 @@ pub(crate) async fn get(
     let credential = resolve::load(&state, workspace.id, destination.credential_id).await?;
     let network = DestinationContext::new(
         state.egress_policy().clone(),
-        HttpLimits::default(),
+        HttpLimits {
+            max_redirects: 0,
+            ..HttpLimits::default()
+        },
         driver.spec().kind,
         destination.id.to_string(),
     )

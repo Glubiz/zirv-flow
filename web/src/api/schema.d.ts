@@ -1063,8 +1063,10 @@ export interface paths {
         };
         /**
          * Asks a provider destination for the state of one sending domain and shows it next to ours.
-         *     Anyone who can read the workspace may ask. It is read-only: the provider's answer is shown and
-         *     never promotes the domain, whose status only the DNS check sets. A destination whose manifest
+         *     It needs the Admin role, as the other destination endpoints do: it calls the provider with the
+         *     stored credential, and a redirect from the provider is an upstream error, never followed. It is
+         *     read-only: the provider's answer is shown and never
+         *     promotes the domain, whose status only the DNS check sets. A destination whose manifest
          *     declares no domain-status request is a 404 with code `domain_status_unsupported`.
          */
         get: operations["get_destination_domain_status"];
@@ -13182,7 +13184,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A missing scope */
+            /** @description Not a workspace admin, or a missing scope */
             403: {
                 headers: {
                     [name: string]: unknown;

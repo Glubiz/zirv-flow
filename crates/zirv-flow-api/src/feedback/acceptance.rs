@@ -715,7 +715,7 @@ mod tests {
             fx.destination
         );
 
-        let as_reader = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.read), None).await;
+        let as_reader = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.admin), None).await;
 
         assert_eq!(as_reader.status, StatusCode::OK, "{:?}", as_reader.body);
         assert_eq!(as_reader.body["status"], "unverified");
@@ -760,7 +760,7 @@ mod tests {
         let asks = |destination: Uuid, query: String| {
             let uri = fx.path(&format!("/destinations/{destination}/domain-status{query}"));
             let router = fx.router.clone();
-            let key = fx.read.clone();
+            let key = fx.admin.clone();
             async move { send(&router, "GET", &uri, Some(&key), None).await }
         };
 
@@ -798,6 +798,52 @@ mod tests {
         assert_eq!(stranger.status, StatusCode::NOT_FOUND);
     }
 
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_domain_status_needs_the_admin_role_like_the_other_destination_routes(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let domain = domain(&fx).await;
+        let tail = format!(
+            "/destinations/{}/domain-status?domain_id={domain}",
+            fx.destination
+        );
+
+        let status = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.read), None).await;
+        let listing = send(
+            &fx.router,
+            "GET",
+            &fx.path("/destinations"),
+            Some(&fx.read),
+            None,
+        )
+        .await;
+
+        assert_eq!(listing.status, StatusCode::FORBIDDEN);
+        assert_eq!(status.status, listing.status);
+        assert_eq!(status.body["detail"], listing.body["detail"]);
+        assert!(fx.fake.domain_queries().is_empty(), "the provider was not asked");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_redirect_from_the_provider_is_an_upstream_error_and_is_not_followed(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let domain = domain(&fx).await;
+        fx.fake.set_domain_status(Some(json!({"records": []})));
+        fx.fake.set_domain_redirect(Some("/elsewhere"));
+        let tail = format!(
+            "/destinations/{}/domain-status?domain_id={domain}",
+            fx.destination
+        );
+
+        let reply = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.admin), None).await;
+
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{:?}", reply.body);
+        assert_eq!(fx.fake.domain_queries().len(), 1, "the redirect was not followed");
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_provider_that_errors_is_a_502_with_a_fixed_code_and_no_value(pool: PgPool) {
@@ -809,7 +855,7 @@ mod tests {
         );
 
         // The fake answers 404 while it has no domain document.
-        let reply = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.read), None).await;
+        let reply = send(&fx.router, "GET", &fx.path(&tail), Some(&fx.admin), None).await;
 
         assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{:?}", reply.body);
         assert_eq!(reply.body["code"], "upstream_error");
