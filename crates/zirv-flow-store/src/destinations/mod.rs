@@ -22,5 +22,6 @@ pub use bucket::{
 };
 pub use crud::{
     Destination, DestinationUpdate, NewDestination, archive_destination, create_destination,
-    find_destination, find_destination_for_update, list_destinations, update_destination,
+    find_destination, find_destination_for_update, find_destination_workspace, list_destinations,
+    update_destination,
 };

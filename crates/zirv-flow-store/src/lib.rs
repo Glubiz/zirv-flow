@@ -12,6 +12,7 @@ mod contacts;
 mod decisions;
 mod destinations;
 mod events;
+mod feedback;
 mod flows;
 mod identities;
 mod imports;
@@ -92,8 +93,9 @@ pub use destinations::{
     DestinationStat, DestinationUpdate, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, NewDeliveryAttempt,
     NewDestination, RateGate, StatusClass, SubjectKind, archive_destination, bucket_state,
     count_delivery_attempt, count_delivery_attempt_record_failure, create_destination,
-    destination_report, find_destination, find_destination_for_update, list_delivery_attempts,
-    list_destinations, record_delivery_attempt, throttle_bucket, update_destination,
+    destination_report, find_destination, find_destination_for_update, find_destination_workspace,
+    list_delivery_attempts, list_destinations, record_delivery_attempt, throttle_bucket,
+    update_destination,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
@@ -109,6 +111,9 @@ pub use events::{
     list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
     publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
     set_event_policy, touch_debugger_watch, update_event_schema,
+};
+pub use feedback::{
+    FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
 };
 pub use flows::{
     AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError,

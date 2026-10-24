@@ -29,7 +29,7 @@ pub struct Engagement<'a> {
 
 /// The trace of the enrollment a message was sent for, with the cause that started it; none when
 /// the enrollment is gone.
-async fn enrollment_trace(
+pub(crate) async fn enrollment_trace(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     enrollment: Uuid,
