@@ -40,7 +40,7 @@ pub(crate) struct DestinationCheckBody {
 
 /// The code and the fixed sentence for a failed check. The connector's own text can name a host
 /// (an egress denial does), so it is never passed on.
-fn describe(error: &DestinationError) -> (&'static str, &'static str) {
+pub(super) fn describe(error: &DestinationError) -> (&'static str, &'static str) {
     match error {
         DestinationError::Config { .. } => {
             ("config_invalid", "a setting of the destination is unusable")

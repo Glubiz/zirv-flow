@@ -10,6 +10,7 @@ use crate::events::{
     IngestRejectBody, IngestRejectsBody, PropertyBody, ReasonBody, RedactionBody, SaveDraftRequest,
     SchemaVersionBody, UpdateEventSchemaRequest,
 };
+use crate::feedback;
 use crate::flows::{self, FlowSchemas};
 use crate::health::{self, StatusBody};
 use crate::imports;
@@ -180,6 +181,8 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::update,
         destinations::crud::remove,
         destinations::actions::check,
+        destinations::domain_status::get,
+        feedback::receive::receive,
         workspace_credentials::schema::list_kinds,
         workspace_credentials::crud::list,
         workspace_credentials::crud::create,
@@ -501,6 +504,11 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::CreateDestinationRequest,
         destinations::crud::UpdateDestinationRequest,
         destinations::actions::DestinationCheckBody,
+        destinations::domain_status::DomainStatusBody,
+        destinations::domain_status::DomainStatusRecordBody,
+        destinations::domain_status::ProviderRecordBody,
+        destinations::domain_status::ProviderOnlyRecordBody,
+        feedback::receive::FeedbackAccepted,
         workspace_credentials::schema::KindBody,
         workspace_credentials::schema::SchemaBody,
         workspace_credentials::schema::SchemaFieldBody,

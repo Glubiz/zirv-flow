@@ -259,14 +259,20 @@ fn in_flight_entry(attempt: i32) -> Value {
 /// flight (see [`clear_message_in_flight`]), so the mark is committed before the call starts. The
 /// entry records `attempts` and replaces any older in-flight entry. A message that has ended is
 /// left alone; false then.
+///
+/// `address_hash` is the keyed identifier hash of the address the message goes to (never the
+/// address): it is stored in the same write, so a provider's feedback can suppress exactly the
+/// address that was sent to. `None` leaves a hash an earlier attempt wrote.
 pub async fn mark_message_sending<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     id: Uuid,
     attempts: i32,
+    address_hash: Option<&[u8; 32]>,
 ) -> Result<bool, StoreError> {
     let marked = sqlx::query(
         "UPDATE messages SET status = 'sending', attempts = $3,
+             address_hash = COALESCE($6, address_hash),
              gate_results = COALESCE(
                  (SELECT jsonb_agg(entry) FROM jsonb_array_elements(gate_results) AS entry
                   WHERE NOT entry @> ($5::jsonb -> 0)), '[]'::jsonb) || $4::jsonb
@@ -277,11 +283,36 @@ pub async fn mark_message_sending<'e>(
     .bind(attempts)
     .bind(in_flight_entry(attempts))
     .bind(in_flight_note())
+    .bind(address_hash.map(|hash| hash.as_slice()))
     .execute(executor)
     .await
     .map_err(StoreError::query)?
     .rows_affected();
     Ok(marked == 1)
+}
+
+/// The keyed address hash a message was sent to, as [`mark_message_sending`] stored it.
+/// `None` when there is no such message in the workspace; `Some(None)` when it has no hash (it
+/// was sent before the column existed, or never reached `sending`).
+pub async fn message_address_hash<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<Option<Option<[u8; 32]>>, StoreError> {
+    let row: Option<(Option<Vec<u8>>,)> =
+        sqlx::query_as("SELECT address_hash FROM messages WHERE workspace_id = $1 AND id = $2")
+            .bind(workspace.as_uuid())
+            .bind(id)
+            .fetch_optional(executor)
+            .await
+            .map_err(StoreError::query)?;
+    row.map(|(hash,)| hash.map(<[u8; 32]>::try_from).transpose())
+        .transpose()
+        .map_err(|_| {
+            StoreError::query(sqlx::Error::Decode(
+                "a message address hash is not 32 bytes".into(),
+            ))
+        })
 }
 
 /// Clears the in-flight note of a `sending` message: the call is known not to have been accepted
@@ -598,7 +629,7 @@ mod tests {
         let started = insert_message(&pool, &message(MessageStatus::Pending, None, 0)).await;
         let again = insert_message(&pool, &message(MessageStatus::Pending, None, 0)).await;
         let pending = find_message(&pool, ws, id).await.unwrap().unwrap();
-        let marked = mark_message_sending(&pool, ws, id, 1).await;
+        let marked = mark_message_sending(&pool, ws, id, 1, None).await;
         let sending = find_message(&pool, ws, id).await.unwrap().unwrap();
         let ended = insert_message(
             &pool,
@@ -623,7 +654,7 @@ mod tests {
         assert!(ended.unwrap(), "the end is written over the sending row");
         assert!(!late.unwrap(), "an ended message never changes");
         assert!(
-            !mark_message_sending(&pool, ws, id, 9).await.unwrap(),
+            !mark_message_sending(&pool, ws, id, 9, None).await.unwrap(),
             "an ended message is never marked again"
         );
         assert_eq!(
@@ -689,12 +720,12 @@ mod tests {
             .unwrap();
 
         let pending = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
-        mark_message_sending(&pool, ws, id, 1).await.unwrap();
+        mark_message_sending(&pool, ws, id, 1, None).await.unwrap();
         let before = message_unconfirmed(&pool, ws, id).await.unwrap();
         let first = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
         let second = mark_message_unconfirmed(&pool, ws, id).await.unwrap();
         let after = message_unconfirmed(&pool, ws, id).await.unwrap();
-        mark_message_sending(&pool, ws, id, 2).await.unwrap();
+        mark_message_sending(&pool, ws, id, 2, None).await.unwrap();
         let kept = message_unconfirmed(&pool, ws, id).await.unwrap();
         insert_message(
             &pool,
@@ -763,8 +794,21 @@ mod tests {
         .unwrap();
 
         let pending = message_in_flight(&pool, ws, id).await.unwrap();
-        mark_message_sending(&pool, ws, id, 1).await.unwrap();
-        mark_message_sending(&pool, ws, id, 2).await.unwrap();
+        mark_message_sending(&pool, ws, id, 1, None).await.unwrap();
+        let unhashed = message_address_hash(&pool, ws, id).await.unwrap();
+        let hash = [7_u8; 32];
+        mark_message_sending(&pool, ws, id, 2, Some(&hash))
+            .await
+            .unwrap();
+        let hashed = message_address_hash(&pool, ws, id).await.unwrap();
+        let unknown = message_address_hash(&pool, ws, Uuid::now_v7())
+            .await
+            .unwrap();
+        assert_eq!(
+            (unhashed, hashed, unknown),
+            (Some(None), Some(Some(hash)), None),
+            "the sending write stores the hash of the recipient, never the address"
+        );
         let marked = message_in_flight(&pool, ws, id).await.unwrap();
         mark_message_unconfirmed(&pool, ws, id).await.unwrap();
         let stale = clear_message_in_flight(&pool, ws, id, 1).await.unwrap();

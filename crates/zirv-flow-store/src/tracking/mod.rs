@@ -8,6 +8,7 @@ mod engagement;
 mod links;
 mod unsubscribe;
 
+pub(crate) use engagement::enrollment_trace;
 pub use engagement::{Engagement, record_engagement};
 pub use links::{
     TrackedMessage, find_message_link, find_message_links, find_tracked_message,

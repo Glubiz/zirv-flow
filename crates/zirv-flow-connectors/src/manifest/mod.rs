@@ -7,12 +7,17 @@
 //! manifest. The API's validate endpoint, the editor, the source's own `read` and `check`, and
 //! the assistant's manifest tool all call it.
 
+mod destination;
 mod issue;
 mod model;
 mod parse;
 
 use serde_json::Value;
 
+pub use destination::{
+    BodyMatch, BounceKindSpec, DomainStatusSpec, ErrorAction, ErrorRule, FeedbackSpec,
+    MessageField, Provider, SendMethod, SendSpec, StatusRange, VerificationSpec, place,
+};
 pub use issue::{Issue, code};
 pub use model::{
     Auth, CredentialSpec, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation,

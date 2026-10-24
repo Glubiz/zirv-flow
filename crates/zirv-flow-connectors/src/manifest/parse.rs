@@ -24,9 +24,9 @@ pub(super) const MAX_STREAMS: usize = 20;
 pub(super) const MAX_FIELDS: usize = 200;
 const MAX_HEADERS: usize = 10;
 const MAX_QUERY: usize = 20;
-const MAX_NAME: usize = 256;
-const MAX_PATH: usize = 512;
-const MAX_TEXT: usize = 256;
+pub(super) const MAX_NAME: usize = 256;
+pub(super) const MAX_PATH: usize = 512;
+pub(super) const MAX_TEXT: usize = 256;
 const MAX_QUERY_VALUE: usize = 1024;
 const MAX_SCOPES: usize = 20;
 
@@ -74,37 +74,37 @@ impl TraitCatalog for AnyTrait {
 }
 
 /// An object being read: the keys taken so far, so the rest can be reported.
-struct Obj<'v> {
-    map: &'v Map<String, Value>,
-    path: String,
-    taken: Vec<&'static str>,
+pub(super) struct Obj<'v> {
+    pub(super) map: &'v Map<String, Value>,
+    pub(super) path: String,
+    pub(super) taken: Vec<&'static str>,
 }
 
 impl<'v> Obj<'v> {
-    fn at(&self, key: &str) -> String {
+    pub(super) fn at(&self, key: &str) -> String {
         child(&self.path, key)
     }
 
     /// The value of `key`; a null counts as absent.
-    fn take(&mut self, key: &'static str) -> Option<&'v Value> {
+    pub(super) fn take(&mut self, key: &'static str) -> Option<&'v Value> {
         self.taken.push(key);
         self.map.get(key).filter(|value| !value.is_null())
     }
 }
 
 #[derive(Default)]
-struct Walk {
-    issues: Vec<Issue>,
+pub(super) struct Walk {
+    pub(super) issues: Vec<Issue>,
 }
 
 impl Walk {
-    fn add(&mut self, code: &'static str, path: String) {
+    pub(super) fn add(&mut self, code: &'static str, path: String) {
         if self.issues.len() < MAX_ISSUES {
             self.issues.push(Issue { code, path });
         }
     }
 
-    fn object<'v>(&mut self, value: &'v Value, path: String) -> Option<Obj<'v>> {
+    pub(super) fn object<'v>(&mut self, value: &'v Value, path: String) -> Option<Obj<'v>> {
         match value.as_object() {
             Some(map) => Some(Obj {
                 map,
@@ -119,7 +119,7 @@ impl Walk {
     }
 
     /// Reports every key the walk did not take.
-    fn finish(&mut self, obj: Obj<'_>) {
+    pub(super) fn finish(&mut self, obj: Obj<'_>) {
         for key in obj.map.keys() {
             if obj.taken.contains(&key.as_str()) {
                 continue;
@@ -133,12 +133,12 @@ impl Walk {
         }
     }
 
-    fn missing(&mut self, obj: &Obj<'_>, key: &str) {
+    pub(super) fn missing(&mut self, obj: &Obj<'_>, key: &str) {
         self.add(code::REQUIRED, obj.at(key));
     }
 
     /// A text of `min..=max` characters.
-    fn text<'v>(
+    pub(super) fn text<'v>(
         &mut self,
         obj: &mut Obj<'v>,
         key: &'static str,
@@ -162,7 +162,7 @@ impl Walk {
         Some(text)
     }
 
-    fn number(
+    pub(super) fn number(
         &mut self,
         obj: &mut Obj<'_>,
         key: &'static str,
@@ -196,7 +196,7 @@ impl Walk {
     }
 
     /// A text that is one of `choices`.
-    fn choice<'v>(
+    pub(super) fn choice<'v>(
         &mut self,
         obj: &mut Obj<'v>,
         key: &'static str,
@@ -222,7 +222,12 @@ impl Walk {
         }
     }
 
-    fn url(&mut self, obj: &mut Obj<'_>, key: &'static str, allow_query: bool) -> Option<Url> {
+    pub(super) fn url(
+        &mut self,
+        obj: &mut Obj<'_>,
+        key: &'static str,
+        allow_query: bool,
+    ) -> Option<Url> {
         let Some(value) = obj.take(key) else {
             self.missing(obj, key);
             return None;
@@ -246,7 +251,7 @@ impl Walk {
         }
     }
 
-    fn pointer<'v>(
+    pub(super) fn pointer<'v>(
         &mut self,
         obj: &mut Obj<'v>,
         key: &'static str,
@@ -273,7 +278,7 @@ impl Walk {
         }
     }
 
-    fn scopes(&mut self, obj: &mut Obj<'_>) -> Vec<String> {
+    pub(super) fn scopes(&mut self, obj: &mut Obj<'_>) -> Vec<String> {
         let Some(value) = obj.take("scopes") else {
             return Vec::new();
         };
@@ -302,7 +307,7 @@ impl Walk {
         scopes
     }
 
-    fn client_auth(&mut self, obj: &mut Obj<'_>) -> ClientAuth {
+    pub(super) fn client_auth(&mut self, obj: &mut Obj<'_>) -> ClientAuth {
         match self.choice(obj, "client_auth", false, &["body", "basic"]) {
             Some("basic") => ClientAuth::Basic,
             _ => ClientAuth::Body,
@@ -345,13 +350,27 @@ fn manifest(walk: &mut Walk, value: &Value) -> Option<Manifest> {
         .take("headers")
         .map(|value| headers(walk, value, obj.at("headers")))
         .unwrap_or_default();
-    let streams = match obj.take("streams") {
-        Some(value) => streams(walk, value, obj.at("streams")),
-        None => {
+    // A provider manifest describes a destination and reads no stream.
+    let provider = obj.take("destination");
+    let streams = match (obj.take("streams"), provider) {
+        (Some(value), _) => streams(walk, value, obj.at("streams")),
+        (None, Some(_)) => Vec::new(),
+        (None, None) => {
             walk.missing(&obj, "streams");
             Vec::new()
         }
     };
+    let provider =
+        provider.and_then(|value| super::destination::provider(walk, value, obj.at("destination")));
+    if let Some(provider) = &provider {
+        super::destination::cross_check(
+            walk,
+            provider,
+            &headers,
+            auth.as_ref(),
+            credential.as_ref(),
+        );
+    }
     walk.finish(obj);
     Some(Manifest {
         base_url: base_url?,
@@ -360,6 +379,7 @@ fn manifest(walk: &mut Walk, value: &Value) -> Option<Manifest> {
         rate_limit,
         headers,
         streams,
+        provider,
     })
 }
 
@@ -547,7 +567,7 @@ fn credential_spec(walk: &mut Walk, value: &Value, path: String) -> Option<Crede
     spec
 }
 
-fn rate_limit(walk: &mut Walk, value: &Value, path: String) -> Option<RateLimitSpec> {
+pub(super) fn rate_limit(walk: &mut Walk, value: &Value, path: String) -> Option<RateLimitSpec> {
     let mut obj = walk.object(value, path)?;
     let requests = walk.number(&mut obj, "requests", true, 1..=1000);
     let per_seconds = walk.number(&mut obj, "per_seconds", true, 1..=3600);
@@ -559,7 +579,7 @@ fn rate_limit(walk: &mut Walk, value: &Value, path: String) -> Option<RateLimitS
 }
 
 /// A header or parameter name: the characters of an RFC 9110 token.
-fn is_token(name: &str) -> bool {
+pub(super) fn is_token(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME
         && name
@@ -569,7 +589,7 @@ fn is_token(name: &str) -> bool {
 
 /// Whether a manifest may not send a header of this name: the runtime or the transport owns it, or it
 /// makes the request conditional.
-fn is_forbidden_header(name: &str) -> bool {
+pub(super) fn is_forbidden_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     FORBIDDEN_HEADERS.contains(&lower.as_str()) || lower.starts_with("if-")
 }
@@ -676,7 +696,7 @@ fn stream(walk: &mut Walk, value: &Value, path: String) -> Option<StreamSpec> {
     })
 }
 
-fn stream_path(walk: &mut Walk, obj: &mut Obj<'_>) -> Option<String> {
+pub(super) fn stream_path(walk: &mut Walk, obj: &mut Obj<'_>) -> Option<String> {
     let value = obj.take("path");
     let Some(value) = value else {
         walk.missing(obj, "path");

@@ -142,6 +142,22 @@ pub async fn find_destination<'e>(
     .map_err(StoreError::query)
 }
 
+/// The workspace of the destination with this id, whichever workspace it is in. For the one
+/// public route that receives a provider's webhook by the destination's id; the id only locates
+/// the destination, and a signature authorizes. Archived destinations are found too.
+pub async fn find_destination_workspace<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+) -> Result<Option<WorkspaceId>, StoreError> {
+    let workspace: Option<Uuid> =
+        sqlx::query_scalar("SELECT workspace_id FROM destinations WHERE id = $1")
+            .bind(id)
+            .fetch_optional(executor)
+            .await
+            .map_err(StoreError::query)?;
+    Ok(workspace.map(WorkspaceId::from_uuid))
+}
+
 /// Reads a destination and locks its row until the transaction ends, so concurrent changes to it
 /// (a credential replaced twice, say) run one after the other.
 pub async fn find_destination_for_update(

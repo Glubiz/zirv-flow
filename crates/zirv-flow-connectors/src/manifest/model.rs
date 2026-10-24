@@ -20,6 +20,9 @@ pub struct Manifest {
     /// Static headers sent with every request.
     pub headers: Vec<(String, String)>,
     pub streams: Vec<StreamSpec>,
+    /// The `destination` section of a provider manifest: how to send mail through the API and read
+    /// its feedback. A provider manifest has no streams.
+    pub provider: Option<super::destination::Provider>,
 }
 
 /// How requests prove who is asking. The secrets are never in the manifest: each type names the

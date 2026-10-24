@@ -8,7 +8,7 @@
 
 use axum::Json;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -16,12 +16,14 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::mapping::walk_path;
-use zirv_flow_core::signature::{self, Scheme, SignatureError};
+use zirv_flow_core::signature::Scheme;
 use zirv_flow_core::{SecretId, SecretPurpose};
 use zirv_flow_store::HookReceive;
 
 use crate::AppState;
-use crate::ingest::{declared_too_large, read_body, too_large};
+use crate::ingest::{
+    Refusal, declared_too_large, invalid_signature, read_body, too_large, verify_signature,
+};
 use crate::problem::{ApiError, Problem};
 use crate::trace::request_trace;
 
@@ -32,18 +34,6 @@ const MAX_DEDUPE_CHARS: usize = 128;
 pub(crate) struct WebhookAccepted {
     /// Payloads appended to the inbox: always 1. They are durable, not yet applied.
     accepted: usize,
-}
-
-/// A refused request and the metric label that counts it.
-struct Refusal {
-    error: ApiError,
-    outcome: &'static str,
-}
-
-impl Refusal {
-    fn new(error: ApiError, outcome: &'static str) -> Self {
-        Self { error, outcome }
-    }
 }
 
 /// Receives one JSON document for a webhook. The request carries the hook's signature header
@@ -109,28 +99,6 @@ fn not_found() -> Refusal {
     )
 }
 
-/// The 401 of a signature that does not verify. Every cause shares one type and one detail but
-/// for a stale timestamp, which tells a sender with a bad clock; the cause is a metric label.
-fn invalid_signature(error: SignatureError) -> Refusal {
-    let (detail, outcome) = match error {
-        SignatureError::OutsideTolerance => (
-            "signature timestamp is outside the tolerance",
-            "signature_stale",
-        ),
-        SignatureError::MissingSignature | SignatureError::MissingTimestamp => {
-            ("signature is missing or invalid", "signature_missing")
-        }
-        SignatureError::MalformedSignature | SignatureError::MalformedTimestamp => {
-            ("signature is missing or invalid", "signature_malformed")
-        }
-        SignatureError::Mismatch => ("signature is missing or invalid", "signature_mismatch"),
-    };
-    Refusal::new(
-        ApiError::new(StatusCode::UNAUTHORIZED, detail).with_code("invalid_signature"),
-        outcome,
-    )
-}
-
 /// The dedupe value of a payload: a string, integer or float at `field`, 1 to 128 characters
 /// without control characters, scalars as their JSON text.
 pub(crate) fn dedupe_value(payload: &Map<String, Value>, field: &str) -> Option<String> {
@@ -170,31 +138,6 @@ async fn open_secret(
     .map_err(|_| unavailable())
 }
 
-fn verify(
-    now: OffsetDateTime,
-    hook: &HookReceive,
-    secret: &zirv_flow_core::SecretBytes,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<signature::Verified, SignatureError> {
-    // Every value of a header counts: a sender in a rotation grace window signs with two secrets
-    // and sends one signature value for each.
-    let lookup = |name: &str| {
-        headers
-            .get_all(name)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .collect::<Vec<_>>()
-    };
-    signature::verify(
-        &scheme(hook),
-        secret.expose(),
-        &lookup,
-        body,
-        now.unix_timestamp(),
-    )
-}
-
 async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refusal> {
     let max = state.ingest.limits().max_webhook_bytes;
     if declared_too_large(request.headers(), max) {
@@ -219,10 +162,10 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
         .map_err(|error| Refusal::new(error, "too_large"))?;
     let verified = {
         let secret = open_secret(state, &hook).await?;
-        verify(
+        verify_signature(
             state.clock.now_in_process(),
-            &hook,
-            &secret,
+            &scheme(&hook),
+            secret.expose(),
             &headers,
             &body,
         )
@@ -272,6 +215,7 @@ async fn accept(state: &AppState, id: &str, request: Request) -> Result<(), Refu
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use zirv_flow_core::signature::SignatureError;
 
     use super::*;
 

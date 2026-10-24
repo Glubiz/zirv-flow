@@ -217,6 +217,121 @@
         ]
       }
     },
+    "/api/v1/destinations/{id}/feedback": {
+      "post": {
+        "tags": [
+          "destinations"
+        ],
+        "summary": "Receives one signed feedback event of an email provider. The destination's manifest names the\nsignature header, its prefix and the optional timestamp header and tolerance; the signed\nmessage is `\"{timestamp}.{body}\"` for a timestamped provider and the raw body otherwise, signed\nwith HMAC-SHA256 under the signing secret the destination's credential holds. A delivery is\nrecorded as `email.delivered`, a bounce as `email.bounced` (with `kind` `hard` or `soft`) and a\ncomplaint as `email.complained`. A hard bounce suppresses the address the message was sent to\nin every workspace of the organization, a complaint in the destination's workspace only, and a\nsoft bounce nobody. A repeat of an event writes nothing.",
+        "operationId": "receive_destination_feedback",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The id of the provider destination, in the URL given to the provider",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "One JSON event of the provider, at most ingest.max_webhook_bytes",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Recorded, or dropped as needing nothing: an event type the manifest does not map, a repeat, or a message that is not this destination's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The signed body is not JSON (code invalid_payload)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The signature or timestamp is missing, malformed, outside the tolerance or wrong (code invalid_signature); nothing was written",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such destination, or it is not a provider destination",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over ingest.max_webhook_bytes",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The destination is over its rate limit",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Whole seconds until a request fits"
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The database or the secret keyring is unavailable; nothing was recorded, so retry",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
     "/api/v1/ingest/batch": {
       "post": {
         "tags": [
@@ -5999,6 +6114,147 @@
           },
           "504": {
             "description": "The destination did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/destinations/{id}/domain-status": {
+      "get": {
+        "tags": [
+          "destinations"
+        ],
+        "summary": "Asks a provider destination for the state of one sending domain and shows it next to ours.\nIt needs the Admin role, as the other destination endpoints do: it calls the provider with the\nstored credential, and a redirect from the provider is an upstream error, never followed. It is\nread-only: the provider's answer is shown and never\npromotes the domain, whose status only the DNS check sets. A destination whose manifest\ndeclares no domain-status request is a 404 with code `domain_status_unsupported`.",
+        "operationId": "get_destination_domain_status",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Destination id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "domain_id",
+            "in": "query",
+            "description": "The sending domain to ask the provider about",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Our record status and the provider's, side by side",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainStatusBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No valid domain_id query parameter",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, destination or sending domain, no access, or the destination declares no domain-status request (code `domain_status_unsupported`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The destination is archived (`destination_archived`), or its type is not in this build (`destination_kind_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The provider failed or answered with an error; `code` says which",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key to open the credential",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The provider did not answer in time",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -23103,7 +23359,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "The most deliveries at once, 1 to 100000. Default: the rate."
+            "description": "The most deliveries at once, 1 to 100000. Default: the rate; for a `provider`\ndestination, the manifest's burst when it declares a rate limit."
           },
           "config": {
             "type": "object",
@@ -23137,7 +23393,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Deliveries per second, 1 to 100000. Default 10."
+            "description": "Deliveries per second, 1 to 100000. Default 10; for a `provider` destination, the rate\nof its manifest's `destination.rate_limit` when it declares one."
           }
         }
       },
@@ -24576,6 +24832,75 @@
           }
         }
       },
+      "DomainStatusBody": {
+        "type": "object",
+        "required": [
+          "domain_id",
+          "domain",
+          "status",
+          "records",
+          "provider_only"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "domain_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "provider_only": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderOnlyRecordBody"
+            }
+          },
+          "records": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DomainStatusRecordBody"
+            }
+          },
+          "status": {
+            "type": "string",
+            "description": "The domain's own status, `verified` or `unverified`. Only the DNS check changes it."
+          }
+        }
+      },
+      "DomainStatusRecordBody": {
+        "type": "object",
+        "description": "One record of the domain: our status and the provider's.",
+        "required": [
+          "kind",
+          "host",
+          "status"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "The DNS name of the record."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`dkim`, `spf` or `dmarc`."
+          },
+          "provider": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ProviderRecordBody",
+                "description": "The provider's view of the record at the same name; null when it lists none there."
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "Our status of the record, from the DNS check: `pending`, `ok`, `mismatch` or `missing`."
+          }
+        }
+      },
       "DraftBody": {
         "type": "object",
         "description": "The result of a draft run.",
@@ -25942,6 +26267,19 @@
           "output_tokens": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "FeedbackAccepted": {
+        "type": "object",
+        "required": [
+          "accepted"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "description": "Always 1: the event was recorded, or dropped as one that needs nothing (an event type the\nmanifest does not map, a repeat, a message that is not ours).",
+            "minimum": 0
           }
         }
       },
@@ -29778,6 +30116,46 @@
             "items": {
               "$ref": "#/components/schemas/ModelBody"
             }
+          }
+        }
+      },
+      "ProviderOnlyRecordBody": {
+        "type": "object",
+        "description": "A record the provider lists that is none of ours (a return-path or tracking record).",
+        "required": [
+          "name",
+          "record_type",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "record_type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ProviderRecordBody": {
+        "type": "object",
+        "description": "What the provider reports for one record.",
+        "required": [
+          "record_type",
+          "status"
+        ],
+        "properties": {
+          "record_type": {
+            "type": "string",
+            "description": "The record's DNS type as the provider names it, such as `TXT`.",
+            "example": "TXT"
+          },
+          "status": {
+            "type": "string",
+            "description": "`verified`, `pending` or `failed`, as the manifest maps the provider's own value; `unknown`\nwhen it maps none.",
+            "example": "verified"
           }
         }
       },

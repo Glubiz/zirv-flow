@@ -146,15 +146,21 @@ impl Source for Http {
 pub(crate) fn check_config(config: &Value) -> Vec<FieldError> {
     match config.get("manifest") {
         None | Some(Value::Null) => Vec::new(),
-        Some(manifest) => validate(manifest)
-            .err()
-            .into_iter()
-            .flatten()
-            .map(|issue| FieldError {
-                field: format!("manifest{}", issue.path),
-                reason: issue.code.to_owned(),
-            })
-            .collect(),
+        Some(manifest) => match validate(manifest) {
+            Err(issues) => issues
+                .into_iter()
+                .map(|issue| FieldError {
+                    field: format!("manifest{}", issue.path),
+                    reason: issue.code.to_owned(),
+                })
+                .collect(),
+            // A provider manifest sends mail; a source reads streams.
+            Ok(parsed) if parsed.provider.is_some() => vec![FieldError {
+                field: "manifest/destination".to_owned(),
+                reason: "is for a provider destination, not a source".to_owned(),
+            }],
+            Ok(_) => Vec::new(),
+        },
     }
 }
 
@@ -163,7 +169,7 @@ fn manifest_of(config: &Value) -> Result<Manifest, SourceError> {
         field: "manifest".to_owned(),
         reason: "is required".to_owned(),
     })?;
-    validate(value).map_err(|issues| {
+    let manifest = validate(value).map_err(|issues| {
         let first = issues.first();
         SourceError::Config {
             field: format!("manifest{}", first.map_or("", |issue| issue.path.as_str())),
@@ -172,7 +178,14 @@ fn manifest_of(config: &Value) -> Result<Manifest, SourceError> {
                 first.map_or("unknown", |issue| issue.code)
             ),
         }
-    })
+    })?;
+    if manifest.provider.is_some() {
+        return Err(SourceError::Config {
+            field: "manifest/destination".to_owned(),
+            reason: "is for a provider destination, not a source".to_owned(),
+        });
+    }
+    Ok(manifest)
 }
 
 fn descriptor(stream: &StreamSpec) -> StreamDescriptor {
@@ -787,6 +800,21 @@ mod tests {
         // The manifest must be an object, and is required.
         assert!(validate_config(&Http::SPEC, &json!({"manifest": "text"})).is_err());
         assert!(validate_config(&Http::SPEC, &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_provider_manifest_is_not_a_source_and_is_refused_before_any_request() {
+        let provider = include_str!("../../../tests/fixtures/providers/bearer_timestamped.json");
+        let config = json!({"manifest": serde_json::from_str::<Value>(provider).unwrap()});
+
+        let errors = validate_config(&Http::SPEC, &config).unwrap_err();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "manifest/destination");
+        assert!(matches!(
+            manifest_of(&config),
+            Err(SourceError::Config { ref field, .. }) if field == "manifest/destination"
+        ));
     }
 
     #[test]

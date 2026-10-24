@@ -1216,6 +1216,82 @@ sending, zero duplicates, error classification, verified bounce and complaint
 webhooks, and domain status. Bundled real-provider manifests come later, as
 data only.
 
+**As built (provider destinations, #223).**
+
+- **One registry line.** `provider` is a destination type (`zirv-flow-connectors::destinations::provider`).
+  Its configuration is the M3 manifest (`config.manifest`, the same JSON the `http` source takes) with a
+  `destination` section, and a manifest used by a provider must have it. A provider manifest has no
+  streams, and the `http` source refuses one. The manifest is validated by the same walk (unknown keys,
+  script keys, template markers and JSON-pointer issues named by pointer, never by value). Auth may be
+  `none`, `api_key`, `basic` or `bearer`: an OAuth2 grant is refused (`not_for_destinations`), because the
+  delivery path makes one request and no token round trip. `auth.credential` must declare the feedback
+  signing secret as a secret field.
+- **The `destination` section** is data only:
+  - `send`: `method` (`POST`, `PUT` or `PATCH`), `path`, `idempotency_header` (carries the message id) and a
+    `body` of `fields`, a closed set (`from`, `from_name`, `reply_to`, `to`, `subject`, `html`, `text`,
+    `headers`, `message_id`) each placed at a JSON pointer (`/to/0/email` makes an array), and `static`
+    string, number and boolean values placed beside them. `from`, `to`, `subject` and `message_id` are
+    required, and so is `html` or `text`. Two placements that collide are refused (`pointer_conflict`).
+  - `rate_limit`: `requests` per `per_seconds`. It is the default rate and burst of a destination created
+    without them (the #215 bucket); an explicit `rate` wins.
+  - `errors`: rules in order, the first match wins: a `status` (a number, or `"500-503"`, within 400 to
+    599), an optional `body` (`pointer` and a list of `values`) and an `action`: `retry`, `terminal` or
+    `recipient_failure`. Without a match, 408, 429 and 5xx retry and any other status is terminal; a 429
+    keeps its `Retry-After`, which slows the bucket as for any destination. A recipient failure is
+    `Refusal::HardBounce`, as SMTP's is.
+  - `domain_status` (optional): a GET of `path` with the domain as one query parameter (`domain_param`),
+    `records_path`, pointers to each record's `name`, `type` and `status`, and a `status_map` of the
+    provider's values to `verified`, `pending` and `failed`.
+  - `feedback` (required): `event_type`, an `events` map to `delivered`, `bounced` and `complained`,
+    `message_id` (where the provider echoes the id the send placed), `bounce_kind` (required with `bounced`;
+    `hard` and `soft` value lists; an unmapped kind is soft), an optional `event_id`, and a required
+    `verification`: `signature_header`, `signature_prefix`, an optional `timestamp_header`,
+    `tolerance_seconds` (default 300) and `secret_field`, the credential field holding the secret. They map
+    onto `zirv_flow_core::signature::Scheme` (HMAC-SHA256). A manifest without `verification` is refused.
+- **Sending.** One request through the guarded client with the manifest's auth, no redirects and no hidden
+  retry (the pipeline owns retries), the message id as the idempotency key. The credential is opened right
+  before the call and a secret never reaches an error, a log line or a metric.
+- **Feedback route.** `POST /api/v1/destinations/{id}/feedback` is public (no `Principal`, no CSRF), beside
+  `/hooks/{id}`. The id only locates the destination; the signature authorises. The order is: the body cap
+  (413), the destination (404 for an unknown id or a type that is not `provider`), the per-destination rate
+  (429), the signature with the destination's own secret **before the body is parsed** (401
+  `invalid_signature`, and nothing is written, for a missing, malformed or wrong signature or a timestamp
+  outside the tolerance), then the JSON (400) and the manifest's mapping. An event type the manifest does not
+  map, a malformed event, a message that does not exist, belongs to another workspace than the
+  destination's or was sent through another destination is dropped with a 202 and counted in
+  `zirv_flow_provider_feedback_total{outcome}` (a fixed label; never a message id).
+- **Events and decisions.** A delivery writes `email.delivered`, a bounce `email.bounced` (`kind` and `bounce`
+  are `hard` or `soft`) and a complaint `email.complained`, source `feedback`, with ids only and
+  `enqueue_arrivals`. The decisions (`message.feedback`, and `suppression.feedback` when a suppression was
+  asked for) go under the trace the message's enrollment began, so they keep the original cause.
+- **Deduplication.** One event per (destination, message, event, provider event id when the manifest maps
+  one). The key is `events.message_id` and the existing `event_dedupe` row, so a provider's retry writes
+  nothing and bumps `duplicates`. The key is claimed first, whatever the state of the person (live, merged
+  away or erased; `event_dedupe.person_id` is null then), so a retry for a person who is gone appends no
+  decision again.
+- **Address hash (supervisor ruling 86c6f5a4).** Migration 0052 adds `messages.address_hash`, the keyed
+  identifier HMAC suppressions use (never the address), written in the statement that marks the message
+  `sending`, from the address the message actually goes to (the hash the suppression gate computed). Feedback
+  reads it by message id. A null hash (a message sent before the column) suppresses nobody, is recorded as a
+  `suppression.feedback` decision `unable` / `address_hash_missing` and counted (`unable_to_suppress`); the
+  person's current address is never used instead. The column goes with its row on erasure.
+  A retry that is carried (an earlier call may have been accepted) never re-points it: if the current address
+  hashes differently from the stored hash, nothing is sent and the message ends `delivery_unconfirmed` with the
+  gate note `address_changed`, keeping the stored hash. A retry that is not carried, or a row with no stored
+  hash, follows the current address.
+- **Suppression scopes.** A hard bounce adds an `organization` suppression (reason `hard_bounce`), a
+  complaint a `workspace` one (reason `complaint`), both with source `feedback`; a soft bounce and a delivery
+  suppress nobody. The send job's suppression gate then skips the next send with `suppressed`.
+- **Domain status.** `GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (admins only, as the other destination routes)
+  asks the provider with the manifest's request and answers each of our three records with our status next to
+  the provider's, and the provider's other records apart. It is read-only: it never marks a domain verified
+  (404 `domain_status_unsupported` when the manifest declares no request; 502 with a fixed code when the
+  provider fails or redirects: redirects are never followed).
+- **Tests.** Two fixture manifests (`tests/fixtures/providers/`, made-up provider, one timestamped and one
+  body-only signature) and a fake provider under `test-support` (`FakeProvider`: honours idempotency keys,
+  injects errors, 429 with `Retry-After`, a lost or late reply, answers domain status, posts signed feedback).
+  No real provider manifest ships.
+
 **Webhook move (M6)**. The `action.webhook` node contract stays:
 `url`, `trait_keys`, the signing, headers, the guarded client with no redirects,
 jobs that never go dead, the `webhook.succeeded` and `webhook.failed` events and

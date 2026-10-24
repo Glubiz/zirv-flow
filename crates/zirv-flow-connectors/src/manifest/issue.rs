@@ -49,6 +49,12 @@ pub mod code {
     /// The `auth.credential` schema holds a secret the auth type reads (a token, password, API key
     /// or client secret) in a field that is not `secret`, which would store it in plaintext.
     pub const CREDENTIAL_FIELD_NOT_SECRET: &str = "credential_field_not_secret";
+    /// Two body placements of a provider's send mapping collide: the same place, or one inside
+    /// the other, or an array position with a gap.
+    pub const POINTER_CONFLICT: &str = "pointer_conflict";
+    /// A provider manifest uses something a destination cannot: an OAuth2 grant, which needs a
+    /// token round trip the delivery path does not make.
+    pub const NOT_FOR_DESTINATIONS: &str = "not_for_destinations";
 
     /// Every code of this module. Mapping codes (`no_identifier`, `unknown_column`, ...) come
     /// from `zirv_flow_core::mapping::MappingError::code` and are not listed.
@@ -83,6 +89,8 @@ pub mod code {
         INVALID_CREDENTIAL_SCHEMA,
         CREDENTIAL_FIELD_MISSING,
         CREDENTIAL_FIELD_NOT_SECRET,
+        POINTER_CONFLICT,
+        NOT_FOR_DESTINATIONS,
     ];
 }
 

@@ -1,0 +1,74 @@
+{
+  "version": "v1",
+  "base_url": "https://api.fixture-provider.example.test/v1",
+  "auth": {
+    "type": "bearer",
+    "credential": {
+      "fields": [
+        { "key": "token", "label": "API token", "type": "string", "required": true, "secret": true },
+        { "key": "feedback_secret", "label": "Feedback signing secret", "type": "string", "required": true, "secret": true }
+      ]
+    }
+  },
+  "headers": { "Accept": "application/json" },
+  "destination": {
+    "send": {
+      "method": "POST",
+      "path": "/messages",
+      "idempotency_header": "Idempotency-Key",
+      "body": {
+        "fields": {
+          "from": "/from/email",
+          "from_name": "/from/name",
+          "reply_to": "/reply_to",
+          "to": "/to/0/email",
+          "subject": "/subject",
+          "html": "/html",
+          "text": "/text",
+          "headers": "/headers",
+          "message_id": "/custom/message_id"
+        },
+        "static": { "/stream": "outbound", "/track_opens": false }
+      }
+    },
+    "rate_limit": { "requests": 20, "per_seconds": 1 },
+    "errors": [
+      {
+        "status": 422,
+        "body": { "pointer": "/error/code", "values": ["mailbox_unknown", "mailbox_disabled"] },
+        "action": "recipient_failure"
+      }
+    ],
+    "domain_status": {
+      "path": "/domains",
+      "domain_param": "domain",
+      "records_path": "/records",
+      "name": "/host",
+      "type": "/kind",
+      "status": "/state",
+      "status_map": {
+        "verified": ["verified"],
+        "pending": ["pending"],
+        "failed": ["failed"]
+      }
+    },
+    "feedback": {
+      "event_type": "/event",
+      "events": {
+        "delivered": ["delivered"],
+        "bounced": ["bounced"],
+        "complained": ["complained"]
+      },
+      "message_id": "/meta/message_id",
+      "bounce_kind": { "pointer": "/bounce/kind", "hard": ["permanent"], "soft": ["transient"] },
+      "event_id": "/id",
+      "verification": {
+        "signature_header": "X-Fixture-Signature",
+        "signature_prefix": "sha256=",
+        "timestamp_header": "X-Fixture-Timestamp",
+        "tolerance_seconds": 300,
+        "secret_field": "feedback_secret"
+      }
+    }
+  }
+}
