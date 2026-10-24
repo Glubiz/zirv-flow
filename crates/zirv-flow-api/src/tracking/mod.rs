@@ -536,6 +536,52 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_unsubscribe_token_of_an_erased_person_is_the_404_page(pool: PgPool) {
+        let fixture = Fixture::new(pool, "erased", "sent", 3600).await;
+        let uri = format!("/u/{}", fixture.token(TokenKind::Unsubscribe, 0));
+        let before = fixture.call("POST", &uri, None, "").await;
+        assert_eq!(before.status, StatusCode::OK, "the token works before");
+        let key =
+            HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Identifier);
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t"));
+        let mut tx = zirv_flow_store::begin(&fixture.pool).await.unwrap();
+        let request = zirv_flow_store::request_erasure(
+            &mut tx,
+            fixture.ws,
+            fixture.person,
+            &key,
+            None,
+            &trace,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut tx = zirv_flow_store::begin(&fixture.pool).await.unwrap();
+        let outcome = zirv_flow_store::erase_person(&mut tx, fixture.ws, request.id, &key, &trace)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        assert!(matches!(
+            outcome,
+            zirv_flow_store::EraseOutcome::Completed {
+                person_found: true,
+                ..
+            }
+        ));
+
+        let after = fixture.call("POST", &uri, None, "").await;
+
+        assert_eq!(after.status, StatusCode::NOT_FOUND);
+        assert!(after.text().contains("Link not found"), "{}", after.text());
+        let one_click = fixture
+            .call("POST", &uri, None, "List-Unsubscribe=One-Click")
+            .await;
+        assert_eq!(one_click.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_one_click_post_alone_unsubscribes(pool: PgPool) {
         let fixture = Fixture::new(pool, "oneclick", "sent", 3600).await;
         let uri = format!("/u/{}", fixture.token(TokenKind::Unsubscribe, 0));

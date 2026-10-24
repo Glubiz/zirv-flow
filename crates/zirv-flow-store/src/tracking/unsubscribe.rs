@@ -318,6 +318,33 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        let offers = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO topics (id, workspace_id, key, name, channel, policy)              VALUES ($1, $2, 'offers', 'Offers', 'email', 'opt_in')",
+        )
+        .bind(offers)
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let dimension = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO consent_dimensions (id, workspace_id, key, name)              VALUES ($1, $2, 'region', 'Region')",
+        )
+        .bind(dimension)
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO consent_dimension_values (id, workspace_id, dimension_id, key, name)              VALUES ($1, $2, $3, 'north', 'North')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(dimension)
+        .execute(&pool)
+        .await
+        .unwrap();
         let choices = [
             PreferenceChange {
                 topic: Some(topic),
@@ -325,8 +352,8 @@ mod tests {
                 subscribed: true,
             },
             PreferenceChange {
-                topic: None,
-                dimensions: Dimensions::new(),
+                topic: Some(offers),
+                dimensions: Dimensions::from([("region".to_owned(), "north".to_owned())]),
                 subscribed: false,
             },
         ];
@@ -342,13 +369,14 @@ mod tests {
         .unwrap();
 
         assert_eq!((saved.changed, saved.unavailable), (2, false));
+        let events: Vec<Value> =
+            sqlx::query_scalar("SELECT properties FROM events WHERE name = 'email.unsubscribed'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(
-            count(
-                &pool,
-                "SELECT count(*) FROM events WHERE name = 'email.unsubscribed'"
-            )
-            .await,
-            1
+            events,
+            [json!({"topic_id": offers.to_string(), "dimensions": {"region": "north"}})]
         );
     }
 
@@ -391,26 +419,5 @@ mod tests {
             .await,
             1
         );
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_message_whose_person_is_gone_is_unavailable(pool: PgPool) {
-        let ws = workspace(&pool, "unsub3").await;
-        let (_, id) = message(&pool, ws).await;
-        let mut tracked = find_tracked_message(&pool, id).await.unwrap().unwrap();
-        tracked.person_id = Uuid::now_v7();
-
-        let result = unsubscribe_message(
-            &pool,
-            &tracked,
-            datetime!(2031-05-06 07:08:09 UTC),
-            &trace(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result, Unsubscribed::Unavailable);
-        assert_eq!(count(&pool, "SELECT count(*) FROM events").await, 0);
     }
 }

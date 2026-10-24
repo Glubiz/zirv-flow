@@ -84,11 +84,7 @@ mod tests {
 
     #[test]
     fn a_marker_in_the_middle_of_a_word_does_not_mark_the_open() {
-        for agent in [
-            "Mozilla/5.0 Robotic",
-            "abottle/1",
-            "Mozilla bots",
-        ] {
+        for agent in ["Mozilla/5.0 Robotic", "abottle/1", "Mozilla bots"] {
             assert_eq!(
                 machine_reason(Some(agent), &[], None, later(3600)),
                 None,

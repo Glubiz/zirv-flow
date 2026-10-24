@@ -281,8 +281,8 @@ pub use templates::{
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,
-    find_message_link, find_message_links, find_tracked_message, record_engagement, record_message_links,
-    save_preferences, unsubscribe_message,
+    find_message_link, find_message_links, find_tracked_message, record_engagement,
+    record_message_links, save_preferences, unsubscribe_message,
 };
 pub use webhooks::{
     HookReceive, NewWebhook, Webhook, WebhookUpdate, append_webhook, create_webhook,

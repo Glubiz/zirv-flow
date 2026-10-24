@@ -71,9 +71,9 @@ use zirv_flow_store::{
     MessageStatus, NewJob, NewMessage, NewSuppression, PgConnection, PgPool, SEND_JOB_KIND,
     SOFT_BOUNCE, SendOutcome, SubjectKind, WebhookPerson, WebhookSubject,
     add_organization_suppression, clear_message_in_flight, document_sender, find_destination,
-    find_flow, find_message_links, find_template, find_template_version, insert_message, lock_webhook_person,
-    mark_message_sending, mark_message_unconfirmed, message_in_flight, message_status,
-    message_unconfirmed, read_template_field_catalog, read_webhook_subject,
+    find_flow, find_message_links, find_template, find_template_version, insert_message,
+    lock_webhook_person, mark_message_sending, mark_message_unconfirmed, message_in_flight,
+    message_status, message_unconfirmed, read_template_field_catalog, read_webhook_subject,
     record_message_deferral, record_message_links, record_send_outcome, throttle_bucket,
 };
 
@@ -1601,13 +1601,10 @@ mod tests {
             assert_eq!(tokens.len(), urls.len());
             for (url, token) in urls.iter().zip(&tokens) {
                 let claims = verify(&tracking_key(), TokenKind::Click, token).unwrap();
-                let target = zirv_flow_store::find_message_link(
-                    &env.pool,
-                    claims.message,
-                    claims.link,
-                )
-                .await
-                .unwrap();
+                let target =
+                    zirv_flow_store::find_message_link(&env.pool, claims.message, claims.link)
+                        .await
+                        .unwrap();
                 assert_eq!(target.as_deref(), Some(*url));
             }
         }

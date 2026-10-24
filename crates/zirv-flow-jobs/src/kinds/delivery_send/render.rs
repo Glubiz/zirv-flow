@@ -424,7 +424,9 @@ mod tests {
         let context = RenderContext::default();
 
         assert_eq!(
-            render(None, json!({}), &context, None, &[]).await.unwrap_err(),
+            render(None, json!({}), &context, None, &[])
+                .await
+                .unwrap_err(),
             RENDER_ERROR
         );
     }
