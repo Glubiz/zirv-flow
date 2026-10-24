@@ -1330,7 +1330,10 @@ mod tests {
     /// Ingest cost of the outbox step: the same batches pushed through `apply_event_batch` into
     /// three workspaces, interleaved so drift hits all alike: the enqueue switched off (what the
     /// path cost before the outbox), no rule, and one active rule that matches about 10% of the
-    /// events. Prints the p50 and p99 batch time of each. Run with `--ignored --nocapture`.
+    /// events. Prints the p50 and p99 batch time of each. By default it runs 2 batches so that a
+    /// full test run stays short; the numbers in the architecture note come from
+    /// `ZIRV_MEASURE_BATCHES=200` (and `ZIRV_MEASURE_CASE=off|none|rule` to time one case alone),
+    /// run with `cargo test --release -- --ignored --nocapture`.
     #[sqlx::test]
     #[ignore = "measurement; requires PostgreSQL; run it by hand with --nocapture"]
     async fn ingest_batch_time_with_the_outbox_switched_off_with_no_rule_and_with_a_rule(
@@ -1339,7 +1342,7 @@ mod tests {
         let batches: usize = std::env::var("ZIRV_MEASURE_BATCHES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(200);
+            .unwrap_or(2);
         let warm_up: usize = 20.min(batches);
         const SIZE: usize = 500;
         let (off_ws, _) = fixture(&pool, "measure-off").await;
