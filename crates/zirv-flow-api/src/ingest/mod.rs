@@ -22,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::Value;
 use utoipa::ToSchema;
+use zirv_flow_core::signature::{self, SignatureError};
 
 use crate::AppState;
 use crate::auth::Principal;
@@ -519,6 +520,60 @@ fn invalid(errors: Vec<ItemError>) -> ApiError {
             })
             .collect(),
     )
+}
+
+/// A refused request to a public signed-webhook route and the metric label that counts it.
+pub(crate) struct Refusal {
+    pub(crate) error: ApiError,
+    pub(crate) outcome: &'static str,
+}
+
+impl Refusal {
+    pub(crate) fn new(error: ApiError, outcome: &'static str) -> Self {
+        Self { error, outcome }
+    }
+}
+
+/// The 401 of a signature that does not verify. Every cause shares one type and one detail but
+/// for a stale timestamp, which tells a sender with a bad clock; the cause is a metric label.
+pub(crate) fn invalid_signature(error: SignatureError) -> Refusal {
+    let (detail, outcome) = match error {
+        SignatureError::OutsideTolerance => (
+            "signature timestamp is outside the tolerance",
+            "signature_stale",
+        ),
+        SignatureError::MissingSignature | SignatureError::MissingTimestamp => {
+            ("signature is missing or invalid", "signature_missing")
+        }
+        SignatureError::MalformedSignature | SignatureError::MalformedTimestamp => {
+            ("signature is missing or invalid", "signature_malformed")
+        }
+        SignatureError::Mismatch => ("signature is missing or invalid", "signature_mismatch"),
+    };
+    Refusal::new(
+        ApiError::new(StatusCode::UNAUTHORIZED, detail).with_code("invalid_signature"),
+        outcome,
+    )
+}
+
+/// Verifies the signature a request carries over its body under `scheme`.
+pub(crate) fn verify_signature(
+    now: time::OffsetDateTime,
+    scheme: &signature::Scheme<'_>,
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> Result<signature::Verified, SignatureError> {
+    // Every value of a header counts: a sender in a rotation grace window signs with two secrets
+    // and sends one signature value for each.
+    let lookup = |name: &str| {
+        headers
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>()
+    };
+    signature::verify(scheme, secret, &lookup, body, now.unix_timestamp())
 }
 
 #[cfg(test)]
