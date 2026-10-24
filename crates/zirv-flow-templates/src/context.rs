@@ -80,6 +80,26 @@ impl RenderContext {
             .insert(RESERVED_EMAIL.to_owned(), Value::from(SAMPLE_EMAIL));
         context
     }
+
+    /// The context of a real person: the values of the traits the catalog knows (a trait the
+    /// registry archived is not offered to templates), their own address as `person.email` when
+    /// they have one, and sample event properties, because a preview or a test send has no
+    /// triggering event. `traits` is the person's stored traits object.
+    pub fn real_person(catalog: &FieldCatalog, traits: &Value, email: Option<String>) -> Self {
+        let mut context = Self::sample(catalog);
+        context.person.clear();
+        for key in catalog.person.keys() {
+            if let Some(value) = traits.get(key) {
+                context.person.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(email) = email {
+            context
+                .person
+                .insert(RESERVED_EMAIL.to_owned(), Value::from(email));
+        }
+        context
+    }
 }
 
 /// The message being rendered.
@@ -136,6 +156,25 @@ mod tests {
         let sample = RenderContext::sample_person(&FieldCatalog::default());
         assert_eq!(sample.person[RESERVED_EMAIL], Value::from(SAMPLE_EMAIL));
         assert_eq!(sample.message.id, "msg_sample");
+    }
+
+    #[test]
+    fn a_real_person_gets_only_the_fields_the_catalog_knows() {
+        let mut catalog = FieldCatalog::default().with_reserved_email();
+        catalog.person.insert("plan".into(), TraitType::String);
+        catalog.person.insert("age".into(), TraitType::Number);
+        let traits = serde_json::json!({"plan": "pro", "secret": "x"});
+
+        let context = RenderContext::real_person(&catalog, &traits, Some("ann@example.com".into()));
+
+        assert_eq!(context.person["plan"], Value::from("pro"));
+        assert_eq!(context.person["email"], Value::from("ann@example.com"));
+        assert!(!context.person.contains_key("secret"));
+        assert!(!context.person.contains_key("age"));
+        let without = RenderContext::real_person(&catalog, &traits, None);
+        assert!(!without.person.contains_key("email"));
+        let not_an_object = RenderContext::real_person(&catalog, &Value::Null, None);
+        assert!(not_an_object.person.is_empty());
     }
 
     #[test]

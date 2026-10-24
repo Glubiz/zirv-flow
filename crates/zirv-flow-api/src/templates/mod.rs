@@ -15,13 +15,38 @@ pub(crate) mod publish;
 pub(crate) mod where_used;
 
 use serde_json::Value;
-use zirv_flow_store::{Template, TemplateError, TemplateFieldCatalog};
+use zirv_flow_store::{Template, TemplateError, TemplateFieldCatalog, Workspace};
 use zirv_flow_templates::{
     BlocksError, Category, Channel, EmailContent, FieldCatalog, Issue, Mode, Severity,
     TemplateDocument, WebhookContent, parse_template_document,
 };
 
+use crate::AppState;
+use crate::auth::{Need, Principal, authorize};
 use crate::problem::{ApiError, TemplateIssueProblem};
+
+/// Authorizes a render of a template: the write role for a sample person, the admin role for a
+/// real one (their values are shown), whose refusal is `template_preview_values_forbidden`.
+pub(crate) async fn authorize_render(
+    state: &AppState,
+    principal: &Principal,
+    ws: zirv_flow_core::WorkspaceId,
+    real_person: bool,
+) -> Result<Workspace, ApiError> {
+    if !real_person {
+        return authorize(state, principal, ws, Need::Write).await;
+    }
+    // Until the `view_pii` grant exists, a real person's values are for admins.
+    authorize(state, principal, ws, Need::Admin)
+        .await
+        .map_err(|error| {
+            if error.status_code() == axum::http::StatusCode::FORBIDDEN {
+                ApiError::template_preview_values_forbidden()
+            } else {
+                error
+            }
+        })
+}
 
 /// The problem for a refused template write.
 pub(crate) fn template_error(error: TemplateError) -> ApiError {

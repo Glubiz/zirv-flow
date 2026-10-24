@@ -35,7 +35,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::warn;
@@ -47,13 +47,14 @@ use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, NewJob, SOFT_BOUNCE, TEST_SEND_JOB_KIND, TestSend,
     TestSendOutcome, find_destination, find_person, find_template, find_template_draft,
     find_template_version, find_user, finish_test_send, list_identities,
-    read_template_field_catalog, suppressing_scope, throttle_bucket,
+    read_template_field_catalog, suppressing_scope,
 };
 use zirv_flow_templates::FieldCatalog;
 
 use super::delivery_send::deliver::{self, Call};
 use super::delivery_send::gates;
 use super::delivery_send::render::{self, Tracker};
+use super::delivery_send::slow_down;
 use crate::delivery::Verdict;
 use crate::delivery::verdict::SMTP_DEFERRED;
 use crate::{JobContext, JobError, JobKind};
@@ -254,11 +255,7 @@ async fn decide(
                 .into_iter()
                 .find(|identity| identity.kind == "email")
                 .map(|identity| identity.value);
-            let traits = match &found.traits {
-                Value::Object(map) => map.clone(),
-                _ => Map::new(),
-            };
-            person_context(&catalog, &traits, email)
+            RenderContext::real_person(&catalog, &found.traits, email)
         }
     };
     let tracker = ctx.tracking().map(|(base, key)| Tracker {
@@ -330,12 +327,8 @@ async fn decide(
             retry_after,
             ..
         } => {
-            if reason == "http_429"
-                && throttle_bucket(&pool, destination.id, retry_after, ctx.clock())
-                    .await
-                    .is_err()
-            {
-                warn!(destination = %destination.id, "a destination's rate could not be slowed");
+            if reason == "http_429" {
+                slow_down(&pool, &destination, retry_after, ctx).await;
             }
             if ctx.attempts() < ctx.max_attempts() {
                 let error = JobError::new(message);
@@ -351,28 +344,6 @@ async fn decide(
             )
         }
     }
-}
-
-/// The context of a real person: the values of the traits the catalog knows, their own email
-/// identity as `person.email`, and sample event properties (a test has no triggering event).
-fn person_context(
-    catalog: &FieldCatalog,
-    traits: &Map<String, Value>,
-    email: Option<String>,
-) -> RenderContext {
-    let mut context = RenderContext::sample_person(catalog);
-    context.person.clear();
-    for key in catalog.person.keys() {
-        if let Some(value) = traits.get(key) {
-            context.person.insert(key.clone(), value.clone());
-        }
-    }
-    if let Some(email) = email {
-        context
-            .person
-            .insert("email".to_owned(), Value::from(email));
-    }
-    context
 }
 
 /// No token yet: this job ends and a copy runs when the bucket will hold one. The copy has its own
@@ -468,25 +439,6 @@ mod tests {
             }))
             .is_none()
         );
-    }
-
-    #[test]
-    fn a_real_persons_context_holds_their_traits_and_their_own_address() {
-        let mut catalog = FieldCatalog::default().with_reserved_email();
-        catalog
-            .person
-            .insert("plan".into(), zirv_flow_core::people::TraitType::String);
-        let traits = json!({"plan": "pro", "secret": "x"});
-
-        let context = person_context(
-            &catalog,
-            traits.as_object().unwrap(),
-            Some("p@example.test".into()),
-        );
-
-        assert_eq!(context.person["plan"], json!("pro"));
-        assert_eq!(context.person["email"], json!("p@example.test"));
-        assert!(!context.person.contains_key("secret"));
     }
 
     // The render host is this test binary run again, filtered to `render_host_child`, which does

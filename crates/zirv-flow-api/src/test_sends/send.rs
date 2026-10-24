@@ -19,6 +19,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
+use crate::templates::authorize_render;
 use crate::trace;
 
 /// Who a test goes to. Exactly one of the two fields is given.
@@ -103,20 +104,7 @@ pub(crate) async fn test_send(
     ApiJson(body): ApiJson<TestSendRequest>,
 ) -> Result<(StatusCode, Json<TestSendBody>), ApiError> {
     let ws = path_id(&ws)?;
-    let workspace = if body.person_id.is_some() {
-        // Until the `view_pii` grant exists, a real person's values are for admins.
-        authorize(&state, &principal, ws, Need::Admin)
-            .await
-            .map_err(|error| {
-                if error.status_code() == StatusCode::FORBIDDEN {
-                    ApiError::template_preview_values_forbidden()
-                } else {
-                    error
-                }
-            })?
-    } else {
-        authorize(&state, &principal, ws, Need::Write).await?
-    };
+    let workspace = authorize_render(&state, &principal, ws, body.person_id.is_some()).await?;
     let id: Uuid = path_id(&id)?;
     let key = state.identifier_key.as_deref().ok_or_else(unavailable)?;
     let trace = trace::current().ok_or_else(ApiError::internal)?;
