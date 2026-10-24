@@ -64,17 +64,25 @@ pub(crate) fn limiter() -> RateLimiter {
 
 /// The claims of a token of `kind` that may be used now, or the page that answers instead: a 404
 /// for anything that does not verify, a 429 past the message's rate.
-pub(super) fn admit(state: &AppState, kind: TokenKind, token: &str) -> Result<Claims, Response> {
-    let key = state.tracking_key.as_deref().ok_or_else(pages::not_found)?;
-    let claims = verify(key, kind, token).ok_or_else(pages::not_found)?;
+pub(super) fn admit(
+    state: &AppState,
+    kind: TokenKind,
+    token: &str,
+) -> Result<Claims, Box<Response>> {
+    let refuse = |response: Response| Box::new(response);
+    let key = state
+        .tracking_key
+        .as_deref()
+        .ok_or_else(|| refuse(pages::not_found()))?;
+    let claims = verify(key, kind, token).ok_or_else(|| refuse(pages::not_found()))?;
     // Only a click names a link; a token for the others carries 0.
     if kind != TokenKind::Click && claims.link != 0 {
-        return Err(pages::not_found());
+        return Err(refuse(pages::not_found()));
     }
     state
         .tracking_limiter
         .take(claims.message, 1, Instant::now())
-        .map_err(pages::rate_limited)?;
+        .map_err(|retry| refuse(pages::rate_limited(retry)))?;
     Ok(claims)
 }
 
@@ -101,7 +109,7 @@ pub(crate) async fn open(
 ) -> Response {
     let claims = match admit(&state, TokenKind::Open, &token) {
         Ok(claims) => claims,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if method != Method::GET {
         return gif();
@@ -153,7 +161,7 @@ pub(crate) async fn click(
 ) -> Response {
     let claims = match admit(&state, TokenKind::Click, &token) {
         Ok(claims) => claims,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let url = match find_message_link(&state.pool, claims.message, claims.link).await {
         Ok(Some(url)) => url,
@@ -211,7 +219,7 @@ pub(crate) async fn unsubscribe_page(
 ) -> Response {
     let claims = match admit(&state, TokenKind::Unsubscribe, &token) {
         Ok(claims) => claims,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match find_tracked_message(&state.pool, claims.message).await {
         Ok(Some(_)) => pages::confirm(&token),
@@ -239,7 +247,7 @@ pub(crate) async fn unsubscribe(
 ) -> Response {
     let claims = match admit(&state, TokenKind::Unsubscribe, &token) {
         Ok(claims) => claims,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let message = match find_tracked_message(&state.pool, claims.message).await {
         Ok(Some(message)) => message,

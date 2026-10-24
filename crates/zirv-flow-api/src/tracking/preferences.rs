@@ -6,11 +6,10 @@
 //! about the message's topic for that value alone, so leaving one vertical blocks only that
 //! vertical. The page shows the names the marketer chose and nothing about the person.
 
-use std::collections::HashSet;
-
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::response::Response;
+use hashbrown::HashSet;
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::consent::{Channel, Dimensions};
@@ -108,14 +107,14 @@ async fn load(state: &AppState, message: &TrackedMessage) -> Result<Loaded, Stor
     Ok(Loaded { groups, scopes })
 }
 
-async fn message_of(state: &AppState, token: &str) -> Result<TrackedMessage, Response> {
+async fn message_of(state: &AppState, token: &str) -> Result<TrackedMessage, Box<Response>> {
     let claims = admit(state, TokenKind::Unsubscribe, token)?;
     match find_tracked_message(&state.pool, claims.message).await {
         Ok(Some(message)) => Ok(message),
-        Ok(None) => Err(pages::not_found()),
+        Ok(None) => Err(Box::new(pages::not_found())),
         Err(error) => {
             warn!(%error, "the preference page could not be read");
-            Err(pages::unavailable())
+            Err(Box::new(pages::unavailable()))
         }
     }
 }
@@ -127,7 +126,7 @@ pub(crate) async fn preferences_page(
 ) -> Response {
     let message = match message_of(&state, &token).await {
         Ok(message) => message,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match load(&state, &message).await {
         Ok(loaded) => pages::preferences(&token, &loaded.groups, false),
@@ -154,7 +153,7 @@ pub(crate) async fn preferences_save(
 ) -> Response {
     let message = match message_of(&state, &token).await {
         Ok(message) => message,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let result = async {
         let loaded = load(&state, &message).await?;
