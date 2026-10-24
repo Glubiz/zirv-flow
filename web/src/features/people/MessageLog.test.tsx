@@ -272,10 +272,10 @@ describe("the words of a message", () => {
     await user.click(await screen.findByRole("button", { name: /Show the checks for/ }));
 
     const items = within(screen.getByRole("list", { name: "Send checks, in the order they run" })).getAllByRole("listitem");
-    const rate = items.findIndex((item) => item.textContent?.includes("Rate limit"));
+    const rate = items.findIndex((item) => item.textContent.includes("Rate limit"));
     expect(items[rate]).toHaveTextContent("Held here");
-    expect(items.slice(0, rate).every((item) => item.textContent?.includes("Passed"))).toBe(true);
-    expect(items.slice(rate + 1).every((item) => item.textContent?.includes("Not reached"))).toBe(true);
+    expect(items.slice(0, rate).every((item) => item.textContent.includes("Passed"))).toBe(true);
+    expect(items.slice(rate + 1).every((item) => item.textContent.includes("Not reached"))).toBe(true);
     expect(gateRows(rateLimited as unknown as Message).find((row) => row.state === "held")?.code).toBe("rate_limit");
   });
 

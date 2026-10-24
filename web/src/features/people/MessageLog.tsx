@@ -39,18 +39,18 @@ export function MessageLog({ workspaceId, personId }: MessageLogProps) {
   const rows = useRef<HTMLDivElement>(null);
   const footer = useRef<HTMLDivElement>(null);
   // How many messages were shown when "Load older" was pressed; focus moves once the page is in.
-  const [focusFrom, setFocusFrom] = useState<number | null>(null);
-  const shown = log.resource.status === "ready" ? log.resource.data : [];
-  const { loadingMore } = log;
+  const focusFrom = useRef<number | null>(null);
+  const { loadingMore, resource } = log;
   useEffect(() => {
-    if (focusFrom === null || loadingMore) return;
-    const first = shown[focusFrom];
+    const from = focusFrom.current;
+    if (from === null || loadingMore) return;
+    focusFrom.current = null;
+    const first = resource.status === "ready" ? resource.data[from] : undefined;
     const target = first
       ? rows.current?.querySelector<HTMLElement>(`[data-message-toggle="${first.id}"]`)
       : footer.current?.querySelector<HTMLElement>("button");
     target?.focus();
-    setFocusFrom(null);
-  }, [focusFrom, loadingMore, shown]);
+  }, [loadingMore, resource]);
 
   function toggle(id: string) {
     setExpanded((current) => {
@@ -148,7 +148,7 @@ export function MessageLog({ workspaceId, personId }: MessageLogProps) {
           {log.moreError ? <InlineError {...describeError(log.moreError)} /> : null}
           <Button
             onClick={() => {
-              setFocusFrom(loaded.length);
+              focusFrom.current = loaded.length;
               log.loadOlder();
             }}
             disabled={log.loadingMore}

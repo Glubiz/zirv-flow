@@ -1887,7 +1887,7 @@ As built (M1 skeleton):
 
 As built (message log, #231): `GET /api/v1/workspaces/{ws}/people/{id}/messages` (`read`) pages
 a person's `messages` newest first by `(created_at, id)` (`limit`, `before`, and the filters
-`result` = `sent`, `skipped`, `deferred` (a pending message) or `failed`, and `template_id`). It
+`result` = `sent`, `skipped`, `deferred` (pending with a rate-limit wait or a gate hold in force), `in_progress` (sending, or pending and not waiting) or `failed`, and `template_id`). It
 reads through `people.merged_into` and `person_merges`, so a merged-away id reads as its
 survivor; an unknown or erased person is 404. Each message carries the template (name, version,
 category), the flow and step (the step name only when the published graph gives its node one),
