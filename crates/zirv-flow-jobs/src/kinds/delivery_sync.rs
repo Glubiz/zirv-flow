@@ -213,7 +213,7 @@ impl JobKind for DeliverySync {
                             .into_iter()
                             .filter(|(name, _)| job.trait_keys.contains(name))
                             .collect();
-                        match call(ctx, &job, &plan, &key, &listed, number, now).await? {
+                        match call(ctx, &job, &plan, (person, &key), &listed, number, now).await? {
                             Called::Done(done) => done,
                             Called::Waiting => return Ok(()),
                         }
@@ -309,7 +309,7 @@ async fn call(
     ctx: &mut JobContext<'_>,
     job: &SyncJob,
     plan: &Plan,
-    key: &str,
+    (person, key): (Uuid, &str),
     traits: &Map<String, Value>,
     number: i32,
     now: OffsetDateTime,
@@ -329,7 +329,8 @@ async fn call(
     match gates.admit(&pool, plan.destination.id, &clock).await? {
         Admission::Granted => {}
         Admission::Wait(wait) => {
-            wait_for_token(ctx, job, wait, now).await?;
+            // Whether the copy was enqueued or the person is gone, this run ends with no call.
+            wait_for_token(ctx, job, person, wait, now).await?;
             return Ok(Called::Waiting);
         }
         Admission::Gone => return Ok(Called::Done(ended("destination_unavailable"))),
@@ -407,12 +408,23 @@ async fn slow_down(
 
 /// Re-enqueues the sync for when the bucket holds a token. The wait spends no attempt: the next
 /// run has the attempts this one had left, and numbers its calls on from the last one made.
+///
+/// The copy names the person, and an erasure purges the jobs that do. So the person is locked
+/// (`FOR KEY SHARE`, which the erasure's delete conflicts with) before the copy is inserted, and
+/// nothing is enqueued when the person is gone, exited or merged away. An erasure that holds the
+/// person first makes this wait, then find them gone; one that comes later waits for this
+/// transaction, and its purge, which runs after the delete, sees the committed copy.
 async fn wait_for_token(
     ctx: &mut JobContext<'_>,
     job: &SyncJob,
+    person: Uuid,
     wait: Duration,
     now: OffsetDateTime,
 ) -> Result<(), JobError> {
+    match lock_webhook_person(ctx.conn(), job.workspace, job.enrollment, person).await? {
+        WebhookPerson::Held => {}
+        WebhookPerson::Gone | WebhookPerson::Moved => return Ok(()),
+    }
     let attempts = ctx.attempts();
     let mut payload = ctx.payload().clone();
     if let Some(map) = payload.as_object_mut() {
@@ -669,23 +681,35 @@ mod tests {
             .unwrap()
         }
 
+        /// The handler on `claimed`, in the worker's transaction `tx`.
+        async fn run(
+            &self,
+            tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+            claimed: &ClaimedJob,
+        ) -> Result<(), JobError> {
+            let egress = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
+            let mut ctx = JobContext::new(tx, claimed)
+                .with_outbound(None, egress, Arc::default())
+                .with_ingest(IngestSettings {
+                    pool: self.pool.clone(),
+                    redaction_key: None,
+                    batch_size: 1,
+                    shards: 1,
+                });
+            DeliverySync.run(&mut ctx, claimed.payload.clone()).await
+        }
+
         /// Claims the job and runs one attempt as a worker does: the work commits with the
         /// job's completion, and an error rolls it back and puts the job up again at once.
         async fn attempt(&self) -> Result<(), JobError> {
             let claimed = self.claim().await.expect("a delivery.sync job is ready");
-            let egress = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
+            self.attempt_claimed(claimed).await
+        }
+
+        /// As [`attempt`](Self::attempt), for a job already claimed.
+        async fn attempt_claimed(&self, claimed: ClaimedJob) -> Result<(), JobError> {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
-            let result = {
-                let mut ctx = JobContext::new(&mut tx, &claimed)
-                    .with_outbound(None, egress, Arc::default())
-                    .with_ingest(IngestSettings {
-                        pool: self.pool.clone(),
-                        redaction_key: None,
-                        batch_size: 1,
-                        shards: 1,
-                    });
-                DeliverySync.run(&mut ctx, claimed.payload.clone()).await
-            };
+            let result = self.run(&mut tx, &claimed).await;
             match result {
                 Ok(()) => {
                     zirv_flow_store::complete_job(&mut *tx, claimed.id, claimed.lease_token)
@@ -1073,6 +1097,158 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((waits, attempts, base), (1, 5, 0));
+    }
+
+    /// A second sync that must wait for a token, its job naming a person as `flow.step` writes
+    /// it (the erasure purges by that name). The one token the bucket has is spent first.
+    async fn waiting_sync_of_a_person(env: &Env) -> Uuid {
+        let first = env.enroll(env.person().await).await;
+        env.queue(&first, "upsert", 5).await;
+        env.attempt().await.unwrap();
+        let person = env.person().await;
+        let second = env.enroll(person).await;
+        let key = env.queue(&second, "upsert", 5).await;
+        sqlx::query(
+            "UPDATE jobs SET payload = jsonb_set(payload, '{person_id}', to_jsonb($2::text)) \
+             WHERE unique_key = $1",
+        )
+        .bind(key)
+        .bind(person.to_string())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        person
+    }
+
+    async fn sync_jobs(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'delivery.sync'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn wait_until_something_waits_for_a_lock(pool: &PgPool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND cardinality(pg_blocking_pids(pid)) > 0)",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "nothing waited for a lock"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rate_wait_that_meets_an_erasure_in_flight_enqueues_no_copy(pool: PgPool) {
+        let env = Env::with(pool, |manifest| manifest, 1, 1).await;
+        let person = waiting_sync_of_a_person(&env).await;
+        // The worker has the job (an erasure marks a running job instead of deleting it).
+        let claimed = env.claim().await.expect("the waiting sync is ready");
+        let trace = TraceContext::root(Cause::api("erase"));
+        // The erasure has deleted the person and purged the jobs, and has not committed.
+        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+        zirv_flow_store::delete_person(
+            &mut erasure,
+            env.ws,
+            person,
+            zirv_flow_store::DeleteReason::Erasure,
+            &trace,
+        )
+        .await
+        .unwrap();
+
+        let commit_when_the_handler_waits = async {
+            wait_until_something_waits_for_a_lock(&env.pool).await;
+            zirv_flow_store::commit(erasure).await.unwrap();
+        };
+        let (result, ()) =
+            tokio::join!(env.attempt_claimed(claimed), commit_when_the_handler_waits);
+
+        result.unwrap();
+        assert_eq!(
+            sync_jobs(&env.pool).await,
+            0,
+            "no job names the erased person"
+        );
+        assert_eq!(env.fake.requests(), 1, "the waiting sync made no call");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_that_follows_a_rate_wait_purges_the_copy_it_enqueued(pool: PgPool) {
+        let env = Env::with(pool, |manifest| manifest, 1, 1).await;
+        let person = waiting_sync_of_a_person(&env).await;
+        let claimed = env.claim().await.expect("the waiting sync is ready");
+        let mut handler = zirv_flow_store::begin(&env.pool).await.unwrap();
+        env.run(&mut handler, &claimed).await.unwrap();
+        let copies: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE unique_key LIKE '%:wait:1'")
+                .fetch_one(&mut *handler)
+                .await
+                .unwrap();
+        assert_eq!(
+            copies, 1,
+            "the wait copy is enqueued in the handler's transaction"
+        );
+
+        // The erasure starts while the handler holds the person, and waits for it.
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (pool, ws) = (env.pool.clone(), env.ws);
+        let erasure = tokio::spawn(async move {
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            sender.send(pid).unwrap();
+            let trace = TraceContext::root(Cause::api("erase"));
+            zirv_flow_store::delete_person(
+                &mut tx,
+                ws,
+                person,
+                zirv_flow_store::DeleteReason::Erasure,
+                &trace,
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        });
+        let pid = receiver.await.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !sqlx::query_scalar::<_, bool>("SELECT cardinality(pg_blocking_pids($1)) > 0")
+            .bind(pid)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the erasure never waited"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        zirv_flow_store::complete_job(&mut *handler, claimed.id, claimed.lease_token)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(handler).await.unwrap();
+        erasure.await.unwrap();
+
+        assert_eq!(
+            sync_jobs(&env.pool).await,
+            0,
+            "the copy went with the erasure"
+        );
     }
 
     fn payload() -> Value {
