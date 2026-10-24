@@ -20,4 +20,5 @@ pub use log::{
     TestSend, TestSendCursor, TestSendOutcome, TestSendReservation, WORKSPACE_HOURLY_LIMIT,
     abandon_orphaned_test_sends, delete_test_sends_before, delete_test_sends_by_hash,
     find_test_send, finish_test_send, is_test_send, list_test_sends, reserve_test_send,
+    test_send_may_go,
 };

@@ -51,7 +51,7 @@ use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, NewJob, SOFT_BOUNCE, TEST_SEND_JOB_KIND, TestSend,
     TestSendOutcome, find_destination, find_person, find_template, find_template_draft,
     find_template_version, find_user, finish_test_send, list_identities, membership_role,
-    open_allowlist_address, read_template_field_catalog, suppressing_scope,
+    open_allowlist_address, read_template_field_catalog, suppressing_scope, test_send_may_go,
 };
 use zirv_flow_templates::FieldCatalog;
 
@@ -311,6 +311,13 @@ async fn decide(
         Admission::Granted => {}
         Admission::Wait(wait) => return defer(ctx, job, payload, wait, now).await,
         Admission::Gone => return end(TestSendOutcome::Failed, "destination_unavailable"),
+    }
+
+    // An erasure can commit while the job renders and waits for a token: the row and the person
+    // are checked again in one statement, right before the call. The send job holds no lock over
+    // its call either, so the call itself is the one window left.
+    if !test_send_may_go(ctx.conn(), workspace, row.id, job.person).await? {
+        return end(TestSendOutcome::RenderFailed, "person_unavailable");
     }
 
     // The call, holding no lock. The log id is the idempotency key.
@@ -1407,6 +1414,89 @@ mod tests {
 
         assert!(fake_ledger_calls(&env.ledger).is_empty());
         assert_eq!(env.count("SELECT count(*) FROM jobs").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_erased_after_the_render_and_before_the_call_gets_no_call(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let template = env.html_template().await;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(env.ws.as_uuid())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let id = env
+            .reserve_with(
+                template,
+                "qa@example.org",
+                None,
+                Some(person),
+                env.sender,
+                Some(1),
+            )
+            .await;
+        // The rate token is the step between the render and the call: hold the bucket's row so
+        // the job waits there, and let the erasure commit meanwhile.
+        sqlx::query(
+            "INSERT INTO destination_rate_buckets \
+                (destination_id, workspace_id, rate, burst, tokens, refilled_at) \
+             SELECT id, workspace_id, rate, burst, burst, now() FROM destinations WHERE id = $1 \
+             ON CONFLICT (destination_id) DO NOTHING",
+        )
+        .bind(env.destination)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        let mut holder = zirv_flow_store::begin(&env.pool).await.unwrap();
+        sqlx::query("SELECT 1 FROM destination_rate_buckets WHERE destination_id = $1 FOR UPDATE")
+            .bind(env.destination)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let erase = async {
+            let mut waiting = false;
+            for _ in 0..400 {
+                let blocked: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+                       AND query LIKE '%destination_rate_buckets%'",
+                )
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+                if blocked > 0 {
+                    waiting = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(waiting, "the job reached the rate token");
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let deleted = zirv_flow_store::delete_person(
+                &mut tx,
+                env.ws,
+                person,
+                zirv_flow_store::DeleteReason::Erasure,
+                &env.trace,
+            )
+            .await
+            .unwrap();
+            assert!(deleted);
+            zirv_flow_store::commit(tx).await.unwrap();
+            zirv_flow_store::commit(holder).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(env.attempt(), erase);
+        result.unwrap();
+
+        assert!(fake_ledger_calls(&env.ledger).is_empty());
+        assert_eq!(
+            env.row(id).await.outcome,
+            TestSendOutcome::RenderFailed,
+            "the row ends without a call"
+        );
     }
 
     #[sqlx::test]

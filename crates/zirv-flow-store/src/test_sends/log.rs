@@ -270,6 +270,30 @@ pub async fn find_test_send(
     row.map(Row::into_send).transpose()
 }
 
+/// Whether the call may still be made: the row exists and is `queued`, and, for a render of a
+/// real person, that person still exists. One statement, run right before the destination call,
+/// so an erasure that committed while the job rendered is seen; the erasure deletes the person
+/// and the row of their address hash in one transaction.
+pub async fn test_send_may_go(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    person: Option<Uuid>,
+) -> Result<bool, StoreError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM test_sends \
+                        WHERE workspace_id = $1 AND id = $2 AND outcome = 'queued') \
+            AND ($3::uuid IS NULL \
+                 OR EXISTS (SELECT 1 FROM people WHERE workspace_id = $1 AND id = $3))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(person)
+    .fetch_one(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Whether a test send has this id. The unsubscribe routes ask it of a token whose message does
 /// not exist.
 pub async fn is_test_send(pool: &PgPool, id: Uuid) -> Result<bool, StoreError> {
