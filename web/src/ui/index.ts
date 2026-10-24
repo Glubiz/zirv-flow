@@ -29,5 +29,5 @@ export {
 } from "./transforms";
 export type { Transform, TraitType, TransformDraft, TransformOp } from "./transforms";
 export { formatAgo, formatDate, formatDateTime, formatDuration, shortId } from "./format";
-export { builtInRuleText, gateLabel, isBuiltInRule, reasonLabel, SEND_GATES, waitLabel } from "./sendLabels";
+export { builtInRuleText, gateLabel, reasonLabel, SEND_GATES, waitLabel } from "./sendLabels";
 export type { SendGate } from "./sendLabels";

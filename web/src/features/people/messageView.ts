@@ -1,5 +1,5 @@
 import type { components } from "../../api";
-import { builtInRuleText, formatDateTime, gateLabel, isBuiltInRule, reasonLabel, SEND_GATES, waitLabel } from "../../ui";
+import { builtInRuleText, formatDateTime, gateLabel, reasonLabel, SEND_GATES, waitLabel } from "../../ui";
 
 export type Message = components["schemas"]["MessageBody"];
 type GateResult = components["schemas"]["GateResultBody"];
@@ -99,7 +99,7 @@ export function explain(message: Message): string {
     case "skipped": {
       if (reason === "no_consent") {
         const rule = message.deciding_rule ?? null;
-        if (rule && !isBuiltInRule(rule)) {
+        if (rule && builtInRuleText(rule) === null) {
           return `The consent policy rule "${rule}" matched, so the message was not sent.${after}`;
         }
         return `${rule ? (builtInRuleText(rule) ?? "") : ""}${rule ? " " : ""}No consent allowed this message.${after}`.trim();

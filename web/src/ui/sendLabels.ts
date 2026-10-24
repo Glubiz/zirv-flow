@@ -76,10 +76,7 @@ const BUILT_IN_RULES: Record<string, string> = {
   suppression_organization: "The address is suppressed in the whole organization.",
 };
 
-export function isBuiltInRule(rule: string | null | undefined): boolean {
-  return rule !== null && rule !== undefined && rule in BUILT_IN_RULES;
-}
-
+/** The words for a built-in rule, or none for a rule of the consent policy. */
 export function builtInRuleText(rule: string): string | null {
   return BUILT_IN_RULES[rule] ?? null;
 }

@@ -5,7 +5,6 @@ import type { Message } from "./messageView";
 
 type Page = components["schemas"]["MessagesBody"];
 
-
 const PAGE_SIZE = 25;
 
 export type ResultFilter = "" | "sent" | "skipped" | "deferred" | "failed";

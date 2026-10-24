@@ -184,7 +184,7 @@ function MessageRows({ workspaceId, message, open, onToggle }: { workspaceId: st
       {open ? (
         <tr id={detailId} className="message-open">
           <td colSpan={6} className="message-detail-cell">
-            <Checks workspaceId={workspaceId} message={message} />
+            <Checks workspaceId={workspaceId} message={message} result={result} />
           </td>
         </tr>
       ) : null}
@@ -249,7 +249,14 @@ const GATE_WORDS: Record<GateRow["state"], string> = {
   not_reached: "Not reached",
 };
 
-function Checks({ workspaceId, message }: { workspaceId: string; message: Message }) {
+const GATE_TONES: Record<GateRow["state"], string> = {
+  passed: "st st-ok",
+  stopped: "st st-skip",
+  held: "st st-defer",
+  not_reached: "faint",
+};
+
+function Checks({ workspaceId, message, result }: { workspaceId: string; message: Message; result: MessageResult }) {
   const rows = gateRows(message);
   return (
     <div className="message-detail">
@@ -258,7 +265,7 @@ function Checks({ workspaceId, message }: { workspaceId: string; message: Messag
           <li key={row.code} className={`message-gate message-gate-${row.state}`}>
             <span className="faint">{index + 1}</span>
             <span className="strong">{row.label}</span>
-            <span className={row.state === "passed" ? "st st-ok" : row.state === "stopped" ? "st st-skip" : row.state === "held" ? "st st-defer" : "faint"}>
+            <span className={GATE_TONES[row.state]}>
               {GATE_WORDS[row.state]}
               {row.reason ? (
                 <>
@@ -272,7 +279,7 @@ function Checks({ workspaceId, message }: { workspaceId: string; message: Messag
       </ol>
       <div className="message-cards">
         <div className="message-card">
-          <p className="strong">{cardTitle(message)}</p>
+          <p className="strong">{cardTitle(result)}</p>
           <p>{explain(message)}</p>
         </div>
         <div className="message-card">
@@ -297,7 +304,6 @@ function Checks({ workspaceId, message }: { workspaceId: string; message: Messag
   );
 }
 
-function cardTitle(message: Message): string {
-  const result = resultOf(message);
+function cardTitle(result: MessageResult): string {
   return `${result.headline}${result.code ? `: ${result.code}` : ""}`;
 }
