@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 
 import { client, describeError, unwrap, useResource } from "../../api";
@@ -17,6 +17,7 @@ const RESULTS: readonly { value: ResultFilter; label: string }[] = [
   { value: "sent", label: "Sent" },
   { value: "skipped", label: "Skipped" },
   { value: "deferred", label: "Deferred" },
+  { value: "in_progress", label: "In progress" },
   { value: "failed", label: "Failed" },
 ];
 
@@ -35,6 +36,21 @@ export function MessageLog({ workspaceId, personId }: MessageLogProps) {
   );
   const resultId = useId();
   const templateId = useId();
+  const rows = useRef<HTMLDivElement>(null);
+  const footer = useRef<HTMLDivElement>(null);
+  // How many messages were shown when "Load older" was pressed; focus moves once the page is in.
+  const [focusFrom, setFocusFrom] = useState<number | null>(null);
+  const shown = log.resource.status === "ready" ? log.resource.data : [];
+  const { loadingMore } = log;
+  useEffect(() => {
+    if (focusFrom === null || loadingMore) return;
+    const first = shown[focusFrom];
+    const target = first
+      ? rows.current?.querySelector<HTMLElement>(`[data-message-toggle="${first.id}"]`)
+      : footer.current?.querySelector<HTMLElement>("button");
+    target?.focus();
+    setFocusFrom(null);
+  }, [focusFrom, loadingMore, shown]);
 
   function toggle(id: string) {
     setExpanded((current) => {
@@ -97,7 +113,7 @@ export function MessageLog({ workspaceId, personId }: MessageLogProps) {
         }
       >
         {(messages) => (
-          <div className="table-scroll">
+          <div className="table-scroll" ref={rows}>
             <table className="table message-table">
               <caption>Messages to this person, newest first, with the result of each</caption>
               <thead>
@@ -128,9 +144,15 @@ export function MessageLog({ workspaceId, personId }: MessageLogProps) {
         )}
       </ResourceView>
       {log.resource.status === "ready" && log.nextBefore !== null ? (
-        <div className="panel-footer">
+        <div className="panel-footer" ref={footer}>
           {log.moreError ? <InlineError {...describeError(log.moreError)} /> : null}
-          <Button onClick={log.loadOlder} disabled={log.loadingMore}>
+          <Button
+            onClick={() => {
+              setFocusFrom(loaded.length);
+              log.loadOlder();
+            }}
+            disabled={log.loadingMore}
+          >
             {log.loadingMore ? "Loading" : "Load older"}
           </Button>
           {loaded.length > 0 ? <span className="faint">Showing messages since {formatDateTime(loaded[loaded.length - 1]?.created_at ?? "")}</span> : null}
@@ -171,7 +193,8 @@ function MessageRows({ workspaceId, message, open, onToggle }: { workspaceId: st
             type="button"
             className="icon-btn"
             aria-expanded={open}
-            aria-controls={open ? detailId : undefined}
+            aria-controls={detailId}
+            data-message-toggle={message.id}
             aria-label={`${open ? "Hide" : "Show"} the checks for ${name}`}
             onClick={onToggle}
           >
@@ -181,13 +204,11 @@ function MessageRows({ workspaceId, message, open, onToggle }: { workspaceId: st
           </button>
         </td>
       </tr>
-      {open ? (
-        <tr id={detailId} className="message-open">
-          <td colSpan={6} className="message-detail-cell">
-            <Checks workspaceId={workspaceId} message={message} result={result} />
-          </td>
-        </tr>
-      ) : null}
+      <tr id={detailId} className="message-open" hidden={!open}>
+        <td colSpan={6} className="message-detail-cell">
+          {open ? <Checks workspaceId={workspaceId} message={message} result={result} /> : null}
+        </td>
+      </tr>
     </>
   );
 }

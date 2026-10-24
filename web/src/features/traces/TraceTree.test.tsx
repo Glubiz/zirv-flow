@@ -92,6 +92,23 @@ describe("trace tree", () => {
     expect(within(rows[2] as HTMLElement).getByRole("link", { name: "Flow" })).toHaveAttribute("href", "/w/ws1/flows/f1");
   });
 
+  it("labels a worker's attempt record that has no subjects, with no link", () => {
+    const attempt = (outcome: string, reason: string | null, number: number | null): TraceTreeRecord => ({
+      ...record("9", outcome, START, reason ?? undefined),
+      action: "job.attempt",
+      attempt: number,
+    });
+    render(
+      <MemoryRouter>
+        <TraceTree label="Attempts" workspaceId="ws1" records={[attempt("failed", "http_503", 2), attempt("succeeded", null, 3)]} />
+      </MemoryRouter>,
+    );
+
+    const rows = Array.from(screen.getByRole("list", { name: "Attempts" }).querySelectorAll("li.trace-record"));
+    expect(rows.map((row) => row.querySelector(".strong")?.textContent.trim())).toEqual(["Attempt 2 failed: http 503", "Attempt 3 succeeded"]);
+    expect(within(rows[0] as HTMLElement).queryByRole("link")).not.toBeInTheDocument();
+  });
+
   it("words the delivery feedback and the tracking events, and leaves a decision it does not know as its codes", () => {
     const labelled = (action: string, outcome: string, reason: string | null) => recordLabel({ action, outcome, reason, subject_ids: {} });
 

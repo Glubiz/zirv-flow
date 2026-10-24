@@ -167,6 +167,62 @@ describe("the message log of a person", () => {
     });
   });
 
+  it("gives every expand button a details region that exists, hidden, while the row is collapsed", async () => {
+    mount({ [MESSAGES]: () => json({ messages: [SKIPPED, SENT], next_before: null }) });
+
+    const toggles = await screen.findAllByRole("button", { name: /Show the checks for/ });
+    expect(toggles).toHaveLength(2);
+    for (const toggle of toggles) {
+      const id = toggle.getAttribute("aria-controls");
+      expect(id).toMatch(/^message-.+-checks$/);
+      const region = document.getElementById(id ?? "");
+      expect(region).not.toBeNull();
+      expect(region).not.toBeVisible();
+    }
+  });
+
+  it("moves focus to the first row that Load older brought in", async () => {
+    const user = userEvent.setup();
+    mount({
+      [MESSAGES]: (request) => {
+        if (new URL(request.url).searchParams.get("before") === "cursor-1") return json({ messages: [SENT], next_before: null });
+        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+      },
+    });
+
+    await screen.findByRole("row", { name: /Skipped/ });
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+
+    await waitFor(() => expect(screen.getAllByRole("row")).toHaveLength(3));
+    const rows = screen.getAllByRole("button", { name: /Show the checks for/ });
+    await waitFor(() => expect(rows[1]).toHaveFocus());
+  });
+
+  it("keeps focus on Load older when the next page brings nothing new", async () => {
+    const user = userEvent.setup();
+    mount({
+      [MESSAGES]: (request) => {
+        if (new URL(request.url).searchParams.get("before") === "cursor-1") return json({ messages: [], next_before: "cursor-2" });
+        return json({ messages: [SKIPPED], next_before: "cursor-1" });
+      },
+    });
+
+    await screen.findByRole("row", { name: /Skipped/ });
+    await user.click(screen.getByRole("button", { name: "Load older" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Load older" })).toHaveFocus());
+  });
+
+  it("offers In progress in the Result filter and asks for it", async () => {
+    const user = userEvent.setup();
+    const calls = mount({ [MESSAGES]: () => json({ messages: [SENT], next_before: null }) });
+
+    await screen.findByRole("row", { name: /Sent/ });
+    await user.selectOptions(screen.getByLabelText("Result"), "In progress");
+
+    await waitFor(() => expect(calls.filter((call) => call.path.endsWith("/messages")).at(-1)?.search).toContain("result=in_progress"));
+  });
+
   it("says so when there are no messages", async () => {
     mount({ [MESSAGES]: () => json({ messages: [], next_before: null }) });
 
@@ -200,6 +256,27 @@ describe("the words of a message", () => {
     expect(resultOf(held).kind).toBe("deferred");
     expect(explain(held)).toMatch(/Held by the quiet hours until .* Every check runs again then\./);
     expect(resultOf({ ...held, deferred_until: null }).kind).toBe("waiting");
+  });
+
+  it("shows a rate-limit hold on the Rate limit check, with the checks before it passed", async () => {
+    const user = userEvent.setup();
+    const rateLimited = message("00000000-0000-4000-8000-000000000005", {
+      status: "pending",
+      completed_at: null,
+      gate_results: [],
+      deferred_until: "2026-10-23T06:00:00Z",
+      deferred_why: "rate_limit",
+    });
+    mount({ [MESSAGES]: () => json({ messages: [rateLimited], next_before: null }) });
+
+    await user.click(await screen.findByRole("button", { name: /Show the checks for/ }));
+
+    const items = within(screen.getByRole("list", { name: "Send checks, in the order they run" })).getAllByRole("listitem");
+    const rate = items.findIndex((item) => item.textContent?.includes("Rate limit"));
+    expect(items[rate]).toHaveTextContent("Held here");
+    expect(items.slice(0, rate).every((item) => item.textContent?.includes("Passed"))).toBe(true);
+    expect(items.slice(rate + 1).every((item) => item.textContent?.includes("Not reached"))).toBe(true);
+    expect(gateRows(rateLimited as unknown as Message).find((row) => row.state === "held")?.code).toBe("rate_limit");
   });
 
   it("explains a recorded-consent skip with the built-in rule, not a policy rule", () => {

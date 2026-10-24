@@ -7,7 +7,7 @@ type Page = components["schemas"]["MessagesBody"];
 
 const PAGE_SIZE = 25;
 
-export type ResultFilter = "" | "sent" | "skipped" | "deferred" | "failed";
+export type ResultFilter = "" | "sent" | "skipped" | "deferred" | "in_progress" | "failed";
 
 export interface MessageFilter {
   result: ResultFilter;

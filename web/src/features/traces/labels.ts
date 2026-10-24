@@ -2,6 +2,7 @@ import { gateLabel, reasonLabel } from "../../ui";
 
 /** The part of a decision record the labels read. */
 interface Labelled {
+  attempt?: number | null;
   action: string;
   outcome: string;
   reason?: string | null;
@@ -35,6 +36,16 @@ const MAIL_EVENTS: Record<string, string> = {
 };
 
 /**
+ * A job attempt the worker recorded, with no subject ids to link: it names the attempt, how it
+ * ended and why, and nothing it cannot know.
+ */
+function attemptLabel(record: Labelled): string {
+  const number = record.attempt != null ? `Attempt ${record.attempt}` : "Attempt";
+  const how = record.outcome === "failed" || record.outcome === "succeeded" ? record.outcome : record.outcome.replaceAll("_", " ");
+  return record.reason ? `${number} ${how}: ${reasonLabel(record.reason)}` : `${number} ${how}`;
+}
+
+/**
  * What a send decision says in plain words, or none for a decision this map does not know. The
  * record's own codes are shown beside it, so nothing is lost when the words are missing.
  */
@@ -52,7 +63,8 @@ export function recordLabel(record: Labelled): string | null {
     case "suppression.feedback":
       return record.outcome === "added" ? "The address was suppressed after the feedback" : "The feedback could not suppress the address";
     case "job.attempt":
-      return "destination" in record.subject_ids ? `Attempt to reach the destination: ${record.outcome.replaceAll("_", " ")}` : null;
+      if ("destination" in record.subject_ids) return `Attempt to reach the destination: ${record.outcome.replaceAll("_", " ")}`;
+      return attemptLabel(record);
     default:
       return MAIL_EVENTS[record.action] ? `${MAIL_EVENTS[record.action]}${record.reason === "hard" || record.reason === "soft" ? ` (${record.reason})` : ""}` : null;
   }

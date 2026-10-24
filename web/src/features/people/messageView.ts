@@ -30,11 +30,18 @@ export function gateRows(message: Message): GateRow[] {
   const last = lastByGate(message.gate_results);
   const known = new Set(SEND_GATES.map((gate) => gate.code));
   const extra = [...last.keys()].filter((code) => !known.has(code)).map((code) => ({ code, label: gateLabel(code) }));
-  return [...SEND_GATES, ...extra].map(({ code, label }) => {
+  const all = [...SEND_GATES, ...extra];
+  // The rate limit holds a message without writing a verdict of its own: the checks before it have
+  // passed, and it is the one that holds the message.
+  const rateHeld = message.status === "pending" && message.deferred_why === "rate_limit" && message.deferred_until != null;
+  const rateAt = all.findIndex((gate) => gate.code === "rate_limit");
+  return all.map(({ code, label }, index) => {
     const found = last.get(code);
     let state: GateState = "not_reached";
-    if (found?.result === "passed") state = "passed";
-    else if (found?.result === "deferred") state = message.status === "pending" ? "held" : "passed";
+    if (rateHeld && rateAt >= 0 && index === rateAt && !found) state = "held";
+    else if (rateHeld && index < rateAt) state = found && found.result !== "passed" && found.result !== "deferred" ? "stopped" : "passed";
+    else if (found?.result === "passed") state = "passed";
+    else if (found?.result === "deferred") state = message.status === "pending" && !rateHeld ? "held" : "passed";
     else if (found) state = "stopped";
     return { code, label, state, reason: state === "stopped" ? (found?.reason ?? null) : null };
   });
