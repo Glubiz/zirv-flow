@@ -15,6 +15,12 @@ pub const SAMPLE_UNSUBSCRIBE_URL: &str = "https://unsubscribe.sample.invalid/u";
 /// The preference-centre URL of the sample context.
 pub const SAMPLE_PREFERENCES_URL: &str = "https://preferences.sample.invalid/p";
 
+/// The address a sample person has.
+pub const SAMPLE_EMAIL: &str = "sample@example.invalid";
+/// The reserved person field the send address arrives in (`person.email`). It is a string and
+/// always known to a template, whatever the field registry holds.
+pub const RESERVED_EMAIL: &str = "email";
+
 /// The values behind `person`, `event`, `message` and `system` in a template.
 ///
 /// Person traits and event properties carry their registry type (string, number, boolean, list):
@@ -62,6 +68,16 @@ impl RenderContext {
         context.message.id = "msg_sample".to_owned();
         context.system.unsubscribe_url = SAMPLE_UNSUBSCRIBE_URL.to_owned();
         context.system.preferences_url = SAMPLE_PREFERENCES_URL.to_owned();
+        context
+    }
+
+    /// [`Self::sample`] with the sample person's address as `person.email`: what a preview of a
+    /// sample person and a test send with no person render.
+    pub fn sample_person(catalog: &FieldCatalog) -> Self {
+        let mut context = Self::sample(catalog);
+        context
+            .person
+            .insert(RESERVED_EMAIL.to_owned(), Value::from(SAMPLE_EMAIL));
         context
     }
 }
@@ -113,6 +129,13 @@ mod tests {
         assert_eq!(sample.message.id, "msg_sample");
         assert_eq!(sample.system.unsubscribe_url, SAMPLE_UNSUBSCRIBE_URL);
         assert_eq!(sample, RenderContext::sample(&catalog));
+    }
+
+    #[test]
+    fn the_sample_person_has_the_sample_address() {
+        let sample = RenderContext::sample_person(&FieldCatalog::default());
+        assert_eq!(sample.person[RESERVED_EMAIL], Value::from(SAMPLE_EMAIL));
+        assert_eq!(sample.message.id, "msg_sample");
     }
 
     #[test]

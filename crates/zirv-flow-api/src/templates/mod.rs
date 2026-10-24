@@ -23,10 +23,6 @@ use zirv_flow_templates::{
 
 use crate::problem::{ApiError, TemplateIssueProblem};
 
-/// The reserved person field the send address will arrive in (`person.email`). It is a string and
-/// always known to a template, whatever the field registry holds.
-const RESERVED_EMAIL: &str = "email";
-
 /// The problem for a refused template write.
 pub(crate) fn template_error(error: TemplateError) -> ApiError {
     match error {
@@ -50,15 +46,11 @@ pub(crate) fn name_taken(error: zirv_flow_store::StoreError) -> ApiError {
 
 /// The renderer's field catalog from the store's read, plus the reserved `person.email`.
 pub(crate) fn field_catalog(read: TemplateFieldCatalog) -> FieldCatalog {
-    let mut catalog = FieldCatalog {
+    FieldCatalog {
         person: read.traits.into_iter().collect(),
         event: read.event_properties.into_iter().collect(),
-    };
-    catalog.person.insert(
-        RESERVED_EMAIL.to_owned(),
-        zirv_flow_core::people::TraitType::String,
-    );
-    catalog
+    }
+    .with_reserved_email()
 }
 
 /// The document as the renderer reads it, or the 422 that says it is not a template document. A

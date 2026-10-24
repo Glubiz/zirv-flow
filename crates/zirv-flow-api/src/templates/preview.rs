@@ -29,9 +29,6 @@ use crate::problem::{ApiError, Problem, TemplateIssueProblem};
 /// Where an inert link points: the structure of a real tracked link, none of its meaning.
 const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
 
-/// The address a sample person has.
-const SAMPLE_EMAIL: &str = "sample@example.invalid";
-
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct TemplatePreviewRequest {
     /// Preview as this person. Needs the workspace admin role, because the render shows their
@@ -73,15 +70,6 @@ pub(crate) struct TemplatePreviewBody {
     body: Option<String>,
     /// The same checks a publish makes, against the workspace's fields now.
     issues: Vec<TemplateIssueProblem>,
-}
-
-/// The sample person's context: a deterministic value for every field in the catalog, by type.
-pub(crate) fn sample_context(catalog: &FieldCatalog) -> RenderContext {
-    let mut context = RenderContext::sample(catalog);
-    context
-        .person
-        .insert("email".to_owned(), Value::from(SAMPLE_EMAIL));
-    context
 }
 
 /// The context of a real person: the values of the traits the catalog knows (a trait the
@@ -238,7 +226,7 @@ pub(crate) async fn preview(
         zirv_flow_store::read_template_field_catalog(&mut tx, workspace.id).await?;
     let catalog = field_catalog(read);
     let (context, person_id) = match body.person_id {
-        None => (sample_context(&catalog), None),
+        None => (RenderContext::sample_person(&catalog), None),
         Some(requested) => {
             let person = zirv_flow_store::find_person(&mut *tx, workspace.id, requested)
                 .await?
@@ -329,12 +317,12 @@ mod tests {
 
     #[test]
     fn the_sample_person_has_a_value_per_type_and_an_address() {
-        let context = sample_context(&catalog());
+        let context = RenderContext::sample_person(&catalog());
 
         assert_eq!(context.person["plan"], json!("sample"));
         assert_eq!(context.person["age"], json!(1));
-        assert_eq!(context.person["email"], json!(SAMPLE_EMAIL));
-        assert_eq!(context, sample_context(&catalog()));
+        assert_eq!(context.person["email"], json!(zirv_flow_templates::SAMPLE_EMAIL));
+        assert_eq!(context, RenderContext::sample_person(&catalog()));
     }
 
     #[test]
