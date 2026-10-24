@@ -378,6 +378,31 @@ async fn decide(
     if !driver.spec().capabilities.channels.contains(&"email") {
         return Ok(trail.fail_unsent(resuming, "rate_limit", "destination_unsupported"));
     }
+    // An earlier call may have been accepted: it lost the server's reply after the whole message
+    // was sent (the unconfirmed mark), or it was cut off before its outcome was known (the
+    // in-flight mark, written before every call). Both are kept on the row (they survive a job
+    // retry), and read once, before this attempt writes its own in-flight mark (gate 9). A crash
+    // after a definitive reply but before the clear there also counts as carried: that is
+    // deliberately conservative.
+    let carried = resuming
+        && (message_unconfirmed(&pool, workspace, job.message).await?
+            || message_in_flight(&pool, workspace, job.message).await?);
+    let current_hash = gates::address_hash(&key, &address);
+    // An earlier call that may have been accepted went to the stored address. If the person's
+    // address changed since, the resumed call must not go to the new one under the same
+    // idempotency key, and the stored hash must keep naming the address that may have received
+    // the message (a bounce for it must not suppress the new one). A message with no stored hash
+    // keeps the earlier behaviour. This ends the message before a rate token is taken: it makes
+    // no call, so it must not spend one.
+    if carried
+        && let (Some(current), Some(Some(stored))) = (
+            current_hash,
+            message_address_hash(&pool, workspace, job.message).await?,
+        )
+        && current != stored
+    {
+        return Ok(trail.unconfirmed("delivery", Some(ADDRESS_CHANGED)));
+    }
     let gates = Arc::clone(ctx.rate_gates());
     let clock = ctx.clock().clone();
     match gates.admit(&pool, destination.id, &clock).await? {
@@ -394,30 +419,6 @@ async fn decide(
     // first, in a statement of its own: from here on the message may go out, and a retry knows it.
     let attempts = ctx.attempts();
     let number = job.attempt_base + attempts;
-    // An earlier call may have been accepted: it lost the server's reply after the whole message
-    // was sent (the unconfirmed mark), or it was cut off before its outcome was known (the
-    // in-flight mark, written before every call). Both are kept on the row (they survive a job
-    // retry), and read once, before this attempt writes its own in-flight mark. A crash after a
-    // definitive reply but before the clear below also counts as carried: that is deliberately
-    // conservative.
-    let carried = resuming
-        && (message_unconfirmed(&pool, workspace, job.message).await?
-            || message_in_flight(&pool, workspace, job.message).await?);
-    let current_hash = gates::address_hash(&key, &address);
-    // An earlier call that may have been accepted went to the stored address. If the person's
-    // address changed since, the resumed call must not go to the new one under the same
-    // idempotency key, and the stored hash must keep naming the address that may have received
-    // the message (a bounce for it must not suppress the new one). A message with no stored hash
-    // keeps the earlier behaviour.
-    if carried
-        && let (Some(current), Some(Some(stored))) = (
-            current_hash,
-            message_address_hash(&pool, workspace, job.message).await?,
-        )
-        && current != stored
-    {
-        return Ok(trail.unconfirmed("delivery", Some(ADDRESS_CHANGED)));
-    }
     // The attempt number fences the mark: a stale attempt clears only its own.
     let mark = number - 1;
     mark_message_sending(&pool, workspace, job.message, mark, current_hash.as_ref()).await?;
@@ -4553,6 +4554,12 @@ mod tests {
 
         let fake = FakeProvider::start(FakeProviderOptions::default()).await;
         let env = provider_env(pool, "one", &fake).await;
+        // One token a second and a burst of one, so the gate holds one token per take.
+        sqlx::query("UPDATE destinations SET rate = 1, burst = 1 WHERE id = $1")
+            .bind(env.destination)
+            .execute(&env.pool)
+            .await
+            .unwrap();
         let template = env.plain_template("transactional").await;
         let person = env.person("ada@example.com").await;
         let queued = env.queue(person, template, 5).await;
@@ -4564,9 +4571,27 @@ mod tests {
             .await
             .unwrap();
         move_address(&env, person, "bob@example.com").await;
+        // The first attempt spent the gate's only token; the bucket holds one for the next take.
+        sqlx::query(
+            "UPDATE destination_rate_buckets SET tokens = 1, refilled_at = $2
+             WHERE destination_id = $1",
+        )
+        .bind(env.destination)
+        .bind(env.clock.now())
+        .execute(&env.pool)
+        .await
+        .unwrap();
 
         env.attempt().await.unwrap();
 
+        let bucket = zirv_flow_store::bucket_state(&env.pool, env.destination)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bucket.tokens, 1.0,
+            "the ending made no call and took no token"
+        );
         let message = env.message(queued.message).await;
         assert_eq!(message.status, "failed");
         assert_eq!(message.reason.as_deref(), Some(DELIVERY_UNCONFIRMED));
