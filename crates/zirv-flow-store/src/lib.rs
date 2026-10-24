@@ -13,8 +13,8 @@ mod decisions;
 mod destinations;
 mod events;
 mod feedback;
-mod forwarding;
 mod flows;
+mod forwarding;
 mod identities;
 mod imports;
 mod ingest;
@@ -116,13 +116,6 @@ pub use events::{
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
 };
-pub use forwarding::{
-    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
-    ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate, RuleWrite, Settled, claim_due,
-    create_rule, defer_row, delete_rule, enqueue_forwarding, enqueue_segment_forwarding, ensure_forward_job, find_rule, forwarding_report,
-    forwarding_status, list_dead_letters, list_rules, next_due, purge_delivered, redrive,
-    settle_row, update_rule,
-};
 pub use flows::{
     AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError,
     EnrollEntries, EnrollEntry, EnrollError, EnrollJobPayload, EnrollOutcome, EnrollRequest,
@@ -148,6 +141,13 @@ pub use flows::{
     resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
     save_enrollment, segment_is_watched, segment_trigger_flows, settle_wait_step, step_zones,
     unhealthy_inputs, update_flow_draft, version_node_counts, wait_filters,
+};
+pub use forwarding::{
+    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
+    ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate, RuleWrite, Settled, claim_due,
+    create_rule, defer_row, delete_rule, enqueue_forwarding, enqueue_segment_forwarding,
+    ensure_forward_job, find_rule, forwarding_report, forwarding_status, list_dead_letters,
+    list_rules, next_due, purge_delivered, redrive, settle_row, update_rule,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,

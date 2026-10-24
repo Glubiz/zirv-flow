@@ -105,7 +105,10 @@ pub(crate) struct RedriveBody {
     redriven: u64,
 }
 
-fn parse_query(query: &str) -> Result<(u32, Option<(OffsetDateTime, Uuid)>, Option<Uuid>), ApiError> {
+/// A page request: the size, the cursor and the destination to look at.
+type Page = (u32, Option<(OffsetDateTime, Uuid)>, Option<Uuid>);
+
+fn parse_query(query: &str) -> Result<Page, ApiError> {
     let mut limit = DEFAULT_LIMIT;
     let mut before = None;
     let mut destination = None;
@@ -160,7 +163,11 @@ pub(crate) async fn dead_letters(
 ) -> Result<Json<DeadLettersBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let (limit, before, destination) = parse_query(query.as_deref().unwrap_or_default())?;
-    let mut connection = state.pool.acquire().await.map_err(|_| ApiError::internal())?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let mut letters = zirv_flow_store::list_dead_letters(
         &mut connection,
         workspace.id,
@@ -202,7 +209,11 @@ pub(crate) async fn status(
     Path(ws): Path<String>,
 ) -> Result<Json<ForwardingStatusBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let mut connection = state.pool.acquire().await.map_err(|_| ApiError::internal())?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let rows = zirv_flow_store::forwarding_status(&mut connection, workspace.id).await?;
     Ok(Json(ForwardingStatusBody {
         destinations: rows.into_iter().map(QueueStatusBody::from).collect(),
@@ -237,7 +248,10 @@ pub(crate) async fn redrive(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let (scope, kind) = match (body.id, body.destination_id) {
         (Some(_), Some(_)) => {
-            return Err(invalid("body", "names either id or destination_id, not both"));
+            return Err(invalid(
+                "body",
+                "names either id or destination_id, not both",
+            ));
         }
         (Some(id), None) => (Redrive::Row(id), "row"),
         (None, Some(id)) => (Redrive::Destination(id), "destination"),

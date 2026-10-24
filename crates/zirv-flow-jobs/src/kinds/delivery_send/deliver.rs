@@ -129,7 +129,6 @@ async fn open_signer(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

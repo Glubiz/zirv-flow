@@ -33,7 +33,8 @@ pub struct ForwardRef {
 /// Test-only switch: with it set, [`enqueue_forwarding`] does nothing. The ingest measurement uses it to
 /// time the path as it was before the outbox existed.
 #[cfg(test)]
-pub(crate) static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) static DISABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Copies the events that an active rule selects into the outbox, in the caller's transaction,
 /// which also holds the events. Call it once per batch, after the events are inserted.
@@ -492,7 +493,10 @@ pub async fn enqueue_segment_forwarding(
     .map_err(StoreError::query)?;
     let refs: Vec<ForwardRef> = ids
         .into_iter()
-        .map(|id| ForwardRef { id, occurred_at: at })
+        .map(|id| ForwardRef {
+            id,
+            occurred_at: at,
+        })
         .collect();
     enqueue_forwarding(connection, workspace, &refs).await
 }
@@ -741,12 +745,11 @@ mod tests {
 
         assert_eq!(inside, 1, "the row exists inside the writer's transaction");
         assert_eq!(rows(&pool, ws).await, 0);
-        let events: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
-                .bind(ws.as_uuid())
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(events, 0);
         let jobs: i64 =
             sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
@@ -970,7 +973,12 @@ mod tests {
             .await
             .unwrap();
         assert!(none.is_empty(), "a retry waits for its time");
-        assert!(next_due(&mut connection, destination).await.unwrap().is_some());
+        assert!(
+            next_due(&mut connection, destination)
+                .await
+                .unwrap()
+                .is_some()
+        );
 
         sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now()")
             .execute(&mut *connection)
@@ -1067,7 +1075,11 @@ mod tests {
             .fetch_one(&mut *connection)
             .await
             .unwrap();
-        assert_eq!((forward, flow), (1, 0), "one forwarding job, and no flow job");
+        assert_eq!(
+            (forward, flow),
+            (1, 0),
+            "one forwarding job, and no flow job"
+        );
         let enrollments: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollments")
             .fetch_one(&mut *connection)
             .await
@@ -1080,7 +1092,9 @@ mod tests {
     async fn at_most_one_job_is_ready_and_a_running_one_leaves_a_successor(pool: PgPool) {
         let (ws, destination) = fixture(&pool, "jobs").await;
         let mut connection = pool.acquire().await.unwrap();
-        async fn ready(connection: &mut sqlx::PgConnection) -> Result<Vec<(String, bool)>, sqlx::Error> {
+        async fn ready(
+            connection: &mut sqlx::PgConnection,
+        ) -> Result<Vec<(String, bool)>, sqlx::Error> {
             sqlx::query_as(
                 "SELECT unique_key, run_at > now() + interval '30 minutes' FROM jobs \
                  WHERE kind = 'event.forward' AND state = 'ready' ORDER BY unique_key",
@@ -1248,7 +1262,10 @@ mod tests {
     /// must call one of these in its transaction and be added here; the test fails until it is.
     const WRITERS: &[(&str, &str)] = &[
         ("zirv-flow-store/src/events/apply.rs", "forwards.push"),
-        ("zirv-flow-store/src/flows/delivery.rs", "enqueue_forwarding"),
+        (
+            "zirv-flow-store/src/flows/delivery.rs",
+            "enqueue_forwarding",
+        ),
         ("zirv-flow-store/src/flows/send.rs", "enqueue_forwarding"),
         ("zirv-flow-store/src/feedback.rs", "enqueue_forwarding"),
         (
@@ -1302,7 +1319,10 @@ mod tests {
             .find(|(path, _)| path.ends_with("zirv-flow-store/src/events/replay.rs"))
             .expect("the replay module exists");
 
-        assert!(replay.contains("insert_event"), "replay still writes events");
+        assert!(
+            replay.contains("insert_event"),
+            "replay still writes events"
+        );
         assert!(!replay.contains("enqueue_forwarding"));
         assert!(!replay.contains("forwards"));
     }
@@ -1316,7 +1336,10 @@ mod tests {
     async fn ingest_batch_time_with_the_outbox_switched_off_with_no_rule_and_with_a_rule(
         pool: PgPool,
     ) {
-        let batches: usize = std::env::var("ZIRV_MEASURE_BATCHES").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        let batches: usize = std::env::var("ZIRV_MEASURE_BATCHES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
         let warm_up: usize = 20.min(batches);
         const SIZE: usize = 500;
         let (off_ws, _) = fixture(&pool, "measure-off").await;
@@ -1336,13 +1359,18 @@ mod tests {
             (0..SIZE)
                 .map(|n| {
                     let global = number * SIZE + n;
-                    let name = if global % 10 == 0 { "order" } else { "view" };
+                    let name = if global.is_multiple_of(10) {
+                        "order"
+                    } else {
+                        "view"
+                    };
                     let mut event = record(
                         name,
                         json!({"plan": "pro", "n": global}),
                         &format!("m-{global}"),
                     );
-                    event.identifiers = vec![("email".into(), format!("u{}@example.com", global % 2000))];
+                    event.identifiers =
+                        vec![("email".into(), format!("u{}@example.com", global % 2000))];
                     event
                 })
                 .collect()
@@ -1352,7 +1380,9 @@ mod tests {
         let mut times: [Vec<f64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         // One case alone (`off`, `none` or `rule`), for a run too long to interleave.
         let only = std::env::var("ZIRV_MEASURE_CASE").ok().and_then(|case| {
-            ["off", "none", "rule"].iter().position(|name| *name == case)
+            ["off", "none", "rule"]
+                .iter()
+                .position(|name| *name == case)
         });
         for number in 0..warm_up + batches {
             let records = batch(number);

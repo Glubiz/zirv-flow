@@ -82,9 +82,7 @@ fn source_sql(source: &Source, binds: &mut Binds) -> String {
 }
 
 fn timestamp_sql(column: &str) -> String {
-    format!(
-        "to_jsonb(to_char({column} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))"
-    )
+    format!("to_jsonb(to_char({column} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'))")
 }
 
 /// A `LIKE` pattern that matches `text` literally, with `prefix` and `suffix` wildcards.
@@ -224,7 +222,10 @@ mod tests {
         assert!(sql.contains("unnest($4::uuid[], $5::timestamptz[])"));
         assert!(sql.contains("ON CONFLICT (destination_id, event_id) DO NOTHING"));
         assert!(sql.contains("jsonb_build_object($7::text, to_jsonb(e.id::text), $8::text"));
-        assert!(!sql.contains("DROP TABLE"), "values are bound, not spliced: {sql}");
+        assert!(
+            !sql.contains("DROP TABLE"),
+            "values are bound, not spliced: {sql}"
+        );
         assert!(binds.contains(&Bind::Jsonb(json!("pro'; DROP TABLE x; --"))));
         assert!(binds.contains(&Bind::TextArray(vec!["plan".into()])));
         // Every placeholder past the fixed ones has a bind.

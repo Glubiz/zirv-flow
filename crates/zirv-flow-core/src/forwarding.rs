@@ -94,7 +94,9 @@ pub struct Mapping {
 
 impl Mapping {
     pub fn entries(&self) -> impl Iterator<Item = (&str, &Source)> {
-        self.entries.iter().map(|(key, source)| (key.as_str(), source))
+        self.entries
+            .iter()
+            .map(|(key, source)| (key.as_str(), source))
     }
 
     pub fn len(&self) -> usize {
@@ -277,7 +279,10 @@ pub fn filter_definition(event_name: &str, filter: &Value) -> Value {
 /// Parses a filter (the segment `where` list) and checks that its operators are supported.
 /// Whether the properties exist and the values fit their types is the segment validator's check
 /// ([`filter_definition`]).
-pub fn parse_filter(event_name: &str, filter: &Value) -> Result<Vec<PropertyFilter>, Vec<RuleIssue>> {
+pub fn parse_filter(
+    event_name: &str,
+    filter: &Value,
+) -> Result<Vec<PropertyFilter>, Vec<RuleIssue>> {
     let Some(list) = filter.as_array() else {
         return Err(vec![RuleIssue::new("", code::NOT_AN_OBJECT)]);
     };
@@ -342,12 +347,8 @@ mod tests {
 
         assert_eq!(mapping.len(), 9);
         assert_eq!(mapping.to_value(), wire);
-        assert!(
-            mapping
-                .entries()
-                .any(|(key, source)| key == "plan"
-                    && *source == Source::Property(vec!["plan".into(), "tier".into()]))
-        );
+        assert!(mapping.entries().any(|(key, source)| key == "plan"
+            && *source == Source::Property(vec!["plan".into(), "tier".into()])));
     }
 
     #[test]
@@ -357,7 +358,11 @@ mod tests {
             (json!({}), "", code::EMPTY),
             (json!({"a b": {"value": 1}}), "/a b", code::INVALID_KEY),
             (json!({"a": "event.id"}), "/a", code::INVALID_SOURCE),
-            (json!({"a": {"from": "person.email"}}), "/a", code::UNKNOWN_SOURCE),
+            (
+                json!({"a": {"from": "person.email"}}),
+                "/a",
+                code::UNKNOWN_SOURCE,
+            ),
             (
                 json!({"a": {"from": "event.id", "pointer": "/x"}}),
                 "/a",
@@ -398,7 +403,12 @@ mod tests {
         );
         let deep = "/a".repeat(MAX_POINTER_TOKENS + 1);
         assert!(pointer_tokens(&deep).is_none());
-        assert_eq!(pointer_tokens(&"/a".repeat(MAX_POINTER_TOKENS)).unwrap().len(), 8);
+        assert_eq!(
+            pointer_tokens(&"/a".repeat(MAX_POINTER_TOKENS))
+                .unwrap()
+                .len(),
+            8
+        );
         assert_eq!(pointer_tokens("/a~1b/c~0d").unwrap(), ["a/b", "c~d"]);
     }
 

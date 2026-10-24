@@ -52,8 +52,14 @@ mod tests {
 
     #[test]
     fn the_refusals_are_422s_with_their_own_code() {
-        assert_eq!(destination_unsupported().status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(destination_unsupported().code(), Some("destination_unsupported"));
+        assert_eq!(
+            destination_unsupported().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            destination_unsupported().code(),
+            Some("destination_unsupported")
+        );
         assert_eq!(too_many_rules().status(), StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(too_many_rules().code(), Some("too_many_rules"));
     }

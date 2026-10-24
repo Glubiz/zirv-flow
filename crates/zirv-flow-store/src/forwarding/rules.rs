@@ -349,10 +349,13 @@ pub(crate) mod tests {
         let mut tx = pool.acquire().await.unwrap();
         for n in 0..MAX_ACTIVE_RULES {
             let name = format!("rule {n}");
-            let written =
-                create_rule(&mut tx, ws, &new_rule(destination, &name, &filter, &mapping))
-                    .await
-                    .unwrap();
+            let written = create_rule(
+                &mut tx,
+                ws,
+                &new_rule(destination, &name, &filter, &mapping),
+            )
+            .await
+            .unwrap();
             assert!(matches!(written, RuleWrite::Saved(_)), "{n}");
         }
 

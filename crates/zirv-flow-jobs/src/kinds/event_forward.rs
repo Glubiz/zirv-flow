@@ -33,11 +33,11 @@ use zirv_flow_connectors::destinations::{
 };
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
-use zirv_flow_core::schedule::backoff;
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
-    Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision,
-    PgPool, Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job,
+    Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision, PgPool,
+    Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job,
     find_destination, next_due, purge_delivered, settle_row, throttle_bucket,
 };
 
@@ -115,8 +115,11 @@ impl JobKind for EventForward {
     const KIND: &'static str = FORWARD_JOB_KIND;
 
     async fn run(&self, ctx: &mut JobContext<'_>, payload: Value) -> Result<(), JobError> {
-        let (workspace, destination_id) =
-            workspace_and_id(&payload, "destination_id", "the payload is not an event forward")?;
+        let (workspace, destination_id) = workspace_and_id(
+            &payload,
+            "destination_id",
+            "the payload is not an event forward",
+        )?;
         if ctx.workspace_id() != Some(workspace) {
             return Err(JobError::new(
                 "the payload names another workspace than the job",
@@ -210,7 +213,9 @@ async fn forward_one(
                 *credential = Some(open_credential(ctx, workspace, destination).await?);
             }
             match credential.as_ref() {
-                Some(Ok(credential)) => call(ctx, destination, driver, credential, row, now).await?,
+                Some(Ok(credential)) => {
+                    call(ctx, destination, driver, credential, row, now).await?
+                }
                 Some(Err(Verdict::Retry {
                     status,
                     reason,
@@ -252,7 +257,9 @@ async fn forward_one(
     let planned = plan(&done.verdict, row.attempts, now, random_unit());
     let (how, error, decision) = match &planned {
         Plan::Delivered => (Settled::Delivered, None, None),
-        Plan::Retry { at, reason } => (Settled::Retry(*at), Some(*reason), Some(("retry", *reason))),
+        Plan::Retry { at, reason } => {
+            (Settled::Retry(*at), Some(*reason), Some(("retry", *reason)))
+        }
         Plan::Dead { reason } => (Settled::Dead, Some(*reason), Some(("dead", *reason))),
     };
     // The row and its decision commit together.
@@ -372,13 +379,15 @@ mod tests {
     #[test]
     fn a_retryable_verdict_backs_off_with_each_attempt_and_dies_on_the_last() {
         let waits: Vec<Duration> = (1..MAX_ATTEMPTS)
-            .map(|attempts| match plan(&retry("http_5xx", None), attempts, NOW, 1.0) {
-                Plan::Retry { at, reason } => {
-                    assert_eq!(reason, "http_5xx");
-                    Duration::try_from(at - NOW).unwrap()
-                }
-                other => panic!("{other:?}"),
-            })
+            .map(
+                |attempts| match plan(&retry("http_5xx", None), attempts, NOW, 1.0) {
+                    Plan::Retry { at, reason } => {
+                        assert_eq!(reason, "http_5xx");
+                        Duration::try_from(at - NOW).unwrap()
+                    }
+                    other => panic!("{other:?}"),
+                },
+            )
             .collect();
 
         assert!(waits.windows(2).all(|pair| pair[0] < pair[1]), "{waits:?}");
@@ -582,10 +591,12 @@ mod tests {
 
         /// Makes every waiting row and job due now, claims the job and runs it.
         async fn run(&self) {
-            sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now() WHERE state = 'pending'")
-                .execute(&self.pool)
-                .await
-                .unwrap();
+            sqlx::query(
+                "UPDATE forwarding_outbox SET next_attempt_at = now() WHERE state = 'pending'",
+            )
+            .execute(&self.pool)
+            .await
+            .unwrap();
             sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
                 .execute(&self.pool)
                 .await
@@ -665,10 +676,20 @@ mod tests {
             .unwrap();
         assert_eq!(payload, json!({}), "a delivered row keeps no payload");
         assert_eq!(env.attempts().await, [(1, "delivered".to_owned())]);
-        assert!(env.decisions().await.is_empty(), "a delivery is not a decision");
+        assert!(
+            env.decisions().await.is_empty(),
+            "a delivery is not a decision"
+        );
         // The job writes no event and starts no flow.
-        assert_eq!(env.count("SELECT count(*) FROM events").await, events_before);
-        assert_eq!(env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'").await, 0);
+        assert_eq!(
+            env.count("SELECT count(*) FROM events").await,
+            events_before
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
+                .await,
+            0
+        );
         assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
         assert_eq!(
             env.count("SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'")
@@ -687,22 +708,34 @@ mod tests {
 
         env.run().await;
 
-        assert_eq!(env.rows().await, [("pending".to_owned(), 1, Some("http_5xx".to_owned()))]);
+        assert_eq!(
+            env.rows().await,
+            [("pending".to_owned(), 1, Some("http_5xx".to_owned()))]
+        );
         let wait: f64 = sqlx::query_scalar(
             "SELECT EXTRACT(EPOCH FROM next_attempt_at - now())::float8 FROM forwarding_outbox",
         )
         .fetch_one(&env.pool)
         .await
         .unwrap();
-        assert!((1.0..=10.5).contains(&wait), "the first backoff is about 5 s: {wait}");
-        assert_eq!(env.decisions().await, [("retry".to_owned(), Some("http_5xx".to_owned()))]);
-        let successor: (String, bool) = sqlx::query_as(
-            "SELECT state, run_at > now() FROM jobs WHERE kind = 'event.forward'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(successor, ("ready".to_owned(), true), "the next attempt waits for its time");
+        assert!(
+            (1.0..=10.5).contains(&wait),
+            "the first backoff is about 5 s: {wait}"
+        );
+        assert_eq!(
+            env.decisions().await,
+            [("retry".to_owned(), Some("http_5xx".to_owned()))]
+        );
+        let successor: (String, bool) =
+            sqlx::query_as("SELECT state, run_at > now() FROM jobs WHERE kind = 'event.forward'")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            successor,
+            ("ready".to_owned(), true),
+            "the next attempt waits for its time"
+        );
 
         env.run().await;
 
@@ -734,7 +767,11 @@ mod tests {
         let decisions = env.decisions().await;
         assert_eq!(decisions.len(), MAX_ATTEMPTS as usize);
         assert_eq!(decisions.last().unwrap().0, "dead");
-        assert!(decisions[..decisions.len() - 1].iter().all(|(outcome, _)| outcome == "retry"));
+        assert!(
+            decisions[..decisions.len() - 1]
+                .iter()
+                .all(|(outcome, _)| outcome == "retry")
+        );
         assert_eq!(env.attempts().await.len(), MAX_ATTEMPTS as usize);
         assert_eq!(
             env.count("SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'")
@@ -743,10 +780,11 @@ mod tests {
             "a dead letter schedules nothing"
         );
         // Nothing of the payload reached a decision.
-        let text: Vec<String> = sqlx::query_scalar("SELECT subject_ids::text FROM decision_records")
-            .fetch_all(&env.pool)
-            .await
-            .unwrap();
+        let text: Vec<String> =
+            sqlx::query_scalar("SELECT subject_ids::text FROM decision_records")
+                .fetch_all(&env.pool)
+                .await
+                .unwrap();
         assert!(text.iter().all(|row| !row.contains("pro")));
     }
 
@@ -763,13 +801,20 @@ mod tests {
             env.rows().await,
             [("dead".to_owned(), 1, Some("http_4xx".to_owned()))]
         );
-        assert_eq!(env.decisions().await, [("dead".to_owned(), Some("http_4xx".to_owned()))]);
+        assert_eq!(
+            env.decisions().await,
+            [("dead".to_owned(), Some("http_4xx".to_owned()))]
+        );
 
         env.set_mode("ok").await;
         let mut connection = env.pool.acquire().await.unwrap();
-        let redriven = redrive(&mut connection, env.ws, Redrive::Destination(env.destination))
-            .await
-            .unwrap();
+        let redriven = redrive(
+            &mut connection,
+            env.ws,
+            Redrive::Destination(env.destination),
+        )
+        .await
+        .unwrap();
         drop(connection);
         assert_eq!(redriven, 1);
         env.run().await;
@@ -780,9 +825,19 @@ mod tests {
             [(1, "terminal".to_owned()), (2, "delivered".to_owned())],
             "the attempt numbers continue past the re-drive"
         );
-        assert_eq!(fake_ledger_sent(&env.ledger)[0].key, idempotency_key(event, env.destination));
-        assert_eq!(env.count("SELECT count(*) FROM events").await, events_before);
-        assert_eq!(env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'").await, 0);
+        assert_eq!(
+            fake_ledger_sent(&env.ledger)[0].key,
+            idempotency_key(event, env.destination)
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM events").await,
+            events_before
+        );
+        assert_eq!(
+            env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
+                .await,
+            0
+        );
         assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
     }
 
@@ -814,9 +869,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_destination_that_cannot_carry_events_kills_its_rows_with_a_fixed_code(
-        pool: PgPool,
-    ) {
+    async fn a_destination_that_cannot_carry_events_kills_its_rows_with_a_fixed_code(pool: PgPool) {
         let env = Env::with(pool, "mail", "smtp", json!({}), 10, 10).await;
         env.order().await;
 
@@ -824,7 +877,11 @@ mod tests {
 
         assert_eq!(
             env.rows().await,
-            [("dead".to_owned(), 1, Some("destination_unsupported".to_owned()))]
+            [(
+                "dead".to_owned(),
+                1,
+                Some("destination_unsupported".to_owned())
+            )]
         );
     }
 

@@ -270,9 +270,14 @@ mod tests {
         .await
         .unwrap();
         tx.rollback().await.unwrap();
-        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
 
-        record_engagement(&pool, &tracked, engagement).await.unwrap();
+        record_engagement(&pool, &tracked, engagement)
+            .await
+            .unwrap();
         assert_eq!(payloads(&pool, ws).await, [json!({"machine": false})]);
         assert_eq!(forward_jobs(&pool).await, 1);
     }

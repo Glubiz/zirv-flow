@@ -142,7 +142,7 @@ pub async fn record_send_outcome(
     )
     .await?;
 
-    let subject_ids =|extra: Option<(&'static str, Uuid)>| {
+    let subject_ids = |extra: Option<(&'static str, Uuid)>| {
         let mut ids = vec![
             ("message", message.id),
             ("enrollment", message.enrollment),
@@ -545,7 +545,10 @@ mod tests {
             .await
             .unwrap();
         tx.rollback().await.unwrap();
-        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
 
         let mut tx = crate::begin(&pool).await.unwrap();
         record_send_outcome(&mut tx, &write(Uuid::now_v7()).await)

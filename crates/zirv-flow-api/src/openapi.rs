@@ -5,7 +5,6 @@ use crate::assistant;
 use crate::consent::{dimensions, person, policy, suppressions, topics, transfer};
 use crate::contacts;
 use crate::destinations;
-use crate::forwarding;
 use crate::events::{
     self, CreateEventSchemaRequest, EventPolicyBody, EventSchemaBody, EventSchemaDetailBody,
     IngestRejectBody, IngestRejectsBody, PropertyBody, ReasonBody, RedactionBody, SaveDraftRequest,
@@ -13,6 +12,7 @@ use crate::events::{
 };
 use crate::feedback;
 use crate::flows::{self, FlowSchemas};
+use crate::forwarding;
 use crate::health::{self, StatusBody};
 use crate::imports;
 use crate::ingest::{

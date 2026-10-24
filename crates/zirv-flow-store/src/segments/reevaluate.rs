@@ -917,7 +917,10 @@ mod tests {
         .await
         .unwrap();
         tx.rollback().await.unwrap();
-        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
 
         reevaluate(&pool, ws, seg.id, "pro", &batch).await;
         assert_eq!(payloads(&pool, ws).await, [json!({"who": ada.to_string()})]);

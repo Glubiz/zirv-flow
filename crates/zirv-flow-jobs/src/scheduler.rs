@@ -15,9 +15,9 @@ use zirv_flow_store::{
     disable_schedule, due_schedules, due_sending_domains, end_orphaned_messages, enqueue,
     enqueue_domain_verify, enqueue_drain, enqueue_reevaluate, ensure_decision_partitions,
     ensure_event_partitions, ensure_forward_job, expire_contact_idempotency, expire_exports,
-    fail_orphaned_runs, forwarding_report,
-    inbox_heads, prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
-    reconcile_segment_schedules, stream_freshness, try_lead,
+    fail_orphaned_runs, forwarding_report, inbox_heads, prune_debugger_feed, queue_depths,
+    reap_expired, reconcile_flow_schedules, reconcile_segment_schedules, stream_freshness,
+    try_lead,
 };
 
 use crate::metrics::{

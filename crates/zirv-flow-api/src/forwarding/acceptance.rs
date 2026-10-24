@@ -352,9 +352,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn invalid_rules_are_refused_with_where_and_why_and_the_cap_and_names_hold(
-        pool: PgPool,
-    ) {
+    async fn invalid_rules_are_refused_with_where_and_why_and_the_cap_and_names_hold(pool: PgPool) {
         let fx = fixture(&pool).await;
         let refused = |mut body: Value, field: &str, value: Value| {
             body[field] = value;
@@ -363,7 +361,11 @@ mod tests {
         let cases = [
             (refused(fx.rule("a"), "event_name", json!("")), "event_name"),
             (
-                refused(fx.rule("b"), "mapping", json!({"x": {"from": "event.nope"}})),
+                refused(
+                    fx.rule("b"),
+                    "mapping",
+                    json!({"x": {"from": "event.nope"}}),
+                ),
                 "mapping/x unknown_source",
             ),
             (refused(fx.rule("c"), "mapping", json!({})), "mapping empty"),
@@ -456,7 +458,9 @@ mod tests {
         // An inactive rule is allowed, and turning it on is refused at the cap.
         let mut dormant = fx.rule("dormant");
         dormant["active"] = json!(false);
-        let created = fx.as_admin("POST", "/forwarding/rules", Some(dormant)).await;
+        let created = fx
+            .as_admin("POST", "/forwarding/rules", Some(dormant))
+            .await;
         assert_eq!(created.status, StatusCode::CREATED);
         let id = created.body["id"].as_str().unwrap().to_owned();
         let on = fx
@@ -508,14 +512,18 @@ mod tests {
             .as_admin(
                 "POST",
                 "/forwarding/rules",
-                Some(with_filter(json!([{"prop": "total", "op": "gt", "value": 10}]))),
+                Some(with_filter(
+                    json!([{"prop": "total", "op": "gt", "value": 10}]),
+                )),
             )
             .await;
         let wrong_type = fx
             .as_admin(
                 "POST",
                 "/forwarding/rules",
-                Some(with_filter(json!([{"prop": "total", "op": "contains", "value": "x"}]))),
+                Some(with_filter(
+                    json!([{"prop": "total", "op": "contains", "value": "x"}]),
+                )),
             )
             .await;
         let unknown = fx
@@ -529,16 +537,24 @@ mod tests {
         assert_eq!(good.status, StatusCode::CREATED, "{:?}", good.body);
         assert_eq!(good.body["filter"][0]["prop"], "total");
         assert_eq!(wrong_type.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(wrong_type.body["detail"].as_str().unwrap().contains("operator_not_allowed"));
+        assert!(
+            wrong_type.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("operator_not_allowed")
+        );
         assert_eq!(unknown.status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(unknown.body["detail"].as_str().unwrap().contains("unknown_property"));
+        assert!(
+            unknown.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("unknown_property")
+        );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn dead_letters_are_paged_without_payloads_and_the_status_counts_the_queue(
-        pool: PgPool,
-    ) {
+    async fn dead_letters_are_paged_without_payloads_and_the_status_counts_the_queue(pool: PgPool) {
         let fx = fixture(&pool).await;
         fx.create_rule("Orders").await;
         let oldest = fx.row("dead", Some("http_4xx"), 30).await;
@@ -581,7 +597,10 @@ mod tests {
         assert_eq!(status.status, StatusCode::OK, "{:?}", status.body);
         let destinations = status.body["destinations"].as_array().unwrap();
         assert_eq!(destinations.len(), 1);
-        assert_eq!(destinations[0]["destination_id"], fx.destination.to_string());
+        assert_eq!(
+            destinations[0]["destination_id"],
+            fx.destination.to_string()
+        );
         assert_eq!(destinations[0]["depth"], 1);
         assert_eq!(destinations[0]["dead"], 3);
         assert!(destinations[0]["oldest_lag_seconds"].as_i64().unwrap() >= 0);
@@ -618,7 +637,9 @@ mod tests {
             )
             .await;
         assert_eq!(remaining.body["redriven"], 2);
-        let nothing = fx.as_admin("POST", "/forwarding/re-drive", Some(json!({}))).await;
+        let nothing = fx
+            .as_admin("POST", "/forwarding/re-drive", Some(json!({})))
+            .await;
         assert_eq!(nothing.body["redriven"], 0);
 
         let states: Vec<(String, i32, i32)> = sqlx::query_as(
@@ -628,11 +649,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(states, vec![("pending".to_owned(), 0, 3); 3]);
-        let kinds: Vec<String> =
-            sqlx::query_scalar("SELECT DISTINCT kind FROM jobs ORDER BY kind")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
+        let kinds: Vec<String> = sqlx::query_scalar("SELECT DISTINCT kind FROM jobs ORDER BY kind")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
         assert_eq!(kinds, ["event.forward"], "no flow job");
         let enrollments: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollments")
             .fetch_one(&pool)
@@ -648,6 +668,9 @@ mod tests {
             ]
         );
         let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
-        assert!(!format!("{audit:?}").contains(MARKER), "no payload in the audit");
+        assert!(
+            !format!("{audit:?}").contains(MARKER),
+            "no payload in the audit"
+        );
     }
 }

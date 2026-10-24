@@ -569,7 +569,10 @@ mod tests {
         let mut tx = crate::begin(&pool).await.unwrap();
         record_webhook_outcome(&mut tx, &outcome).await.unwrap();
         tx.rollback().await.unwrap();
-        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
 
         let mut tx = crate::begin(&pool).await.unwrap();
         record_webhook_outcome(&mut tx, &outcome).await.unwrap();

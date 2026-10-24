@@ -1221,7 +1221,10 @@ mod tests {
         };
         apply_refresh(&mut tx, &apply).await.unwrap();
         tx.rollback().await.unwrap();
-        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
 
         refresh(&pool, ws, seg.id, "pro", cause, NOW).await;
         assert_eq!(

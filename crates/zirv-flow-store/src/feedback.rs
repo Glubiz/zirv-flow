@@ -870,7 +870,10 @@ mod tests {
         .unwrap();
 
         assert!(record_provider_feedback(&pool, &hard).await.is_err());
-        assert_eq!((outbox_rows(&pool, ws).await, forward_jobs(&pool).await), (0, 0));
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
 
         sqlx::query("DROP TRIGGER refuse ON suppressions")
             .execute(&pool)

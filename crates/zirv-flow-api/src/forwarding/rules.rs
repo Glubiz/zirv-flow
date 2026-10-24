@@ -15,9 +15,7 @@ use zirv_flow_core::forwarding::{Mapping, parse_filter};
 use zirv_flow_core::segment::{Issue, parse};
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_segments::validate;
-use zirv_flow_store::{
-    ForwardingRule, NewRule, PgPool, RuleUpdate, RuleWrite, segment_catalog,
-};
+use zirv_flow_store::{ForwardingRule, NewRule, PgPool, RuleUpdate, RuleWrite, segment_catalog};
 
 use super::{destination_unsupported, issues_problem, too_many_rules};
 use crate::AppState;
@@ -110,14 +108,15 @@ async fn check_destination(
     let destination = zirv_flow_store::find_destination(pool, workspace, id)
         .await?
         .filter(|destination| destination.archived_at.is_none())
-        .ok_or_else(|| invalid("destination_id", "is not a live destination of this workspace"))?;
-    let carries_events = registry().get(&destination.kind).is_some_and(|driver| {
-        driver
-            .spec()
-            .capabilities
-            .channels
-            .contains(&"event")
-    });
+        .ok_or_else(|| {
+            invalid(
+                "destination_id",
+                "is not a live destination of this workspace",
+            )
+        })?;
+    let carries_events = registry()
+        .get(&destination.kind)
+        .is_some_and(|driver| driver.spec().capabilities.channels.contains(&"event"));
     if carries_events {
         Ok(())
     } else {
@@ -149,15 +148,18 @@ async fn check_filter(
     event_name: &str,
     filter: &Value,
 ) -> Result<(), ApiError> {
-    let filters = parse_filter(event_name, filter).map_err(|issues| issues_problem("filter", issues))?;
+    let filters =
+        parse_filter(event_name, filter).map_err(|issues| issues_problem("filter", issues))?;
     if filters.is_empty() {
         return Ok(());
     }
     let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
     let snapshot = segment_catalog(&mut connection, workspace).await?;
     let (catalog, _) = catalog_of(snapshot);
-    let definition = parse(&zirv_flow_core::forwarding::filter_definition(event_name, filter))
-        .map_err(|issues| filter_issues(issues))?;
+    let definition = parse(&zirv_flow_core::forwarding::filter_definition(
+        event_name, filter,
+    ))
+    .map_err(filter_issues)?;
     validate(&definition, &catalog).map_err(filter_issues)
 }
 
@@ -240,7 +242,11 @@ pub(crate) async fn update_rule(
     id: Uuid,
     request: &UpdateRuleRequest,
 ) -> Result<ForwardingRule, ApiError> {
-    let mut connection = state.pool.acquire().await.map_err(|_| ApiError::internal())?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let current = zirv_flow_store::find_rule(&mut connection, workspace, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -329,7 +335,11 @@ pub(crate) async fn list(
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<RuleBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let mut connection = state.pool.acquire().await.map_err(|_| ApiError::internal())?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let rules = zirv_flow_store::list_rules(&mut connection, workspace.id).await?;
     Ok(Json(rules.into_iter().map(RuleBody::from).collect()))
 }
@@ -394,7 +404,11 @@ pub(crate) async fn get(
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<RuleBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let mut connection = state.pool.acquire().await.map_err(|_| ApiError::internal())?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
     let rule = zirv_flow_store::find_rule(&mut connection, workspace.id, path_id(&id)?)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -429,7 +443,14 @@ pub(crate) async fn update(
     ApiJson(body): ApiJson<UpdateRuleRequest>,
 ) -> Result<Json<RuleBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let rule = update_rule(&state, &principal.context(), workspace.id, path_id(&id)?, &body).await?;
+    let rule = update_rule(
+        &state,
+        &principal.context(),
+        workspace.id,
+        path_id(&id)?,
+        &body,
+    )
+    .await?;
     Ok(Json(RuleBody::from(rule)))
 }
 
@@ -504,7 +525,11 @@ mod tests {
     fn filter_issues_carry_a_pointer_and_a_code_only() {
         let error = filter_issues(vec![Issue::new("/where/0/prop", "unknown_property")]);
 
-        assert!(error.detail().contains("filter/where/0/prop unknown_property"));
+        assert!(
+            error
+                .detail()
+                .contains("filter/where/0/prop unknown_property")
+        );
     }
 
     #[test]
