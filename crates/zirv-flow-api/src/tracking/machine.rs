@@ -6,7 +6,10 @@
 //! nor the IP address is.
 //!
 //! The user agent is matched against a few generic markers and against the operator's own list
-//! (`tracking.prefetch_user_agents`). No product, provider or client is named here; an operator
+//! (`tracking.prefetch_user_agents`). A generic marker matches only a whole token of the
+//! lower-cased user agent, split on non-alphanumeric characters, so `bot` inside a longer word
+//! is a person. An operator entry is a case-insensitive substring match, because operators
+//! supply exact fragments. No product, provider or client is named here; an operator
 //! who knows the fetchers in front of their audience adds them to the list.
 
 use time::{Duration, OffsetDateTime};
@@ -32,7 +35,9 @@ pub(super) fn machine_reason(
 ) -> Option<&'static str> {
     if let Some(agent) = user_agent {
         let agent = agent.to_lowercase();
-        let marked = GENERIC_MARKERS.iter().any(|marker| agent.contains(marker))
+        let marked = agent
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|token| GENERIC_MARKERS.contains(&token))
             || operator
                 .iter()
                 .any(|fragment| !fragment.is_empty() && agent.contains(fragment.as_str()));
@@ -65,7 +70,7 @@ mod tests {
             "mail-preview",
             "Security Scanner 1",
             "web-crawler",
-            "examplebot/1",
+            "examplebot-bot/1",
         ] {
             assert_eq!(
                 machine_reason(Some(agent), &[], Some(DELIVERED), later(3600)),
@@ -73,6 +78,27 @@ mod tests {
                 "{agent}"
             );
         }
+    }
+
+    #[test]
+    fn a_marker_inside_a_longer_word_does_not_mark_the_open() {
+        for agent in [
+            "Mozilla/5.0 Robotic",
+            "abottle/1",
+            "reproxy-less",
+            "Mozilla bots",
+        ] {
+            assert_eq!(
+                machine_reason(Some(agent), &[], None, later(3600)),
+                None,
+                "{agent}"
+            );
+        }
+        let operator = vec!["tle".to_owned()];
+        assert_eq!(
+            machine_reason(Some("abottle/1"), &operator, None, later(3600)),
+            Some(USER_AGENT)
+        );
     }
 
     #[test]
