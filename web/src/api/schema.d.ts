@@ -3257,8 +3257,8 @@ export interface paths {
         get: operations["list_test_send_allowlist"];
         put?: never;
         /**
-         * Allows test sends to an address. The address is hashed here and only the hash and a masked hint
-         *     are stored. Needs the workspace admin role and the CSRF token. Audited as
+         * Allows test sends to an address. The address is normalised, hashed here and stored as the hash,
+         *     a masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as
          *     `test_send.allowlist_added`, with the entry id and nothing else.
          */
         post: operations["add_test_send_allowlist_entry"];
@@ -3834,7 +3834,7 @@ export interface components {
             /** Format: date-time */
             created_at: string;
             /**
-             * @description The first character, `***`, then `@domain`. The address itself is not stored.
+             * @description The first character, `***`, then `@domain`. The address itself is stored only sealed and never returned.
              * @example q***@example.com
              */
             display_hint: string;
