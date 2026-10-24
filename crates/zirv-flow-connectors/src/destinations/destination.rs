@@ -3,7 +3,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
+use zirv_flow_core::flow::SyncOperation;
 
 use super::context::DestinationContext;
 use super::dkim::DkimSigner;
@@ -25,6 +26,20 @@ pub struct Outbound<'a> {
     /// The sender domain's DKIM key, for a type whose capabilities say it signs; none for the
     /// others, and none when the sender has no key. The destination never decrypts anything.
     pub dkim: Option<&'a DkimSigner>,
+}
+
+/// One profile operation to run at a remote system (`action.sync`, architecture 10.2). Like
+/// [`Outbound`] it lives in memory for the call only and has no `Debug`: the key and the traits
+/// are the person's data.
+pub struct ProfileCall<'a> {
+    pub operation: SyncOperation,
+    /// The external key of the person at the remote system.
+    pub key: &'a str,
+    /// The traits the node lists, each at the person's value (`null` when they have none). Empty
+    /// for a remove.
+    pub traits: &'a Map<String, Value>,
+    /// Stable across every retry of the node's effect; passed on in the operation's header.
+    pub idempotency_key: &'a str,
 }
 
 /// A delivery the remote system accepted.
@@ -58,6 +73,21 @@ pub trait Destination: Send + Sync + 'static {
         credential: &Credential,
         message: &Outbound<'_>,
     ) -> impl Future<Output = Result<Delivered, DestinationError>> + Send;
+
+    /// Runs one profile operation. Only a type whose capabilities list the `profile_sync` channel
+    /// overrides it, and it may support one operation and not the other.
+    fn sync(
+        &self,
+        ctx: &DestinationContext,
+        config: &Value,
+        credential: &Credential,
+        call: &ProfileCall<'_>,
+    ) -> impl Future<Output = Result<Delivered, DestinationError>> + Send {
+        async move {
+            let _ = (ctx, config, credential, call);
+            Err(DestinationError::Unsupported)
+        }
+    }
 
     /// Erases the data held about `subject` (the type's own key for the person) at the remote
     /// system. Only a type with [`Capabilities::erase`](super::Capabilities::erase) overrides it.
@@ -98,6 +128,14 @@ pub trait ErasedDestination: Send + Sync {
         message: &'a Outbound<'a>,
     ) -> BoxFuture<'a, Result<Delivered, DestinationError>>;
 
+    fn sync<'a>(
+        &'a self,
+        ctx: &'a DestinationContext,
+        config: &'a Value,
+        credential: &'a Credential,
+        call: &'a ProfileCall<'a>,
+    ) -> BoxFuture<'a, Result<Delivered, DestinationError>>;
+
     fn erase<'a>(
         &'a self,
         ctx: &'a DestinationContext,
@@ -129,6 +167,16 @@ impl<D: Destination> ErasedDestination for D {
         message: &'a Outbound<'a>,
     ) -> BoxFuture<'a, Result<Delivered, DestinationError>> {
         Box::pin(Destination::deliver(self, ctx, config, credential, message))
+    }
+
+    fn sync<'a>(
+        &'a self,
+        ctx: &'a DestinationContext,
+        config: &'a Value,
+        credential: &'a Credential,
+        call: &'a ProfileCall<'a>,
+    ) -> BoxFuture<'a, Result<Delivered, DestinationError>> {
+        Box::pin(Destination::sync(self, ctx, config, credential, call))
     }
 
     fn erase<'a>(
@@ -231,6 +279,18 @@ mod tests {
         assert_eq!(
             destination.erase(&ctx, &config, &credential, "p-1").await,
             Err(DestinationError::Unsupported)
+        );
+        let traits = Map::new();
+        let call = ProfileCall {
+            operation: SyncOperation::Upsert,
+            key: "k",
+            traits: &traits,
+            idempotency_key: "key-1",
+        };
+        assert_eq!(
+            destination.sync(&ctx, &config, &credential, &call).await,
+            Err(DestinationError::Unsupported),
+            "sync defaults to unsupported"
         );
     }
 }

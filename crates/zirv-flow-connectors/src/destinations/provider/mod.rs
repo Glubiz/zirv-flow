@@ -23,6 +23,7 @@ mod domain;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod fake;
 mod feedback;
+mod profile;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -34,13 +35,15 @@ use url::Url;
 pub use self::domain::{ProviderRecord, ProviderRecordStatus};
 pub use self::feedback::{Feedback, FeedbackKind, FeedbackRead};
 use super::context::DestinationContext;
-use super::destination::{Delivered, Destination, Outbound};
+use super::destination::{Delivered, Destination, Outbound, ProfileCall};
 use super::error::DestinationError;
 use super::spec::{Capabilities, DestinationSpec};
 use crate::manifest::{
-    Auth, FeedbackSpec, KeyLocation, Manifest, Provider, SendMethod, VerificationSpec, validate,
+    Auth, ErrorAction, ErrorRule, FeedbackSpec, KeyLocation, KeySource, Manifest, ProfileMethod,
+    Provider, SendMethod, VerificationSpec, validate,
 };
 use crate::sources::{Credential, FieldError, FieldKind, FieldSpec};
+use zirv_flow_core::flow::SyncOperation;
 
 pub(crate) struct ProviderDestination;
 
@@ -79,7 +82,7 @@ impl Destination for ProviderDestination {
             secret("password", "Password", "For a basic manifest."),
         ],
         capabilities: Capabilities {
-            channels: &["email"],
+            channels: &["email", "profile_sync"],
             idempotency_key: true,
             batching: false,
             rate_limit: true,
@@ -100,9 +103,11 @@ impl Destination for ProviderDestination {
         let probe_url = joined(&manifest.base_url, "/")?;
         let mut probe = Request::new(Method::GET, probe_url);
         apply_auth(&mut probe, &manifest.auth, credential)?;
-        let field = &provider.feedback.verification.secret_field;
-        if credential.get(field).is_none() {
-            return Err(missing(field));
+        if let Some(feedback) = &provider.feedback {
+            let field = &feedback.verification.secret_field;
+            if credential.get(field).is_none() {
+                return Err(missing(field));
+            }
         }
         if let Some(host) = manifest.base_url.host_str() {
             ctx.resolve_checked(host.trim_matches(['[', ']'])).await?;
@@ -118,14 +123,14 @@ impl Destination for ProviderDestination {
         message: &Outbound<'_>,
     ) -> Result<Delivered, DestinationError> {
         let (manifest, provider) = provider_of(config)?;
-        let body = body::build(
-            &provider.send,
-            message.payload,
-            message.to,
-            message.idempotency_key,
-        )?;
-        let url = joined(&manifest.base_url, &provider.send.path)?;
-        let method = match provider.send.method {
+        // A manifest of profile operations only has no email to send.
+        let send = provider
+            .send
+            .as_ref()
+            .ok_or_else(|| missing("manifest/destination/send"))?;
+        let body = body::build(send, message.payload, message.to, message.idempotency_key)?;
+        let url = joined(&manifest.base_url, &send.path)?;
+        let method = match send.method {
             SendMethod::Post => Method::POST,
             SendMethod::Put => Method::PUT,
             SendMethod::Patch => Method::PATCH,
@@ -140,7 +145,7 @@ impl Destination for ProviderDestination {
         // The idempotency header replaces any header of the same name: the request carries exactly
         // one value, the message id.
         request.headers_mut().insert(
-            HeaderName::from_bytes(provider.send.idempotency_header.as_bytes())
+            HeaderName::from_bytes(send.idempotency_header.as_bytes())
                 .map_err(|_| unbuildable())?,
             HeaderValue::from_str(message.idempotency_key).map_err(|_| unbuildable())?,
         );
@@ -156,7 +161,80 @@ impl Destination for ProviderDestination {
                 remote_id: None,
             });
         }
-        Err(failure(&provider, response).await)
+        Err(failure(&provider.errors, response).await)
+    }
+
+    async fn sync(
+        &self,
+        ctx: &DestinationContext,
+        config: &Value,
+        credential: &Credential,
+        call: &ProfileCall<'_>,
+    ) -> Result<Delivered, DestinationError> {
+        let (manifest, provider) = provider_of(config)?;
+        let spec = match call.operation {
+            SyncOperation::Upsert => provider.upsert_profile.as_ref(),
+            SyncOperation::Remove => provider.remove_profile.as_ref(),
+        }
+        .ok_or(DestinationError::Unsupported)?;
+        if call.key.is_empty() || call.key.len() > profile::MAX_KEY_BYTES {
+            return Err(DestinationError::Config {
+                field: "key".to_owned(),
+                reason: "is not usable".to_owned(),
+            });
+        }
+        let body = profile::build_body(spec, call.key, call.traits)?;
+        let url = joined(&manifest.base_url, &profile::path_for(spec, call.key))?;
+        let method = match spec.method {
+            ProfileMethod::Post => Method::POST,
+            ProfileMethod::Put => Method::PUT,
+            ProfileMethod::Patch => Method::PATCH,
+            ProfileMethod::Delete => Method::DELETE,
+        };
+        let mut request = Request::new(method, url);
+        add_headers(
+            &mut request,
+            manifest
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )?;
+        request.headers_mut().insert(
+            HeaderName::from_bytes(spec.idempotency_header.as_bytes())
+                .map_err(|_| unbuildable())?,
+            HeaderValue::from_str(call.idempotency_key).map_err(|_| unbuildable())?,
+        );
+        if let Some(body) = body {
+            request
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            *request.body_mut() = Some(body.to_string().into_bytes().into());
+        }
+        apply_auth(&mut request, &manifest.auth, credential)?;
+
+        let response = ctx.http().execute(request).await?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(Delivered {
+                status: Some(status),
+                remote_id: None,
+            });
+        }
+        // The operation's own rules come first, then the destination's. A profile has no
+        // recipient address: a rule that says so ends the operation, as any terminal answer does.
+        let rules: Vec<ErrorRule> = spec
+            .errors
+            .iter()
+            .chain(&provider.errors)
+            .map(|rule| ErrorRule {
+                action: match rule.action {
+                    ErrorAction::RecipientFailure => ErrorAction::Terminal,
+                    other => other,
+                },
+                ..rule.clone()
+            })
+            .collect();
+        Err(failure(&rules, response).await)
     }
 }
 
@@ -210,8 +288,51 @@ fn provider_of(config: &Value) -> Result<(Manifest, Provider), DestinationError>
 /// the route that receives its webhook. `None` when `config` is not a valid provider manifest.
 pub fn feedback_of(config: &Value) -> Option<(FeedbackSpec, VerificationSpec)> {
     let (_, provider) = provider_of(config).ok()?;
-    let verification = provider.feedback.verification.clone();
-    Some((provider.feedback, verification))
+    let feedback = provider.feedback?;
+    let verification = feedback.verification.clone();
+    Some((feedback, verification))
+}
+
+/// The profile operations a destination's manifest declares, and whether it also carries email.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProfileSupport {
+    pub upsert: bool,
+    pub remove: bool,
+    /// Whether the manifest declares the email pair (`send` with `feedback`).
+    pub email: bool,
+}
+
+impl ProfileSupport {
+    /// Whether the operation is declared.
+    pub fn supports(self, operation: SyncOperation) -> bool {
+        match operation {
+            SyncOperation::Upsert => self.upsert,
+            SyncOperation::Remove => self.remove,
+        }
+    }
+}
+
+/// What the manifest of a provider destination's `config` declares. Nothing for a configuration
+/// that is not a valid provider manifest.
+pub fn profile_support(config: &Value) -> ProfileSupport {
+    match provider_of(config) {
+        Ok((_, provider)) => ProfileSupport {
+            upsert: provider.upsert_profile.is_some(),
+            remove: provider.remove_profile.is_some(),
+            email: provider.send.is_some(),
+        },
+        Err(_) => ProfileSupport::default(),
+    }
+}
+
+/// Where the external key of `operation` comes from, per the manifest of `config`.
+pub fn profile_key_source(config: &Value, operation: SyncOperation) -> Option<KeySource> {
+    let (_, provider) = provider_of(config).ok()?;
+    match operation {
+        SyncOperation::Upsert => provider.upsert_profile,
+        SyncOperation::Remove => provider.remove_profile,
+    }
+    .map(|spec| spec.key_from)
 }
 
 /// The signature scheme of a verification section, as `zirv_flow_core::signature` takes it.
@@ -229,7 +350,17 @@ pub fn read_feedback(spec: &FeedbackSpec, body: &Value) -> FeedbackRead {
 /// when the manifest declares none.
 pub fn default_rate(config: &Value) -> Option<(i32, i32)> {
     let (_, provider) = provider_of(config).ok()?;
-    let limit = provider.rate_limit?;
+    // The destination's own limit, else the strictest an operation declares.
+    let limit = provider.rate_limit.or_else(|| {
+        [&provider.upsert_profile, &provider.remove_profile]
+            .into_iter()
+            .flatten()
+            .filter_map(|spec| spec.rate_limit)
+            .min_by(|a, b| {
+                (u64::from(a.requests) * u64::from(b.per_seconds))
+                    .cmp(&(u64::from(b.requests) * u64::from(a.per_seconds)))
+            })
+    })?;
     let per_second = limit.requests.div_ceil(limit.per_seconds).clamp(1, 100_000);
     let burst = limit.requests.clamp(per_second, 100_000);
     Some((i32::try_from(per_second).ok()?, i32::try_from(burst).ok()?))
@@ -266,7 +397,7 @@ pub async fn domain_status(
     let response = ctx.http().execute(request).await?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(failure(&provider, response).await);
+        return Err(failure(&provider.errors, response).await);
     }
     let bytes = response.body().await.map_err(|_| {
         DestinationError::Other("the provider's reply could not be read".to_owned())
@@ -277,7 +408,7 @@ pub async fn domain_status(
 }
 
 /// The error of a response that was not a success.
-async fn failure(provider: &Provider, response: crate::http::GuardedResponse) -> DestinationError {
+async fn failure(rules: &[ErrorRule], response: crate::http::GuardedResponse) -> DestinationError {
     let status = response.status().as_u16();
     let retry_after = response
         .headers()
@@ -290,7 +421,7 @@ async fn failure(provider: &Provider, response: crate::http::GuardedResponse) ->
         .await
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    let action = classify::classify(&provider.errors, status, body.as_ref());
+    let action = classify::classify(rules, status, body.as_ref());
     classify::error_for(action, status, retry_after)
 }
 
@@ -485,7 +616,7 @@ mod tests {
         let spec = &ProviderDestination::SPEC;
 
         assert_eq!(spec.kind, "provider");
-        assert_eq!(spec.capabilities.channels, ["email"]);
+        assert_eq!(spec.capabilities.channels, ["email", "profile_sync"]);
         assert!(spec.capabilities.idempotency_key && spec.capabilities.rate_limit);
         assert!(!spec.capabilities.signs_dkim);
         assert!(spec.credential_fields.iter().all(|field| field.secret));
@@ -788,6 +919,223 @@ mod tests {
             Err(DestinationError::Config { ref field, .. }) if field == "feedback_secret"
         ));
         assert_eq!(fake.requests(), 0);
+    }
+
+    const PROFILES: &str = include_str!("../../../tests/fixtures/providers/profile_sync.json");
+
+    async fn sync(
+        config: &Value,
+        operation: SyncOperation,
+        key: &str,
+        traits: &serde_json::Map<String, Value>,
+        idempotency_key: &str,
+    ) -> Result<Delivered, DestinationError> {
+        let call = ProfileCall {
+            operation,
+            key,
+            traits,
+            idempotency_key,
+        };
+        ProviderDestination
+            .sync(
+                &ctx(Duration::from_secs(5)),
+                config,
+                &credential(&[("token", "tok-1")]),
+                &call,
+            )
+            .await
+    }
+
+    fn traits(value: Value) -> serde_json::Map<String, Value> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_upsert_and_a_remove_call_the_mapped_requests_with_the_key_in_one_path_segment() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_for(PROFILES, &fake);
+
+        sync(
+            &config,
+            SyncOperation::Upsert,
+            "a/b?c#d@x.test",
+            &traits(json!({"plan": "pro", "age": null})),
+            "effect-1",
+        )
+        .await
+        .unwrap();
+        sync(
+            &config,
+            SyncOperation::Remove,
+            "a/b?c#d@x.test",
+            &traits(json!({})),
+            "effect-2",
+        )
+        .await
+        .unwrap();
+
+        let accepted = fake.accepted();
+        assert_eq!(accepted.len(), 2);
+        assert_eq!(accepted[0].method, "PUT");
+        assert_eq!(accepted[0].path, "/v1/profiles/a%2Fb%3Fc%23d%40x.test");
+        assert_eq!(
+            accepted[0].body,
+            json!({
+                "source": "zirv-flow",
+                "profile": {"id": "a/b?c#d@x.test", "attributes": {"plan": "pro", "age": null}}
+            })
+        );
+        assert_eq!(accepted[0].authorization.as_deref(), Some("Bearer tok-1"));
+        assert_eq!(
+            (accepted[1].method.as_str(), accepted[1].key.as_str()),
+            ("DELETE", "effect-2")
+        );
+        assert_eq!(accepted[1].path, accepted[0].path);
+        assert_eq!(
+            accepted[1].body,
+            Value::Null,
+            "a remove with nothing to place has no body"
+        );
+        assert_eq!(accepted[0].key_headers, 1);
+    }
+
+    #[tokio::test]
+    async fn a_retried_sync_under_the_same_key_is_one_change_at_a_key_honouring_provider() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_for(PROFILES, &fake);
+        let plan = traits(json!({"plan": "pro"}));
+
+        for _ in 0..3 {
+            sync(&config, SyncOperation::Upsert, "k", &plan, "effect-1")
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(fake.accepted().len(), 1);
+        assert_eq!(fake.requests(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_sync_failure_is_classified_by_the_operation_rules_then_the_defaults() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_for(PROFILES, &fake);
+        let none = traits(json!({}));
+        for (status, retry_after) in [(409, None), (503, None), (429, Some(7)), (422, None)] {
+            fake.script(Script::Status {
+                status,
+                body: json!({}),
+                retry_after,
+            });
+        }
+
+        let mut dispositions = Vec::new();
+        for n in 0..4 {
+            let error = sync(
+                &config,
+                SyncOperation::Upsert,
+                "k",
+                &none,
+                &format!("e-{n}"),
+            )
+            .await
+            .unwrap_err();
+            dispositions.push(error.disposition());
+        }
+
+        assert_eq!(
+            dispositions,
+            [
+                Disposition::Retryable,
+                Disposition::Retryable,
+                Disposition::Throttled { retry_after: None },
+                Disposition::Terminal
+            ]
+        );
+        assert!(fake.accepted().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_operation_the_manifest_lacks_or_a_bad_key_makes_no_request() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let mut manifest = serde_json::from_str::<Value>(PROFILES).unwrap();
+        manifest["destination"]
+            .as_object_mut()
+            .unwrap()
+            .remove("remove_profile");
+        let text = manifest.to_string().replace(
+            "https://api.fixture-provider.example.test",
+            &fake.base_url(),
+        );
+        let config = json!({"manifest": serde_json::from_str::<Value>(&text).unwrap()});
+        let none = traits(json!({}));
+
+        let remove = sync(&config, SyncOperation::Remove, "k", &none, "e-1").await;
+        let empty = sync(&config, SyncOperation::Upsert, "", &none, "e-2").await;
+        let long = sync(
+            &config,
+            SyncOperation::Upsert,
+            &"k".repeat(600),
+            &none,
+            "e-3",
+        )
+        .await;
+
+        assert_eq!(remove, Err(DestinationError::Unsupported));
+        assert!(matches!(empty, Err(DestinationError::Config { .. })));
+        assert!(matches!(long, Err(DestinationError::Config { .. })));
+        assert_eq!(fake.requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_profile_only_manifest_sends_no_email_and_has_no_feedback() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_for(PROFILES, &fake);
+
+        let sent = deliver(&config, &token(), "m-1", Duration::from_secs(5)).await;
+
+        assert!(matches!(sent, Err(DestinationError::Config { .. })));
+        assert!(feedback_of(&config).is_none());
+        assert_eq!(fake.requests(), 0);
+        ProviderDestination
+            .check(
+                &ctx(Duration::from_secs(5)),
+                &config,
+                &credential(&[("token", "t")]),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn the_manifest_says_which_operations_exist_where_the_key_comes_from_and_the_default_rate() {
+        let profiles = json!({"manifest": serde_json::from_str::<Value>(PROFILES).unwrap()});
+        let email = json!({"manifest": serde_json::from_str::<Value>(ONE).unwrap()});
+
+        let support = profile_support(&profiles);
+        assert_eq!(
+            support,
+            ProfileSupport {
+                upsert: true,
+                remove: true,
+                email: false
+            }
+        );
+        assert!(support.supports(SyncOperation::Remove));
+        assert_eq!(
+            profile_support(&email),
+            ProfileSupport {
+                upsert: false,
+                remove: false,
+                email: true
+            }
+        );
+        assert_eq!(profile_support(&json!({})), ProfileSupport::default());
+        assert_eq!(
+            profile_key_source(&profiles, SyncOperation::Upsert),
+            Some(KeySource::Identity("email".to_owned()))
+        );
+        assert_eq!(profile_key_source(&email, SyncOperation::Upsert), None);
+        assert_eq!(default_rate(&profiles), Some((10, 10)));
     }
 
     #[test]
