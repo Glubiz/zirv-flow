@@ -2652,7 +2652,8 @@ after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
 (keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
 defaults, enforced by scheduler jobs): events 25 months deployment-wide, with
 per-name workspace overrides (drop monthly partitions; batched deletes where
-an override is shorter), messages 13 months, ingest rejects (including those from syncs and imports) 30 days, import files 7 days after the import ends,
+an override is shorter; each purge of rows that show a destination handled a person leaves a
+handled marker, see "Handled markers" below), messages 13 months, ingest rejects (including those from syncs and imports) 30 days, import files 7 days after the import ends,
 job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28.
 Assistant transcripts are not stored unless a workspace opts in to a 1 to 30
 day window (default 7), which a retention job purges (13.4, OQ-26).
@@ -2738,8 +2739,24 @@ the result per destination.
   attempts, error code, times) to each request; never a key.
 - **Manifest.** `erase_profile` has the shape and validation of `remove_profile` (`key` and
   `static` body placements only, never traits). Existing manifests validate as before.
-- **Open.** Events and forwarded rows age out by retention, so a destination that handled a person
-  only before that is not called.
+- **Handled markers (#283).** Events and delivered forwarding rows age out by retention, so a
+  destination that handled a person only before that would not be called. `erasure_handled_markers`
+  (migration 0059) keeps the fact: one row per workspace, person and destination, with
+  `first_handled_at`. Each retention purge that removes handling evidence writes the markers of the
+  rows it removes, in its own statement, with `ON CONFLICT DO NOTHING`: the event deletes (default
+  and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
+  safety net before a partition drop, and `purge_delivered` for delivered outbox rows. A row that
+  names no destination writes none, and neither does a destination that no longer exists. Messages
+  are not purged by retention (the 13-month message retention is not built), so they write none;
+  when it is built it writes markers too. Nothing on a hot path (message insert, outbox insert, sync
+  outcome) writes a marker. The marker insert joins `people`, so a purge writes nothing for a person
+  already gone, and the table's `(workspace_id, person_id)` key (`ON DELETE CASCADE`) means a
+  marker never outlives its person: a purge that raced an erasure fails as a whole statement and
+  runs again on its next pass, and an erasure waits for the person row a purge's marker key holds.
+  Planning reads the markers with the other evidence in one statement, for every member of the merged
+  group, so each destination is planned once whether the evidence is a marker, a live row or both.
+  `delete_person` deletes the markers after planning, and the erasure scan finds the table through its
+  `person_id` column.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's
