@@ -40,6 +40,17 @@ struct Ledger {
     calls: Vec<String>,
     /// The messages accepted, one per key.
     sent: Vec<FakeSent>,
+    /// The erase calls received, in order.
+    erased: Vec<FakeErased>,
+}
+
+/// An erase call the fake received.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FakeErased {
+    /// The idempotency key of the call.
+    pub key: String,
+    /// The external key of the person the call named.
+    pub subject: String,
 }
 
 static LEDGERS: Mutex<BTreeMap<String, Ledger>> = Mutex::new(BTreeMap::new());
@@ -61,6 +72,16 @@ pub fn ledger_sent(name: &str) -> Vec<FakeSent> {
         .unwrap_or_else(PoisonError::into_inner)
         .get(name)
         .map(|ledger| ledger.sent.clone())
+        .unwrap_or_default()
+}
+
+/// The erase calls the ledger `name` received, in order.
+pub fn ledger_erased(name: &str) -> Vec<FakeErased> {
+    LEDGERS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(name)
+        .map(|ledger| ledger.erased.clone())
         .unwrap_or_default()
 }
 
@@ -215,9 +236,28 @@ impl Destination for Fake {
         ctx: &DestinationContext,
         config: &Value,
         _: &Credential,
-        _: &str,
+        subject: &str,
+        idempotency_key: &str,
     ) -> Result<(), DestinationError> {
-        resolve_host(ctx, config).await
+        resolve_host(ctx, config).await?;
+        if let Some(ledger) = config.get("ledger").and_then(Value::as_str) {
+            LEDGERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(ledger.to_owned())
+                .or_default()
+                .erased
+                .push(FakeErased {
+                    key: idempotency_key.to_owned(),
+                    subject: subject.to_owned(),
+                });
+        }
+        match config.get("mode").and_then(Value::as_str).unwrap_or("ok") {
+            "throttle" => Err(DestinationError::Upstream(429)),
+            "server_error" => Err(DestinationError::Upstream(503)),
+            "rejected" => Err(DestinationError::Upstream(422)),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -363,6 +403,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn erase_records_its_calls_under_a_ledger_and_answers_as_the_mode_says() {
+        let erase = |mode: &str| {
+            let config = json!({"mode": mode, "ledger": "fake-erase-test"});
+            async move {
+                Fake.erase(&ctx(), &config, &credential("x"), "subject-1", "erase-key")
+                    .await
+            }
+        };
+
+        assert_eq!(erase("ok").await, Ok(()));
+        assert_eq!(
+            erase("server_error").await.unwrap_err().disposition(),
+            Disposition::Retryable
+        );
+
+        let call = FakeErased {
+            key: "erase-key".into(),
+            subject: "subject-1".into(),
+        };
+        assert_eq!(ledger_erased("fake-erase-test"), [call.clone(), call]);
+    }
+
+    #[tokio::test]
     async fn an_answer_that_throttles_can_carry_a_retry_after() {
         let payload = json!({});
         let message = Outbound {
@@ -414,7 +477,7 @@ mod tests {
             Fake.deliver(&ctx(), &config, &credential, &message)
                 .await
                 .unwrap_err(),
-            Fake.erase(&ctx(), &config, &credential, "p")
+            Fake.erase(&ctx(), &config, &credential, "p", "e-1")
                 .await
                 .unwrap_err(),
         ];
