@@ -24,7 +24,7 @@
 #   RUN_TIMEOUT_S 3600
 #
 # Results: $M6_OUT/<LABEL>/ (report.json, report.txt, arrivals.ndjson, enrollments.csv,
-# metrics-w*.txt, docker-stats.ndjson, queue.csv, messages.txt, variant.txt).
+# metrics-w*.txt, docker-stats.ndjson, queue.csv, queue.misses, messages.txt, variant.txt).
 #
 # Usage: PEOPLE=20000 WORKERS=3 TEMPLATE=html scripts/bench/m6/run.sh LABEL
 
@@ -108,7 +108,6 @@ api_json PATCH "/workspaces/$ws/destinations/$dest" "$(jq -nc --argjson r "$dest
 list="$(api_json POST "/workspaces/$ws/lists" "$(jq -nc --arg n "bench-$label" '{name: $n}')" | jq -r .id)"
 [ -n "$list" ] && [ "$list" != null ] || die "the list was not created"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 pgc -At -v ws="$ws" -v pat="sb-%@$M6_RCPT_DOMAIN" -v n="$people" -c \
   "SELECT person_id FROM identities WHERE workspace_id = :'ws' AND kind = 'email' AND value LIKE :'pat' ORDER BY value LIMIT :n" \
   | split -l 1000 - "$tmp/ids-"
@@ -136,17 +135,40 @@ sampler() {
     sleep 3
   done
 }
-# The destination queue gauges are the scheduler leader's (the workers do not publish them):
-# one line `t_us,depth,oldest_s` per second.
+# The destination queue gauges are the scheduler leader's (the workers do not publish them), for
+# this run's destination only (label `destination`): one line `t_us,depth,oldest_s` per second.
+# A scrape that fails, or finds no gauge of this destination, adds no sample; it adds a line to
+# queue.misses, which the report shows.
 queue_sampler() {
+  local body line
   while [ ! -e "$out/stop" ]; do
-    curl -fsS --max-time 2 "http://127.0.0.1:9101/metrics" 2>/dev/null \
-      | awk -v t="$(date +%s%6N)" '/^zirv_flow_destination_queue_depth/ {d += $NF}
-          /^zirv_flow_destination_queue_oldest_seconds/ {if ($NF > o) o = $NF}
-          END {printf "%s,%d,%s\n", t, d, o + 0}' >>"$out/queue.csv" || true
+    line=""
+    if body="$(curl -fsS --max-time 2 "http://127.0.0.1:9101/metrics" 2>/dev/null)"; then
+      line="$(awk -v t="$(date +%s%6N)" -v d="destination=\"$dest\"" '
+        index($0, d) && /^zirv_flow_destination_queue_depth/ {depth += $NF; seen_d = 1}
+        index($0, d) && /^zirv_flow_destination_queue_oldest_seconds/ {if ($NF > oldest) oldest = $NF; seen_o = 1}
+        END {if (seen_d && seen_o) printf "%s,%d,%s\n", t, depth, oldest + 0}' <<<"$body")"
+    fi
+    if [ -n "$line" ]; then echo "$line" >>"$out/queue.csv"; else echo "$(date +%s%6N)" >>"$out/queue.misses"; fi
     sleep 1
   done
 }
+sampler_pid=""
+queue_pid=""
+cleanup() {
+  touch "$out/stop"
+  local pid
+  for pid in "$sampler_pid" "$queue_pid"; do
+    [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  done
+  for pid in "$sampler_pid" "$queue_pid"; do
+    [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  done
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+: >"$out/queue.csv"
+: >"$out/queue.misses"
 sampler &
 sampler_pid=$!
 queue_sampler &
@@ -208,7 +230,7 @@ for f in "$out"/metrics-w*.txt; do metrics_args+=(--metrics "$f"); done
 "$SENDBENCH" report --arrivals "$out/arrivals.ndjson" --enrollments "$out/enrollments.csv" \
   "${metrics_args[@]}" --label "$label" --target 300 --tolerance "$tol" --expected "$people" \
   --offset-before-us "$offset_before" --offset-after-us "$offset_after" --uncertainty-us "$uncertainty" \
-  "${bucket_args[@]}" --queue "$out/queue.csv" --docker-stats "$out/docker-stats.ndjson" \
+  "${bucket_args[@]}" --queue "$out/queue.csv" --queue-misses "$(wc -l <"$out/queue.misses" 2>/dev/null || echo 0)" --docker-stats "$out/docker-stats.ndjson" \
   --db-container "$pgname" --out "$out/report.json" | tee "$out/report.txt"
 # Whether the bucket (or the workers) was the limit: a queue stood in the steady window.
 echo "queue_in_window=$(jq -c .queue "$out/report.json") db_cpu_in_window=$(jq -c .db_cpu "$out/report.json")" >>"$out/variant.txt"

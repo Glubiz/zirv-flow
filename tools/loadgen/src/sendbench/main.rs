@@ -118,6 +118,9 @@ enum Command {
         /// The scheduler queue samples: lines of `t_us,depth,oldest_s`.
         #[arg(long)]
         queue: Option<PathBuf>,
+        /// Scrapes of the scheduler that gave no sample (failed or no gauge of the destination).
+        #[arg(long, default_value_t = 0)]
+        queue_misses: u64,
         /// The `docker stats` samples (JSON lines with `Name`, `CPUPerc` and `t`).
         #[arg(long)]
         docker_stats: Option<PathBuf>,
@@ -222,6 +225,7 @@ fn run_report(command: Command) -> Result<(), String> {
         bucket_rate,
         bucket_burst,
         queue,
+        queue_misses,
         docker_stats,
         db_container,
         out,
@@ -253,7 +257,7 @@ fn run_report(command: Command) -> Result<(), String> {
     );
     let mut built = built;
     if let Some(path) = &queue {
-        built = built.with_queue(&report::parse_queue(&read(path, "--queue")?));
+        built = built.with_queue(&report::parse_queue(&read(path, "--queue")?), queue_misses);
     }
     if let Some(path) = &docker_stats {
         built = built.with_db_cpu(&report::parse_docker_cpu(

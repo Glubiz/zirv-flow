@@ -154,6 +154,8 @@ pub struct QueueStats {
     pub samples: u64,
     pub max_depth: f64,
     pub max_oldest_s: f64,
+    /// Scrapes of the scheduler that failed or found no gauge of the destination: no sample.
+    pub missed_scrapes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -310,11 +312,14 @@ pub fn build(inputs: Inputs, arrivals: &[Arrival], enrolled: &HashMap<String, u6
 
 impl Report {
     /// Adds the destination queue samples (`t_us,depth,oldest_s`) that fall in the steady window.
-    pub fn with_queue(mut self, samples: &[(u64, f64, f64)]) -> Self {
+    pub fn with_queue(mut self, samples: &[(u64, f64, f64)], missed_scrapes: u64) -> Self {
         let inside = samples
             .iter()
             .filter(|(t, _, _)| *t >= self.window.start_us && *t <= self.window.end_us);
-        let mut stats = QueueStats::default();
+        let mut stats = QueueStats {
+            missed_scrapes,
+            ..QueueStats::default()
+        };
         for (_, depth, oldest) in inside {
             stats.samples += 1;
             stats.max_depth = stats.max_depth.max(*depth);
@@ -405,17 +410,25 @@ impl Report {
             ));
         }
         if let Some(queue) = &self.queue {
-            out.push_str(&format!(
-                "Queue (scheduler gauges, steady window, {} samples): max depth {:.0}, max oldest age {:.1} s{}\n",
-                queue.samples,
-                queue.max_depth,
-                queue.max_oldest_s,
-                if queue.max_depth > 0.0 {
-                    ": a queue stood in the window, so the destination or the workers were the limit"
-                } else {
-                    ""
-                }
-            ));
+            if queue.samples == 0 {
+                out.push_str(&format!(
+                    "Queue: NO SAMPLES in the steady window ({} missed scrapes): the queue depth is unknown, not 0\n",
+                    queue.missed_scrapes
+                ));
+            } else {
+                out.push_str(&format!(
+                    "Queue (scheduler gauges of the destination, steady window, {} samples, {} missed scrapes in the run): max depth {:.0}, max oldest age {:.1} s{}\n",
+                    queue.samples,
+                    queue.missed_scrapes,
+                    queue.max_depth,
+                    queue.max_oldest_s,
+                    if queue.max_depth > 0.0 {
+                        ": a queue stood in the window, so the destination or the workers were the limit"
+                    } else {
+                        ""
+                    }
+                ));
+            }
         }
         if let Some(cpu) = &self.db_cpu {
             out.push_str(&format!(
@@ -701,12 +714,22 @@ mod tests {
             "9000000,900,30\n10300000,12,0.5\n11000000,7,0.9\n12500000,500,20\nbroken\n",
         );
         assert_eq!(samples.len(), 4);
-        let queue = report.with_queue(&samples).queue.unwrap_or_default();
+        let queue = report.with_queue(&samples, 3).queue.unwrap_or_default();
         assert_eq!(queue.samples, 2);
         assert_eq!(queue.max_depth, 12.0);
         assert_eq!(queue.max_oldest_s, 0.9);
+        assert_eq!(queue.missed_scrapes, 3);
     }
 
+    #[test]
+    fn a_run_with_no_queue_samples_says_so_instead_of_showing_zero() {
+        let (arrivals, enrolled) = fixed();
+        let report = build(inputs(300.0), &arrivals, &enrolled).with_queue(&[], 12);
+        let text = report.text();
+        assert!(text.contains("Queue: NO SAMPLES in the steady window (12 missed scrapes)"));
+        assert!(!text.contains("max depth 0"));
+        assert_eq!(report.queue.map(|q| q.missed_scrapes), Some(12));
+    }
     #[test]
     fn a_bucket_limited_run_that_beats_its_bucket_is_not_met() {
         let (arrivals, enrolled) = fixed();
