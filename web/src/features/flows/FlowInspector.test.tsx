@@ -48,7 +48,7 @@ function failedEnrollment(overrides: Record<string, unknown> = {}) {
 }
 
 function nodeCount(node_id: string, node_type: string, entered: number, waiting = 0, failed = 0) {
-  return { node_id, node_type, entered, waiting, failed, completed: entered - waiting - failed, goal_conversions: 0 };
+  return { node_id, node_type, entered, waiting, failed, completed: entered - waiting - failed, goal_conversions: 0, sent: 0, send_failed: 0, skipped: [] };
 }
 
 function counts(version: number) {

@@ -297,6 +297,12 @@ pub struct NodeCount {
     pub waiting: i64,
     /// Step executions that ended `failed`.
     pub failed: i64,
+    /// Messages of a send node that ended `sent`.
+    pub sent: i64,
+    /// Messages of a send node that ended `failed`.
+    pub send_failed: i64,
+    /// Messages of a send node that ended `skipped`, by the fixed reason code, sorted by reason.
+    pub skipped: Vec<(String, i64)>,
 }
 
 /// The counts of every node that has rows, by node id (the settings goal as
@@ -346,8 +352,29 @@ pub async fn version_node_counts(
     .fetch_all(&mut *tx)
     .await
     .map_err(StoreError::bounded)?;
+    // Delivery outcomes come from the message rows of this version, by node; test sends carry no
+    // flow and a pending or sending message has no outcome yet.
+    let deliveries: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT node_id, status, reason, count(*) FROM messages          WHERE workspace_id = $1 AND flow_id = $2 AND flow_version = $3 AND NOT test            AND status IN ('sent', 'skipped', 'failed')          GROUP BY node_id, status, reason ORDER BY node_id, reason",
+    )
+    .bind(workspace.as_uuid())
+    .bind(flow)
+    .bind(version)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(StoreError::bounded)?;
     drop(tx);
     let mut counts: HashMap<String, NodeCount> = HashMap::new();
+    for (node, status, reason, total) in deliveries {
+        let count = counts.entry(node).or_default();
+        match status.as_str() {
+            "sent" => count.sent += total,
+            "failed" => count.send_failed += total,
+            _ => count
+                .skipped
+                .push((reason.unwrap_or_else(|| "unknown".to_owned()), total)),
+        }
+    }
     for (node, entered, completed, failed) in steps {
         let count = counts.entry(node).or_default();
         count.entered = entered;
@@ -584,6 +611,7 @@ mod tests {
             completed,
             waiting,
             failed,
+            ..NodeCount::default()
         };
         assert_eq!(count("a"), expect(3, 3, 0, 0));
         assert_eq!(count("b"), expect(3, 1, 1, 1));
@@ -595,6 +623,76 @@ mod tests {
         let other = workspace(&pool, "elsewhere").await;
         let elsewhere = version_node_counts(&pool, other, flow, 1).await.unwrap();
         assert!(elsewhere.is_none());
+    }
+
+    async fn message(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        flow: Option<(Uuid, i32)>,
+        node: &str,
+        status: &str,
+        reason: Option<&str>,
+        test: bool,
+    ) {
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id,                  flow_version, node_id, template_id, destination_id, status, reason, test,                  completed_at)              VALUES ($1, $2, $3, $1, $4, $5, $6, $1, $1, $7, $8, $9,                      CASE WHEN $7 IN ('pending', 'sending') THEN NULL ELSE now() END)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(flow.map(|f| f.0))
+        .bind(flow.map(|f| f.1))
+        .bind(node)
+        .bind(status)
+        .bind(reason)
+        .bind(test)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_delivery_counts_of_a_node_come_from_its_message_rows(pool: PgPool) {
+        let (ws, flow) = published_flow(&pool, "deliveries").await;
+        let v1 = Some((flow, 1));
+        for (node, status, reason) in [
+            ("mail", "sent", None),
+            ("mail", "sent", None),
+            ("mail", "skipped", Some("no_consent")),
+            ("mail", "skipped", Some("no_consent")),
+            ("mail", "skipped", Some("suppressed")),
+            ("mail", "failed", Some("rejected")),
+            ("mail", "pending", None),
+            ("other", "sent", None),
+        ] {
+            message(&pool, ws, v1, node, status, reason, false).await;
+        }
+        // Not counted: a test message, another version, a test send with no flow.
+        message(&pool, ws, v1, "mail", "sent", None, true).await;
+        message(&pool, ws, Some((flow, 2)), "mail", "sent", None, false).await;
+        message(&pool, ws, None, "mail", "sent", None, false).await;
+
+        let counts = version_node_counts(&pool, ws, flow, 1)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mail = counts.get("mail").cloned().unwrap();
+        assert_eq!((mail.sent, mail.send_failed), (2, 1));
+        assert_eq!(
+            mail.skipped,
+            vec![("no_consent".to_owned(), 2), ("suppressed".to_owned(), 1)]
+        );
+        assert_eq!(counts.get("other").map(|c| c.sent), Some(1));
+        assert_eq!(mail.entered, 0, "enrollment counts are independent");
     }
 
     #[sqlx::test]
