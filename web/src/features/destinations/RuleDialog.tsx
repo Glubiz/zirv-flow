@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
-import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
+import { Button, Dialog, InlineError, SelectField, shortId, TextField } from "../../ui";
 import { PropertyFilterEditor, type PropertyFilter } from "../segments";
 import { kindOf, type Destination, type DestinationKind, type Rule } from "./labels";
 import { mappingFromRows, newRow, rowsFromMapping, SOURCES, type MappingRow, type SourceId, type ValueType } from "./mapping";
@@ -52,7 +52,7 @@ export function RuleDialog({ workspaceId, destinations, existing, onClose, onSav
         await unwrap(
           client.PATCH("/api/v1/workspaces/{ws}/forwarding/rules/{id}", {
             params: { path: { ws: workspaceId, id: existing.id } },
-            body: { ...body, destination_id: destinationId },
+            body,
           }),
         );
       } else {
@@ -82,14 +82,22 @@ export function RuleDialog({ workspaceId, destinations, existing, onClose, onSav
         }}
       >
         <TextField label="Name" value={name} onChange={(event) => setName(event.target.value)} maxLength={MAX_NAME_CHARS} autoComplete="off" />
-        <SelectField label="Destination" value={destinationId} onChange={(event) => setDestinationId(event.target.value)}>
-          <option value="">Choose a destination</option>
-          {destinations.map((destination) => (
-            <option key={destination.id} value={destination.id}>
-              {destination.name}
-            </option>
-          ))}
-        </SelectField>
+        {existing ? (
+          <div className="stack-tight">
+            <span className="field-label">Destination</span>
+            <span>{destinations.find((destination) => destination.id === existing.destination_id)?.name ?? shortId(existing.destination_id)}</span>
+            <span className="faint">A rule keeps its destination. To send to another one, add a new rule.</span>
+          </div>
+        ) : (
+          <SelectField label="Destination" value={destinationId} onChange={(event) => setDestinationId(event.target.value)}>
+            <option value="">Choose a destination</option>
+            {destinations.map((destination) => (
+              <option key={destination.id} value={destination.id}>
+                {destination.name}
+              </option>
+            ))}
+          </SelectField>
+        )}
         {events.status === "ready" ? (
           <SelectField
             label="Event"

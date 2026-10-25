@@ -12,6 +12,7 @@ import {
   OTHER_LETTER_ID,
   queue,
   rule,
+  RULE_ID,
   WS,
 } from "../../test/destinationsApi";
 import { json, mockApi, problem } from "../../test/mockApi";
@@ -96,6 +97,25 @@ describe("forwarding status and rules", () => {
       filter: [{ prop: "amount", op: "gt", value: 10 }],
       mapping: { id: { from: "event.properties", pointer: "/amount" } },
     });
+  });
+
+  it("shows the destination of a rule being changed read-only and leaves it out of the change", async () => {
+    const calls = mockApi(base({ [`PATCH ${WS}/forwarding/rules/${RULE_ID}`]: () => json(rule()) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Change Paid orders" }));
+    const dialog = await screen.findByRole("dialog", { name: "Change Paid orders" });
+    expect(within(dialog).queryByLabelText("Destination")).not.toBeInTheDocument();
+    expect(within(dialog).getByText("Order hook")).toBeInTheDocument();
+    await user.clear(within(dialog).getByLabelText("Name"));
+    await user.type(within(dialog).getByLabelText("Name"), "Big orders");
+    await user.click(within(dialog).getByRole("button", { name: "Save the rule" }));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    const body = calls.find((call) => call.method === "PATCH")?.body as Record<string, unknown>;
+    expect(body.name).toBe("Big orders");
+    expect(body).not.toHaveProperty("destination_id");
   });
 
   it("offers only destinations that carry events, and points to a webhook when there is none", async () => {
