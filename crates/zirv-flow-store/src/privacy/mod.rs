@@ -7,6 +7,7 @@ mod delete;
 mod erasure;
 mod erasure_calls;
 mod export;
+mod handled_markers;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -26,3 +27,5 @@ pub use export::{
     PrivacyExport, build_export, download_export, expire_exports, find_privacy_export,
     list_privacy_exports, request_export,
 };
+
+pub(crate) use handled_markers::{delete_and_mark, event_columns, mark_partition};
