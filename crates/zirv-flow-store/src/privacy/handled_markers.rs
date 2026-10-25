@@ -22,6 +22,7 @@ const WRITE_MARKERS: &str = "INSERT INTO erasure_handled_markers \
     SELECT g.workspace_id, g.person_id, d.id, min(g.handled_at) FROM gone g \
     JOIN people p ON p.workspace_id = g.workspace_id AND p.id = g.person_id \
     JOIN destinations d ON d.workspace_id = g.workspace_id AND d.id::text = g.destination \
+    WHERE g.destination IS NOT NULL \
     GROUP BY g.workspace_id, g.person_id, d.id \
     ON CONFLICT DO NOTHING";
 

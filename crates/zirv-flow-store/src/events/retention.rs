@@ -511,6 +511,68 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dropped_partition_leaves_the_markers_of_its_sync_events(pool: PgPool) {
+        let seeded = crate::privacy::testing::seed_everything(&pool).await;
+        let destination = Uuid::now_v7();
+        crate::create_destination(
+            &pool,
+            seeded.ws,
+            &crate::NewDestination {
+                id: destination,
+                kind: "fake",
+                name: "partitioned",
+                config: &json!({}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE events_y2020m01 PARTITION OF events              FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-02-01 00:00:00+00')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at,                 properties, source, trace_id, validation_state)              VALUES (gen_random_uuid(), $1, $2, $3, '2020-01-15 00:00:00+00', now(),                 jsonb_build_object('destination_id', $4::text), 'flows', gen_random_uuid(),                 'valid')",
+        )
+        .bind(seeded.ws.as_uuid())
+        .bind(seeded.person)
+        .bind(zirv_flow_core::events::SYNC_SUCCEEDED_EVENT)
+        .bind(destination)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // The event deletes of a run would take the event first, so the drop is called alone.
+        let mut connection = pool.acquire().await.unwrap();
+        let dropped = drop_old_partitions(&mut connection, 100, NOW)
+            .await
+            .unwrap();
+        drop(connection);
+
+        assert!(dropped >= 1);
+        let table: Option<String> =
+            sqlx::query_scalar("SELECT to_regclass('events_y2020m01')::text")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(table.is_none(), "the partition is gone");
+        let markers: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT person_id FROM erasure_handled_markers WHERE destination_id = $1",
+        )
+        .bind(destination)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(markers, [seeded.person]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_longer_override_keeps_an_old_partition(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         sqlx::query(

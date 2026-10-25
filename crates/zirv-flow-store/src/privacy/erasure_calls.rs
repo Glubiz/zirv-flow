@@ -1423,4 +1423,96 @@ mod tests {
 
         assert_eq!(markers(&pool, person).await, [synced]);
     }
+
+    /// A sync outcome event of `person` that names `destination` (any text).
+    async fn sync_event_naming<'e>(
+        executor: impl sqlx::PgExecutor<'e>,
+        ws: WorkspaceId,
+        person: Uuid,
+        destination: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at,                 properties, source, trace_id, validation_state)              VALUES (gen_random_uuid(), $1, $2, $3, now(), now(),                 jsonb_build_object('destination_id', $4::text), 'flows', gen_random_uuid(),                 'valid')",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(SYNC_SUCCEEDED_EVENT)
+        .bind(destination)
+        .execute(executor)
+        .await
+        .unwrap();
+    }
+
+    async fn sync_events_of(pool: &PgPool, person: Uuid) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE person_id = $1 AND name = $2")
+            .bind(person)
+            .bind(SYNC_SUCCEEDED_EVENT)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purge_writes_no_marker_for_a_person_who_no_longer_exists(pool: PgPool) {
+        let seeded = seed_everything(&pool).await;
+        let ws = seeded.ws;
+        let one = destination(&pool, ws, "one").await;
+        let gone = Uuid::now_v7();
+        // The events table refuses a dangling person, so the row goes in with the checks off.
+        let mut connection = pool.acquire().await.unwrap();
+        sqlx::query("SET session_replication_role = replica")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sync_event_naming(&mut *connection, ws, gone, &one.to_string()).await;
+        sqlx::query("RESET session_replication_role")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+
+        assert!(purge_events(&pool).await >= 1);
+
+        assert_eq!(sync_events_of(&pool, gone).await, 0, "the event was purged");
+        assert_eq!(marker_count(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purge_writes_no_marker_for_another_workspaces_destination(pool: PgPool) {
+        let seeded = seed_everything(&pool).await;
+        let (ws, person) = (seeded.ws, seeded.person);
+        let other = crate::privacy::testing::workspace(&pool, "other-workspace").await;
+        let theirs = destination(&pool, other, "theirs").await;
+        sync_event_naming(&pool, ws, person, &theirs.to_string()).await;
+
+        assert!(purge_events(&pool).await >= 1);
+
+        assert_eq!(
+            sync_events_of(&pool, person).await,
+            0,
+            "the event was purged"
+        );
+        assert_eq!(marker_count(&pool).await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purge_deletes_an_event_whose_destination_is_not_a_uuid_and_writes_no_marker(
+        pool: PgPool,
+    ) {
+        let seeded = seed_everything(&pool).await;
+        let (ws, person) = (seeded.ws, seeded.person);
+        sync_event_naming(&pool, ws, person, "not-a-uuid").await;
+
+        assert!(purge_events(&pool).await >= 1);
+
+        assert_eq!(
+            sync_events_of(&pool, person).await,
+            0,
+            "the event was purged"
+        );
+        assert_eq!(marker_count(&pool).await, 0);
+    }
 }

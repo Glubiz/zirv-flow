@@ -2757,6 +2757,10 @@ the result per destination.
   group, so each destination is planned once whether the evidence is a marker, a live row or both.
   `delete_person` deletes the markers after planning, and the erasure scan finds the table through its
   `person_id` column.
+  A purge and an erasure of the same person can deadlock, because the purge's marker key takes the
+  person row after it deleted the evidence and `delete_person` locks the person row first; Postgres
+  aborts one of them. The aborted erasure job retries and plans from the committed markers, the
+  aborted purge rolls back and runs again on its next pass, and no data is lost either way.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's
