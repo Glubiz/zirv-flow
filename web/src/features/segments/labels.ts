@@ -50,6 +50,8 @@ const ISSUES: Record<string, string> = {
   too_many_nodes: "The definition has too many conditions.",
   too_many_values: "Too many values in the list.",
   value_too_long: "The value is too long.",
+  unknown_dimension: "This dimension does not exist.",
+  policy_only: "This condition is only for a consent policy.",
 };
 
 export function issueMessage(code: string): string {

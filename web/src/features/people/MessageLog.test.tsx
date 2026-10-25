@@ -255,15 +255,22 @@ describe("the message log of a person", () => {
 
   it("shows a loading state, then an error with a retry", async () => {
     const user = userEvent.setup();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let attempts = 0;
     mount({
-      [MESSAGES]: () => {
+      [MESSAGES]: async () => {
         attempts += 1;
-        return attempts === 1 ? problem(503, "Search timed out", "Try a narrower filter.") : json({ messages: [SENT], next_before: null });
+        if (attempts > 1) return json({ messages: [SENT], next_before: null });
+        await held;
+        return problem(503, "Search timed out", "Try a narrower filter.");
       },
     });
 
     expect(await screen.findByText("Loading the messages")).toBeInTheDocument();
+    release();
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("Search timed out");
     await user.click(within(alert).getByRole("button", { name: "Try again" }));

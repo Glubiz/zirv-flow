@@ -33,7 +33,7 @@ pub use crud::{
     find_flow_version, list_flow_versions, list_flows, lock_flow, update_flow_draft,
 };
 pub use delivery::{
-    WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject, lock_webhook_person,
+    SyncDetail, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject, lock_webhook_person,
     read_webhook_subject, record_webhook_outcome,
 };
 pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
@@ -50,13 +50,13 @@ pub use inspector::{
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};
 pub use runtime::{
     Enrollment, EnrollmentStatus, EnrollmentUpdate, NewStepExecution, NewWait, STEP_JOB_KIND,
-    StepJobInput, StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND, clear_waits,
-    count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps, register_wait,
-    save_enrollment, settle_wait_step, step_zones, wait_filters,
+    SYNC_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND,
+    clear_waits, count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps,
+    register_wait, save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
 pub use send::{
-    DELIVERY_UNCONFIRMED, HARD_BOUNCE, INTERNAL_ERROR, SEND_JOB_KIND, SOFT_BOUNCE, SendOutcome,
-    end_orphaned_messages, record_send_outcome,
+    DELIVERY_UNCONFIRMED, EndedOrphan, HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD, SEND_JOB_KIND,
+    SOFT_BOUNCE, SendOutcome, end_orphaned_messages, record_send_outcome,
 };
 pub use signing::{
     Rotation, SigningKey, SigningKeys, create_signing_key, live_signing_keys, rotate_signing_key,

@@ -377,6 +377,23 @@ describe("the wizard for an HTTP manifest source", () => {
     expect((created?.body as { config: unknown }).config).toEqual({ manifest: JSON.parse(MANIFEST) as unknown });
   });
 
+  it("offers a credential holding only fields its manifest may declare", async () => {
+    mockApi({
+      ...HTTP,
+      "GET /api/v1/workspaces/ws1/credentials": () =>
+        json([...CREDENTIALS, aCredentialHolding("cred-custom", "Account secret", ["account_secret"])]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Choose HTTP API (manifest)" }));
+
+    const picker = await screen.findByLabelText("Credential");
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toContain(
+      "Account secret (Custom)",
+    );
+  });
+
   it("will not save a manifest that is not a JSON object", async () => {
     mockApi(HTTP);
     const user = userEvent.setup();

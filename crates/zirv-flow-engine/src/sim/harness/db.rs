@@ -254,6 +254,9 @@ impl Db {
                 Some(key),
             ) => Some((key, "webhook", url.clone(), trait_keys.clone())),
             (EffectKind::Send { .. }, Some(key)) => Some((key, "send", String::new(), Vec::new())),
+            (EffectKind::Sync { trait_keys, .. }, Some(key)) => {
+                Some((key, "sync", String::new(), trait_keys.clone()))
+            }
             _ => None,
         };
         let Some((key, kind, url, trait_keys)) = external else {

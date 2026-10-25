@@ -545,6 +545,37 @@ impl Walker<'_> {
                 }
                 self.external.push(body("webhook", captured));
             }
+            EffectKind::Sync {
+                destination,
+                operation,
+                trait_keys,
+            } => {
+                // A walk calls nothing and writes no outcome: it names the operation a real run
+                // would queue, with the listed traits at the values the walk has. The external
+                // key is not read.
+                let traits: Map<String, Value> = trait_keys
+                    .iter()
+                    .map(|key| {
+                        (
+                            key.clone(),
+                            self.snapshot
+                                .traits
+                                .get(key)
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        )
+                    })
+                    .collect();
+                self.external.push(body(
+                    "sync",
+                    json!({
+                        "destination": destination,
+                        "operation": operation.as_str(),
+                        "idempotency_key": effect.effect_key,
+                        "traits": traits,
+                    }),
+                ));
+            }
             EffectKind::Send {
                 template,
                 destination,
@@ -1223,6 +1254,51 @@ mod tests {
         assert_eq!(envelope["idempotency_key"], json!(hook.effect_key));
         assert!(hook.detail.get("signature").is_none() && envelope.get("secret").is_none());
         assert_eq!(walked.wakes.iter().filter(|wake| wake.fired).count(), 2);
+    }
+
+    #[test]
+    fn a_sync_node_is_captured_with_its_operation_and_traits_and_calls_nothing() {
+        let destination = Uuid::from_u128(77);
+        let g = graph(
+            json!([
+                {"id": "set", "type": "action.update_trait", "key": "plan",
+                 "change": {"op": "set", "value": "pro"}},
+                {"id": "push", "type": "action.sync", "destination": destination,
+                 "operation": "upsert", "trait_keys": ["plan", "country"]},
+                {"id": "drop", "type": "action.sync", "destination": destination,
+                 "operation": "remove"},
+                {"id": "end", "type": "exit"}
+            ]),
+            &[
+                ("set", "next", "push"),
+                ("push", "next", "drop"),
+                ("drop", "next", "end"),
+            ],
+        );
+
+        let walked = run(&g, PersonSnapshot::default(), &[], MAX_STEPS).unwrap();
+
+        assert_eq!(walked.final_state.status, "completed");
+        let [push, drop] = walked.external_effects.as_slice() else {
+            panic!("two external effects");
+        };
+        let enrollment = subject().enrollment_id;
+        assert_eq!((push.kind, drop.kind), ("sync", "sync"));
+        assert_eq!(
+            push.effect_key.as_deref(),
+            Some(format!("{enrollment}:push:sync").as_str())
+        );
+        assert_eq!(
+            push.detail,
+            json!({
+                "destination": destination,
+                "operation": "upsert",
+                "idempotency_key": push.effect_key,
+                "traits": {"plan": "pro", "country": null}
+            })
+        );
+        assert_eq!(drop.detail["operation"], "remove");
+        assert_eq!(drop.detail["traits"], json!({}));
     }
 
     #[test]

@@ -401,7 +401,7 @@ impl Extensions {
 impl From<WireError> for DestinationError {
     fn from(error: WireError) -> Self {
         match error {
-            WireError::Timeout => Self::Egress(HttpError::Timeout),
+            WireError::Timeout => Self::Egress(HttpError::NotSent { timed_out: true }),
             WireError::Io => Self::Unreachable,
             WireError::Unconfirmed => Self::Unconfirmed,
             WireError::Protocol => {
@@ -482,7 +482,7 @@ async fn connect(addresses: &[IpAddr], port: u16) -> Result<TcpStream, Destinati
         {
             Ok(Ok(stream)) => return Ok(stream),
             Ok(Err(_)) => {}
-            Err(_) => last = DestinationError::Egress(HttpError::Timeout),
+            Err(_) => last = DestinationError::Egress(HttpError::NotSent { timed_out: true }),
         }
     }
     Err(last)
@@ -504,7 +504,9 @@ async fn handshake(
         Ok(Err(_)) => Err(DestinationError::Other(
             "the TLS handshake with the mail server failed".to_owned(),
         )),
-        Err(_) => Err(DestinationError::Egress(HttpError::Timeout)),
+        Err(_) => Err(DestinationError::Egress(HttpError::NotSent {
+            timed_out: true,
+        })),
     }
 }
 

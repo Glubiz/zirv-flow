@@ -31,6 +31,34 @@ const SMTP: CredentialKind = {
   },
 };
 
+const BEARER: CredentialKind = {
+  id: "bearer_token",
+  label: "Bearer token",
+  schema: { fields: [{ key: "token", label: "Token", type: "string", required: true, secret: true, options: [] }] },
+};
+
+const TLS_CLIENT: CredentialKind = {
+  id: "tls_client",
+  label: "TLS client certificate",
+  schema: {
+    fields: [
+      { key: "tls_client_cert", label: "Client certificate (PEM)", type: "string", required: true, secret: false, options: [] },
+      { key: "tls_client_key", label: "Client private key (PEM)", type: "string", required: true, secret: true, options: [] },
+    ],
+  },
+};
+
+const SIGNING: CredentialKind = {
+  id: "signing_secret",
+  label: "Signing secret",
+  schema: {
+    fields: [
+      { key: "signing_secret", label: "Signing secret", type: "string", required: true, secret: true, options: [] },
+      { key: "previous_signing_secret", label: "Previous signing secret", type: "string", required: false, secret: true, options: [] },
+    ],
+  },
+};
+
 function aCredential(change: Partial<Credential> = {}): Credential {
   return {
     id: "cred-1",
@@ -67,6 +95,35 @@ function mount() {
 }
 
 describe("credentials", () => {
+  it("offers the bearer token, TLS client and signing secret kinds with masked secrets and an optional previous secret", async () => {
+    mockApi({
+      ...ADMIN,
+      "GET /api/v1/workspaces/ws1/credential-kinds": () => json([BASIC, SMTP, BEARER, TLS_CLIENT, SIGNING]),
+      "GET /api/v1/workspaces/ws1/credentials": () => json([]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText("No credentials yet")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "New credential" }));
+    const dialog = within(screen.getByRole("dialog", { name: "New credential" }));
+    const kind = await dialog.findByLabelText("Kind");
+    expect(within(kind).getAllByRole("option").map((option) => option.textContent)).toEqual(
+      expect.arrayContaining(["Bearer token", "TLS client certificate", "Signing secret"]),
+    );
+
+    await user.selectOptions(kind, "bearer_token");
+    expect(dialog.getByLabelText("Token")).toHaveAttribute("type", "password");
+
+    await user.selectOptions(dialog.getByLabelText("Kind"), "tls_client");
+    expect(dialog.getByLabelText("Client certificate (PEM)")).toHaveAttribute("type", "text");
+    expect(dialog.getByLabelText("Client private key (PEM)")).toHaveAttribute("type", "password");
+
+    await user.selectOptions(dialog.getByLabelText("Kind"), "signing_secret");
+    expect(dialog.getByLabelText("Signing secret")).toHaveAttribute("type", "password");
+    expect(dialog.getByLabelText("Previous signing secret (optional)")).toHaveAttribute("type", "password");
+  });
+
   it("lists name, kind, hints, used-by count, last test and rotated date, and never a value", async () => {
     mockApi({
       ...ADMIN,

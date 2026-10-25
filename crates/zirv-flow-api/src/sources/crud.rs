@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::sources::{validate_config, validate_credential_names};
+use zirv_flow_connectors::sources::{
+    validate_config, validate_credential_fit_with, validate_credential_names,
+};
 use zirv_flow_core::{Freshness, SecretId, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
@@ -23,7 +25,9 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
-use crate::workspace_credentials::resolve::{check_manifest_credential, lock_for_use};
+use crate::workspace_credentials::resolve::{
+    check_schema_credential, lock_for_use, manifest_schema, schema_field_names,
+};
 
 const MAX_NAME_CHARS: usize = 128;
 /// The schedules of sources are cron expressions in UTC.
@@ -219,18 +223,23 @@ pub(crate) async fn create_source(
         check_schedule(schedule)?;
     }
 
+    // An HTTP source's manifest may declare credential fields of its own: they count as the source's.
+    let schema = (spec.kind == "http")
+        .then(|| manifest_schema(&request.config))
+        .flatten();
+    let declared = schema_field_names(schema.as_ref());
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let linked = match request.credential_id {
         Some(id) => Some(
             lock_for_use(&mut tx, workspace, id, |present| {
-                validate_credential_names(spec, present)
+                validate_credential_fit_with(spec, &declared, present)
             })
             .await?,
         ),
         None => None,
     };
     if spec.kind == "http" {
-        check_manifest_credential(&request.config, linked.as_ref())?;
+        check_schema_credential(schema.as_ref(), linked.as_ref())?;
     }
     let source = zirv_flow_store::create_source(
         &mut *tx,
@@ -326,10 +335,15 @@ pub(crate) async fn update_source(
             .config
             .as_ref()
             .is_some_and(|config| auth_of(config) != auth_of(&locked.config));
+    // The manifest this save leaves declares credential fields of its own.
+    let schema = (spec.kind == "http")
+        .then(|| manifest_schema(request.config.as_ref().unwrap_or(&locked.config)))
+        .flatten();
+    let declared = schema_field_names(schema.as_ref());
     let linked = match request.credential_id {
         Some(id) => Some(
             lock_for_use(&mut tx, workspace, id, |present| {
-                validate_credential_names(spec, present)
+                validate_credential_fit_with(spec, &declared, present)
             })
             .await?,
         ),
@@ -347,10 +361,7 @@ pub(crate) async fn update_source(
             }
             (None, None) => None,
         };
-        check_manifest_credential(
-            request.config.as_ref().unwrap_or(&locked.config),
-            effective.as_ref(),
-        )?;
+        check_schema_credential(schema.as_ref(), effective.as_ref())?;
     }
     // A refresh token belongs to one client: a source that now uses another credential drops the
     // connected account too.

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 use zirv_flow_connectors::sources::{Credential, FieldError};
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::credentials::CredentialSchema;
 use zirv_flow_store::{PgConnection, WorkspaceCredential};
 
 use super::archived;
@@ -50,23 +51,41 @@ pub(crate) fn field_names(credential: &WorkspaceCredential) -> BTreeSet<String> 
         .collect()
 }
 
-/// Checks the credential an `http` source uses against the credential schema its saved manifest
-/// declares in `auth.credential`, if it declares one: every required field must be present, a
-/// secret field among the credential's secrets and a plain one among its `fields`. With no
-/// credential the check runs against nothing, so a manifest that requires a secret refuses a
-/// source that has none. A manifest that declares no schema, or is not valid (the config check
-/// reports that), asks nothing more.
-pub(crate) fn check_manifest_credential(
-    config: &serde_json::Value,
-    credential: Option<&WorkspaceCredential>,
-) -> Result<(), ApiError> {
-    let Some(manifest) = config.get("manifest") else {
-        return Ok(());
-    };
-    let Some(spec) = zirv_flow_connectors::manifest::validate(manifest)
+/// The credential schema a saved manifest declares in `auth.credential`, if the config holds a
+/// valid manifest that declares one (a provider manifest's includes its feedback secret).
+pub(crate) fn manifest_schema(config: &serde_json::Value) -> Option<CredentialSchema> {
+    let manifest = config.get("manifest")?;
+    zirv_flow_connectors::manifest::validate(manifest)
         .ok()
         .and_then(|manifest| manifest.credential)
-    else {
+        .map(|spec| spec.schema())
+}
+
+/// The names of the fields a manifest's credential schema declares: what an owner with a
+/// manifest declares besides its static spec's fields.
+pub(crate) fn schema_field_names(schema: Option<&CredentialSchema>) -> BTreeSet<String> {
+    schema
+        .map(|schema| {
+            schema
+                .fields
+                .iter()
+                .map(|field| field.key.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Checks the credential an `http` source or a provider destination uses against the credential
+/// schema its saved manifest declares in `auth.credential` ([`manifest_schema`]), if it declares
+/// one: every required field must be present, a secret field among the credential's secrets and
+/// a plain one among its `fields`. With no credential the check runs against nothing, so a
+/// manifest that requires a secret refuses an owner that has none. A manifest that declares no
+/// schema, or is not valid (the config check reports that), asks nothing more.
+pub(crate) fn check_schema_credential(
+    schema: Option<&CredentialSchema>,
+    credential: Option<&WorkspaceCredential>,
+) -> Result<(), ApiError> {
+    let Some(schema) = schema else {
         return Ok(());
     };
     let keys = |value: Option<&serde_json::Value>| -> BTreeSet<String> {
@@ -78,7 +97,7 @@ pub(crate) fn check_manifest_credential(
     let plain = keys(credential.map(|stored| &stored.fields));
     let sealed = keys(credential.map(|stored| &stored.hints));
     let mut errors = Vec::new();
-    for field in spec.schema().fields {
+    for field in schema.fields.iter().cloned() {
         let (here, there) = if field.secret {
             (&sealed, &plain)
         } else {
@@ -128,10 +147,15 @@ pub(crate) async fn check_owners(
                 let Some(driver) = crate::sources::registry().get(&source.kind) else {
                     continue;
                 };
-                if source.kind == "http" {
-                    check_manifest_credential(&source.config, Some(after))?;
-                }
-                zirv_flow_connectors::sources::validate_credential_names(driver.spec(), &present)
+                let schema = (source.kind == "http")
+                    .then(|| manifest_schema(&source.config))
+                    .flatten();
+                check_schema_credential(schema.as_ref(), Some(after))?;
+                zirv_flow_connectors::sources::validate_credential_fit_with(
+                    driver.spec(),
+                    &schema_field_names(schema.as_ref()),
+                    &present,
+                )
             }
             _ => {
                 let Some(destination) =
@@ -143,8 +167,13 @@ pub(crate) async fn check_owners(
                 let Some(driver) = registry.get(&destination.kind) else {
                     continue;
                 };
-                zirv_flow_connectors::destinations::validate_credential_names(
+                let schema = (destination.kind == "provider")
+                    .then(|| manifest_schema(&destination.config))
+                    .flatten();
+                check_schema_credential(schema.as_ref(), Some(after))?;
+                zirv_flow_connectors::destinations::validate_credential_fit_with(
                     driver.spec(),
+                    &schema_field_names(schema.as_ref()),
                     &present,
                 )
             }

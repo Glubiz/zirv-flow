@@ -19,13 +19,15 @@ pub(crate) mod rate;
 pub(crate) mod verdict;
 
 pub(crate) use attempt::settle;
-pub(crate) use verdict::{Verdict, verdict_of};
+pub(crate) use verdict::{Verdict, arrived, verdict_of};
 
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use time::OffsetDateTime;
-use zirv_flow_connectors::destinations::{DestinationContext, ErasedDestination, Outbound};
+use zirv_flow_connectors::destinations::{
+    DestinationContext, ErasedDestination, Outbound, ProfileCall,
+};
 use zirv_flow_connectors::sources::Credential;
 
 /// One call to a destination and how it went.
@@ -34,6 +36,10 @@ pub(crate) struct Attempt {
     pub(crate) verdict: Verdict,
     /// How long the call took.
     pub(crate) elapsed: Duration,
+    /// Whether the destination may have received the call, so it may have acted on it even though
+    /// the verdict is a failure (a timeout or reset after the request was written). Only
+    /// `delivery.send` reads it.
+    pub(crate) may_have_arrived: bool,
 }
 
 /// Delivers `message` through `destination` and judges the answer at `now`.
@@ -50,6 +56,26 @@ pub(crate) async fn send(
     Attempt {
         verdict: verdict_of(&result, now),
         elapsed: started.elapsed(),
+        may_have_arrived: arrived(&result),
+    }
+}
+
+/// Runs one profile operation through `destination` and judges the answer at `now`, as [`send`]
+/// does for a message.
+pub(crate) async fn sync(
+    destination: &dyn ErasedDestination,
+    ctx: &DestinationContext,
+    config: &Value,
+    credential: &Credential,
+    call: &ProfileCall<'_>,
+    now: OffsetDateTime,
+) -> Attempt {
+    let started = Instant::now();
+    let result = destination.sync(ctx, config, credential, call).await;
+    Attempt {
+        verdict: verdict_of(&result, now),
+        elapsed: started.elapsed(),
+        may_have_arrived: arrived(&result),
     }
 }
 
@@ -287,6 +313,7 @@ mod tests {
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
+            may_have_arrived: false,
         };
 
         let recorded = settle(&mut ctx, None, 1, &done).await.unwrap();
@@ -389,6 +416,7 @@ mod tests {
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
+            may_have_arrived: false,
         };
         settle(&mut ctx, Some(&second), 2, &done).await.unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
@@ -517,6 +545,7 @@ mod tests {
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
+            may_have_arrived: false,
         };
 
         // One poll starts the recording and waits for it; the future is dropped there, as the

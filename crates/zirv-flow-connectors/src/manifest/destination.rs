@@ -1,6 +1,7 @@
 //! The `destination` section of a manifest (architecture "Provider-manifest destinations", #223):
 //! how to send an email through an HTTP API, how to read its errors, how to ask it for the state
-//! of a sending domain, and how to read and verify its feedback webhook. Like the rest of the
+//! of a sending domain, and how to read and verify its feedback webhook; and, optionally, how to
+//! upsert and remove a profile (#226, see [`super::profile`]). Like the rest of the
 //! manifest it is data only: closed sets of keys, JSON pointers, lists of literal values. There is
 //! no expression language, and a template marker anywhere is refused by the manifest-wide scan.
 //!
@@ -12,9 +13,10 @@ use serde_json::{Map, Value};
 use super::issue::{child, code, index};
 use super::model::{Auth, CredentialSpec, KeyLocation, RateLimitSpec};
 use super::parse::{MAX_NAME, MAX_PATH, Obj, Walk, is_forbidden_header, is_token, rate_limit};
+use super::profile::{self, ProfileSpec};
 
 /// The most error rules a manifest lists.
-const MAX_ERROR_RULES: usize = 20;
+pub(super) const MAX_ERROR_RULES: usize = 20;
 /// The most values in one list of literals.
 const MAX_VALUES: usize = 20;
 /// The longest literal in such a list.
@@ -28,17 +30,24 @@ const MAX_ARRAY_INDEX: usize = 31;
 /// The default tolerance of a timestamped feedback signature, in seconds.
 const DEFAULT_TOLERANCE_SECONDS: u32 = 300;
 
-/// A provider destination: the `destination` section of a validated manifest.
+/// A provider destination: the `destination` section of a validated manifest. It declares the
+/// email pair (`send` with `feedback`, both or neither), the profile operations, or both; at least
+/// one of the three.
 #[derive(Clone, Debug)]
 pub struct Provider {
-    pub send: SendSpec,
+    pub send: Option<SendSpec>,
     /// Feeds the destination's rate bucket when the destination is created without a rate.
     pub rate_limit: Option<RateLimitSpec>,
     /// Checked in order; the first rule that matches wins. A response no rule matches is judged
     /// by the defaults (408, 429 and 5xx retry; any other status is terminal).
     pub errors: Vec<ErrorRule>,
     pub domain_status: Option<DomainStatusSpec>,
-    pub feedback: FeedbackSpec,
+    /// Present exactly when `send` is.
+    pub feedback: Option<FeedbackSpec>,
+    /// Creates or updates a person's profile at the provider (`action.sync` upsert).
+    pub upsert_profile: Option<ProfileSpec>,
+    /// Removes a person's profile at the provider (`action.sync` remove).
+    pub remove_profile: Option<ProfileSpec>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -219,7 +228,7 @@ fn array_index(token: &str) -> Option<usize> {
 
 /// Whether `pointer` is a body placement: not the root, at most [`MAX_POINTER_TOKENS`] tokens,
 /// no empty token, only the two escapes, array positions up to [`MAX_ARRAY_INDEX`].
-fn valid_placement(pointer: &str) -> bool {
+pub(super) fn valid_placement(pointer: &str) -> bool {
     if pointer.len() > MAX_PATH || !pointer.starts_with('/') {
         return false;
     }
@@ -335,13 +344,19 @@ fn optional_literals(walk: &mut Walk, obj: &mut Obj<'_>, key: &'static str) -> V
 
 pub(super) fn provider(walk: &mut Walk, value: &Value, path: String) -> Option<Provider> {
     let mut obj = walk.object(value, path)?;
-    let send = match obj.take("send") {
-        Some(value) => send(walk, value, obj.at("send")),
-        None => {
-            walk.missing(&obj, "send");
-            None
-        }
-    };
+    let send_value = obj.take("send");
+    let feedback_value = obj.take("feedback");
+    let upsert_value = obj.take("upsert_profile");
+    let remove_value = obj.take("remove_profile");
+    // The email half is a pair, and a provider declares the pair, a profile operation or both.
+    let profiles = upsert_value.is_some() || remove_value.is_some();
+    if send_value.is_none() && (feedback_value.is_some() || !profiles) {
+        walk.missing(&obj, "send");
+    }
+    if feedback_value.is_none() && (send_value.is_some() || !profiles) {
+        walk.missing(&obj, "feedback");
+    }
+    let send = send_value.map(|value| send(walk, value, obj.at("send")));
     let rate_limit = obj
         .take("rate_limit")
         .and_then(|value| rate_limit(walk, value, obj.at("rate_limit")));
@@ -352,21 +367,31 @@ pub(super) fn provider(walk: &mut Walk, value: &Value, path: String) -> Option<P
     let domain_status = obj
         .take("domain_status")
         .and_then(|value| domain_status(walk, value, obj.at("domain_status")));
-    let feedback = match obj.take("feedback") {
-        Some(value) => feedback(walk, value, obj.at("feedback")),
-        None => {
-            walk.missing(&obj, "feedback");
-            None
-        }
-    };
+    let feedback = feedback_value.map(|value| feedback(walk, value, obj.at("feedback")));
+    let upsert_profile =
+        upsert_value.map(|value| profile::profile(walk, value, obj.at("upsert_profile"), false));
+    let remove_profile =
+        remove_value.map(|value| profile::profile(walk, value, obj.at("remove_profile"), true));
     walk.finish(obj);
+    // A section that failed reported its own issues.
     Some(Provider {
-        send: send?,
+        send: settled(send)?,
         rate_limit,
         errors,
         domain_status,
-        feedback: feedback?,
+        feedback: settled(feedback)?,
+        upsert_profile: settled(upsert_profile)?,
+        remove_profile: settled(remove_profile)?,
     })
+}
+
+/// A section that is absent stays absent; one that is there and failed to parse fails the
+/// destination (its issues are reported already).
+fn settled<T>(parsed: Option<Option<T>>) -> Option<Option<T>> {
+    match parsed {
+        None => Some(None),
+        Some(section) => section.map(Some),
+    }
 }
 
 fn send(walk: &mut Walk, value: &Value, path: String) -> Option<SendSpec> {
@@ -377,20 +402,7 @@ fn send(walk: &mut Walk, value: &Value, path: String) -> Option<SendSpec> {
         _ => SendMethod::Post,
     };
     let send_path = super::parse::stream_path(walk, &mut obj);
-    let header_at = obj.at("idempotency_header");
-    let header = walk
-        .text(&mut obj, "idempotency_header", true, MAX_NAME)
-        .and_then(|name| {
-            if is_forbidden_header(name) {
-                walk.add(code::FORBIDDEN_HEADER, header_at.clone());
-                None
-            } else if !is_token(name) {
-                walk.add(code::INVALID_HEADER, header_at.clone());
-                None
-            } else {
-                Some(name.to_owned())
-            }
-        });
+    let header = idempotency_header(walk, &mut obj);
     let body = match obj.take("body") {
         Some(value) => body(walk, value, obj.at("body")),
         None => {
@@ -407,6 +419,23 @@ fn send(walk: &mut Walk, value: &Value, path: String) -> Option<SendSpec> {
         fields,
         statics,
     })
+}
+
+/// The `idempotency_header` of an operation: a header token the runtime does not own.
+pub(super) fn idempotency_header(walk: &mut Walk, obj: &mut Obj<'_>) -> Option<String> {
+    let header_at = obj.at("idempotency_header");
+    walk.text(obj, "idempotency_header", true, MAX_NAME)
+        .and_then(|name| {
+            if is_forbidden_header(name) {
+                walk.add(code::FORBIDDEN_HEADER, header_at.clone());
+                None
+            } else if !is_token(name) {
+                walk.add(code::INVALID_HEADER, header_at.clone());
+                None
+            } else {
+                Some(name.to_owned())
+            }
+        })
 }
 
 type Body = (Vec<(MessageField, String)>, Vec<(String, Value)>);
@@ -469,7 +498,7 @@ fn message_fields(
     Some(fields)
 }
 
-fn statics(walk: &mut Walk, value: &Value, path: String) -> Vec<(String, Value)> {
+pub(super) fn statics(walk: &mut Walk, value: &Value, path: String) -> Vec<(String, Value)> {
     let Some(map) = value.as_object() else {
         walk.add(code::INVALID_TYPE, path);
         return Vec::new();
@@ -544,7 +573,7 @@ fn status_range(walk: &mut Walk, obj: &mut Obj<'_>) -> Option<StatusRange> {
     }
 }
 
-fn error_rule(walk: &mut Walk, value: &Value, path: String) -> Option<ErrorRule> {
+pub(super) fn error_rule(walk: &mut Walk, value: &Value, path: String) -> Option<ErrorRule> {
     let mut obj = walk.object(value, path)?;
     let status = status_range(walk, &mut obj);
     let body = match obj.take("body") {
@@ -799,10 +828,24 @@ pub(super) fn cross_check(
     ) {
         walk.add(code::NOT_FOR_DESTINATIONS, "/auth/type".to_owned());
     }
-    // A static header of the idempotency header's name would give the request two values or a
+    let idempotency_headers: Vec<&str> = provider
+        .send
+        .iter()
+        .map(|send| send.idempotency_header.as_str())
+        .chain(
+            [&provider.upsert_profile, &provider.remove_profile]
+                .into_iter()
+                .flatten()
+                .map(|spec| spec.idempotency_header.as_str()),
+        )
+        .collect();
+    // A static header of an idempotency header's name would give the request two values or a
     // constant one.
     for (name, _) in headers {
-        if name.eq_ignore_ascii_case(&provider.send.idempotency_header) {
+        if idempotency_headers
+            .iter()
+            .any(|own| name.eq_ignore_ascii_case(own))
+        {
             walk.add(code::FORBIDDEN_HEADER, format!("/headers/{name}"));
         }
     }
@@ -812,14 +855,21 @@ pub(super) fn cross_check(
         location: KeyLocation::Header,
         name,
     }) = auth
-        && name.eq_ignore_ascii_case(&provider.send.idempotency_header)
+        && idempotency_headers
+            .iter()
+            .any(|own| name.eq_ignore_ascii_case(own))
     {
         walk.add(code::FORBIDDEN_HEADER, "/auth/name".to_owned());
     }
+    // Only the feedback webhook needs a secret of its own, so only an email destination needs a
+    // declared credential schema.
+    let Some(feedback) = &provider.feedback else {
+        return;
+    };
     let secret_at = "/destination/feedback/verification/secret_field".to_owned();
     match credential.map(CredentialSpec::schema) {
         None => walk.add(code::REQUIRED, "/auth/credential".to_owned()),
-        Some(schema) => match schema.field(&provider.feedback.verification.secret_field) {
+        Some(schema) => match schema.field(&feedback.verification.secret_field) {
             None => walk.add(code::CREDENTIAL_FIELD_MISSING, secret_at),
             Some(field) if !field.secret => walk.add(code::CREDENTIAL_FIELD_NOT_SECRET, secret_at),
             Some(_) => {}
@@ -904,19 +954,36 @@ mod tests {
         let provider = parsed.provider.unwrap();
 
         assert!(parsed.streams.is_empty());
-        assert_eq!(provider.send.path, "/messages");
-        assert_eq!(provider.send.idempotency_header, "Idempotency-Key");
-        assert_eq!(provider.send.fields.len(), 6);
-        assert_eq!(provider.send.statics.len(), 2);
+        assert_eq!(provider.send.as_ref().unwrap().path, "/messages");
+        assert_eq!(
+            provider.send.as_ref().unwrap().idempotency_header,
+            "Idempotency-Key"
+        );
+        assert_eq!(provider.send.as_ref().unwrap().fields.len(), 6);
+        assert_eq!(provider.send.as_ref().unwrap().statics.len(), 2);
         assert_eq!(provider.rate_limit.unwrap().requests, 20);
         assert_eq!(
             provider.errors[1].status,
             StatusRange { min: 500, max: 503 }
         );
         assert_eq!(provider.errors[0].action, ErrorAction::RecipientFailure);
-        assert_eq!(provider.feedback.verification.tolerance_seconds, 120);
         assert_eq!(
-            provider.feedback.verification.timestamp_header.as_deref(),
+            provider
+                .feedback
+                .as_ref()
+                .unwrap()
+                .verification
+                .tolerance_seconds,
+            120
+        );
+        assert_eq!(
+            provider
+                .feedback
+                .as_ref()
+                .unwrap()
+                .verification
+                .timestamp_header
+                .as_deref(),
             Some("X-Mailer-Timestamp")
         );
     }
@@ -937,11 +1004,37 @@ mod tests {
 
         assert!(one.domain_status.is_some() && two.domain_status.is_none());
         assert!(one.rate_limit.is_some() && two.rate_limit.is_none());
-        assert!(one.feedback.verification.timestamp_header.is_some());
-        assert!(two.feedback.verification.timestamp_header.is_none());
-        assert_eq!(two.feedback.verification.signature_prefix, "");
-        assert_eq!(two.send.method, SendMethod::Put);
-        assert_eq!(two.feedback.bounce_kind.unwrap().hard, ["hard", "5"]);
+        assert!(
+            one.feedback
+                .as_ref()
+                .unwrap()
+                .verification
+                .timestamp_header
+                .is_some()
+        );
+        assert!(
+            two.feedback
+                .as_ref()
+                .unwrap()
+                .verification
+                .timestamp_header
+                .is_none()
+        );
+        assert_eq!(
+            two.feedback.as_ref().unwrap().verification.signature_prefix,
+            ""
+        );
+        assert_eq!(two.send.as_ref().unwrap().method, SendMethod::Put);
+        assert_eq!(
+            two.feedback
+                .as_ref()
+                .unwrap()
+                .bounce_kind
+                .as_ref()
+                .unwrap()
+                .hard,
+            ["hard", "5"]
+        );
     }
 
     #[test]

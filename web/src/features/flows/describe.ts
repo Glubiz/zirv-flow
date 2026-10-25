@@ -84,6 +84,12 @@ export function wordsFor(node: FlowNode, names: Names = NO_NAMES): Words {
       const count = node.trait_keys?.length ?? 0;
       return { title: hostOf(node.url), detail: count === 0 ? "Sends the standard envelope" : `Sends ${count} trait${count === 1 ? "" : "s"}` };
     }
+    case "action.sync": {
+      const count = node.trait_keys?.length ?? 0;
+      return node.operation === "remove"
+        ? { title: "Remove the profile", detail: "In an external system" }
+        : { title: "Update the profile", detail: `Sends ${count} trait${count === 1 ? "" : "s"}` };
+    }
     case "action.send":
       return { title: "Send an email", detail: node.topic === undefined ? "No topic" : "Under a topic" };
     case "action.update_trait": {

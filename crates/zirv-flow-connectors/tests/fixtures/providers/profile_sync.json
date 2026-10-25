@@ -1,0 +1,28 @@
+{
+  "version": "v1",
+  "base_url": "https://api.fixture-provider.example.test",
+  "auth": {
+    "type": "bearer"
+  },
+  "destination": {
+    "upsert_profile": {
+      "method": "PUT",
+      "path": "/v1/profiles/{key}",
+      "idempotency_header": "Idempotency-Key",
+      "key_from": { "identity": "email" },
+      "body": {
+        "key": "/profile/id",
+        "traits": "/profile/attributes",
+        "static": { "/source": "zirv-flow" }
+      },
+      "rate_limit": { "requests": 10, "per_seconds": 1 },
+      "errors": [{ "status": 409, "action": "retry" }]
+    },
+    "remove_profile": {
+      "method": "DELETE",
+      "path": "/v1/profiles/{key}",
+      "idempotency_header": "Idempotency-Key",
+      "key_from": { "identity": "email" }
+    }
+  }
+}

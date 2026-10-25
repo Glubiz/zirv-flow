@@ -20,7 +20,9 @@ mod validate;
 mod webhook;
 
 pub use context::DestinationContext;
-pub use destination::{BoxFuture, Delivered, Destination, ErasedDestination, Outbound};
+pub use destination::{
+    BoxFuture, Delivered, Destination, ErasedDestination, Outbound, ProfileCall,
+};
 #[cfg(feature = "test-support")]
 pub use dkim::verify_signature as verify_dkim_signature;
 pub use dkim::{DkimSigner, DkimSignerError};
@@ -32,9 +34,10 @@ pub use provider::fake::{
 };
 pub use provider::{
     Feedback as ProviderFeedback, FeedbackKind as ProviderFeedbackKind,
-    FeedbackRead as ProviderFeedbackRead, ProviderRecord, ProviderRecordStatus,
+    FeedbackRead as ProviderFeedbackRead, ProfileSupport, ProviderRecord, ProviderRecordStatus,
     default_rate as provider_default_rate, domain_status as provider_domain_status,
     feedback_of as provider_feedback_of, feedback_scheme as provider_feedback_scheme,
+    profile_key_source as provider_profile_key_source, profile_support as provider_profile_support,
     read_feedback as provider_read_feedback,
 };
 pub use registry::Registry;
@@ -46,7 +49,10 @@ pub use smtp::{
     SinkOptions as SmtpSinkOptions, SinkStage as SmtpSinkStage, SinkTls as SmtpSinkTls, SmtpSink,
 };
 pub use spec::{Capabilities, DestinationSpec};
-pub use validate::{validate_config, validate_credential, validate_credential_names};
+pub use validate::{
+    validate_config, validate_credential, validate_credential_fit, validate_credential_fit_with,
+    validate_credential_names,
+};
 
 /// The token the fake destination's check accepts.
 #[cfg(feature = "test-support")]

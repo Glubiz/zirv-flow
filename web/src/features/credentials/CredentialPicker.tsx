@@ -9,12 +9,16 @@ interface CredentialPickerProps {
   workspaceId: string;
   /** The credential fields the source or destination type declares. */
   fields: FieldHint[];
+  /** The type's settings hold a manifest, which may declare credential fields of its own. */
+  manifest?: boolean;
   /** The id of the chosen credential, or empty. */
   value: string;
   onChange: (id: string) => void;
   /** What the credential is for, such as the source type's name. */
   purpose?: string;
   disabled?: boolean;
+  /** Whether to offer no credential. Off when the credential cannot be cleared later. Default on. */
+  allowNone?: boolean;
 }
 
 /**
@@ -22,13 +26,21 @@ interface CredentialPickerProps {
  * field the type requires, and "New credential" to create one without leaving the form. Nothing
  * secret is ever shown or kept here.
  */
-export function CredentialPicker({ workspaceId, fields, value, onChange, purpose, disabled = false }: CredentialPickerProps) {
+export function CredentialPicker({
+  workspaceId,
+  fields,
+  manifest = false,
+  value,
+  onChange,
+  purpose,
+  disabled = false,
+  allowNone = true,
+}: CredentialPickerProps) {
   const credentials = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/credentials", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
   const [creating, setCreating] = useState(false);
-  const required = fields.filter((field) => field.required).map((field) => field.key);
 
   function created(credential: Credential) {
     setCreating(false);
@@ -51,7 +63,7 @@ export function CredentialPicker({ workspaceId, fields, value, onChange, purpose
         <SelectField
           label="Credential"
           hint={
-            credentials.data.some((credential) => covers(credential, required))
+            credentials.data.some((credential) => covers(credential, fields, manifest))
               ? "Shared: rotating it once changes every source and destination that uses it."
               : "No credential holds the fields this type needs yet. Create one."
           }
@@ -59,9 +71,9 @@ export function CredentialPicker({ workspaceId, fields, value, onChange, purpose
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
         >
-          <option value="">Choose a credential</option>
+          {allowNone || value === "" ? <option value="">Choose a credential</option> : null}
           {credentials.data
-            .filter((credential) => credential.id === value || covers(credential, required))
+            .filter((credential) => credential.id === value || covers(credential, fields, manifest))
             .map((credential) => (
               <option key={credential.id} value={credential.id}>
                 {credential.name} ({kindName(null, credential.kind)})

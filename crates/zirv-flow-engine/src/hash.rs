@@ -10,7 +10,7 @@ pub fn step_key(enrollment_id: Uuid, node: &str) -> String {
     format!("{enrollment_id}:{node}")
 }
 
-/// The key of the external effect a step produces, `{step_key}:webhook` or `{step_key}:send`. One external effect per
+/// The key of the external effect a step produces, `{step_key}:webhook`, `{step_key}:send` or `{step_key}:sync`. One external effect per
 /// node today; the suffix names its kind.
 pub fn effect_key(enrollment_id: Uuid, node: &str, kind: &str) -> String {
     format!("{}:{kind}", step_key(enrollment_id, node))
