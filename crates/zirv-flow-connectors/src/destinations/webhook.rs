@@ -10,6 +10,9 @@
 //! signs), and sends. `headers` are extra headers a template rendered; they never replace the
 //! four the destination owns, nor a header the connection owns.
 //!
+//! The `event` channel carries forwarded events (`event.forward`): the body is the mapped payload as
+//! JSON text and the idempotency key is the outbox row's.
+//!
 //! The configuration is the URL. The credential holds the signing secret and, during a rotation,
 //! the previous one. The response body is never read. A 2xx answer is a delivery; any other
 //! status is [`DestinationError::Answered`] with the raw `Retry-After`, and the pipeline's
@@ -83,7 +86,7 @@ impl Destination for Webhook {
             },
         ],
         capabilities: Capabilities {
-            channels: &["webhook"],
+            channels: &["webhook", "event"],
             idempotency_key: true,
             batching: false,
             // A raw URL has no rate bucket (architecture 10.1).
@@ -323,12 +326,12 @@ mod tests {
     }
 
     #[test]
-    fn the_spec_has_a_secret_credential_no_rate_limit_and_the_webhook_channel() {
+    fn the_spec_has_a_secret_credential_no_rate_limit_and_the_webhook_and_event_channels() {
         let spec = &Webhook::SPEC;
 
         assert_eq!(spec.kind, "webhook");
         assert!(!spec.capabilities.rate_limit);
-        assert_eq!(spec.capabilities.channels, &["webhook"]);
+        assert_eq!(spec.capabilities.channels, &["webhook", "event"]);
         assert!(spec.credential_fields.iter().all(|field| field.secret));
     }
 

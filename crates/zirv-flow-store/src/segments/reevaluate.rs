@@ -345,6 +345,10 @@ pub async fn apply_reevaluation(
         .await
         .map_err(StoreError::query)?;
     let outcome = captured.outcome();
+    if outcome.entered + outcome.exited > 0 {
+        crate::enqueue_segment_forwarding(connection, apply.workspace, apply.segment, apply.now)
+            .await?;
+    }
     if capture {
         let changes = captured.changes();
         if !triggered.is_empty() {
@@ -870,5 +874,56 @@ mod tests {
         assert!(after - before < 100, "read {} rows", after - before);
         // The setting does not leak into the rest of the transaction.
         assert_eq!(mode, "auto");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_passes_segment_events_reach_the_forwarding_outbox(pool: PgPool) {
+        use crate::forwarding::support::{
+            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+        };
+
+        let ws = workspace(&pool, "one").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        let ada = person(&pool, ws, "ada@example.com", "pro").await;
+        let sink = destination_in(&pool, ws).await;
+        add_rule(
+            &pool,
+            ws,
+            sink,
+            "segment.entered",
+            json!([]),
+            json!({"who": {"from": "person.id"}}),
+        )
+        .await;
+        let fallback = TraceContext::root(Cause::schedule(id(1)));
+        let trace = TraceContext::root(Cause::api("req"));
+        let batch = DirtyBatch::new(&[dirty(ada, &trace)], &fallback);
+
+        let mut tx = begin(&pool).await.unwrap();
+        lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+        apply_reevaluation(
+            &mut tx,
+            &ReevaluateApply {
+                workspace: ws,
+                segment: seg.id,
+                version: 1,
+                members: &pro_batch("pro"),
+                now: NOW,
+                batch: &batch,
+                job: (Uuid::new_v4(), 1),
+            },
+        )
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
+
+        reevaluate(&pool, ws, seg.id, "pro", &batch).await;
+        assert_eq!(payloads(&pool, ws).await, [json!({"who": ada.to_string()})]);
+        assert_eq!(forward_jobs(&pool).await, 1);
     }
 }

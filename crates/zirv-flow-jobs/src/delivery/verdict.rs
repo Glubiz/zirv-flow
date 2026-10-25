@@ -25,7 +25,7 @@ pub(crate) const SMTP_REJECTED: &str = "smtp_rejected";
 pub(crate) const SMTP_DEFERRED: &str = "smtp_4xx";
 
 /// How an attempt went.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Verdict {
     /// A 2xx response.
     Succeeded { status: u16 },
