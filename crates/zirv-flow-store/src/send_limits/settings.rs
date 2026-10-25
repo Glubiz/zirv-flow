@@ -69,6 +69,9 @@ pub struct QuietHours {
 pub struct SendLimits {
     pub caps: Vec<FrequencyCap>,
     pub quiet_hours: Option<QuietHours>,
+    /// Counts the replaces of the settings (0 when they were never replaced); a replace names the
+    /// revision it read.
+    pub revision: i32,
 }
 
 #[derive(FromRow)]
@@ -102,10 +105,14 @@ impl TryFrom<CapRow> for FrequencyCap {
 }
 
 /// The workspace's caps (in the order they were written) and its quiet hours, if it set any.
+///
+/// The revision is read first, in its own statement. A save that commits between the reads makes
+/// the document newer than the revision, so a save based on it is refused as stale, never accepted.
 pub async fn read_send_limits(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<SendLimits, StoreError> {
+    let revision = read_revision(connection, workspace).await?;
     let caps = sqlx::query_as::<_, CapRow>(
         "SELECT id, channel, window_hours, message_limit, mode FROM frequency_caps
          WHERE workspace_id = $1 ORDER BY id",
@@ -129,7 +136,24 @@ pub async fn read_send_limits(
         end: row.end_time,
         days: row.days,
     });
-    Ok(SendLimits { caps, quiet_hours })
+    Ok(SendLimits {
+        caps,
+        quiet_hours,
+        revision,
+    })
+}
+
+async fn read_revision(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<i32, StoreError> {
+    let revision =
+        sqlx::query_scalar::<_, i32>("SELECT revision FROM send_settings WHERE workspace_id = $1")
+            .bind(workspace.as_uuid())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    Ok(revision.unwrap_or(0))
 }
 
 /// Replaces both settings. Run it in a transaction: the old settings are deleted and the new ones
@@ -137,17 +161,36 @@ pub async fn read_send_limits(
 /// lock on its row that the transaction holds to its end, so two concurrent replaces leave one
 /// writer's settings. The lock does not exclude key-share locks, so rows that reference the
 /// workspace are still written meanwhile.
+///
+/// The settings are replaced only if they are still at `expected_revision` (0 when they were never
+/// replaced); the revision is compared under that lock, so two saves of one revision cannot both
+/// pass. Returns the new revision, or `None` with nothing written when the settings are at another
+/// revision.
 pub async fn replace_send_limits(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
+    expected_revision: i32,
     caps: &[NewFrequencyCap],
     quiet_hours: Option<&QuietHours>,
-) -> Result<(), StoreError> {
+) -> Result<Option<i32>, StoreError> {
     sqlx::query("SELECT id FROM workspaces WHERE id = $1 FOR NO KEY UPDATE")
         .bind(workspace.as_uuid())
         .fetch_optional(&mut *connection)
         .await
         .map_err(StoreError::query)?;
+    if read_revision(connection, workspace).await? != expected_revision {
+        return Ok(None);
+    }
+    let revision = expected_revision.saturating_add(1);
+    sqlx::query(
+        "INSERT INTO send_settings (workspace_id, revision) VALUES ($1, $2)
+         ON CONFLICT (workspace_id) DO UPDATE SET revision = EXCLUDED.revision, updated_at = now()",
+    )
+    .bind(workspace.as_uuid())
+    .bind(revision)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
     sqlx::query("DELETE FROM frequency_caps WHERE workspace_id = $1")
         .bind(workspace.as_uuid())
         .execute(&mut *connection)
@@ -190,7 +233,7 @@ pub async fn replace_send_limits(
         .await
         .map_err(StoreError::query)?;
     }
-    Ok(())
+    Ok(Some(revision))
 }
 
 #[cfg(test)]
@@ -241,30 +284,38 @@ mod tests {
             end: time!(08:00),
             days: vec!["mon".to_owned(), "fri".to_owned()],
         };
-        replace_send_limits(
+        let saved = replace_send_limits(
             &mut conn,
             ws,
+            0,
             &[cap(3, CapMode::Skip), cap(1, CapMode::Defer)],
             Some(&quiet),
         )
         .await
         .unwrap();
+        assert_eq!(saved, Some(1));
 
         let read = read_send_limits(&mut conn, ws).await.unwrap();
         let limits: Vec<(i32, CapMode)> = read.caps.iter().map(|c| (c.limit, c.mode)).collect();
         assert_eq!(limits, vec![(3, CapMode::Skip), (1, CapMode::Defer)]);
         assert_eq!(read.quiet_hours, Some(quiet));
+        assert_eq!(read.revision, 1);
 
-        replace_send_limits(&mut conn, ws, &[], None).await.unwrap();
+        replace_send_limits(&mut conn, ws, 1, &[], None)
+            .await
+            .unwrap();
         assert_eq!(
             read_send_limits(&mut conn, ws).await.unwrap(),
-            SendLimits::default()
+            SendLimits {
+                revision: 2,
+                ..SendLimits::default()
+            }
         );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_replace_waits_for_one_in_flight_and_leaves_only_its_own_settings(
+    async fn a_replace_waits_for_one_in_flight_and_is_refused_as_stale_after_it(
         pool: sqlx::PgPool,
     ) {
         let ws = workspace(&pool).await;
@@ -275,7 +326,7 @@ mod tests {
         };
         let mut first = pool.begin().await.unwrap();
         let caps = [cap(1, CapMode::Skip), cap(2, CapMode::Skip)];
-        replace_send_limits(&mut first, ws, &caps, Some(&quiet))
+        replace_send_limits(&mut first, ws, 0, &caps, Some(&quiet))
             .await
             .unwrap();
         let second = {
@@ -284,51 +335,76 @@ mod tests {
             tokio::spawn(async move {
                 let caps = [cap(7, CapMode::Skip), cap(8, CapMode::Skip)];
                 let mut tx = pool.begin().await.unwrap();
-                replace_send_limits(&mut tx, ws, &caps, Some(&quiet))
+                let saved = replace_send_limits(&mut tx, ws, 0, &caps, Some(&quiet))
                     .await
                     .unwrap();
                 tx.commit().await.unwrap();
+                saved
             })
         };
-        // Without the lock, the second replace deletes nothing it can see and inserts its caps
-        // beside the first's while the first is still open.
+        // Without the lock, the second replace reads revision 0 beside the first's open write and
+        // both pass.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
             !second.is_finished(),
             "the second replace waits for the first"
         );
         first.commit().await.unwrap();
-        second.await.unwrap();
+        assert_eq!(second.await.unwrap(), None, "the second read revision 0");
 
         let mut conn = pool.acquire().await.unwrap();
         let read = read_send_limits(&mut conn, ws).await.unwrap();
         let limits: Vec<i32> = read.caps.iter().map(|c| c.limit).collect();
-        assert_eq!(limits, vec![7, 8]);
+        assert_eq!(limits, vec![1, 2]);
         assert_eq!(read.quiet_hours, Some(quiet));
+        assert_eq!(read.revision, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replace_at_another_revision_writes_nothing(pool: sqlx::PgPool) {
+        let ws = workspace(&pool).await;
+        let mut conn = pool.acquire().await.unwrap();
+        let first = replace_send_limits(&mut conn, ws, 0, &[cap(3, CapMode::Skip)], None)
+            .await
+            .unwrap();
+        assert_eq!(first, Some(1));
+        for stale in [0, 2] {
+            let refused = replace_send_limits(&mut conn, ws, stale, &[], None)
+                .await
+                .unwrap();
+            assert_eq!(refused, None);
+        }
+        let read = read_send_limits(&mut conn, ws).await.unwrap();
+        assert_eq!((read.caps.len(), read.revision), (1, 1));
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_table_refuses_equal_times_and_no_days(pool: sqlx::PgPool) {
         let ws = workspace(&pool).await;
-        let mut conn = pool.acquire().await.unwrap();
+        // Each replace runs in its own transaction, as it does in production, so the refused one
+        // leaves no revision behind.
         let same = QuietHours {
             start: time!(08:00),
             end: time!(08:00),
             days: vec!["mon".to_owned()],
         };
+        let mut tx = pool.begin().await.unwrap();
         assert!(
-            replace_send_limits(&mut conn, ws, &[], Some(&same))
+            replace_send_limits(&mut tx, ws, 0, &[], Some(&same))
                 .await
                 .is_err()
         );
+        drop(tx);
         let none = QuietHours {
             start: time!(08:00),
             end: time!(09:00),
             days: Vec::new(),
         };
+        let mut tx = pool.begin().await.unwrap();
         assert!(
-            replace_send_limits(&mut conn, ws, &[], Some(&none))
+            replace_send_limits(&mut tx, ws, 0, &[], Some(&none))
                 .await
                 .is_err()
         );

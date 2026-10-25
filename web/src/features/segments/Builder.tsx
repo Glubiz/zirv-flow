@@ -12,13 +12,14 @@ import {
   removeChild,
   samePath,
   updateAt,
+  type BuilderMode,
   type Kind,
   type Node,
   type Path,
 } from "./ast";
 import { BuilderContext, useBuilder, type BuilderApi, type PlacedIssue } from "./builderContext";
-import type { Catalog, EventTypes } from "./catalog";
-import { ConsentEditor, EventEditor, IdentifierEditor, ListEditor, SegmentEditor, TraitEditor } from "./Conditions";
+import type { Catalog, DimensionDef, EventTypes } from "./catalog";
+import { ConsentEditor, EventEditor, IdentifierEditor, ListEditor, MessagesEditor, SegmentEditor, TraitEditor } from "./Conditions";
 import { issueMessage } from "./labels";
 
 const GROUP_LABELS: Record<string, string> = { all: "All of", any: "Any of", not: "Not" };
@@ -32,6 +33,7 @@ const TYPE_OPTIONS: readonly { kind: Kind; label: string }[] = [
   { kind: "list", label: "In a list" },
   { kind: "segment", label: "In a segment" },
   { kind: "consent", label: "Consent" },
+  { kind: "messages", label: "Messages sent" },
   { kind: "identifier", label: "Has an identifier" },
 ];
 
@@ -62,6 +64,8 @@ function claimed(kind: Kind, field: string): boolean {
       return field === kind;
     case "consent":
       return field.startsWith("consent.");
+    case "messages":
+      return field.startsWith("messages.");
     default:
       return false;
   }
@@ -79,7 +83,7 @@ interface NodeEditorProps {
 }
 
 function NodeEditor({ node, path, removal }: NodeEditorProps) {
-  const { readOnly, issues, remove, changeKind: change, add } = useBuilder();
+  const { readOnly, issues, remove, changeKind: change, add, mode } = useBuilder();
   const kind = kindOf(node);
   const name = nameOf(node, path);
   const children = childrenOf(node);
@@ -91,7 +95,7 @@ function NodeEditor({ node, path, removal }: NodeEditorProps) {
       <legend className="node-legend">{name}</legend>
       <div className="node-head">
         <SelectField label="Type" value={kind} onChange={(event) => change(path, event.target.value)} disabled={readOnly}>
-          {TYPE_OPTIONS.map((option) => (
+          {TYPE_OPTIONS.filter((option) => mode === "policy" || option.kind !== "messages").map((option) => (
             <option key={option.kind} value={option.kind}>
               {option.label}
             </option>
@@ -116,7 +120,7 @@ function NodeEditor({ node, path, removal }: NodeEditorProps) {
           ))}
           {readOnly ? null : (
             <div className="row">
-              <Button onClick={() => add(path, defaultNode("trait"))}>
+              <Button onClick={() => add(path, defaultNode("trait", mode))}>
                 Add condition <span className="visually-hidden">to {name}</span>
               </Button>
               <Button onClick={() => add(path, defaultNode("all"))}>
@@ -136,6 +140,7 @@ function NodeEditor({ node, path, removal }: NodeEditorProps) {
       {"list" in node ? <ListEditor node={node} path={path} /> : null}
       {"segment" in node ? <SegmentEditor node={node} path={path} /> : null}
       {"consent" in node ? <ConsentEditor node={node} path={path} /> : null}
+      {"messages" in node ? <MessagesEditor node={node} path={path} /> : null}
       {"identifier" in node ? <IdentifierEditor node={node} path={path} /> : null}
     </fieldset>
   );
@@ -143,6 +148,10 @@ function NodeEditor({ node, path, removal }: NodeEditorProps) {
 
 interface BuilderProps {
   root: Node;
+  /** A segment (the default) or a consent policy rule, which also has the policy-only leaves. */
+  mode?: BuilderMode;
+  /** The workspace dimensions a messages condition can filter by; null when they could not be loaded. */
+  dimensions?: readonly DimensionDef[] | null;
   readOnly: boolean;
   selfId: string | null;
   catalog: Catalog;
@@ -153,7 +162,7 @@ interface BuilderProps {
 }
 
 /** Edits the definition tree in place: groups, conditions, and the pickers each condition needs. */
-export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, onEdit }: BuilderProps) {
+export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, onEdit, mode = "segment", dimensions = [] }: BuilderProps) {
   const pending = useRef<string | null>(null);
   const container = useRef<HTMLDivElement>(null);
 
@@ -170,6 +179,8 @@ export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, o
 
   const api: BuilderApi = {
     readOnly,
+    mode,
+    dimensions,
     selfId,
     catalog,
     eventTypes,
@@ -191,7 +202,7 @@ export function Builder({ root, readOnly, selfId, catalog, eventTypes, issues, o
       const wanted = TYPE_OPTIONS.find((option) => option.kind === kind)?.kind;
       if (current === undefined || wanted === undefined) return;
       pending.current = pointerOf(path) || "/";
-      onEdit(updateAt(root, path, () => changeKind(current, wanted)), path, "structure");
+      onEdit(updateAt(root, path, () => changeKind(current, wanted, mode)), path, "structure");
     },
   };
 

@@ -264,4 +264,38 @@ describe("segment builder", () => {
     expect(screen.queryByRole("button", { name: "Refresh now" })).not.toBeInTheDocument();
     expect(screen.getByText("You can look at this segment but not change it.")).toBeInTheDocument();
   });
+
+  it("adds a visible, removable machine = false filter when email.opened is chosen", async () => {
+    const calls = mockApi(routes());
+    const user = userEvent.setup();
+    mountNew();
+
+    await screen.findByRole("group", { name: "All of" });
+    await addCondition(user);
+    const condition = screen.getByRole("group", { name: "Condition 1" });
+    await user.selectOptions(within(condition).getByLabelText("Type"), "event");
+    await user.selectOptions(within(condition).getByLabelText("Event"), "email.opened");
+
+    const filter = await within(condition).findByRole("group", { name: "Property filter 1" });
+    expect(within(filter).getByLabelText("Property of filter 1")).toHaveValue("machine");
+    expect(within(filter).getByLabelText("Value of filter 1")).toHaveValue("false");
+    expect(within(condition).getByText(/not detected as machine-generated/)).toBeInTheDocument();
+    await expectDefinition(calls, {
+      v: 1,
+      all: [{ event: "email.opened", where: [{ prop: "machine", op: "eq", value: false }] }],
+    });
+
+    await user.click(within(filter).getByRole("button", { name: /Remove/ }));
+    expect(within(condition).queryByRole("group", { name: "Property filter 1" })).not.toBeInTheDocument();
+    expect(within(condition).queryByText(/not detected as machine-generated/)).not.toBeInTheDocument();
+  });
+
+  it("does not offer the policy-only leaves in a segment", async () => {
+    mockApi(routes());
+    mountNew();
+
+    const root = await screen.findByRole("group", { name: "All of" });
+    const kinds = within(within(root).getByLabelText("Type")).getAllByRole("option").map((option) => option.textContent);
+    expect(kinds).not.toContain("Messages sent");
+  });
 });

@@ -797,6 +797,18 @@ impl ApiError {
         }
     }
 
+    /// A replace of the send settings that names a revision other than the current one: they were
+    /// replaced by someone else since the caller read them.
+    pub(crate) fn send_settings_revision_mismatch() -> Self {
+        Self {
+            code: Some("send_settings_revision_mismatch"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the send settings are not at the revision named; read them again",
+            )
+        }
+    }
+
     /// A publish (or, later, a send) whose sender identity may not send: it is unknown, archived,
     /// or on a domain whose DKIM, SPF and DMARC records are not all verified.
     pub(crate) fn sender_unverified(detail: impl Into<String>) -> Self {

@@ -803,6 +803,7 @@ mod tests {
                 {"channel": "email", "window": "PT6H", "limit": 1, "mode": "defer"},
             ],
             "quiet_hours": {"start": "21:00", "end": "08:00", "days": ["fri", "mon"]},
+            "revision": 0,
         })
     }
 
@@ -810,7 +811,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn send_settings_are_read_by_readers_and_replaced_only_by_admins(pool: PgPool) {
         let fx = fixture(&pool).await;
-        let empty = json!({"frequency_caps": [], "quiet_hours": null});
+        let empty = json!({"frequency_caps": [], "quiet_hours": null, "revision": 0});
 
         let anonymous = fx
             .send("GET", "/sending/settings", None, Auth::Anonymous)
@@ -881,6 +882,7 @@ mod tests {
                 {"channel": "email", "window": "PT6H", "limit": 1, "mode": "defer"},
             ],
             "quiet_hours": {"start": "21:00", "end": "08:00", "days": ["mon", "fri"]},
+            "revision": 1,
         });
         assert_eq!(put.body, expected);
         let read = fx
@@ -889,18 +891,48 @@ mod tests {
         assert_eq!(read.body, expected);
 
         // A second PUT replaces both: nothing of the first is left.
-        let replaced = fx
-            .as_admin("PUT", "/sending/settings", Some(empty.clone()))
-            .await;
-        assert_eq!(replaced.body, empty);
+        let nothing = json!({"frequency_caps": [], "quiet_hours": null, "revision": 1});
+        let replaced = fx.as_admin("PUT", "/sending/settings", Some(nothing)).await;
+        let after = json!({"frequency_caps": [], "quiet_hours": null, "revision": 2});
+        assert_eq!(replaced.body, after);
         assert_eq!(
             fx.send("GET", "/sending/settings", None, Auth::Key(&fx.read))
                 .await
                 .body,
-            empty
+            after
         );
         let audit = fx.audit_actions_like("send_settings.").await;
         assert_eq!(audit, ["send_settings.updated", "send_settings.updated"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_send_settings_revision_is_a_409_and_writes_nothing(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let first = fx
+            .as_admin("PUT", "/sending/settings", Some(settings_body()))
+            .await;
+        assert_eq!(first.status, StatusCode::OK, "{:?}", first.body);
+        assert_eq!(first.body["revision"], 1);
+
+        // The form of another admin, loaded before that save, still names revision 0.
+        let mut stale = settings_body();
+        stale["frequency_caps"] = json!([]);
+        stale["quiet_hours"] = Value::Null;
+        let refused = fx.as_admin("PUT", "/sending/settings", Some(stale)).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "send_settings_revision_mismatch");
+        let read = fx.as_admin("GET", "/sending/settings", None).await;
+        assert_eq!(read.body, first.body, "the stale save wrote nothing");
+        assert_eq!(fx.audit_actions_like("send_settings.").await.len(), 1);
+
+        let mut fresh = settings_body();
+        fresh["frequency_caps"] = json!([]);
+        fresh["revision"] = json!(1);
+        let saved = fx.as_admin("PUT", "/sending/settings", Some(fresh)).await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["revision"], 2);
+        assert_eq!(saved.body["frequency_caps"], json!([]));
     }
 
     #[sqlx::test]
@@ -941,7 +973,8 @@ mod tests {
             (quiet("21:00", "08:00", json!([])), "/quiet_hours/days"),
         ];
 
-        for (body, pointer) in cases {
+        for (mut body, pointer) in cases {
+            body["revision"] = json!(1);
             let reply = fx.as_admin("PUT", "/sending/settings", Some(body)).await;
             assert_eq!(
                 reply.status,

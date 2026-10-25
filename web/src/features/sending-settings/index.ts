@@ -1,0 +1,1 @@
+export { SendingSettingsPage } from "./SendingSettingsPage";

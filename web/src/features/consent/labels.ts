@@ -57,3 +57,23 @@ export const STATUSES: { value: string; label: string }[] = [
 export function statusLabel(value: string): string {
   return STATUSES.find((status) => status.value === value)?.label ?? value;
 }
+
+const IMPORT_PROBLEMS: Record<string, string> = {
+  malformed_row: "The row does not have the columns of the header",
+  invalid_person_id: "The person id is not valid",
+  invalid_channel: "The channel is not email",
+  invalid_status: "The status is not one that can be imported",
+  invalid_dimension: "A dimension column is not valid",
+  unknown_topic: "The topic does not exist",
+  unknown_dimension: "A dimension does not exist",
+  unknown_dimension_value: "A dimension value does not exist",
+  no_such_person: "No such person in this workspace",
+};
+
+export function importProblemLabel(code: string): string {
+  return IMPORT_PROBLEMS[code] ?? code;
+}
+
+export function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
