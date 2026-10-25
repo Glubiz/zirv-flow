@@ -324,9 +324,10 @@ pub use workspace_credentials::{
     record_credential_test, swap_credential_secret, update_credential,
 };
 pub use workspaces::{
-    Member, Membership, Workspace, create_workspace, find_workspace, find_workspace_by_slug,
-    list_members, list_workspaces_for_user, membership_role, orphan_policy, remove_membership,
-    set_membership, set_orphan_policy, set_workspace_timezone,
+    Member, Membership, UtmSettings, Workspace, create_workspace, find_workspace,
+    find_workspace_by_slug, list_members, list_workspaces_for_user, membership_role, orphan_policy,
+    remove_membership, set_membership, set_orphan_policy, set_workspace_timezone,
+    set_workspace_utm,
 };
 /// The operator master key, its derived keys and the sealing of secrets, re-exported so the
 /// binary reaches them through the store.
