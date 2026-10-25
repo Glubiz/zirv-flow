@@ -34,11 +34,11 @@ pub use types::{
     SyncMode,
 };
 pub use validate::{
-    FieldError, StreamSettingsInput, validate_config, validate_credential,
+    FieldError, StreamSettingsInput, validate_config, validate_credential, validate_credential_fit,
     validate_credential_names, validate_stream_settings,
 };
 pub(crate) use validate::{
-    check_config, check_credential, check_credential_names, url_problem_https,
+    check_config, check_credential, check_credential_fit, check_credential_names, url_problem_https,
 };
 pub use webhook::PAYLOAD_STREAM;
 

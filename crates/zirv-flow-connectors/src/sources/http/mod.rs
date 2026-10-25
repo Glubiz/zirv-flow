@@ -874,6 +874,31 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_client_credential_is_refused_by_the_http_source() {
+        crate::sources::validate::assert_kind_refused(
+            &Http::SPEC,
+            zirv_flow_core::credentials::CredentialKind::TlsClient,
+        );
+    }
+
+    #[test]
+    fn an_oauth2_client_credential_that_keeps_a_token_url_still_fits_the_http_source() {
+        use std::collections::BTreeSet;
+
+        use zirv_flow_core::credentials::CredentialKind;
+
+        let present: BTreeSet<String> = CredentialKind::OAuth2Client
+            .schema()
+            .fields
+            .into_iter()
+            .map(|f| f.key)
+            .chain(["token_url".to_owned()])
+            .collect();
+
+        assert!(crate::sources::validate_credential_fit(&Http::SPEC, &present).is_ok());
+    }
+
+    #[test]
     fn the_spec_declares_secret_credentials_a_json_manifest_and_every_capability() {
         let spec = &Http::SPEC;
 

@@ -86,10 +86,16 @@ export function fieldNames(credential: Credential): string[] {
   return [...new Set([...Object.keys(credential.fields), ...Object.keys(credential.hints)])];
 }
 
-/** Whether the credential holds every field in `required`. */
-export function covers(credential: Credential, required: string[]): boolean {
+/**
+ * Whether the credential fits an owner that declares `fields`: it holds every required field and
+ * at least one declared field. An owner that declares no field fits no credential.
+ */
+export function covers(credential: Credential, fields: Pick<FieldHint, "key" | "required">[]): boolean {
   const names = fieldNames(credential);
-  return required.every((key) => names.includes(key));
+  return (
+    fields.filter((field) => field.required).every((field) => names.includes(field.key)) &&
+    fields.some((field) => names.includes(field.key))
+  );
 }
 
 /** A secret as the list shows it: masked, with its last four characters when the server sent them. */

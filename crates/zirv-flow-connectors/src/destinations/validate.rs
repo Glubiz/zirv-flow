@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::Value;
 
 use super::spec::DestinationSpec;
-use crate::sources::{FieldError, check_config, check_credential, check_credential_names};
+use crate::sources::{
+    FieldError, check_config, check_credential, check_credential_fit, check_credential_names,
+};
 
 /// Checks the configuration object: required fields are present, values have the declared type
 /// and select values are among the options, and no undeclared key is set.
@@ -31,6 +33,15 @@ pub fn validate_credential_names(
     present: &BTreeSet<String>,
 ) -> Result<(), Vec<FieldError>> {
     check_credential_names(spec.credential_fields, "destination", present)
+}
+
+/// Checks that a linked credential fits the destination type: every required field and at
+/// least one declared field.
+pub fn validate_credential_fit(
+    spec: &DestinationSpec,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_fit(spec.credential_fields, "destination", present)
 }
 
 #[cfg(test)]

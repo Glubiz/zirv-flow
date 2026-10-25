@@ -28,7 +28,6 @@ export function CredentialPicker({ workspaceId, fields, value, onChange, purpose
     [workspaceId],
   );
   const [creating, setCreating] = useState(false);
-  const required = fields.filter((field) => field.required).map((field) => field.key);
 
   function created(credential: Credential) {
     setCreating(false);
@@ -51,7 +50,7 @@ export function CredentialPicker({ workspaceId, fields, value, onChange, purpose
         <SelectField
           label="Credential"
           hint={
-            credentials.data.some((credential) => covers(credential, required))
+            credentials.data.some((credential) => covers(credential, fields))
               ? "Shared: rotating it once changes every source and destination that uses it."
               : "No credential holds the fields this type needs yet. Create one."
           }
@@ -61,7 +60,7 @@ export function CredentialPicker({ workspaceId, fields, value, onChange, purpose
         >
           <option value="">Choose a credential</option>
           {credentials.data
-            .filter((credential) => credential.id === value || covers(credential, required))
+            .filter((credential) => credential.id === value || covers(credential, fields))
             .map((credential) => (
               <option key={credential.id} value={credential.id}>
                 {credential.name} ({kindName(null, credential.kind)})

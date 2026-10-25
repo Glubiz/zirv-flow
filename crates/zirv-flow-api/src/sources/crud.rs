@@ -13,7 +13,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_connectors::sources::{validate_config, validate_credential_names};
+use zirv_flow_connectors::sources::{
+    validate_config, validate_credential_fit, validate_credential_names,
+};
 use zirv_flow_core::{Freshness, SecretId, UserId, WorkspaceId};
 use zirv_flow_store::{NewSource, PgPool, Source, SourceUpdate, StoreError};
 
@@ -223,7 +225,7 @@ pub(crate) async fn create_source(
     let linked = match request.credential_id {
         Some(id) => Some(
             lock_for_use(&mut tx, workspace, id, |present| {
-                validate_credential_names(spec, present)
+                validate_credential_fit(spec, present)
             })
             .await?,
         ),
@@ -329,7 +331,7 @@ pub(crate) async fn update_source(
     let linked = match request.credential_id {
         Some(id) => Some(
             lock_for_use(&mut tx, workspace, id, |present| {
-                validate_credential_names(spec, present)
+                validate_credential_fit(spec, present)
             })
             .await?,
         ),

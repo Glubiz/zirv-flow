@@ -140,12 +140,39 @@ pub(crate) fn check_credential_names(
     }
 }
 
+/// Checks that a stored credential, which has the fields named in `present`, fits the owner:
+/// it holds every required credential field and at least one field the owner declares, so a
+/// credential the owner reads nothing from is refused. Reasons name fields and never a value.
+pub(crate) fn check_credential_fit(
+    fields: &[FieldSpec],
+    noun: &str,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_names(fields, noun, present)?;
+    if fields.iter().any(|field| present.contains(field.key)) {
+        Ok(())
+    } else {
+        Err(vec![error(
+            "credential",
+            &format!("has none of the credential fields this {noun} type reads"),
+        )])
+    }
+}
+
 /// [`check_credential_names`] for a source type.
 pub fn validate_credential_names(
     spec: &SourceSpec,
     present: &BTreeSet<String>,
 ) -> Result<(), Vec<FieldError>> {
     check_credential_names(spec.credential_fields, "source", present)
+}
+
+/// [`check_credential_fit`] for a source type: the check for a credential that is linked.
+pub fn validate_credential_fit(
+    spec: &SourceSpec,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_fit(spec.credential_fields, "source", present)
 }
 
 /// The settings of a stream a user chose, as they are stored.
@@ -337,7 +364,17 @@ pub(crate) fn assert_kind_fits(
             "{key} is not a field of the owner"
         );
     }
-    assert!(validate_credential_names(spec, &present).is_ok());
+    assert!(validate_credential_fit(spec, &present).is_ok());
+}
+
+/// Test helper: the owner refuses the built-in `kind`, which holds no field the owner reads.
+#[cfg(test)]
+pub(crate) fn assert_kind_refused(
+    spec: &SourceSpec,
+    kind: zirv_flow_core::credentials::CredentialKind,
+) {
+    let present: BTreeSet<String> = kind.schema().fields.into_iter().map(|f| f.key).collect();
+    assert!(validate_credential_fit(spec, &present).is_err());
 }
 
 #[cfg(test)]

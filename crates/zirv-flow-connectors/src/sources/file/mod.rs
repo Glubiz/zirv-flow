@@ -1835,6 +1835,14 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_client_credential_is_refused_by_the_file_source() {
+        crate::sources::validate::assert_kind_refused(
+            &File::SPEC,
+            zirv_flow_core::credentials::CredentialKind::TlsClient,
+        );
+    }
+
+    #[test]
     fn the_spec_declares_secret_credentials_a_required_url_and_a_full_refresh_only_stream() {
         let spec = &File::SPEC;
 

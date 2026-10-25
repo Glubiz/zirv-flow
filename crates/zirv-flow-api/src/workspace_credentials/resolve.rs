@@ -131,7 +131,7 @@ pub(crate) async fn check_owners(
                 if source.kind == "http" {
                     check_manifest_credential(&source.config, Some(after))?;
                 }
-                zirv_flow_connectors::sources::validate_credential_names(driver.spec(), &present)
+                zirv_flow_connectors::sources::validate_credential_fit(driver.spec(), &present)
             }
             _ => {
                 let Some(destination) =
@@ -143,10 +143,7 @@ pub(crate) async fn check_owners(
                 let Some(driver) = registry.get(&destination.kind) else {
                     continue;
                 };
-                zirv_flow_connectors::destinations::validate_credential_names(
-                    driver.spec(),
-                    &present,
-                )
+                zirv_flow_connectors::destinations::validate_credential_fit(driver.spec(), &present)
             }
         };
         errors.map_err(|errors| field_problems("credential", errors))?;

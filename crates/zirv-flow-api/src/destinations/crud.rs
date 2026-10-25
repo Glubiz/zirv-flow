@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::{
-    provider_default_rate, validate_config, validate_credential_names,
+    provider_default_rate, validate_config, validate_credential_fit, validate_credential_names,
 };
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_store::{Destination, DestinationUpdate, NewDestination, PgPool, StoreError};
@@ -185,7 +185,7 @@ pub(crate) async fn create_destination(
     let linked = match request.credential_id {
         Some(id) => Some(
             lock_for_use(&mut tx, workspace, id, |present| {
-                validate_credential_names(spec, present)
+                validate_credential_fit(spec, present)
             })
             .await?,
         ),
@@ -287,7 +287,7 @@ pub(crate) async fn update_destination(
     let linked = match request.credential_id {
         Some(id) => Some(
             lock_for_use(&mut tx, workspace, id, |present| {
-                validate_credential_names(spec, present)
+                validate_credential_fit(spec, present)
             })
             .await?,
         ),
