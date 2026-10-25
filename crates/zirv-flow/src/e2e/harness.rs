@@ -519,3 +519,24 @@ impl World {
         .await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_world_starts_and_a_sending_domain_verifies_through_the_fixture_resolver(
+        pool: PgPool,
+    ) {
+        let world = World::start(pool).await;
+
+        let (identity, dkim) = world
+            .verified_sender("example.com", "news@example.com")
+            .await;
+
+        assert!(!identity.is_empty());
+        assert!(dkim.starts_with("v=DKIM1"), "{dkim}");
+        world.finish().await;
+    }
+}
