@@ -77,12 +77,18 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
   const dirty = !sameDraft(draft, original);
   const readOnly = !canManage;
 
+  /** Every edit goes through here: a changed form no longer matches the "Saved." notice. */
+  function edit(change: (current: SettingsDraft) => SettingsDraft) {
+    onNotice(null);
+    setDraft(change);
+  }
+
   function setCap(key: number, change: Partial<CapDraft>) {
-    setDraft((current) => ({ ...current, caps: current.caps.map((cap) => (cap.key === key ? { ...cap, ...change } : cap)) }));
+    edit((current) => ({ ...current, caps: current.caps.map((cap) => (cap.key === key ? { ...cap, ...change } : cap)) }));
   }
 
   function setQuiet(change: (quiet: QuietDraft) => Partial<QuietDraft>) {
-    setDraft((current) => ({ ...current, quiet: current.quiet && { ...current.quiet, ...change(current.quiet) } }));
+    edit((current) => ({ ...current, quiet: current.quiet && { ...current.quiet, ...change(current.quiet) } }));
   }
 
   async function submit(event: SyntheticEvent) {
@@ -168,7 +174,7 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
                       <option value="defer">Hold it until a slot frees up</option>
                     </SelectField>
                     {readOnly ? null : (
-                      <Button onClick={() => setDraft((current) => ({ ...current, caps: current.caps.filter((entry) => entry.key !== cap.key) }))}>
+                      <Button onClick={() => edit((current) => ({ ...current, caps: current.caps.filter((entry) => entry.key !== cap.key) }))}>
                         Remove <span className="visually-hidden">{label}</span>
                       </Button>
                     )}
@@ -181,7 +187,7 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
             <div>
               <Button
                 onClick={() =>
-                  setDraft((current) => ({
+                  edit((current) => ({
                     ...current,
                     caps: [...current.caps, { key: nextCapKey(), channel: "email", hours: "24", limit: "3", mode: "skip" }],
                   }))
@@ -207,7 +213,7 @@ function SettingsForm({ workspaceId, stored, zone, canManage, notice, onNotice, 
               checked={quiet !== null}
               disabled={readOnly}
               onChange={(event) =>
-                setDraft((current) => ({
+                edit((current) => ({
                   ...current,
                   quiet: event.target.checked ? { start: "21:00", end: "08:00", days: WEEKDAYS.map((day) => day.id) } : null,
                 }))

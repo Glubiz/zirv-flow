@@ -102,6 +102,31 @@ describe("sending limits", () => {
     expect(screen.getByText(/Saved\./)).toBeInTheDocument();
   });
 
+  it("clears the saved notice when the form is edited again", async () => {
+    let stored: unknown = STORED;
+    mockApi({
+      ...access("admin"),
+      [`GET ${WS}/sending/settings`]: () => json(stored),
+      [`PUT ${WS}/sending/settings`]: async (request) => {
+        const body = (await request.json()) as { revision: number };
+        stored = { ...body, revision: body.revision + 1 };
+        return json(stored);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const limit = await screen.findByLabelText("Limit of cap 1");
+    await user.clear(limit);
+    await user.type(limit, "5");
+    await user.click(screen.getByRole("button", { name: "Save limits" }));
+    expect(await screen.findByText(/Saved\./)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Limit of cap 1")).toHaveValue(5));
+
+    await user.type(screen.getByLabelText("Limit of cap 1"), "0");
+    expect(screen.queryByText(/Saved\./)).not.toBeInTheDocument();
+  });
+
   it("keeps the draft and offers the latest settings when they changed since the page was opened", async () => {
     let stored: unknown = STORED;
     let stale = true;
