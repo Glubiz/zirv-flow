@@ -422,6 +422,23 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_client_credential_is_offered_to_and_accepted_by_the_kafka_source() {
+        crate::sources::validate::assert_kind_fits(
+            &Kafka::SPEC,
+            zirv_flow_core::credentials::CredentialKind::TlsClient,
+            &["tls_client_cert", "tls_client_key"],
+        );
+    }
+
+    #[test]
+    fn a_bearer_token_credential_is_refused_by_the_kafka_source() {
+        crate::sources::validate::assert_kind_refused(
+            &Kafka::SPEC,
+            zirv_flow_core::credentials::CredentialKind::BearerToken,
+        );
+    }
+
+    #[test]
     fn the_spec_lists_the_settings_and_every_credential_field_is_secret() {
         let config: Vec<_> = Kafka::SPEC.config_fields.iter().map(|f| f.key).collect();
         let credentials: Vec<_> = Kafka::SPEC
