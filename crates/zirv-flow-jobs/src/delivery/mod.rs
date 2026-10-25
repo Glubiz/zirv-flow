@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use time::OffsetDateTime;
 use zirv_flow_connectors::destinations::{
-    DestinationContext, ErasedDestination, Outbound, ProfileCall,
+    Delivered, DestinationContext, ErasedDestination, Outbound, ProfileCall,
 };
 use zirv_flow_connectors::sources::Credential;
 
@@ -72,6 +72,28 @@ pub(crate) async fn sync(
 ) -> Attempt {
     let started = Instant::now();
     let result = destination.sync(ctx, config, credential, call).await;
+    Attempt {
+        verdict: verdict_of(&result, now),
+        elapsed: started.elapsed(),
+        may_have_arrived: arrived(&result),
+    }
+}
+
+/// Erases the person keyed `subject` through `destination` and judges the answer at `now`, as
+/// [`send`] does for a message.
+pub(crate) async fn erase(
+    destination: &dyn ErasedDestination,
+    ctx: &DestinationContext,
+    config: &Value,
+    credential: &Credential,
+    (subject, idempotency_key): (&str, &str),
+    now: OffsetDateTime,
+) -> Attempt {
+    let started = Instant::now();
+    let result = destination
+        .erase(ctx, config, credential, subject, idempotency_key)
+        .await
+        .map(|()| Delivered::default());
     Attempt {
         verdict: verdict_of(&result, now),
         elapsed: started.elapsed(),

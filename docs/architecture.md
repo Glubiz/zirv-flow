@@ -1547,8 +1547,9 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `operation`; the decision is `sync.upsert` or `sync.remove` under the enrollment's trace, with the
   enrollment, person, event, flow and destination ids and a fixed reason. Never the key or a trait
   value, in an event, a decision, a log line or a metric.
-- **Erasure.** No table. `delivery.sync` is in `names_erased_person!`. Calling the destination's erase
-  capability on person erasure is #227.
+- **Erasure.** No table. `delivery.sync` is in `names_erased_person!`. The destination's erase call
+  on person erasure is made by `destination.erase` (#227, 16.3); the manifest declares it as
+  `erase_profile`.
 
 ## 11. Templates and the builder
 
@@ -2125,7 +2126,8 @@ before and after on the same input.
 - **Erasure and merge.** `delete_person` deletes the person's outbox rows and the erasure scan test
   covers the table; the job payload names only the destination, so `names_erased_person!` has
   nothing to purge. A merge re-points `forwarding_outbox.person_id` through `REWRITE_TARGETS`. The
-  destination's own erase call is #227.
+  destination's own erase call is `destination.erase` (#227, 16.3); the erasure flow asserts that
+  pending and dead outbox rows are gone and the suppression hash stays.
 - **Ingest cost (#209).** `apply_event_batch` over 200 batches of 500 events after 20 warm-up
   batches, local PostgreSQL, release build without LTO, each case alone on a fresh database
   (`ZIRV_MEASURE_CASE`, an ignored test in `forwarding/outbox.rs`): enqueue switched off
@@ -2336,7 +2338,7 @@ has a partial index `(priority, run_at) WHERE state = 'ready'` and a partial
 unique index on `unique_key WHERE state IN ('ready','running')`. `schedules(kind,
 cron, timezone, next_run_at, payload)` holds recurring work. Kinds: `sync.run`,
 `kafka.consume`, `ingest.drain`, `ingest.replay`, `event.forward`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
-`flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `webhook.call`,
+`flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `destination.erase`, `webhook.call`,
 `template.test_send`, `privacy.export`, `privacy.erase`, `maintenance.*`.
 Handlers implement `JobKind` (a `KIND` name and `run(ctx, payload)`), with one
 line in the job registry. The M6 kinds are `delivery.send` (10.1),
@@ -2672,6 +2674,72 @@ M6 adds the rest: it erases the `messages` rows and their message links, the tes
 entries and the pending and dead forwarding payloads of the person, and calls
 `erase` on each forwarding or delivery destination that declares it, recording
 the result per destination.
+
+**As built (erase calls, #227).**
+
+- **Who decides.** `zirv-flow-store` reads no manifest. `privacy.erase` (jobs) lists the
+  workspace's live destinations and decides, with the destination registry, which declare erase: a
+  built-in type through `Capabilities.erase` (keyed on the person id), a provider destination when
+  its manifest has `erase_profile` (keyed on the identity or trait its `key_from` names). `webhook`
+  and SMTP declare none. It passes these to `erase_person` as `EraseTarget { destination, key:
+  ExternalKey }`, with `ExternalKey` one of `PersonId`, `Identity(kind)` or `Trait(key)`.
+- **Plan, in the erasure transaction, before the delete.** `erase_person` keeps the targets that
+  handled the person's group (a `messages` or `forwarding_outbox` row at the destination, or a
+  `sync.succeeded`/`sync.failed` event naming it; `delivery_attempts` names those items and no
+  person), resolves each key from the group's rows, writes an `erasure_destination_calls` row
+  `pending` and enqueues one `destination.erase` job, unique key `destination.erase:{ledger}:{destination}`.
+  A key that cannot be resolved records `failed` with `missing_key` and no job.
+- **Table.** `erasure_destination_calls` (migration 0057): ledger id, destination id, `outcome`
+  (`pending`, `done`, `failed`), `attempts`, a fixed `error_code` (set exactly when failed) and the
+  times. It is keyed to the ledger and has no person column, so the erasure scan finds nothing.
+- **Job.** `destination.erase` payload: `workspace_id`, `ledger_id`, `destination_id`,
+  `external_key`; no trait value. The call runs after the erasure commits, through the shared
+  delivery path (rate bucket, the common verdict), with the idempotency key `erase:{ledger}:{destination}`,
+  stable across retries. Retryable failures back off as the other delivery kinds do (8 attempts; a
+  wait for a rate token spends one). A terminal failure or the last attempt records `failed` with
+  the verdict's code and the job ends as done; a destination deleted or archived first records
+  `destination_unavailable`; the erasure is never blocked or rolled back.
+- **Payload lifetime.** A job that ends is deleted by `complete_job`, payload included. A job that
+  dies is scrubbed of `external_key` by `fail_job` and `reap_expired`; a retried dead job records
+  `failed` with `key_unavailable` and makes no call.
+- **Per-person call lock (sync and erasure).** A sync calls its destination and writes the
+  `sync.succeeded`/`sync.failed` outcome afterwards, so an erasure could commit in between and see
+  no handling evidence. Both sides therefore take a PostgreSQL transaction-level advisory lock
+  (class `0x7a636c6b`, key a bucket of `hashtext(workspace/person)` modulo 1024). `delivery.sync`
+  takes it shared (`lock_sync_person`) before it reads the person and keeps it, on its own job
+  connection, through the call and the outcome write. `erase_person` takes it exclusively for the
+  group's buckets, in ascending bucket order, before any row lock (so a sync waiting for the person
+  row cannot deadlock with it), and holds it through commit. A sync that gets the lock after an
+  erasure reads no subject (the person is gone) and makes no call and writes no outcome. Buckets
+  bound the lock-table cost to one lock per sync and at most 1024 per erasure however large a merged
+  group is; a collision only makes a sync and an unrelated erasure wait for each other. A sync
+  holds its shared lock for the length of its call (the client timeout bounds it), so an erasure of
+  that person waits at most that long. Deliveries and forwarding write their evidence before the
+  call, so they need no such lock.
+- **What counts as sync evidence.** A destination handled a person for the erasure when any of
+  these exists for the group: a `messages` or `forwarding_outbox` row at it; a `sync.succeeded` or
+  `sync.failed` event naming it; or a `delivery.sync` job, in any state (queued, running,
+  retrying, dead), whose enrollment belongs to the group and which names it. The last covers an
+  attempt whose answer was lost: its transaction rolled back, so it left no event, only the queued
+  retry. The jobs are read before `delete_person` purges them; a job that never ran adds a harmless
+  extra erase call. A sync whose person was merged away during its call records its outcome under
+  the survivor: the full outcome (event, decision, steps) if the enrollment is the survivor's,
+  else the `sync.*` event alone (`record_sync_evidence`), so the survivor's erasure reaches the
+  destination. A bucket the erasure finds only after it holds row locks (a merge that committed
+  meanwhile) is tried with `pg_try_advisory_xact_lock` and, if held, is a retryable error that
+  makes the job retry the whole transaction, so it never waits for a lock while holding rows.
+  The `job_dead` settlement matches the call's workspace to the dead job's.
+- **Settling.** A call row never stays `pending` after its job dies: `fail_job` and `reap_expired`
+  mark it `failed` with `job_dead`, in the statement that buries the job, so an error on the last
+  attempt (a database error, an unopenable credential, a missing pool) is recorded too. Archived
+  destinations that handled the person are planned and settle as `destination_unavailable`.
+- **Forwarding.** `delete_person` deletes pending and dead outbox rows; the suppression hash stays.
+- **API.** `GET .../privacy/erasures` (admin) adds `destination_calls` (destination id, outcome,
+  attempts, error code, times) to each request; never a key.
+- **Manifest.** `erase_profile` has the shape and validation of `remove_profile` (`key` and
+  `static` body placements only, never traits). Existing manifests validate as before.
+- **Open.** Events and forwarded rows age out by retention, so a destination that handled a person
+  only before that is not called.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's

@@ -34,6 +34,23 @@ pub struct WebhookSubject {
     pub traits: Map<String, Value>,
 }
 
+/// Takes the shared per-person call lock of the person of `enrollment`, held to the end of the
+/// caller's transaction (architecture 16.3, "As built (erase calls, #227)"). A sync takes it before
+/// [`read_webhook_subject`] and keeps it through the destination call and the outcome write: an
+/// erasure takes the same lock exclusively before it reads which destinations handled the person,
+/// so it either waits for the sync's outcome or finds the person gone for the sync, which then
+/// reads no subject and makes no call. Does nothing for an enrollment that is gone.
+pub async fn lock_sync_person(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+) -> Result<(), StoreError> {
+    if let Some(found) = find_enrollment(connection, workspace, enrollment).await? {
+        crate::lock_person_call_shared(connection, workspace, found.person_id).await?;
+    }
+    Ok(())
+}
+
 /// Reads the person of `enrollment` and `trait_keys`, taking no row lock, so the HTTP call that
 /// follows holds nothing an ingest batch or an erasure could wait for. None when the enrollment
 /// or its person is gone (erased), the enrollment exited, or the person was merged into another:
@@ -202,13 +219,19 @@ impl WebhookOutcome<'_> {
     }
 }
 
-/// Records the outcome: the `webhook.succeeded` or `webhook.failed` event of the person (source
-/// `flows`, properties the node and enrollment ids, the status and the attempt count, never the
-/// response), a `webhook.call` decision under the enrollment's trace, and the steps of every
-/// enrollment that waits for the event. Returns the event's id. A profile sync writes the
-/// `sync.` event and a `sync.upsert` or `sync.remove` decision instead, with the destination and
-/// the operation as well; never the external key or a trait value.
-pub async fn record_webhook_outcome(
+/// Writes the outcome event alone, with no decision, no forwarding and no step woken: the
+/// evidence an erasure reads to find the destinations that handled a person. A sync whose person
+/// was merged away during its call records it under the survivor (`outcome.person`) when the
+/// enrollment does not belong to them, so the survivor's erasure still reaches the destination.
+pub async fn record_sync_evidence(
+    connection: &mut PgConnection,
+    outcome: &WebhookOutcome<'_>,
+) -> Result<Uuid, StoreError> {
+    insert_outcome_event(connection, outcome).await
+}
+
+/// Inserts the `webhook.` or `sync.` event of an outcome and returns its id.
+async fn insert_outcome_event(
     connection: &mut PgConnection,
     outcome: &WebhookOutcome<'_>,
 ) -> Result<Uuid, StoreError> {
@@ -239,6 +262,20 @@ pub async fn record_webhook_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    Ok(event)
+}
+
+/// Records the outcome: the `webhook.succeeded` or `webhook.failed` event of the person (source
+/// `flows`, properties the node and enrollment ids, the status and the attempt count, never the
+/// response), a `webhook.call` decision under the enrollment's trace, and the steps of every
+/// enrollment that waits for the event. Returns the event's id. A profile sync writes the
+/// `sync.` event and a `sync.upsert` or `sync.remove` decision instead, with the destination and
+/// the operation as well; never the external key or a trait value.
+pub async fn record_webhook_outcome(
+    connection: &mut PgConnection,
+    outcome: &WebhookOutcome<'_>,
+) -> Result<Uuid, StoreError> {
+    let event = insert_outcome_event(connection, outcome).await?;
     crate::forwarding::enqueue_forwarding_of(connection, outcome.workspace, event, outcome.now)
         .await?;
     // The flow and version the call belongs to, for the trace to link from; an erased enrollment has

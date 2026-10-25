@@ -106,7 +106,8 @@ for is sent as `null`. To keep the external system current when a trait changes,
   `sync.failed` with `missing_key`, and nothing is sent.
 - A person who was erased, who left the flow, or who was merged into another gets no call.
   Erasing a person removes their pending `delivery.sync` jobs. Telling the external system to
-  erase them is the destination's erase capability (a separate step).
+  erase them is the manifest's optional `erase_profile` (same shape as `remove_profile`, no
+  traits), called once by the `destination.erase` job after the erasure commits (#227).
 - Test mode shows the sync (destination, operation, the listed traits at the values of the walk)
   and sends nothing and writes nothing.
 

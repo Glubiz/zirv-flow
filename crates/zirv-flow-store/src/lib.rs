@@ -136,12 +136,13 @@ pub use flows::{
     find_event_of_person, find_events, find_flow, find_flow_version, flow_source,
     flow_state_for_step, has_webhook_signing_secret, hold_enrollment, list_flow_enrollments,
     list_flow_versions, list_flows, live_signing_keys, load_enrollment_path, lock_audience_page,
-    lock_enrollment, lock_flow, lock_webhook_person, occurrence_of, pause_flow, publish_flow,
-    read_webhook_subject, reconcile_flow_schedules, record_send_outcome, record_steps,
-    record_webhook_outcome, register_wait, release_enrollment, reopen_failed_step,
-    resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
-    save_enrollment, segment_is_watched, segment_trigger_flows, settle_wait_step, step_zones,
-    unhealthy_inputs, update_flow_draft, version_node_counts, wait_filters,
+    lock_enrollment, lock_flow, lock_sync_person, lock_webhook_person, occurrence_of, pause_flow,
+    publish_flow, read_webhook_subject, reconcile_flow_schedules, record_send_outcome,
+    record_steps, record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
+    reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
+    rotate_signing_key, save_enrollment, segment_is_watched, segment_trigger_flows,
+    settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft, version_node_counts,
+    wait_filters,
 };
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
@@ -211,11 +212,14 @@ pub use people::{
 };
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use privacy::{
-    BuildOutcome, DeleteReason, ERASE_JOB_KIND, EXPORT_FORMAT, EXPORT_JOB_KIND, EraseOutcome,
-    ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor, ExportDownload, ExportStatus,
-    PrivacyExport, ReplayReport, build_export, delete_person, download_export, erase_person,
-    expire_exports, find_erasure_request, find_privacy_export, list_erasure_requests,
-    list_privacy_exports, replay_erasures, request_erasure, request_export,
+    BuildOutcome, DeleteReason, ERASE_CALL_ATTEMPTS, ERASE_CALL_JOB_KIND, ERASE_JOB_KIND,
+    EXPORT_FORMAT, EXPORT_JOB_KIND, EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseOutcome,
+    EraseTarget, ErasureCall, ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor,
+    ExportDownload, ExportStatus, ExternalKey, MISSING_KEY, PrivacyExport, ReplayReport,
+    build_export, delete_person, download_export, erase_person, expire_exports,
+    find_erasure_request, find_privacy_export, finish_erasure_call, idempotency_key,
+    list_erasure_calls, list_erasure_requests, list_privacy_exports, lock_person_call_shared,
+    replay_erasures, request_erasure, request_export,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;
