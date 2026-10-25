@@ -131,6 +131,7 @@ mod tests {
                 "webhook.call",
                 "delivery.send",
                 "delivery.sync",
+                "destination.erase",
                 "event.forward",
                 "sending_domain.verify",
                 "template.test_send"
@@ -184,6 +185,7 @@ mod tests {
                 "webhook.call",
                 "delivery.send",
                 "delivery.sync",
+                "destination.erase",
                 "event.forward",
                 "sending_domain.verify",
                 "template.test_send",
