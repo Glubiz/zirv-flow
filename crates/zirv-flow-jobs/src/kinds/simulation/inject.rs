@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::schedule::backoff;
@@ -147,7 +147,7 @@ impl World {
             ));
         }
         if let Err(error) = self.run_handler(&mut tx, claimed).await {
-            drop(tx);
+            abandon(tx).await;
             let message = error.message().to_owned();
             return Err(if Self::is_retry(&claimed.kind, &message) {
                 RunError::Retry(message, error.retry_after())
@@ -784,7 +784,7 @@ impl Driver<'_> {
             "the lease of a fresh claim is held"
         );
         if let Err(error) = w.run_handler(&mut tx, claimed).await {
-            drop(tx);
+            abandon(tx).await;
             let message = error.message().to_owned();
             if World::is_retry(&claimed.kind, &message) {
                 return match w.retry(claimed, &message, error.retry_after()).await {
@@ -888,7 +888,7 @@ impl Driver<'_> {
             );
         }
         if let Err(error) = w.run_handler(&mut tx_a, claimed_a).await {
-            drop(tx_a);
+            abandon(tx_a).await;
             let message = error.message().to_owned();
             if World::is_retry(kind, &message) {
                 // A's attempt ended on the destination's answer before there was anything to
@@ -1105,6 +1105,14 @@ async fn wait_for_overlap(pool: &PgPool, holder: i32, finished: &Cell<bool>) -> 
     }
 }
 
+/// Ends a worker's transaction after its handler failed, and returns only once the rollback
+/// has run. Dropping the transaction would queue the rollback on the pooled connection, which
+/// leaves the key-share lock on the job's row held for a moment: a claim made right after
+/// would skip the job (issue 267).
+async fn abandon(tx: zirv_flow_store::Tx) {
+    tx.rollback().await.unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1175,5 +1183,60 @@ mod tests {
         // The clock moves a lease and a second on each expiry, so a re-run is stamped later.
         assert_eq!(LEASE_SECONDS + 1, 31);
         assert!(WorkerConfig::new(1).lease.as_secs() >= LEASE_SECONDS.unsigned_abs());
+    }
+
+    /// A worker's transaction has ended, and let go of the job row, the moment `abandon`
+    /// returns. A plain drop only queued the rollback: the backend stayed "idle in transaction"
+    /// holding the key-share lock, and a claim that came first skipped the job (issue 267).
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_abandoned_transaction_has_let_go_of_the_job_row(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let new = zirv_flow_store::NewJob::new(
+            "a.kind",
+            zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("req")),
+        );
+        zirv_flow_store::enqueue(&pool, &new).await.unwrap();
+        let claimed =
+            zirv_flow_store::claim_job(&pool, "w", &["a.kind"], Duration::from_secs(30), None)
+                .await
+                .unwrap()
+                .unwrap();
+        // Checked from a connection of its own, which never has the transaction's queued
+        // rollback ahead of it.
+        let mut other = sqlx::PgConnection::connect_with(&pool.connect_options())
+            .await
+            .unwrap();
+        for round in 0..200 {
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            assert!(
+                lock_lease(&mut tx, claimed.id, claimed.lease_token)
+                    .await
+                    .unwrap()
+            );
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            abandon(tx).await;
+            let state: Option<String> =
+                sqlx::query_scalar("SELECT state FROM pg_stat_activity WHERE pid = $1")
+                    .bind(pid)
+                    .fetch_optional(&mut other)
+                    .await
+                    .unwrap();
+            assert_ne!(
+                state.as_deref(),
+                Some("idle in transaction"),
+                "round {round}: the transaction was still open"
+            );
+            let free: Option<Uuid> =
+                sqlx::query_scalar("SELECT id FROM jobs WHERE id = $1 FOR UPDATE SKIP LOCKED")
+                    .bind(claimed.id)
+                    .fetch_optional(&mut other)
+                    .await
+                    .unwrap();
+            assert!(free.is_some(), "round {round}: the row was still locked");
+        }
     }
 }
