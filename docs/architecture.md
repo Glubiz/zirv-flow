@@ -1677,7 +1677,11 @@ preview-equals-send test rely on this.
   `{"address"}`, which must hash (the keyed identifier hash the suppressions use) to an entry of the
   workspace allowlist. Anything else is 422 `recipient_not_allowed`, whichever way it is reached. The
   allowlist (`GET`, `POST`, `DELETE /test-send-allowlist`, admin, add and delete audited with no
-  address or hash) stores the hash and a masked hint (`q***@example.com`).
+  address or hash) stores the hash and a masked hint (`q***@example.com`). A writer reads the
+  entries as `GET /test-send-allowlist/options` (`{id, name}`, `name` the masked hint) to pick a test
+  recipient; `GET /destinations/options` and `GET /sender-identities/options` do the same for the
+  other two pickers, with `capabilities` `{send, sync, erase}` on a destination. The capabilities come
+  from `DestinationSpec::abilities` in the connectors crate, the one derivation the erase job reads too.
 - **Rate limit.** At most 10 tests per member and 100 per workspace in any rolling hour. The API counts
   the log rows in the window and inserts the `queued` row, which is the reservation, in one transaction
   under an advisory lock keyed by the workspace, so two requests for the last slot cannot both win. A
