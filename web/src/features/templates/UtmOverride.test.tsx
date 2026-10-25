@@ -11,12 +11,17 @@ function mount() {
   return renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
 }
 
+async function openSettings(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("tab", { name: "Settings" }));
+}
+
 describe("the UTM override of a template", () => {
   it("follows the workspace by default and can be set to off", async () => {
     const calls = mockApi(templateRoutes());
     const user = userEvent.setup();
     mount();
 
+    await openSettings(userEvent.setup());
     const select = await screen.findByRole("combobox", { name: "UTM parameters on links" });
     expect(select).toHaveValue("inherit");
     await user.selectOptions(select, "off");
@@ -31,6 +36,7 @@ describe("the UTM override of a template", () => {
     const user = userEvent.setup();
     mount();
 
+    await openSettings(userEvent.setup());
     const select = await screen.findByRole("combobox", { name: "UTM parameters on links" });
     expect(select).toHaveValue("off");
     await user.selectOptions(select, "inherit");
@@ -43,6 +49,7 @@ describe("the UTM override of a template", () => {
     mockApi(templateRoutes({ role: "reader" }));
     mount();
 
+    await openSettings(userEvent.setup());
     expect(await screen.findByRole("combobox", { name: "UTM parameters on links" })).toBeDisabled();
   });
 
@@ -54,6 +61,7 @@ describe("the UTM override of a template", () => {
     const user = userEvent.setup();
     mount();
 
+    await openSettings(userEvent.setup());
     const select = await screen.findByRole("combobox", { name: "UTM parameters on links" });
     await user.selectOptions(select, "off");
 
