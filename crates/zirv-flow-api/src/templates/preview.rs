@@ -15,7 +15,8 @@ use uuid::Uuid;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::TemplateFieldCatalog;
 use zirv_flow_templates::{
-    Hooks, Issue, RenderContext, RenderKind, TemplateDocument, Tracking, content_type_of,
+    Hooks, Issue, RenderContext, RenderKind, TemplateDocument, Tracking, UtmPlan, UtmValues,
+    content_type_of,
 };
 
 use super::{authorize_render, field_catalog, issue_problems, stored_document};
@@ -93,6 +94,7 @@ async fn render(
     kind: RenderKind,
     doc: &TemplateDocument,
     context: &RenderContext,
+    utm: Option<&UtmPlan>,
 ) -> Result<Rendered, ApiError> {
     match kind {
         RenderKind::Email => {
@@ -100,7 +102,7 @@ async fn render(
                 tracking: Tracking::Inert {
                     base_url: INERT_BASE_URL,
                 },
-                utm: None,
+                utm: utm.map(UtmPlan::tags),
             };
             let email = pool
                 .render_email(doc, context, &hooks)
@@ -167,7 +169,7 @@ pub(crate) async fn preview(
     let id: Uuid = path_id(&id)?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    zirv_flow_store::find_template(&mut *tx, workspace.id, id)
+    let template = zirv_flow_store::find_template(&mut *tx, workspace.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let (document, source) = match body.version {
@@ -222,6 +224,29 @@ pub(crate) async fn preview(
         drop(tx);
     }
 
+    // The preview shows the tagged links the send would carry; it has no flow, so `{flow}` and
+    // `{step}` expand to nothing and those parameters are left out.
+    let utm = (workspace.utm.enabled && template.utm != "off").then(|| {
+        let version = body.version.map(|version| version.to_string());
+        let values = UtmValues {
+            workspace: &workspace.slug,
+            template: &template.name,
+            template_version: version.as_deref().unwrap_or(""),
+            category: &template.category,
+            ..UtmValues::default()
+        };
+        let setting = &workspace.utm;
+        UtmPlan::new(
+            [
+                &setting.source,
+                &setting.medium,
+                &setting.campaign,
+                &setting.content,
+            ],
+            &setting.domains,
+            &values,
+        )
+    });
     let content = content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
     // Validation renders a sample, so it runs in the render host like the render itself.
     let pool = state
@@ -235,7 +260,7 @@ pub(crate) async fn preview(
     let rendered = if blocked {
         None
     } else {
-        Some(render(pool, content.render_kind(), &doc, &context).await?)
+        Some(render(pool, content.render_kind(), &doc, &context, utm.as_ref()).await?)
     };
     let (subject, html, text, headers, rendered_body) = match rendered {
         Some(parts) => (

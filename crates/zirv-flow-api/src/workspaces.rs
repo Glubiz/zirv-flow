@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::ValidationError;
-use zirv_flow_store::Workspace;
+use zirv_flow_store::{UtmSettings, Workspace};
 
 use crate::AppState;
 use crate::admin;
@@ -26,9 +26,47 @@ pub(crate) struct WorkspaceBody {
     /// their own. `UTC` until an admin sets it.
     #[schema(example = "Europe/Copenhagen")]
     timezone: String,
+    /// The automatic UTM parameter setting for email links. Off until an admin turns it on.
+    utm: UtmSettingsBody,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     created_at: OffsetDateTime,
+}
+
+/// The workspace setting for automatic UTM parameters on email links. A pattern may use only
+/// `{workspace}`, `{flow}`, `{flow_version}`, `{step}`, `{template}`, `{template_version}` and
+/// `{category}`; values are slugged and URL-encoded, and a pattern that expands to nothing omits
+/// its parameter.
+#[derive(Clone, Deserialize, Serialize, ToSchema)]
+pub(crate) struct UtmSettingsBody {
+    enabled: bool,
+    /// The `utm_source` pattern.
+    #[schema(example = "{workspace}")]
+    source: String,
+    /// The `utm_medium` pattern.
+    #[schema(example = "email")]
+    medium: String,
+    /// The `utm_campaign` pattern.
+    #[schema(example = "{flow}")]
+    campaign: String,
+    /// The `utm_content` pattern.
+    #[schema(example = "{template}")]
+    content: String,
+    /// The link domains that get parameters; their subdomains do too. Enabling needs at least one.
+    domains: Vec<String>,
+}
+
+impl From<&UtmSettings> for UtmSettingsBody {
+    fn from(utm: &UtmSettings) -> Self {
+        Self {
+            enabled: utm.enabled,
+            source: utm.source.clone(),
+            medium: utm.medium.clone(),
+            campaign: utm.campaign.clone(),
+            content: utm.content.clone(),
+            domains: utm.domains.clone(),
+        }
+    }
 }
 
 impl From<&Workspace> for WorkspaceBody {
@@ -38,6 +76,7 @@ impl From<&Workspace> for WorkspaceBody {
             name: workspace.name.clone(),
             slug: workspace.slug.clone(),
             timezone: workspace.timezone.clone(),
+            utm: UtmSettingsBody::from(&workspace.utm),
             created_at: workspace.created_at,
         }
     }
@@ -47,7 +86,9 @@ impl From<&Workspace> for WorkspaceBody {
 pub(crate) struct UpdateWorkspaceRequest {
     /// An IANA time zone name such as `Europe/Copenhagen` or `UTC`, at most 64 characters.
     #[schema(example = "Europe/Copenhagen")]
-    timezone: String,
+    timezone: Option<String>,
+    /// The automatic UTM parameter setting, replaced as a whole.
+    utm: Option<UtmSettingsBody>,
 }
 
 /// The longest time zone name stored.
@@ -152,7 +193,7 @@ pub(crate) async fn get(
     Ok(Json(WorkspaceBody::from(&workspace)))
 }
 
-/// Changes the workspace's settings: today its time zone. Needs the workspace admin role and the
+/// Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the workspace admin role and the
 /// CSRF token. Audited as `workspace.updated`.
 #[utoipa::path(
     patch,
@@ -166,7 +207,7 @@ pub(crate) async fn get(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The time zone is not an IANA zone name", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "The time zone is not an IANA zone name, or the UTM setting is refused (codes `utm_pattern_invalid`, `utm_domain_invalid`, `utm_domains_required`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -177,23 +218,43 @@ pub(crate) async fn update(
     ApiJson(body): ApiJson<UpdateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    if !valid_timezone(&body.timezone) {
+    if body.timezone.is_none() && body.utm.is_none() {
+        return Err(ValidationError::new("body", "must change at least one field").into());
+    }
+    if let Some(timezone) = &body.timezone
+        && !valid_timezone(timezone)
+    {
         return Err(ValidationError::new("timezone", "must be an IANA time zone name").into());
     }
-    let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let saved = zirv_flow_store::set_workspace_timezone(&mut *tx, workspace.id, &body.timezone)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    admin::audit(
-        &mut tx,
-        &principal.context(),
-        Some(workspace.id),
-        "workspace.updated",
-        Some(("workspace", workspace.id.as_uuid())),
-        json!({ "timezone": saved.timezone }),
-    )
-    .await?;
-    zirv_flow_store::commit(tx).await?;
+    let mut saved = workspace;
+    if let Some(utm) = body.utm {
+        let change = admin::UtmChange {
+            enabled: utm.enabled,
+            source: utm.source,
+            medium: utm.medium,
+            campaign: utm.campaign,
+            content: utm.content,
+            domains: utm.domains,
+        };
+        saved = admin::update_workspace_utm(&state.pool, &principal.context(), saved.id, &change)
+            .await?;
+    }
+    if let Some(timezone) = body.timezone {
+        let mut tx = zirv_flow_store::begin(&state.pool).await?;
+        saved = zirv_flow_store::set_workspace_timezone(&mut *tx, saved.id, &timezone)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        admin::audit(
+            &mut tx,
+            &principal.context(),
+            Some(saved.id),
+            "workspace.updated",
+            Some(("workspace", saved.id.as_uuid())),
+            json!({ "timezone": saved.timezone }),
+        )
+        .await?;
+        zirv_flow_store::commit(tx).await?;
+    }
     Ok(Json(WorkspaceBody::from(&saved)))
 }
 
@@ -233,6 +294,7 @@ mod tests {
             slug: "acme".into(),
             timezone: "Europe/Copenhagen".into(),
             created_at: OffsetDateTime::UNIX_EPOCH,
+            utm: UtmSettings::default(),
         };
 
         let json = serde_json::to_value(WorkspaceBody::from(&workspace)).unwrap();

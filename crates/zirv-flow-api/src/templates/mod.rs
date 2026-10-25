@@ -215,6 +215,7 @@ mod tests {
             name: "T".into(),
             channel: channel.into(),
             category: category.into(),
+            utm: "inherit".into(),
             sender_identity_id: None,
             current_version: None,
             archived_at: None,

@@ -78,6 +78,13 @@ pub enum AdminError {
     Slot(zirv_flow_store::SlotError),
     /// A stored secret could not be re-wrapped. Names a key id, never key or plaintext bytes.
     Secret(SecretError),
+    /// A UTM setting that was refused; the problem carries the code (`utm_pattern_invalid`,
+    /// `utm_domain_invalid` or `utm_domains_required`). The detail names the field and the rule,
+    /// never a value other than the refused placeholder.
+    Utm {
+        code: &'static str,
+        detail: String,
+    },
 }
 
 impl fmt::Display for AdminError {
@@ -89,6 +96,7 @@ impl fmt::Display for AdminError {
             Self::Store(error) => error.fmt(formatter),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
+            Self::Utm { detail, .. } => formatter.write_str(detail),
         }
     }
 }
@@ -99,7 +107,7 @@ impl Error for AdminError {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) => None,
+            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) | Self::Utm { .. } => None,
         }
     }
 }
@@ -1658,4 +1666,88 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
     }
+}
+
+/// The automatic UTM setting of a workspace as the caller sends it.
+#[derive(Clone, Debug)]
+pub struct UtmChange {
+    pub enabled: bool,
+    pub source: String,
+    pub medium: String,
+    pub campaign: String,
+    pub content: String,
+    pub domains: Vec<String>,
+}
+
+/// Saves the workspace's automatic UTM setting (#240). The patterns may only use the fixed
+/// placeholder set, so a person or event field is refused; every domain is normalised; enabling
+/// with no domain is refused. Audited as `workspace.utm_updated` with the switch and the number of
+/// domains, never a pattern or a domain.
+pub async fn update_workspace_utm(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    change: &UtmChange,
+) -> Result<Workspace, AdminError> {
+    use zirv_flow_store::UtmSettings;
+    use zirv_flow_templates::{MAX_DOMAINS, normalize_domain, validate_utm_pattern};
+
+    let patterns = [
+        ("utm.source", &change.source),
+        ("utm.medium", &change.medium),
+        ("utm.campaign", &change.campaign),
+        ("utm.content", &change.content),
+    ];
+    for (field, pattern) in patterns {
+        validate_utm_pattern(pattern).map_err(|error| AdminError::Utm {
+            code: "utm_pattern_invalid",
+            detail: format!("{field}: {error}"),
+        })?;
+    }
+    if change.domains.len() > MAX_DOMAINS {
+        return Err(AdminError::Utm {
+            code: "utm_domain_invalid",
+            detail: format!("utm.domains: at most {MAX_DOMAINS} domains"),
+        });
+    }
+    let mut domains: Vec<String> = Vec::with_capacity(change.domains.len());
+    for domain in &change.domains {
+        let normal = normalize_domain(domain).ok_or_else(|| AdminError::Utm {
+            code: "utm_domain_invalid",
+            detail: "utm.domains: each entry must be a domain name such as example.com".to_owned(),
+        })?;
+        if !domains.contains(&normal) {
+            domains.push(normal);
+        }
+    }
+    if change.enabled && domains.is_empty() {
+        return Err(AdminError::Utm {
+            code: "utm_domains_required",
+            detail: "utm.domains: list at least one domain before enabling UTM parameters"
+                .to_owned(),
+        });
+    }
+    let settings = UtmSettings {
+        enabled: change.enabled,
+        source: change.source.clone(),
+        medium: change.medium.clone(),
+        campaign: change.campaign.clone(),
+        content: change.content.clone(),
+        domains,
+    };
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let saved = zirv_flow_store::set_workspace_utm(&mut *tx, workspace, &settings)
+        .await?
+        .ok_or(AdminError::NotFound("workspace"))?;
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "workspace.utm_updated",
+        Some(("workspace", workspace.as_uuid())),
+        json!({ "enabled": settings.enabled, "domains": settings.domains.len() }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(saved)
 }
