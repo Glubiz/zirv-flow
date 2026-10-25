@@ -172,6 +172,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         templates::crud::update,
         templates::crud::archive,
         templates::crud::put_draft,
+        templates::crud::convert_draft,
         templates::publish::publish,
         templates::publish::versions,
         templates::publish::version,
