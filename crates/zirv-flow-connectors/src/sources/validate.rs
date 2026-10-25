@@ -140,12 +140,50 @@ pub(crate) fn check_credential_names(
     }
 }
 
+/// Checks that a stored credential, which has the fields named in `present`, fits the owner:
+/// it holds every required credential field and at least one field the owner declares, so a
+/// credential the owner reads nothing from is refused. `extra` names further fields the owner
+/// declares (a manifest's credential schema). Reasons name fields and never a value.
+pub(crate) fn check_credential_fit(
+    fields: &[FieldSpec],
+    extra: &BTreeSet<String>,
+    noun: &str,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_names(fields, noun, present)?;
+    if fields.iter().any(|field| present.contains(field.key)) || !extra.is_disjoint(present) {
+        Ok(())
+    } else {
+        Err(vec![error(
+            "credential",
+            &format!("has none of the credential fields this {noun} type reads"),
+        )])
+    }
+}
+
 /// [`check_credential_names`] for a source type.
 pub fn validate_credential_names(
     spec: &SourceSpec,
     present: &BTreeSet<String>,
 ) -> Result<(), Vec<FieldError>> {
     check_credential_names(spec.credential_fields, "source", present)
+}
+
+/// [`check_credential_fit`] for a source type: the check for a credential that is linked.
+pub fn validate_credential_fit(
+    spec: &SourceSpec,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    validate_credential_fit_with(spec, &BTreeSet::new(), present)
+}
+
+/// [`validate_credential_fit`] where the owner also declares the fields in `extra`.
+pub fn validate_credential_fit_with(
+    spec: &SourceSpec,
+    extra: &BTreeSet<String>,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_fit(spec.credential_fields, extra, "source", present)
 }
 
 /// The settings of a stream a user chose, as they are stored.
@@ -317,6 +355,37 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
         },
         FieldKind::Queries => super::sql::settings::queries_problem(value),
     }
+}
+
+/// Test helper: the built-in `kind` supplies every key in `reads`, offers nothing the owner does
+/// not declare, and the owner's name check accepts it.
+#[cfg(test)]
+pub(crate) fn assert_kind_fits(
+    spec: &SourceSpec,
+    kind: zirv_flow_core::credentials::CredentialKind,
+    reads: &[&str],
+) {
+    let present: BTreeSet<String> = kind.schema().fields.into_iter().map(|f| f.key).collect();
+    for read in reads {
+        assert!(present.contains(*read), "the kind lacks {read}");
+    }
+    for key in &present {
+        assert!(
+            spec.credential_fields.iter().any(|f| f.key == key),
+            "{key} is not a field of the owner"
+        );
+    }
+    assert!(validate_credential_fit(spec, &present).is_ok());
+}
+
+/// Test helper: the owner refuses the built-in `kind`, which holds no field the owner reads.
+#[cfg(test)]
+pub(crate) fn assert_kind_refused(
+    spec: &SourceSpec,
+    kind: zirv_flow_core::credentials::CredentialKind,
+) {
+    let present: BTreeSet<String> = kind.schema().fields.into_iter().map(|f| f.key).collect();
+    assert!(validate_credential_fit(spec, &present).is_err());
 }
 
 #[cfg(test)]

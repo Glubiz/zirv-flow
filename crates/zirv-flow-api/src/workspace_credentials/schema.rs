@@ -261,7 +261,9 @@ mod tests {
                 "basic",
                 "smtp",
                 "oauth2_client",
-                "signing_secret"
+                "signing_secret",
+                "bearer_token",
+                "tls_client"
             ]
         );
         let smtp = &listed[2]["schema"]["fields"];
@@ -269,6 +271,43 @@ mod tests {
         assert_eq!(smtp[4]["secret"], true);
         assert_eq!(smtp[2]["options"], json!(["starttls", "tls", "none"]));
         assert!(!listed.to_string().contains("\"value\""));
+        let fields = |id: &str| -> Vec<(String, bool, bool)> {
+            let kind = listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|kind| kind["id"] == id)
+                .unwrap();
+            kind["schema"]["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    (
+                        f["key"].as_str().unwrap().to_owned(),
+                        f["required"].as_bool().unwrap(),
+                        f["secret"].as_bool().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(fields("bearer_token"), [("token".to_owned(), true, true)]);
+        assert_eq!(
+            fields("tls_client"),
+            [
+                ("tls_client_cert".to_owned(), true, false),
+                ("tls_client_key".to_owned(), true, true)
+            ]
+        );
+        assert_eq!(
+            fields("signing_secret"),
+            [
+                ("signing_secret".to_owned(), true, true),
+                ("previous_signing_secret".to_owned(), false, true)
+            ]
+        );
+        let oauth = fields("oauth2_client");
+        assert!(oauth.contains(&("token_url".to_owned(), false, false)));
     }
 
     #[test]

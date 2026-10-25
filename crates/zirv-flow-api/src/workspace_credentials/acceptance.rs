@@ -436,7 +436,9 @@ mod tests {
                 "basic",
                 "smtp",
                 "oauth2_client",
-                "signing_secret"
+                "signing_secret",
+                "bearer_token",
+                "tls_client"
             ]
         );
         let smtp = kinds.body[2]["schema"]["fields"].as_array().unwrap();
@@ -1559,6 +1561,226 @@ mod tests {
                 .unwrap();
         assert_eq!(credential.get("username").unwrap().expose(), "reader");
         assert_eq!(credential.get("password").unwrap().expose(), "pw");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_new_built_in_kinds_fit_the_owner_types_that_read_their_fields(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let make = |body: Value| {
+            let fx = &fx;
+            async move {
+                let reply = fx.as_admin("POST", "/credentials", Some(body)).await;
+                assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+                reply.body["id"].as_str().unwrap().to_owned()
+            }
+        };
+        let source = |kind: &str, config: Value, credential: &str| {
+            let fx = &fx;
+            let body = json!({"kind": kind, "name": format!("{kind} {credential}"),
+                              "config": config, "credential_id": credential});
+            async move { fx.as_admin("POST", "/sources", Some(body)).await }
+        };
+        let bearer = make(json!({"kind": "bearer_token", "name": "Feed token",
+                                 "fields": {}, "secret": {"token": "tok"}}))
+        .await;
+        let tls = make(json!({"kind": "tls_client", "name": "Broker identity",
+                              "fields": {"tls_client_cert": "-----BEGIN CERTIFICATE-----"},
+                              "secret": {"tls_client_key": "-----BEGIN PRIVATE KEY-----"}}))
+        .await;
+        let oauth = make(json!({"kind": "oauth2_client", "name": "App client",
+                                "fields": {"client_id": "app"},
+                                "secret": {"client_secret": "shh"}}))
+        .await;
+        let signing = make(json!({"kind": "signing_secret", "name": "Hook signing",
+                                  "fields": {},
+                                  "secret": {"signing_secret": "now", "previous_signing_secret": "old"}}))
+        .await;
+        let manifest = |auth: Value| {
+            json!({"version": "v1", "base_url": "https://api.example.test/v1", "auth": auth,
+                   "streams": [{"name": "people", "path": "/people", "records_path": "/data",
+                                "fields": [{"name": "id", "type": "string"}],
+                                "primary_key": ["id"]}]})
+        };
+
+        let file = source(
+            "file",
+            json!({"url": "https://files.example.com/people.csv", "format": "csv"}),
+            &bearer,
+        )
+        .await;
+        let kafka = source(
+            "kafka",
+            json!({"brokers": "kafka-1.example.com:9093", "topics": "people"}),
+            &tls,
+        )
+        .await;
+        let http_bearer = source(
+            "http",
+            json!({"manifest": manifest(json!({"type": "bearer"}))}),
+            &bearer,
+        )
+        .await;
+        let http_oauth = source(
+            "http",
+            json!({"manifest": manifest(json!({
+                "type": "oauth2_client_credentials",
+                "token_url": "https://auth.example.test/token"}))}),
+            &oauth,
+        )
+        .await;
+        let hook = fx
+            .as_admin(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "webhook", "name": "Hook",
+                            "config": {"url": "https://hooks.example.com/in"},
+                            "credential_id": signing})),
+            )
+            .await;
+
+        for (name, reply) in [
+            ("file", &file),
+            ("kafka", &kafka),
+            ("http bearer", &http_bearer),
+            ("http oauth", &http_oauth),
+            ("webhook", &hook),
+        ] {
+            assert_eq!(
+                reply.status,
+                StatusCode::CREATED,
+                "{name}: {:?}",
+                reply.body
+            );
+        }
+        assert_eq!(
+            hook.body["credential_fields_set"],
+            json!(["previous_signing_secret", "signing_secret"])
+        );
+    }
+
+    const PROVIDER: &str = include_str!(
+        "../../../zirv-flow-connectors/tests/fixtures/providers/api_key_body_only.json"
+    );
+
+    /// A provider manifest with the given auth and credential fields (key, required), whose
+    /// feedback is verified under `secret_field`.
+    fn provider_manifest(auth: &str, fields: &[(&str, bool)], secret_field: &str) -> Value {
+        let mut manifest: Value = serde_json::from_str(PROVIDER).unwrap();
+        let fields: Vec<Value> = fields
+            .iter()
+            .map(|(key, required)| {
+                json!({"key": key, "label": key, "type": "string",
+                       "required": required, "secret": true})
+            })
+            .collect();
+        manifest["auth"] = json!({"type": auth, "credential": {"fields": fields}});
+        manifest["destination"]["feedback"]["verification"]["secret_field"] = json!(secret_field);
+        manifest
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_credential_with_only_the_fields_a_provider_manifest_declares_fits_the_destination(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let manifest = provider_manifest("none", &[("signing_secret", true)], "signing_secret");
+        let credential = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Feedback only",
+                            "schema": {"fields": [
+                                {"key": "signing_secret", "label": "S", "type": "string",
+                                 "required": true, "secret": true}]},
+                            "secret": {"signing_secret": "sig"}})),
+            )
+            .await;
+        assert_eq!(
+            credential.status,
+            StatusCode::CREATED,
+            "{:?}",
+            credential.body
+        );
+
+        let created = fx
+            .as_admin(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "provider", "name": "Mail",
+                            "config": {"manifest": manifest},
+                            "credential_id": credential.body["id"]})),
+            )
+            .await;
+
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_that_drops_a_field_a_provider_manifest_requires_is_refused(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let manifest = provider_manifest(
+            "basic",
+            &[
+                ("username", true),
+                ("password", true),
+                ("hook_secret", true),
+            ],
+            "hook_secret",
+        );
+        let credential = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Basic mail",
+                            "schema": {"fields": [
+                                {"key": "username", "label": "U", "type": "string", "secret": true},
+                                {"key": "password", "label": "P", "type": "string", "secret": true},
+                                {"key": "hook_secret", "label": "H", "type": "string", "secret": true},
+                                {"key": "token", "label": "T", "type": "string", "secret": true}]},
+                            "secret": {"username": "u", "password": "p", "hook_secret": "h"}})),
+            )
+            .await;
+        assert_eq!(
+            credential.status,
+            StatusCode::CREATED,
+            "{:?}",
+            credential.body
+        );
+        let id = credential.body["id"].as_str().unwrap().to_owned();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "provider", "name": "Mail",
+                            "config": {"manifest": manifest}, "credential_id": id})),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let rotate = |secret: Value| {
+            let fx = &fx;
+            let path = format!("/credentials/{id}/secret");
+            async move {
+                fx.as_admin("PUT", &path, Some(json!({"secret": secret})))
+                    .await
+            }
+        };
+
+        let refused = rotate(json!({"token": "t"})).await;
+        let kept = rotate(json!({"username": "u2", "password": "p2", "hook_secret": "h2"})).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        let detail = refused.body["detail"].as_str().unwrap();
+        assert!(detail.contains("credential.username"), "{detail}");
+        assert!(detail.contains("required by the manifest"), "{detail}");
+        assert_eq!(kept.status, StatusCode::OK, "{:?}", kept.body);
     }
 
     #[sqlx::test]

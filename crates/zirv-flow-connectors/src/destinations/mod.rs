@@ -49,7 +49,10 @@ pub use smtp::{
     SinkOptions as SmtpSinkOptions, SinkStage as SmtpSinkStage, SinkTls as SmtpSinkTls, SmtpSink,
 };
 pub use spec::{Capabilities, DestinationSpec};
-pub use validate::{validate_config, validate_credential, validate_credential_names};
+pub use validate::{
+    validate_config, validate_credential, validate_credential_fit, validate_credential_fit_with,
+    validate_credential_names,
+};
 
 /// The token the fake destination's check accepts.
 #[cfg(feature = "test-support")]

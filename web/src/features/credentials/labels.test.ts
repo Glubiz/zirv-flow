@@ -84,8 +84,27 @@ describe("credential labels", () => {
     const credential = stored();
 
     expect(fieldNames(credential).sort()).toEqual(["host", "password", "port"]);
-    expect(covers(credential, ["host", "password"])).toBe(true);
-    expect(covers(credential, ["token"])).toBe(false);
+    const hint = (key: string, required: boolean) => ({ key, required });
+    expect(covers(credential, [hint("host", true), hint("password", true)])).toBe(true);
+    expect(covers(credential, [hint("token", true)])).toBe(false);
+    expect(covers(credential, [])).toBe(false);
+  });
+
+  it("offers a credential only when the owner reads at least one of its fields", () => {
+    const tls = stored({ kind: "tls_client", fields: { tls_client_cert: "pem" }, hints: { tls_client_key: "wxyz" } });
+    const bearer = stored({ kind: "bearer_token", fields: {}, hints: { token: "wxyz" } });
+    const fileSource = [{ key: "token", required: false }];
+
+    expect(covers(tls, fileSource)).toBe(false);
+    expect(covers(bearer, fileSource)).toBe(true);
+  });
+
+  it("asks only for the required fields of an owner whose manifest may declare more", () => {
+    const custom = stored({ kind: "custom", fields: {}, hints: { account_secret: "wxyz" } });
+
+    expect(covers(custom, [{ key: "token", required: false }])).toBe(false);
+    expect(covers(custom, [{ key: "token", required: false }], true)).toBe(true);
+    expect(covers(custom, [{ key: "token", required: true }], true)).toBe(false);
   });
 
   it("masks a hint and names kinds and outcomes", () => {

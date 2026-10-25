@@ -310,20 +310,27 @@ pub enum CredentialKind {
     Basic,
     /// A mail server: host, port, TLS mode, username and password.
     Smtp,
-    /// An OAuth2 client: client id, client secret and token URL.
+    /// An OAuth2 client: client id, client secret and an optional token URL. A source's manifest
+    /// carries the token URL it uses and wins over the credential's.
     OAuth2Client,
     /// A secret that signs or verifies messages.
     SigningSecret,
+    /// A bearer token sent in the `Authorization` header.
+    BearerToken,
+    /// A TLS client certificate and its private key, for mutual TLS.
+    TlsClient,
 }
 
 impl CredentialKind {
     /// Every built-in kind.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::ApiKey,
         Self::Basic,
         Self::Smtp,
         Self::OAuth2Client,
         Self::SigningSecret,
+        Self::BearerToken,
+        Self::TlsClient,
     ];
 
     /// The stored schema id.
@@ -334,6 +341,8 @@ impl CredentialKind {
             Self::Smtp => "smtp",
             Self::OAuth2Client => "oauth2_client",
             Self::SigningSecret => "signing_secret",
+            Self::BearerToken => "bearer_token",
+            Self::TlsClient => "tls_client",
         }
     }
 
@@ -350,6 +359,8 @@ impl CredentialKind {
             Self::Smtp => "SMTP server",
             Self::OAuth2Client => "OAuth2 client",
             Self::SigningSecret => "Signing secret",
+            Self::BearerToken => "Bearer token",
+            Self::TlsClient => "TLS client certificate",
         }
     }
 
@@ -405,15 +416,41 @@ impl CredentialKind {
                     true,
                     true,
                 ),
-                field("token_url", "Token URL", FieldType::Url, true, false),
+                field("token_url", "Token URL", FieldType::Url, false, false),
             ],
-            Self::SigningSecret => vec![field(
-                "signing_secret",
-                "Signing secret",
-                FieldType::String,
-                true,
-                true,
-            )],
+            Self::SigningSecret => vec![
+                field(
+                    "signing_secret",
+                    "Signing secret",
+                    FieldType::String,
+                    true,
+                    true,
+                ),
+                field(
+                    "previous_signing_secret",
+                    "Previous signing secret",
+                    FieldType::String,
+                    false,
+                    true,
+                ),
+            ],
+            Self::BearerToken => vec![field("token", "Token", FieldType::String, true, true)],
+            Self::TlsClient => vec![
+                field(
+                    "tls_client_cert",
+                    "Client certificate (PEM)",
+                    FieldType::String,
+                    true,
+                    false,
+                ),
+                field(
+                    "tls_client_key",
+                    "Client private key (PEM)",
+                    FieldType::String,
+                    true,
+                    true,
+                ),
+            ],
         };
         CredentialSchema { fields }
     }
@@ -465,6 +502,71 @@ mod tests {
             assert!(kind.schema().secret_keys().count() >= 1);
         }
         assert_eq!(CredentialKind::parse("other"), None);
+    }
+
+    #[test]
+    fn a_bearer_token_has_one_required_secret_token() {
+        let schema = CredentialKind::BearerToken.schema();
+
+        let keys: Vec<_> = schema.fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["token"]);
+        assert!(schema.fields[0].required && schema.fields[0].secret);
+        assert_eq!(
+            schema.validate(&fields(json!({})), &secrets(&[("token", "t")])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_tls_client_has_a_plain_certificate_and_a_secret_key() {
+        let schema = CredentialKind::TlsClient.schema();
+
+        let cert = schema.field("tls_client_cert").unwrap();
+        let key = schema.field("tls_client_key").unwrap();
+        assert!(cert.required && !cert.secret);
+        assert!(key.required && key.secret);
+        let ok = schema.validate(
+            &fields(json!({"tls_client_cert": "c"})),
+            &secrets(&[("tls_client_key", "k")]),
+        );
+        assert_eq!(ok, Ok(()));
+    }
+
+    #[test]
+    fn an_oauth2_client_needs_no_token_url_but_still_takes_one() {
+        let schema = CredentialKind::OAuth2Client.schema();
+        let without = schema.validate(
+            &fields(json!({"client_id": "i"})),
+            &secrets(&[("client_secret", "s")]),
+        );
+        let with = schema.validate(
+            &fields(json!({"client_id": "i", "token_url": "https://a.example/t"})),
+            &secrets(&[("client_secret", "s")]),
+        );
+        let no_id = schema.validate(&fields(json!({})), &secrets(&[("client_secret", "s")]));
+
+        assert_eq!(without, Ok(()));
+        assert_eq!(with, Ok(()));
+        assert_eq!(no_id.unwrap_err()[0].field, "client_id");
+    }
+
+    #[test]
+    fn a_signing_secret_may_hold_a_previous_secret() {
+        let schema = CredentialKind::SigningSecret.schema();
+
+        let previous = schema.field("previous_signing_secret").unwrap();
+        assert!(previous.secret && !previous.required);
+        let only_current =
+            schema.validate(&fields(json!({})), &secrets(&[("signing_secret", "now")]));
+        let both = schema.validate(
+            &fields(json!({})),
+            &secrets(&[
+                ("signing_secret", "now"),
+                ("previous_signing_secret", "old"),
+            ]),
+        );
+        assert_eq!(only_current, Ok(()));
+        assert_eq!(both, Ok(()));
     }
 
     #[test]

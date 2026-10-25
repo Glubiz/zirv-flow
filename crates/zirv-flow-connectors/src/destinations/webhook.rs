@@ -326,6 +326,36 @@ mod tests {
     }
 
     #[test]
+    fn a_signing_secret_credential_carries_the_current_and_the_previous_secret() {
+        use zirv_flow_core::SecretBytes;
+        use zirv_flow_core::credentials::CredentialKind;
+
+        let schema = CredentialKind::SigningSecret.schema();
+        let spec = &Webhook::SPEC;
+        for field in spec.credential_fields {
+            let kind = schema.field(field.key).unwrap();
+            assert_eq!(kind.required, field.required, "{}", field.key);
+            assert_eq!(kind.secret, field.secret, "{}", field.key);
+        }
+        assert_eq!(schema.fields.len(), spec.credential_fields.len());
+
+        let sealed = SecretBytes::new(
+            br#"{"signing_secret":"zfwh_current","previous_signing_secret":"zfwh_previous"}"#
+                .to_vec(),
+        );
+        let opened = Credential::from_parts(&sealed, &json!({})).unwrap();
+
+        assert_eq!(
+            opened.get("signing_secret").unwrap().expose(),
+            "zfwh_current"
+        );
+        assert_eq!(
+            opened.get("previous_signing_secret").unwrap().expose(),
+            "zfwh_previous"
+        );
+    }
+
+    #[test]
     fn the_spec_has_a_secret_credential_no_rate_limit_and_the_webhook_and_event_channels() {
         let spec = &Webhook::SPEC;
 
