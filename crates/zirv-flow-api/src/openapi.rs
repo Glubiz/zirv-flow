@@ -666,6 +666,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         privacy::PersonTarget,
         privacy::TargetIdentifier,
         erasures::ErasureBody,
+        erasures::ErasureCallBody,
         erasures::ErasuresBody,
         exports::ExportBody,
         exports::ExportsBody,
