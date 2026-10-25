@@ -2225,6 +2225,20 @@ prefetch_user_agents = ["my-gateway-fetcher"]
 
 or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
+### Automatic UTM parameters
+
+A workspace admin can turn on UTM parameters for email links on the Sending screen (the "UTM parameters"
+section), or with `PATCH /api/v1/workspaces/{ws}` and a `utm` object. It is off by default. When it is on,
+every `http` or `https` link to a listed domain (or a subdomain of one) gets `utm_source`, `utm_medium`,
+`utm_campaign` and `utm_content`, in that order, from patterns you set (defaults `{workspace}`, `email`,
+`{flow}`, `{template}`). The patterns may only use `{workspace}`, `{flow}`, `{flow_version}`, `{step}`,
+`{template}`, `{template_version}` and `{category}`; values are lower-cased with hyphens and URL-encoded, and
+nothing about the person is used. Enabling needs at least one domain. Unsubscribe and preference links,
+`mailto:`, `tel:` and anchors are never tagged, a `utm_*` parameter already on a link is kept, and
+`data-zf-utm="off"` on a link skips it (the attribute is removed from every message, tagged or not, and the same URL in the plain-text part is left alone too). A template can opt out in its editor. The
+tagging happens before click tracking, so the recorded link and the redirect carry the parameters, and the
+preview and test sends show them too (without a flow, `{flow}` is empty and that parameter is left out).
+
 ## Template editor and delivery counts
 
 The web app has a Templates page. A template is written as HTML, MJML or from blocks (chosen when it is made) in a split view:

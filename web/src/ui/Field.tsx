@@ -88,11 +88,13 @@ export function SelectField({ label, hint, error, className, children, ...rest }
 interface TextAreaFieldProps extends Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "id"> {
   label: string;
   hint?: string;
+  /** What is wrong with the value; marks the field invalid. */
+  error?: string;
   mono?: boolean;
   ref?: Ref<HTMLTextAreaElement>;
 }
 
-export function TextAreaField({ label, hint, mono = false, className, ...rest }: TextAreaFieldProps) {
+export function TextAreaField({ label, hint, error, mono = false, className, ...rest }: TextAreaFieldProps) {
   const id = useId();
   const classes = ["input", "textarea", mono ? "input-mono" : "", className ?? ""].filter(Boolean).join(" ");
   return (
@@ -100,8 +102,14 @@ export function TextAreaField({ label, hint, mono = false, className, ...rest }:
       <label className="field-label" htmlFor={id}>
         {label}
       </label>
-      <textarea id={id} className={classes} aria-describedby={describedBy(id, hint, undefined)} {...rest} />
-      <Notes id={id} hint={hint} />
+      <textarea
+        id={id}
+        className={classes}
+        aria-describedby={describedBy(id, hint, error)}
+        aria-invalid={error ? true : undefined}
+        {...rest}
+      />
+      <Notes id={id} hint={hint} error={error} />
     </div>
   );
 }

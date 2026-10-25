@@ -1505,6 +1505,13 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Machine rule.** `email.opened` carries `machine` and `machine_reason`. It is a machine open (`user_agent`) when a token of the lower-cased user agent (split on non-alphanumeric characters) ends with `proxy`, `prefetch`, `preview`, `scanner`, `crawler` or `bot`, so a fused fetcher name is caught and `bot` in the middle of a longer word is a person, or when the user agent contains a fragment from `tracking.prefetch_user_agents` (a case-insensitive substring match; default empty; operators add the exact fragments of the fetchers they see), and otherwise (`delivery_delay`) when it arrives less than 10 seconds after the message's `completed_at`.
 - **Never stored.** Neither the IP address nor the user agent is stored or logged, and no event, decision or log line holds a URL, an address or a token. `message_links.url` is the rendered link and goes with its message.
 
+**As built (UTM parameters, #240).**
+
+- **Setting.** `workspaces.utm` (jsonb, migration 0058, default disabled) holds `enabled`, one pattern each for `utm_source` (`{workspace}`), `utm_medium` (`email`), `utm_campaign` (`{flow}`) and `utm_content` (`{template}`), and the link `domains` (empty). It is read and replaced through `GET` and `PATCH /workspaces/{ws}` (`utm` beside `timezone`), by an Admin only, through `admin::update_workspace_utm`, which audits `workspace.utm_updated` with the switch and the number of domains, never a pattern or a domain. `templates.utm` (`inherit` or `off`, default `inherit`) is the per-template override, set by the template update and returned on the template body.
+- **Patterns.** `zirv_flow_templates::utm` is pure. A pattern may use only `{workspace}`, `{flow}`, `{flow_version}`, `{step}`, `{template}`, `{template_version}` and `{category}`; any other placeholder (a person or event field included), unbalanced braces, a control character or more than 200 bytes is refused with `utm_pattern_invalid` naming the placeholder. Domains are normalised (lower case, no leading `*.`), invalid ones are `utm_domain_invalid`, and enabling with none is `utm_domains_required`. Expansion slugs each value (lower case, hyphens) and URL-encodes the result; a pattern that expands to nothing leaves its parameter out.
+- **Step.** `Hooks` gains `utm: Option<UtmTags>` (already expanded values and the domain list). `apply_tracking` runs the step on the HTML and the text part before the click rewrite, so `message_links.url` and the redirect target carry the parameters; the isolated render host finishes in the caller's process as it does for tracking. With the part absent the output is byte-identical. The parameters are appended after the existing query in the fixed order source, medium, campaign, content, the fragment stays last, and a `utm_*` key already on the link is kept. Only `http` and `https` links whose host is a listed domain or a subdomain of one on label boundaries are tagged; the message's unsubscribe and preference URLs, `mailto:`, `tel:` and anchors never are. `data-zf-utm="off"` skips a link and is removed from every `<a>` of the output whether or not the step runs (an `<a>` without `href` included); a text-part URL exactly equal to an opted-out HTML link is skipped too, and a text URL is tagged only at a boundary (start, whitespace or one of `( < [ " '`). A `utm_*` key counts when percent-encoded, and an authority with a backslash is never tagged. The block-level opt-out stays with #238 and #239.
+- **Callers.** The send, the test send and the preview resolve the values (workspace slug, flow name, version and node id, template name and version, the template category as `{category}`) and pass them in. A preview and a test send have no flow, so `{flow}`, `{flow_version}` and `{step}` are empty there and those parameters are left out. The Sending screen has a "UTM parameters" section with a live example link, and the template editor a per-template control.
+
 **As built (profile sync, #226).** The guide is `docs/profile-sync.md`.
 
 - **Manifest.** The `destination` section gains `upsert_profile` and `remove_profile`
@@ -2665,7 +2672,8 @@ after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
 (keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
 defaults, enforced by scheduler jobs): events 25 months deployment-wide, with
 per-name workspace overrides (drop monthly partitions; batched deletes where
-an override is shorter), messages 13 months, ingest rejects (including those from syncs and imports) 30 days, import files 7 days after the import ends,
+an override is shorter; each purge of rows that show a destination handled a person leaves a
+handled marker, see "Handled markers" below), messages 13 months, ingest rejects (including those from syncs and imports) 30 days, import files 7 days after the import ends,
 job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28.
 Assistant transcripts are not stored unless a workspace opts in to a 1 to 30
 day window (default 7), which a retention job purges (13.4, OQ-26).
@@ -2751,8 +2759,28 @@ the result per destination.
   attempts, error code, times) to each request; never a key.
 - **Manifest.** `erase_profile` has the shape and validation of `remove_profile` (`key` and
   `static` body placements only, never traits). Existing manifests validate as before.
-- **Open.** Events and forwarded rows age out by retention, so a destination that handled a person
-  only before that is not called.
+- **Handled markers (#283).** Events and delivered forwarding rows age out by retention, so a
+  destination that handled a person only before that would not be called. `erasure_handled_markers`
+  (migration 0059) keeps the fact: one row per workspace, person and destination, with
+  `first_handled_at`. Each retention purge that removes handling evidence writes the markers of the
+  rows it removes, in its own statement, with `ON CONFLICT DO NOTHING`: the event deletes (default
+  and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
+  safety net before a partition drop, and `purge_delivered` for delivered outbox rows. A row that
+  names no destination writes none, and neither does a destination that no longer exists. Messages
+  are not purged by retention (the 13-month message retention is not built), so they write none;
+  when it is built it writes markers too. Nothing on a hot path (message insert, outbox insert, sync
+  outcome) writes a marker. The marker insert joins `people`, so a purge writes nothing for a person
+  already gone, and the table's `person_id` key (`ON DELETE CASCADE`) means a
+  marker never outlives its person: a purge that raced an erasure fails as a whole statement and
+  runs again on its next pass, and an erasure waits for the person row a purge's marker key holds.
+  Planning reads the markers with the other evidence in one statement, for every member of the merged
+  group, so each destination is planned once whether the evidence is a marker, a live row or both.
+  `delete_person` deletes the markers after planning, and the erasure scan finds the table through its
+  `person_id` column.
+  A purge and an erasure of the same person can deadlock, because the purge's marker key takes the
+  person row after it deleted the evidence and `delete_person` locks the person row first; Postgres
+  aborts one of them. The aborted erasure job retries and plans from the committed markers, the
+  aborted purge rolls back and runs again on its next pass, and no data is lost either way.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's

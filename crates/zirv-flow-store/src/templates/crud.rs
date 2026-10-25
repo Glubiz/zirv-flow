@@ -23,6 +23,9 @@ pub struct Template {
     pub channel: String,
     /// `marketing` or `transactional`; the database checks the set.
     pub category: String,
+    /// `inherit` follows the workspace UTM setting; `off` never tags this template's links. The
+    /// database checks the set.
+    pub utm: String,
     /// The sender identity the draft's document names, or none. Derived: every draft write sets
     /// it from `email.sender`, and it is none when that names no sender identity of this
     /// workspace. It is never set on its own.
@@ -50,7 +53,7 @@ pub struct TemplateDraft {
 macro_rules! template_columns {
     () => {
         "id, name, channel, category, sender_identity_id, current_version, archived_at, \
-         created_by, created_at, updated_at"
+         created_by, created_at, updated_at, utm"
     };
 }
 
@@ -78,6 +81,8 @@ pub struct NewTemplate {
 #[derive(Clone, Debug, Default)]
 pub struct TemplatePatch {
     pub name: Option<String>,
+    /// `inherit` or `off`; the caller checks the set (the database does too).
+    pub utm: Option<String>,
 }
 
 /// The sender identity id a content document names, if it names one: `email.sender` of a code
@@ -252,13 +257,14 @@ pub async fn update_template(
 ) -> Result<Template, TemplateError> {
     lock_live_template(connection, workspace, id).await?;
     let template = sqlx::query_as(concat!(
-        "UPDATE templates SET name = COALESCE($3, name), \
+        "UPDATE templates SET name = COALESCE($3, name), utm = COALESCE($4, utm), \
             updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING ",
         template_columns!()
     ))
     .bind(workspace.as_uuid())
     .bind(id)
     .bind(patch.name.as_deref())
+    .bind(patch.utm.as_deref())
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)?;
@@ -413,6 +419,7 @@ mod tests {
             template.id,
             &TemplatePatch {
                 name: Some("New".into()),
+                ..TemplatePatch::default()
             },
         )
         .await;
@@ -436,6 +443,7 @@ mod tests {
             template.id,
             &TemplatePatch {
                 name: Some("Hello".into()),
+                ..TemplatePatch::default()
             },
         )
         .await
@@ -448,6 +456,52 @@ mod tests {
         assert_eq!(named.name, "Hello");
         assert_eq!(untouched.name, "Hello");
         assert_eq!(named.channel, template.channel);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_utm_override_defaults_to_inherit_and_accepts_only_inherit_or_off(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let template = create(&pool, ws, "Welcome").await;
+        let mut connection = pool.acquire().await.unwrap();
+        assert_eq!(template.utm, "inherit");
+
+        let off = update_template(
+            &mut connection,
+            ws,
+            template.id,
+            &TemplatePatch {
+                utm: Some("off".into()),
+                ..TemplatePatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let kept = update_template(
+            &mut connection,
+            ws,
+            template.id,
+            &TemplatePatch {
+                name: Some("Hello".into()),
+                ..TemplatePatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let bad = update_template(
+            &mut connection,
+            ws,
+            template.id,
+            &TemplatePatch {
+                utm: Some("on".into()),
+                ..TemplatePatch::default()
+            },
+        )
+        .await;
+
+        assert_eq!(off.utm, "off");
+        assert_eq!(kept.utm, "off");
+        assert!(bad.is_err());
     }
 
     fn document_from(sender: &str) -> Value {

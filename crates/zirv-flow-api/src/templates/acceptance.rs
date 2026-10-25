@@ -1052,6 +1052,7 @@ mod tests {
             tracking: Tracking::Inert {
                 base_url: "https://preview.sample.invalid/t",
             },
+            utm: None,
         };
         let expected = render_email(&doc, &context, &hooks).unwrap();
         assert_eq!(email.status, StatusCode::OK, "{:?}", email.body);
@@ -1153,6 +1154,7 @@ mod tests {
             tracking: Tracking::Inert {
                 base_url: "https://preview.sample.invalid/t",
             },
+            utm: None,
         };
         let expected = render_email(&doc, &context, &hooks).unwrap();
         assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
@@ -1446,6 +1448,7 @@ mod tests {
             tracking: Tracking::Inert {
                 base_url: "https://preview.sample.invalid/t",
             },
+            utm: None,
         };
         let expected = render_email(&doc, &context, &hooks).unwrap();
         assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
@@ -2008,6 +2011,99 @@ mod tests {
         assert_eq!(rows[0]["active"], true);
         assert!(unused.body.as_array().unwrap().is_empty());
         let _ = template;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_utm_override_is_set_by_the_template_update_returned_and_refused_when_unknown(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let uri = f.templates(&format!("/{id}"));
+
+        let created = f.lead("GET", &format!("/{id}"), None).await;
+        let by_read = f
+            .call("PUT", &uri, Some(json!({"utm": "off"})), Auth::Key(&f.read))
+            .await;
+        let off = f
+            .lead("PUT", &format!("/{id}"), Some(json!({"utm": "off"})))
+            .await;
+        let read_back = f.lead("GET", &format!("/{id}"), None).await;
+        let bad = f
+            .lead("PUT", &format!("/{id}"), Some(json!({"utm": "on"})))
+            .await;
+        let inherit = f
+            .lead("PUT", &format!("/{id}"), Some(json!({"utm": "inherit"})))
+            .await;
+
+        assert_eq!(created.body["utm"], "inherit");
+        assert_eq!(by_read.status, StatusCode::FORBIDDEN);
+        assert_eq!(off.status, StatusCode::OK, "{:?}", off.body);
+        assert_eq!(off.body["utm"], "off");
+        assert_eq!(read_back.body["utm"], "off");
+        assert!(bad.status.is_client_error());
+        assert_eq!(inherit.body["utm"], "inherit");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_shows_the_tagged_links_unless_the_setting_or_the_template_is_off(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let mut document = email_doc("Hi", "x");
+        document["email"]["html"] = json!(
+            "<a href=\"https://shop.example.com/a?x=1\">Shop</a>\
+             <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>"
+        );
+        // Clicks are inert in a preview, so the tagged URL shows in the text part.
+        document["email"]["text"] = json!("Shop https://shop.example.com/a?x=1 end");
+        let id = f.create("Welcome", document).await;
+        let ws_uri = format!("/api/v1/workspaces/{}", f.ws.as_uuid());
+        let preview = || async {
+            f.lead("POST", &format!("/{id}/preview"), Some(json!({})))
+                .await
+        };
+
+        let setting_off = preview().await;
+        let enabled = f
+            .call(
+                "PATCH",
+                &ws_uri,
+                Some(json!({"utm": {
+                    "enabled": true, "source": "{workspace}", "medium": "email",
+                    "campaign": "{flow}", "content": "{template}",
+                    "domains": ["example.com"],
+                }})),
+                Auth::Session(&f.lead),
+            )
+            .await;
+        assert_eq!(enabled.status, StatusCode::OK, "{:?}", enabled.body);
+        let on = preview().await;
+        let put = f
+            .lead("PUT", &format!("/{id}"), Some(json!({"utm": "off"})))
+            .await;
+        assert_eq!(put.status, StatusCode::OK);
+        let template_off = preview().await;
+
+        let text = |reply: &Reply| reply.body["text"].as_str().unwrap().to_owned();
+        assert_eq!(
+            text(&setting_off),
+            "Shop https://shop.example.com/a?x=1 end"
+        );
+        let tagged = text(&on);
+        // {flow} has no value in a preview, so utm_campaign is left out.
+        assert!(
+            tagged.starts_with("Shop https://shop.example.com/a?x=1&utm_source="),
+            "{tagged}"
+        );
+        assert!(
+            tagged.contains("&utm_medium=email&utm_content=welcome end"),
+            "{tagged}"
+        );
+        assert!(!tagged.contains("utm_campaign"), "{tagged}");
+        assert_eq!(setting_off.body, template_off.body);
     }
 
     #[sqlx::test]

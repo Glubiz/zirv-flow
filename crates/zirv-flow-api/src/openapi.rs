@@ -40,7 +40,9 @@ use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
 use crate::webhooks;
 use crate::workspace_credentials;
-use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, WorkspaceBody};
+use crate::workspaces::{
+    self, CreateWorkspaceRequest, UpdateWorkspaceRequest, UtmSettingsBody, WorkspaceBody,
+};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -319,6 +321,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         CreateWorkspaceRequest,
         UpdateWorkspaceRequest,
         WorkspaceBody,
+        UtmSettingsBody,
         MemberBody,
         SetRoleRequest,
         RoleBody,
@@ -503,6 +506,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         templates::crud::TemplateDetailBody,
         templates::crud::CreateTemplateRequest,
         templates::crud::UpdateTemplateRequest,
+        templates::crud::TemplateUtmRequest,
         templates::crud::SaveTemplateDraftRequest,
         templates::crud::TemplateChannelRequest,
         templates::crud::TemplateCategoryRequest,

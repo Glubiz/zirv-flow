@@ -1486,7 +1486,7 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "Changes the workspace's settings: today its time zone. Needs the workspace admin role and the\nCSRF token. Audited as `workspace.updated`.",
+        "summary": "Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the\nworkspace admin role and the CSRF token. Audited as `workspace.updated` for the time zone and\n`workspace.utm_updated` for the UTM setting, in one transaction.",
         "operationId": "update_workspace",
         "parameters": [
           {
@@ -1552,7 +1552,7 @@
             }
           },
           "422": {
-            "description": "The time zone is not an IANA zone name",
+            "description": "The time zone is not an IANA zone name, or the UTM setting is refused (codes `utm_pattern_invalid`, `utm_domain_invalid`, `utm_domains_required`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -36181,6 +36181,7 @@
           "name",
           "channel",
           "category",
+          "utm",
           "created_at",
           "updated_at"
         ],
@@ -36239,6 +36240,10 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "utm": {
+            "type": "string",
+            "description": "`inherit` (the default) follows the workspace's UTM setting; `off` never adds UTM\nparameters to this template's links."
           }
         }
       },
@@ -36522,6 +36527,14 @@
             "description": "The numbers of the flow's versions that name the template, newest first. An older version\nstill runs for the enrollments pinned to it."
           }
         }
+      },
+      "TemplateUtmRequest": {
+        "type": "string",
+        "description": "The per-template override of the workspace UTM setting.",
+        "enum": [
+          "inherit",
+          "off"
+        ]
       },
       "TemplateVersionBody": {
         "type": "object",
@@ -37677,6 +37690,17 @@
               "string",
               "null"
             ]
+          },
+          "utm": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateUtmRequest",
+                "description": "`inherit` or `off`: whether the workspace's automatic UTM parameters apply to this\ntemplate."
+              }
+            ]
           }
         }
       },
@@ -37806,14 +37830,25 @@
       },
       "UpdateWorkspaceRequest": {
         "type": "object",
-        "required": [
-          "timezone"
-        ],
         "properties": {
           "timezone": {
-            "type": "string",
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "An IANA time zone name such as `Europe/Copenhagen` or `UTC`, at most 64 characters.",
             "example": "Europe/Copenhagen"
+          },
+          "utm": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UtmSettingsBody",
+                "description": "The automatic UTM parameter setting, replaced as a whole."
+              }
+            ]
           }
         }
       },
@@ -37883,6 +37918,50 @@
             ],
             "format": "uuid",
             "description": "Null for calls made with an API key."
+          }
+        }
+      },
+      "UtmSettingsBody": {
+        "type": "object",
+        "description": "The workspace setting for automatic UTM parameters on email links. A pattern may use only\n`{workspace}`, `{flow}`, `{flow_version}`, `{step}`, `{template}`, `{template_version}` and\n`{category}`; values are slugged and URL-encoded, and a pattern that expands to nothing omits\nits parameter.",
+        "required": [
+          "enabled",
+          "source",
+          "medium",
+          "campaign",
+          "content",
+          "domains"
+        ],
+        "properties": {
+          "campaign": {
+            "type": "string",
+            "description": "The `utm_campaign` pattern.",
+            "example": "{flow}"
+          },
+          "content": {
+            "type": "string",
+            "description": "The `utm_content` pattern.",
+            "example": "{template}"
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The link domains that get parameters; their subdomains do too. Enabling needs at least one."
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "medium": {
+            "type": "string",
+            "description": "The `utm_medium` pattern.",
+            "example": "email"
+          },
+          "source": {
+            "type": "string",
+            "description": "The `utm_source` pattern.",
+            "example": "{workspace}"
           }
         }
       },
@@ -38177,6 +38256,7 @@
           "name",
           "slug",
           "timezone",
+          "utm",
           "created_at"
         ],
         "properties": {
@@ -38198,6 +38278,10 @@
             "type": "string",
             "description": "The workspace's IANA time zone, the local clock of a wait for a person with no zone of\ntheir own. `UTC` until an admin sets it.",
             "example": "Europe/Copenhagen"
+          },
+          "utm": {
+            "$ref": "#/components/schemas/UtmSettingsBody",
+            "description": "The automatic UTM parameter setting for email links. Off until an admin turns it on."
           }
         }
       }

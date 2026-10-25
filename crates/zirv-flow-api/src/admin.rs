@@ -18,7 +18,7 @@ use zirv_flow_core::{
 use zirv_flow_store::secrets;
 use zirv_flow_store::{
     Actor, ActorKind, AiSettings, AiSettingsUpdate, ApiKey, Membership, NewAuditEntry,
-    PgConnection, PgPool, ReplayReport, StoreError, User, Workspace,
+    PgConnection, PgPool, ReplayReport, StoreError, User, UtmSettings, Workspace,
 };
 
 use crate::{credentials, passwords};
@@ -78,6 +78,13 @@ pub enum AdminError {
     Slot(zirv_flow_store::SlotError),
     /// A stored secret could not be re-wrapped. Names a key id, never key or plaintext bytes.
     Secret(SecretError),
+    /// A UTM setting that was refused; the problem carries the code (`utm_pattern_invalid`,
+    /// `utm_domain_invalid` or `utm_domains_required`). The detail names the field and the rule,
+    /// never a value other than the refused placeholder.
+    Utm {
+        code: &'static str,
+        detail: String,
+    },
 }
 
 impl fmt::Display for AdminError {
@@ -89,6 +96,7 @@ impl fmt::Display for AdminError {
             Self::Store(error) => error.fmt(formatter),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
+            Self::Utm { detail, .. } => formatter.write_str(detail),
         }
     }
 }
@@ -99,7 +107,7 @@ impl Error for AdminError {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) => None,
+            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) | Self::Utm { .. } => None,
         }
     }
 }
@@ -857,6 +865,106 @@ pub async fn save_ai_settings(
     }
     zirv_flow_store::commit(tx).await?;
     Ok(saved)
+}
+
+/// Validates the UTM setting the caller sent: the patterns may only use the fixed placeholder set,
+/// so a person or event field is refused; every domain is normalised; enabling with no domain is
+/// refused.
+fn validate_utm(change: &UtmSettings) -> Result<UtmSettings, AdminError> {
+    use zirv_flow_templates::{MAX_DOMAINS, normalize_domain, validate_utm_pattern};
+
+    let patterns = [
+        ("utm.source", &change.source),
+        ("utm.medium", &change.medium),
+        ("utm.campaign", &change.campaign),
+        ("utm.content", &change.content),
+    ];
+    for (field, pattern) in patterns {
+        validate_utm_pattern(pattern).map_err(|error| AdminError::Utm {
+            code: "utm_pattern_invalid",
+            detail: format!("{field}: {error}"),
+        })?;
+    }
+    if change.domains.len() > MAX_DOMAINS {
+        return Err(AdminError::Utm {
+            code: "utm_domain_invalid",
+            detail: format!("utm.domains: at most {MAX_DOMAINS} domains"),
+        });
+    }
+    let mut domains: Vec<String> = Vec::with_capacity(change.domains.len());
+    for domain in &change.domains {
+        let normal = normalize_domain(domain).ok_or_else(|| AdminError::Utm {
+            code: "utm_domain_invalid",
+            detail: "utm.domains: each entry must be a domain name such as example.com".to_owned(),
+        })?;
+        if !domains.contains(&normal) {
+            domains.push(normal);
+        }
+    }
+    if change.enabled && domains.is_empty() {
+        return Err(AdminError::Utm {
+            code: "utm_domains_required",
+            detail: "utm.domains: list at least one domain before enabling UTM parameters"
+                .to_owned(),
+        });
+    }
+    Ok(UtmSettings {
+        enabled: change.enabled,
+        source: change.source.clone(),
+        medium: change.medium.clone(),
+        campaign: change.campaign.clone(),
+        content: change.content.clone(),
+        domains,
+    })
+}
+
+/// Saves a workspace's settings, the time zone and the automatic UTM setting (#240), in one
+/// transaction: a refused part changes nothing. The caller has already checked the time zone name.
+/// Audited as `workspace.updated` for the time zone and `workspace.utm_updated` for the UTM setting
+/// (the switch and the number of domains, never a pattern or a domain).
+pub async fn update_workspace(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    timezone: Option<&str>,
+    utm: Option<&UtmSettings>,
+) -> Result<Workspace, AdminError> {
+    let settings = utm.map(validate_utm).transpose()?;
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let mut saved = None;
+    if let Some(settings) = &settings {
+        saved = Some(
+            zirv_flow_store::set_workspace_utm(&mut *tx, workspace, settings)
+                .await?
+                .ok_or(AdminError::NotFound("workspace"))?,
+        );
+        audit(
+            &mut tx,
+            context,
+            Some(workspace),
+            "workspace.utm_updated",
+            Some(("workspace", workspace.as_uuid())),
+            json!({ "enabled": settings.enabled, "domains": settings.domains.len() }),
+        )
+        .await?;
+    }
+    if let Some(timezone) = timezone {
+        let updated = zirv_flow_store::set_workspace_timezone(&mut *tx, workspace, timezone)
+            .await?
+            .ok_or(AdminError::NotFound("workspace"))?;
+        audit(
+            &mut tx,
+            context,
+            Some(workspace),
+            "workspace.updated",
+            Some(("workspace", workspace.as_uuid())),
+            json!({ "timezone": updated.timezone }),
+        )
+        .await?;
+        saved = Some(updated);
+    }
+    zirv_flow_store::commit(tx).await?;
+    saved.ok_or(AdminError::NotFound("workspace"))
 }
 
 #[cfg(test)]

@@ -369,8 +369,9 @@ export interface paths {
         options?: never;
         head?: never;
         /**
-         * Changes the workspace's settings: today its time zone. Needs the workspace admin role and the
-         *     CSRF token. Audited as `workspace.updated`.
+         * Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the
+         *     workspace admin role and the CSRF token. Audited as `workspace.updated` for the time zone and
+         *     `workspace.utm_updated` for the UTM setting, in one transaction.
          */
         patch: operations["update_workspace"];
         trace?: never;
@@ -8946,6 +8947,11 @@ export interface components {
             sender_identity_id?: string | null;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description `inherit` (the default) follows the workspace's UTM setting; `off` never adds UTM
+             *     parameters to this template's links.
+             */
+            utm: string;
         };
         /**
          * @description Whether a message needs the unsubscribe link and headers.
@@ -9057,6 +9063,11 @@ export interface components {
              */
             versions: number[];
         };
+        /**
+         * @description The per-template override of the workspace UTM setting.
+         * @enum {string}
+         */
+        TemplateUtmRequest: "inherit" | "off";
         /** @description One immutable published version. */
         TemplateVersionBody: {
             /** @description The document as it was published. */
@@ -9479,6 +9490,7 @@ export interface components {
         };
         UpdateTemplateRequest: {
             name?: string | null;
+            utm?: null | components["schemas"]["TemplateUtmRequest"];
         };
         UpdateTopicRequest: {
             archived?: boolean | null;
@@ -9511,7 +9523,8 @@ export interface components {
              * @description An IANA time zone name such as `Europe/Copenhagen` or `UTC`, at most 64 characters.
              * @example Europe/Copenhagen
              */
-            timezone: string;
+            timezone?: string | null;
+            utm?: null | components["schemas"]["UtmSettingsBody"];
         };
         /** @description A live source or destination that uses a credential. */
         UsedByBody: {
@@ -9541,6 +9554,37 @@ export interface components {
              * @description Null for calls made with an API key.
              */
             user_id?: string | null;
+        };
+        /**
+         * @description The workspace setting for automatic UTM parameters on email links. A pattern may use only
+         *     `{workspace}`, `{flow}`, `{flow_version}`, `{step}`, `{template}`, `{template_version}` and
+         *     `{category}`; values are slugged and URL-encoded, and a pattern that expands to nothing omits
+         *     its parameter.
+         */
+        UtmSettingsBody: {
+            /**
+             * @description The `utm_campaign` pattern.
+             * @example {flow}
+             */
+            campaign: string;
+            /**
+             * @description The `utm_content` pattern.
+             * @example {template}
+             */
+            content: string;
+            /** @description The link domains that get parameters; their subdomains do too. Enabling needs at least one. */
+            domains: string[];
+            enabled: boolean;
+            /**
+             * @description The `utm_medium` pattern.
+             * @example email
+             */
+            medium: string;
+            /**
+             * @description The `utm_source` pattern.
+             * @example {workspace}
+             */
+            source: string;
         };
         ValidateBody: {
             credential_schema?: null | components["schemas"]["SchemaBody"];
@@ -9661,6 +9705,8 @@ export interface components {
              * @example Europe/Copenhagen
              */
             timezone: string;
+            /** @description The automatic UTM parameter setting for email links. Off until an admin turns it on. */
+            utm: components["schemas"]["UtmSettingsBody"];
         };
     };
     responses: never;
@@ -10840,7 +10886,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The time zone is not an IANA zone name */
+            /** @description The time zone is not an IANA zone name, or the UTM setting is refused (codes `utm_pattern_invalid`, `utm_domain_invalid`, `utm_domains_required`) */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -82,6 +82,9 @@ pub(crate) struct TemplateBody {
     channel: String,
     /// `marketing` or `transactional`; fixed when the template is made.
     category: String,
+    /// `inherit` (the default) follows the workspace's UTM setting; `off` never adds UTM
+    /// parameters to this template's links.
+    utm: String,
     /// The sender identity the draft's document names (`email.sender`), when it is an identity of
     /// this workspace. Read-only: it follows the draft, which is where the sender is set.
     sender_identity_id: Option<Uuid>,
@@ -107,6 +110,7 @@ impl From<&Template> for TemplateBody {
             name: template.name.clone(),
             channel: template.channel.clone(),
             category: template.category.clone(),
+            utm: template.utm.clone(),
             sender_identity_id: template.sender_identity_id,
             current_version: template.current_version,
             archived_at: template.archived_at,
@@ -184,6 +188,26 @@ pub(crate) struct CreateTemplateRequest {
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct UpdateTemplateRequest {
     name: Option<String>,
+    /// `inherit` or `off`: whether the workspace's automatic UTM parameters apply to this
+    /// template.
+    utm: Option<TemplateUtmRequest>,
+}
+
+/// The per-template override of the workspace UTM setting.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TemplateUtmRequest {
+    Inherit,
+    Off,
+}
+
+impl TemplateUtmRequest {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Off => "off",
+        }
+    }
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -251,6 +275,7 @@ pub(crate) async fn create_template(
         name: new.name.clone(),
         channel: new.channel.clone(),
         category: new.category.clone(),
+        utm: "inherit".into(),
         sender_identity_id: None,
         current_version: None,
         archived_at: None,
@@ -294,10 +319,16 @@ pub(crate) async fn update_template(
     if name.is_some() {
         fields.push("name");
     }
+    if request.utm.is_some() {
+        fields.push("utm");
+    }
     if fields.is_empty() {
         return Err(invalid("body", "must change at least one field"));
     }
-    let patch = TemplatePatch { name };
+    let patch = TemplatePatch {
+        name,
+        utm: request.utm.map(|utm| utm.as_str().to_owned()),
+    };
     let mut tx = zirv_flow_store::begin(pool).await?;
     let template = zirv_flow_store::update_template(&mut tx, workspace, id, &patch)
         .await
@@ -311,7 +342,7 @@ pub(crate) async fn update_template(
         Some(workspace),
         "template.updated",
         Some(("template", template.id)),
-        json!({ "name": template.name, "fields": fields }),
+        json!({ "name": template.name, "utm": template.utm, "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -728,6 +759,7 @@ mod tests {
             name: "T".into(),
             channel: "email".into(),
             category: "marketing".into(),
+            utm: "inherit".into(),
             sender_identity_id: None,
             current_version: None,
             archived_at: None,
@@ -765,6 +797,7 @@ mod tests {
             name: "T".into(),
             channel: "email".into(),
             category: "marketing".into(),
+            utm: "inherit".into(),
             sender_identity_id: None,
             current_version: None,
             archived_at: None,
@@ -812,6 +845,7 @@ mod tests {
             name: "T".into(),
             channel: "email".into(),
             category: category.into(),
+            utm: "inherit".into(),
             sender_identity_id: None,
             current_version: None,
             archived_at: None,
@@ -847,6 +881,7 @@ mod tests {
             name: "T".into(),
             channel: channel.into(),
             category: "marketing".into(),
+            utm: "inherit".into(),
             sender_identity_id: None,
             current_version: None,
             archived_at: None,

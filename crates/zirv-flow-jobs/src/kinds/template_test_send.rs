@@ -277,7 +277,22 @@ async fn decide(
     });
     render::address_links(&mut context, row.id, tracker.as_ref());
     let render_pool = ctx.render_pool().cloned();
-    let tracked = match render::render(render_pool.as_ref(), document, &context, None, &[]).await {
+    let utm = match template.as_ref() {
+        Some(template) => {
+            render::utm_plan(ctx.conn(), workspace, template, row.template_version, None).await?
+        }
+        None => None,
+    };
+    let tracked = match render::render(
+        render_pool.as_ref(),
+        document,
+        &context,
+        None,
+        &[],
+        utm.as_ref(),
+    )
+    .await
+    {
         Ok(tracked) => tracked,
         Err(reason) => return end(TestSendOutcome::RenderFailed, reason),
     };

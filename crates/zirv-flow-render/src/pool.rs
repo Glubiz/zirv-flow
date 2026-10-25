@@ -720,6 +720,7 @@ mod tests {
                 base_url: "https://t.example/c",
                 token: &tok,
             },
+            utm: None,
         };
         for name in ["email_marketing", "email_transactional"] {
             let read = |suffix: &str| {
@@ -734,6 +735,7 @@ mod tests {
                 tracking: Tracking::Inert {
                     base_url: "https://t.example/c",
                 },
+                utm: None,
             };
             assert_eq!(
                 pool.render_email(&doc, &context, &inert).await.unwrap(),
@@ -767,6 +769,7 @@ mod tests {
                 base_url: "https://t.example/c",
                 token: &tok,
             },
+            utm: None,
         };
         let catalog = FieldCatalog::default();
         let dir = fixtures().join("mjml");
@@ -812,6 +815,7 @@ mod tests {
                 base_url: "https://t.example/c",
                 token: &tok,
             },
+            utm: None,
         };
         let catalog = FieldCatalog::default();
         let dir = fixtures().join("blocks");

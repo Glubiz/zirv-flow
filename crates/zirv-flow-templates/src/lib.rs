@@ -22,6 +22,7 @@ mod issue;
 mod links;
 mod render;
 mod sandbox;
+mod utm;
 mod validate;
 mod wire;
 
@@ -51,6 +52,11 @@ pub use render::{Rendered, RenderedWebhook, apply_tracking, render_email, render
 pub use sandbox::{
     FUEL, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
     MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, RECURSION_LIMIT,
+};
+pub use utm::{
+    MAX_DOMAINS, MAX_PATTERN_BYTES, PLACEHOLDERS, PatternError, UtmPlan, UtmTags, UtmValues,
+    expand as expand_utm_pattern, normalize_domain, slug as utm_slug, tag_url,
+    validate_pattern as validate_utm_pattern,
 };
 pub use validate::validate;
 pub use wire::{RenderRequest, RenderResponse};
