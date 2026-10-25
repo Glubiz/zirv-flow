@@ -1366,6 +1366,36 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn convert_is_a_404_in_another_workspace_and_a_409_for_an_archived_template(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let id = f.create("Newsletter", blocks_doc("Welcome", footer)).await;
+        let uri = f.templates(&format!("/{id}/draft/convert-to-mjml"));
+
+        let stranger = f.call("POST", &uri, None, Auth::Key(&f.other_admin)).await;
+        assert_eq!(
+            stranger.status,
+            StatusCode::NOT_FOUND,
+            "{:?}",
+            stranger.body
+        );
+
+        let archived = f.lead("DELETE", &format!("/{id}"), None).await;
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        let refused = f
+            .lead("POST", &format!("/{id}/draft/convert-to-mjml"), None)
+            .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "template_archived");
+        let draft = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(draft.body["draft"]["document"]["mode"], "blocks");
+        assert_eq!(draft.body["draft"]["revision"], 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_read_key_cannot_convert_a_draft(pool: PgPool) {
         let f = fixture(&pool).await;
         let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;

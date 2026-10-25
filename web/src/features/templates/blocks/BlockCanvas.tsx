@@ -124,10 +124,10 @@ export function BlockCanvas(props: Props) {
           {chosen ? <span className="faint">selected</span> : null}
           {readOnly ? null : (
             <span className="be-actions">
-              <Button aria-label={`Move ${name} up`} onClick={() => props.onMove("block", block.id, "up")} disabled={number === 1}>
+              <Button data-move="up" aria-label={`Move ${name} up`} onClick={() => props.onMove("block", block.id, "up")} disabled={number === 1}>
                 Up
               </Button>
-              <Button aria-label={`Move ${name} down`} onClick={() => props.onMove("block", block.id, "down")} disabled={number === count}>
+              <Button data-move="down" aria-label={`Move ${name} down`} onClick={() => props.onMove("block", block.id, "down")} disabled={number === count}>
                 Down
               </Button>
               <Button aria-label={`Remove ${name}`} onClick={() => props.onRemove("block", block.id)}>
@@ -147,19 +147,19 @@ export function BlockCanvas(props: Props) {
     const name = `Section ${index + 1}`;
     const chosen = props.selected === section.id;
     return (
-      <div role="group" aria-label={`${name}, ${section.columns.length} ${section.columns.length === 1 ? "column" : "columns"}`} className={chosen ? "be-section be-section-on" : "be-section"}>
+      <div data-section-id={section.id} role="group" aria-label={`${name}, ${section.columns.length} ${section.columns.length === 1 ? "column" : "columns"}`} className={chosen ? "be-section be-section-on" : "be-section"}>
         <div className="be-bar">
           {readOnly ? null : handle(name, { kind: "section", id: section.id })}
-          <button type="button" className="link-button strong" aria-pressed={chosen} onClick={() => props.onSelect(section.id)}>
+          <button type="button" data-section-settings className="link-button strong" aria-pressed={chosen} onClick={() => props.onSelect(section.id)}>
             {name} settings
           </button>
           <span className="faint">{section.columns.length === 1 ? "1 column" : `${section.columns.length} columns`}</span>
           {readOnly ? null : (
             <span className="be-actions">
-              <Button aria-label={`Move ${name} up`} onClick={() => props.onMove("section", section.id, "up")} disabled={index === 0}>
+              <Button data-move="up" aria-label={`Move ${name} up`} onClick={() => props.onMove("section", section.id, "up")} disabled={index === 0}>
                 Up
               </Button>
-              <Button aria-label={`Move ${name} down`} onClick={() => props.onMove("section", section.id, "down")} disabled={index === content.sections.length - 1}>
+              <Button data-move="down" aria-label={`Move ${name} down`} onClick={() => props.onMove("section", section.id, "down")} disabled={index === content.sections.length - 1}>
                 Down
               </Button>
               <Button aria-label={`Remove ${name}`} onClick={() => props.onRemove("section", section.id)}>

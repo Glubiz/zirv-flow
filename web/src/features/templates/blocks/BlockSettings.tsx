@@ -1,4 +1,5 @@
 import { SelectField, TextAreaField, TextField } from "../../../ui";
+import { NumberField } from "./NumberField";
 import { FieldIssues } from "../IssueList";
 import { issuesAt, type TemplateIssue } from "../model";
 import { blockLabel, omit, type Align, type Block, type Section } from "./document";
@@ -148,15 +149,15 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues }: P
       ) : null}
       {block.type === "spacer" ? (
         <>
-          <TextField
+          <NumberField
+            key={block.id}
             label="Height in pixels"
             hint="1 to 200."
-            type="number"
             min={1}
             max={200}
-            value={String(block.height)}
+            value={block.height}
             readOnly={readOnly}
-            onChange={(event) => onChange({ ...block, height: Number(event.target.value) })}
+            onValue={(height) => onChange({ ...block, height })}
           />
           <FieldIssues issues={at("height")} />
         </>

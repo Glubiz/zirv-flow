@@ -1,4 +1,5 @@
 import { SelectField, TextField } from "../../../ui";
+import { NumberField } from "./NumberField";
 import { FieldIssues } from "../IssueList";
 import { issuesAt, type TemplateIssue } from "../model";
 import { SenderPicker } from "../SenderPicker";
@@ -39,16 +40,7 @@ export function DocumentStyleForm({ content, onChange, readOnly, issues }: Props
           <FieldIssues issues={issuesAt(issues, `/blocks/settings/${entry.key}`)} />
         </div>
       ))}
-      <TextField
-        label="Content width in pixels"
-        hint="480 to 800."
-        type="number"
-        min={480}
-        max={800}
-        value={String(style.content_width)}
-        readOnly={readOnly}
-        onChange={(event) => set({ content_width: Number(event.target.value) })}
-      />
+      <NumberField label="Content width in pixels" hint="480 to 800." min={480} max={800} value={style.content_width} readOnly={readOnly} onValue={(content_width) => set({ content_width })} />
       <FieldIssues issues={issuesAt(issues, "/blocks/settings/content_width")} />
       <SelectField label="Font" value={style.font_family} disabled={readOnly} onChange={(event) => set({ font_family: event.target.value })}>
         {FONT_STACKS.map((font) => (

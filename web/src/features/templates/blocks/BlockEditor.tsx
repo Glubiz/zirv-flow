@@ -1,4 +1,4 @@
-import { useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 
 import { Button, MenuButton } from "../../../ui";
 import { IssueList } from "../IssueList";
@@ -66,6 +66,23 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
   const [drag, setDrag] = useState<Drag | null>(null);
   const [target, setTarget] = useState<InsertTarget | null>(null);
   const [status, setStatus] = useState("");
+  const pane = useRef<HTMLElement>(null);
+  /** Selectors to try, in order, for the control that takes focus after the next render. */
+  const refocus = useRef<string[]>([]);
+
+  // A move across columns remounts the block, and a remove takes the focused control away; either
+  // would drop focus to the page, so focus is put back on the block's control, or its neighbour.
+  useEffect(() => {
+    const wanted = refocus.current;
+    refocus.current = [];
+    for (const selector of wanted) {
+      const element = pane.current?.querySelector<HTMLElement>(selector);
+      if (element && !(element instanceof HTMLButtonElement && element.disabled)) {
+        element.focus();
+        return;
+      }
+    }
+  });
 
   function commit(next: BlocksContent) {
     onChange({ ...doc, content: next });
@@ -113,12 +130,21 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
   function move(kind: "block" | "section", id: string, direction: "up" | "down") {
     const next = kind === "block" ? moveBlock(content, id, direction) : moveSection(content, id, direction);
     if (next) {
+      const own = kind === "block" ? `[data-block-id="${id}"]` : `[data-section-id="${id}"] > .be-bar`;
+      refocus.current = [`${own} [data-move="${direction}"]`, kind === "block" ? own : `${own} [data-section-settings]`];
       commit(next);
       setStatus(`Moved ${direction}.`);
     }
   }
 
   function remove(kind: "block" | "section", id: string) {
+    const order = kind === "block" ? content.sections.flatMap((entry) => entry.columns.flat().map((each) => each.id)) : content.sections.map((entry) => entry.id);
+    const at = order.indexOf(id);
+    const neighbour = order[at + 1] ?? order[at - 1];
+    refocus.current =
+      neighbour === undefined
+        ? [".be-palette button"]
+        : [kind === "block" ? `[data-block-id="${neighbour}"]` : `[data-section-id="${neighbour}"] > .be-bar [data-section-settings]`];
     commit(kind === "block" ? removeBlock(content, id) : removeSection(content, id));
     if (selected === id) setSelected(null);
     setStatus("Removed.");
@@ -140,7 +166,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
   }
 
   return (
-    <section className="tp-pane be-pane" aria-label="Editor">
+    <section ref={pane} className="tp-pane be-pane" aria-label="Editor">
       <div className="be-head">
         <MenuButton
           label="Template mode"

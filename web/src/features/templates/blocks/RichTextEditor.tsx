@@ -1,8 +1,8 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 
 import { Button } from "../../../ui";
 import type { InsertTarget } from "./insertTarget";
-import { cleanRichText, linkAllowed } from "./richText";
+import { editorNodes, linkAllowed, richTextFromEditor, richTextToEditor } from "./richText";
 
 interface Props {
   label: string;
@@ -34,7 +34,8 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
   useEffect(() => {
     const element = area.current;
     if (element && value !== emitted.current) {
-      element.innerHTML = cleanRichText(value);
+      // Only escaped, allowlisted HTML goes into the DOM: a merge tag is text there, never markup.
+      element.innerHTML = richTextToEditor(value);
       emitted.current = value;
     }
   }, [value]);
@@ -42,7 +43,7 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
   function emit() {
     const element = area.current;
     if (!element) return;
-    const cleaned = cleanRichText(element.innerHTML);
+    const cleaned = richTextFromEditor(element);
     emitted.current = cleaned;
     onChange(cleaned);
   }
@@ -72,27 +73,65 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
     emit();
   }
 
+  /** Puts nodes at the caret (or at the end), in place of any selection. */
+  function insertNodes(nodes: Node[]) {
+    const element = area.current;
+    if (!element) return;
+    element.focus();
+    restore();
+    const selection = window.getSelection();
+    const fragment = document.createDocumentFragment();
+    fragment.append(...nodes);
+    const last = fragment.lastChild;
+    if (selection && selection.rangeCount > 0 && element.contains(selection.anchorNode)) {
+      const current = selection.getRangeAt(0);
+      current.deleteContents();
+      current.insertNode(fragment);
+      if (last) {
+        current.setStartAfter(last);
+        current.collapse(true);
+      }
+    } else {
+      element.append(fragment);
+    }
+    remember();
+    emit();
+  }
+
+  /** Pasted or dropped content never lands as it came: HTML is cleaned first, plain text becomes text nodes. */
+  function take(data: DataTransfer | null) {
+    if (readOnly || !data) return;
+    const html = data.getData("text/html");
+    if (html !== "") {
+      insertNodes(editorNodes(html));
+      return;
+    }
+    const nodes: Node[] = [];
+    data
+      .getData("text/plain")
+      .split("\n")
+      .forEach((line, index) => {
+        if (index > 0) nodes.push(document.createElement("br"));
+        if (line !== "") nodes.push(document.createTextNode(line));
+      });
+    insertNodes(nodes);
+  }
+
+  function onPaste(event: ClipboardEvent) {
+    event.preventDefault();
+    take(event.clipboardData);
+  }
+
+  function onDrop(event: DragEvent) {
+    event.preventDefault();
+    take(event.dataTransfer);
+  }
+
   function target(): InsertTarget {
     return {
       label,
-      insert(tag) {
-        const element = area.current;
-        if (!element?.isConnected) return;
-        element.focus();
-        restore();
-        const selection = window.getSelection();
-        const text = document.createTextNode(tag);
-        if (selection && selection.rangeCount > 0 && element.contains(selection.anchorNode)) {
-          const current = selection.getRangeAt(0);
-          current.deleteContents();
-          current.insertNode(text);
-          current.setStartAfter(text);
-          current.collapse(true);
-        } else {
-          element.append(text);
-        }
-        remember();
-        emit();
+      insert: (tag) => {
+        if (area.current?.isConnected) insertNodes([document.createTextNode(tag)]);
       },
     };
   }
@@ -168,6 +207,8 @@ export function RichTextEditor({ label, value, onChange, readOnly, onTarget }: P
         onKeyUp={remember}
         onMouseUp={remember}
         onInput={emit}
+        onPaste={onPaste}
+        onDrop={onDrop}
       />
     </div>
   );

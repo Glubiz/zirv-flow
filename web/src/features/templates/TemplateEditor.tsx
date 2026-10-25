@@ -64,6 +64,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const docRef = useRef(doc);
   const personRef = useRef<string | null>(null);
   const dirty = useRef(false);
+  /** Set once the server converted the draft: no blocks document is saved after that. */
+  const convertedRef = useRef(false);
   const revision = useRef(0);
   const run = useRef(0);
   const timer = useRef<number | undefined>(undefined);
@@ -74,6 +76,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
   const saveDraft = useCallback(async (): Promise<boolean> => {
     if (!dirty.current) return true;
+    if (convertedRef.current && docRef.current.kind === "blocks") return true;
     const sent = revision.current;
     setSave("saving");
     try {
@@ -157,6 +160,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   }, []);
 
   function change(next: Editable) {
+    if (convertedRef.current && next.kind === "blocks") return;
     docRef.current = next;
     dirty.current = true;
     revision.current += 1;
@@ -168,6 +172,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   /** The draft the server converted replaces the blocks the editor held; the editor continues in code mode. */
   function converted(detail: TemplateDetail) {
     const next = readDocument(detail.draft.document);
+    convertedRef.current = true;
+    clearTimeout(timer.current);
     docRef.current = next;
     dirty.current = false;
     setDoc(next);

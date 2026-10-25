@@ -371,3 +371,72 @@ describe("converting to MJML", () => {
     expect(screen.getByText("Blocks template")).toBeInTheDocument();
   });
 });
+
+describe("review fixes", () => {
+  it("keeps focus on a block moved across columns, and on a neighbour after a remove", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[heading("a", "A")], [divider("b")]] }])) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Move Heading block 1 down" }));
+    // The heading moved into the second column and was remounted; focus is still in it.
+    const moved = await screen.findByRole("group", { name: "Heading block 1" });
+    await waitFor(() => expect(moved.contains(document.activeElement)).toBe(true));
+
+    await user.click(within(moved).getByRole("button", { name: "Remove Heading block 1" }));
+    const rest = await screen.findByRole("group", { name: "Divider block 1" });
+    await waitFor(() => expect(document.activeElement).toBe(rest));
+  });
+
+  it("does not send a height nobody typed when the field is emptied", async () => {
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[spacer("p")]] }])) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Spacer block 1" }));
+    const height = await screen.findByRole("spinbutton", { name: "Height in pixels" });
+    await user.clear(height);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(drafts(calls)).toHaveLength(0);
+    expect(await screen.findByText(/Enter a number from 1 to 200/)).toBeInTheDocument();
+
+    await user.type(height, "30");
+    await waitFor(() => expect(JSON.stringify(lastDraft(calls))).toContain('"height":30'), WAIT);
+  });
+
+  it("saves a pending edit before the conversion and no blocks document after it", async () => {
+    const source = blocksDocument([{ id: "s", columns: [[heading("a", "A")]] }]);
+    const code = { schema: 1, channel: "email", mode: "code", email: { subject: "Hello", html: "<mjml></mjml>", text: "", category: "marketing", syntax: "mjml" } };
+    const calls = mockApi({
+      ...templateRoutes({ detail: detailOf(source) }),
+      [`POST ${BASE}/draft/convert-to-mjml`]: () => json({ ...detailOf(source), draft: { ...detailOf(source).draft, content_type: "mjml", document: code } }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const text = await screen.findByRole("group", { name: "Heading block 1" });
+    await user.click(text);
+    await user.click(await screen.findByRole("textbox", { name: "Heading text" }));
+    await user.paste("!");
+    await user.click(screen.getByRole("button", { name: "Template mode" }));
+    await user.click(screen.getByRole("menuitem", { name: "Convert to MJML…" }));
+    await user.click(within(await screen.findByRole("dialog")).getByRole("button", { name: "Convert to MJML" }));
+    await screen.findByRole("textbox", { name: "MJML source" });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    const writes = calls.filter((call) => (call.method === "PUT" && call.path.endsWith("/draft")) || call.path.endsWith("/convert-to-mjml"));
+    const at = writes.findIndex((call) => call.path.endsWith("/convert-to-mjml"));
+    expect(at).toBeGreaterThan(0);
+    expect(JSON.stringify(writes[at - 1]?.body)).toContain("A!");
+    expect(writes.slice(at + 1).filter((call) => JSON.stringify(call.body).includes('"mode":"blocks"'))).toEqual([]);
+  });
+
+  it("offers no conversion for a document of a newer schema", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2)) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Template mode" }));
+    expect(screen.queryByRole("menuitem", { name: /Convert to MJML/ })).toBeNull();
+  });
+});
