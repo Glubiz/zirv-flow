@@ -7,6 +7,8 @@
 pub(crate) mod actions;
 pub(crate) mod crud;
 pub(crate) mod domain_status;
+pub(crate) mod kinds;
+pub(crate) mod stats;
 
 #[cfg(test)]
 mod acceptance;

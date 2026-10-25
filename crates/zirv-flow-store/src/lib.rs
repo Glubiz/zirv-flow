@@ -91,13 +91,13 @@ pub use decisions::{
     ensure_decision_partitions, list_trace,
 };
 pub use destinations::{
-    Admission, AttemptOutcome, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt, Destination,
-    DestinationStat, DestinationUpdate, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, NewDeliveryAttempt,
-    NewDestination, RateGate, StatusClass, SubjectKind, archive_destination, bucket_state,
-    count_delivery_attempt, count_delivery_attempt_record_failure, create_destination,
-    destination_report, find_destination, find_destination_for_update, find_destination_workspace,
-    list_delivery_attempts, list_destinations, record_delivery_attempt, throttle_bucket,
-    update_destination,
+    Admission, AttemptOutcome, AttemptStats, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt,
+    Destination, DestinationStat, DestinationUpdate, LEASE, MAX_BLOCK, MAX_RETRY_AFTER,
+    NewDeliveryAttempt, NewDestination, RateGate, StatusClass, SubjectKind, archive_destination,
+    bucket_state, count_delivery_attempt, count_delivery_attempt_record_failure,
+    create_destination, destination_attempt_stats, destination_report, find_destination,
+    find_destination_for_update, find_destination_workspace, list_delivery_attempts,
+    list_destinations, record_delivery_attempt, throttle_bucket, update_destination,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
