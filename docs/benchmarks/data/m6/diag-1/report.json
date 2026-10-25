@@ -1,0 +1,109 @@
+{
+  "arrivals": 12000,
+  "bucket_check": null,
+  "clock_violations": 0,
+  "cpu": {
+    "database": {
+      "max_pct": 384.47,
+      "mean_pct": 350.95790697674414,
+      "samples": 43
+    },
+    "sink": {
+      "max_pct": 7.6,
+      "mean_pct": 2.170930232558139,
+      "samples": 43
+    },
+    "worker1": {
+      "max_pct": 33.08,
+      "mean_pct": 24.526046511627904,
+      "samples": 43
+    }
+  },
+  "delay": {
+    "count": 12000,
+    "max_s": 59.604831,
+    "p50_s": 37.760586,
+    "p95_s": 52.897183,
+    "p99_s": 57.643257
+  },
+  "duplicates": 0,
+  "inputs": {
+    "bucket": null,
+    "clocks": {
+      "offset_after_us": 491441,
+      "offset_before_us": 566809,
+      "uncertainty_us": 1259603
+    },
+    "expected": 12000,
+    "label": "diag-1",
+    "target_rate": 300.0,
+    "tolerance": 0.0,
+    "trim_percent": 10.0
+  },
+  "metrics": {
+    "attempt_record_failures_total": -0.0,
+    "delivery_send_claim_lag": {
+      "count": 12000.0,
+      "mean_s": 15.658207220833324,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 12.979784545817264,
+      "p95_s": 29.112727272727273,
+      "p99_s": 49.8876404494382
+    },
+    "delivery_send_duration": {
+      "count": 12000.0,
+      "mean_s": 0.06534030361433334,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.06250937734433609,
+      "p95_s": 0.09626781695423858,
+      "p99_s": 0.09926856714178545
+    },
+    "destination_attempts_total": 12000.0,
+    "destination_outcomes_total": {
+      "outcome=delivered": 12000.0
+    },
+    "render_duration": {
+      "count": 12000.0,
+      "mean_s": 0.00039850098666666665,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.0049499999999999995
+    },
+    "render_failures_total": -0.0,
+    "render_restarts_total": -0.0,
+    "render_wait": {
+      "count": 12000.0,
+      "mean_s": 3.2293325e-6,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.0049499999999999995
+    }
+  },
+  "negative_delays": 0,
+  "overall_rate": 38.11655081336924,
+  "peak_per_second": 66,
+  "queue": {
+    "max_depth": 1889.0,
+    "max_oldest_s": 32.0,
+    "missed_scrapes": 0,
+    "samples": 210
+  },
+  "unique_delivered": 12000,
+  "unmatched_arrivals": 0,
+  "unreadable_arrival_lines": 0,
+  "verdict": {
+    "complete": true,
+    "met": false,
+    "problems": [],
+    "valid": true
+  },
+  "window": {
+    "end_us": 1792968136102587,
+    "messages": 9599,
+    "rate": 37.836858110552264,
+    "seconds": 253.694426,
+    "start_us": 1792967882408161
+  }
+}

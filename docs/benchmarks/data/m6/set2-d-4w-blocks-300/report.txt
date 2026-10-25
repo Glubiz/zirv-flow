@@ -1,0 +1,13 @@
+Target: 300 messages/s per deployment (architecture 19), the sink standing in for provider limits
+Result: 181.4 messages/s over the steady window (47999 unique deliveries in 264.6 s)
+Verdict: missed
+Detail [set2-d-4w-blocks-300]: 60000 unique of 60000 expected (60000 arrivals, 0 duplicates, 0 unmatched); overall 180.7/s; busiest second 253; delay enrollment to sink p50 8.66 s, p95 12.31 s, p99 15.08 s, max 16.41 s (60000 matched)
+Clocks: database minus host +0.521 s before, +0.528 s after the run; delay uncertainty 1.184 s; 0 negative delays, 0 beyond the uncertainty
+Bucket: held to 300/s; upper bound = rate x (1 + tolerance 3%) + burst slack (300 messages): window rate at most 310.1/s, busiest second at most 609.0: within
+Queue (scheduler gauges of the destination, steady window, 215 samples, 0 missed scrapes in the run): max depth 1297, max oldest age 5.0 s: a queue stood in the window, so the destination or the workers were the limit
+CPU database (steady window, 43 samples): mean 996, max 1238 percent of one core
+CPU sink (steady window, 43 samples): mean 18, max 31 percent of one core
+CPU worker1 (steady window, 43 samples): mean 48, max 54 percent of one core
+CPU worker2 (steady window, 43 samples): mean 48, max 55 percent of one core
+CPU worker3 (steady window, 43 samples): mean 48, max 54 percent of one core
+CPU worker4 (steady window, 43 samples): mean 48, max 55 percent of one core

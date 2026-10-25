@@ -1,0 +1,25 @@
+    687 active|-/-|SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)
+    108 active|Lock/object|COMMIT
+     35 active|LWLock/WALWrite|COMMIT
+     21 active|IO/WALSync|COMMIT
+     12 active|-/-|UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random
+     10 active|LWLock/WALWrite|INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, te
+      9 active|LWLock/WALWrite|UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random
+      9 active|IO/WALSync|UPDATE messages SET status = 'sending', attempts = $3, address_hash = COALESCE($6, address_hash), ga
+      9 active|Client/ClientRead|COMMIT
+      6 active|LWLock/WALWrite|INSERT INTO message_links (workspace_id, message_id, link_index, url) SELECT $1, $2, t.link_index, t
+      6 active|IO/WALSync|UPDATE jobs SET state = 'running', attempts = attempts + 1, locked_by = $1, lease_token = gen_random
+      6 active|IO/WALSync|INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, te
+      6 active|IO/WALSync|INSERT INTO message_links (workspace_id, message_id, link_index, url) SELECT $1, $2, t.link_index, t
+      6 active|-/-|INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause
+      5 active|-/-|INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, te
+      5 active|-/-|COMMIT
+      4 active|LWLock/WALWrite|UPDATE messages SET status = 'sending', attempts = $3, address_hash = COALESCE($6, address_hash), ga
+      4 active|Client/ClientRead|SELECT e.id, e.flow_id, e.flow_version, e.person_id, e.state, e.node, e.context, e.wake_at, e.state_
+      3 active|Timeout/VacuumTruncate|autovacuum: VACUUM ANALYZE public.jobs
+      3 active|Client/ClientRead|SELECT t.key AS topic_key, c.dimensions, c.status, c.changed_at, c.last_change_id FROM consent c LEF
+      3 active|-/-|INSERT INTO delivery_attempts (id, workspace_id, destination_id, subject_kind, subject_id, attempt, 
+      2 active|IO/WALWrite|COMMIT
+      2 active|Client/ClientRead|SELECT state FROM flows WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE
+      2 active|Client/ClientRead|SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)
+      2 active|Client/ClientRead|INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, te

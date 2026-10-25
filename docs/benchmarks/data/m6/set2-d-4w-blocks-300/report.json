@@ -1,0 +1,134 @@
+{
+  "arrivals": 60000,
+  "bucket_check": {
+    "burst_slack_messages": 300.0,
+    "peak_limit": 609.0,
+    "rate": 300.0,
+    "tolerance": 0.03,
+    "window_rate_limit": 310.1337529168959,
+    "within": true
+  },
+  "clock_violations": 0,
+  "cpu": {
+    "database": {
+      "max_pct": 1237.92,
+      "mean_pct": 996.246976744186,
+      "samples": 43
+    },
+    "sink": {
+      "max_pct": 30.82,
+      "mean_pct": 18.444883720930235,
+      "samples": 43
+    },
+    "worker1": {
+      "max_pct": 53.97,
+      "mean_pct": 48.32348837209302,
+      "samples": 43
+    },
+    "worker2": {
+      "max_pct": 55.01,
+      "mean_pct": 48.37302325581394,
+      "samples": 43
+    },
+    "worker3": {
+      "max_pct": 54.02,
+      "mean_pct": 47.99348837209302,
+      "samples": 43
+    },
+    "worker4": {
+      "max_pct": 55.43,
+      "mean_pct": 48.28627906976743,
+      "samples": 43
+    }
+  },
+  "delay": {
+    "count": 60000,
+    "max_s": 16.414586,
+    "p50_s": 8.656452,
+    "p95_s": 12.311358,
+    "p99_s": 15.078335
+  },
+  "duplicates": 0,
+  "inputs": {
+    "bucket": {
+      "burst": 300.0,
+      "rate": 300.0
+    },
+    "clocks": {
+      "offset_after_us": 527937,
+      "offset_before_us": 521137,
+      "uncertainty_us": 1184040
+    },
+    "expected": 60000,
+    "label": "set2-d-4w-blocks-300",
+    "target_rate": 300.0,
+    "tolerance": 0.03,
+    "trim_percent": 10.0
+  },
+  "metrics": {
+    "attempt_record_failures_total": -0.0,
+    "delivery_send_claim_lag": {
+      "count": 60000.0,
+      "mean_s": 3.1546898792999993,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 3.028850754361902,
+      "p95_s": 9.319257716341603,
+      "p99_s": 13.86385154326832
+    },
+    "delivery_send_duration": {
+      "count": 60000.0,
+      "mean_s": 0.0729583687479333,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0627352161808607,
+      "p95_s": 0.09669691074363534,
+      "p99_s": 0.09971572803810419
+    },
+    "destination_attempts_total": 60000.0,
+    "destination_outcomes_total": {
+      "outcome=delivered": 60000.0
+    },
+    "render_duration": {
+      "count": 60000.0,
+      "mean_s": 0.0007464722433999998,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025001666777785185,
+      "p95_s": 0.004750316687779185,
+      "p99_s": 0.004950330022001467
+    },
+    "render_failures_total": -0.0,
+    "render_restarts_total": -0.0,
+    "render_wait": {
+      "count": 60000.0,
+      "mean_s": 3.340479566666667e-6,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.00495
+    }
+  },
+  "negative_delays": 0,
+  "overall_rate": 180.70600752905557,
+  "peak_per_second": 253,
+  "queue": {
+    "max_depth": 1297.0,
+    "max_oldest_s": 5.0,
+    "missed_scrapes": 0,
+    "samples": 215
+  },
+  "unique_delivered": 60000,
+  "unmatched_arrivals": 0,
+  "unreadable_arrival_lines": 0,
+  "verdict": {
+    "complete": true,
+    "met": false,
+    "problems": [],
+    "valid": true
+  },
+  "window": {
+    "end_us": 1792969892273712,
+    "messages": 47999,
+    "rate": 181.39668752695192,
+    "seconds": 264.607919,
+    "start_us": 1792969627665793
+  }
+}

@@ -1,0 +1,9 @@
+label=light-6 people=5000 workers=1 worker_concurrency=4
+template=blocks dest_rate=1000 limits=off dkim=on
+image=0.116.0 render_pool=2 tier=M sink_delay_ms=0
+started=2026-10-25T21:18:10Z
+clock_offset_before_us=493924 bracket_before_us=1113395
+clock_offset_after_us=523339 bracket_after_us=1152718
+finished=2026-10-25T21:19:33Z
+queue_in_window={"max_depth":1533.0,"max_oldest_s":14.0,"missed_scrapes":0,"samples":31} cpu_in_window={"database":{"max_pct":324.73,"mean_pct":247.45714285714286,"samples":7},"sink":{"max_pct":9.57,"mean_pct":4.887142857142857,"samples":7},"worker1":{"max_pct":99.32,"mean_pct":56.42428571428571,"samples":7}}
+cargo_samples_in_window=0

@@ -1,0 +1,9 @@
+label=b-1w-html people=25000 workers=1 worker_concurrency=4
+template=html dest_rate=1000 limits=off dkim=on
+image=0.116.0 render_pool=2 tier=M sink_delay_ms=0
+started=2026-10-25T21:31:14Z
+clock_offset_before_us=513743 bracket_before_us=1142736
+clock_offset_after_us=522582 bracket_after_us=1193797
+finished=2026-10-25T21:40:03Z
+queue_in_window={"max_depth":975.0,"max_oldest_s":17.0,"missed_scrapes":0,"samples":320} cpu_in_window={"database":{"max_pct":379.99,"mean_pct":332.23720588235307,"samples":68},"sink":{"max_pct":7.35,"mean_pct":2.827058823529412,"samples":68},"worker1":{"max_pct":55.79,"mean_pct":30.91838235294118,"samples":68}}
+cargo_samples_in_window=0

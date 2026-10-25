@@ -1,0 +1,109 @@
+{
+  "arrivals": 25000,
+  "bucket_check": null,
+  "clock_violations": 0,
+  "cpu": {
+    "database": {
+      "max_pct": 408.26,
+      "mean_pct": 349.0518947368421,
+      "samples": 95
+    },
+    "sink": {
+      "max_pct": 7.01,
+      "mean_pct": 1.9790526315789463,
+      "samples": 95
+    },
+    "worker1": {
+      "max_pct": 32.67,
+      "mean_pct": 23.74799999999999,
+      "samples": 95
+    }
+  },
+  "delay": {
+    "count": 25000,
+    "max_s": 70.261712,
+    "p50_s": 39.6725,
+    "p95_s": 59.385498,
+    "p99_s": 66.074746
+  },
+  "duplicates": 0,
+  "inputs": {
+    "bucket": null,
+    "clocks": {
+      "offset_after_us": 526276,
+      "offset_before_us": 543256,
+      "uncertainty_us": 1212872
+    },
+    "expected": 25000,
+    "label": "f-1w-blocks-repeat",
+    "target_rate": 300.0,
+    "tolerance": 0.0,
+    "trim_percent": 10.0
+  },
+  "metrics": {
+    "attempt_record_failures_total": -0.0,
+    "delivery_send_claim_lag": {
+      "count": 25000.0,
+      "mean_s": 16.99640573484001,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 14.43040362127499,
+      "p95_s": 38.58366647629926,
+      "p99_s": 55.71673329525985
+    },
+    "delivery_send_duration": {
+      "count": 25000.0,
+      "mean_s": 0.06785762179832003,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0625,
+      "p95_s": 0.09625,
+      "p99_s": 0.09925
+    },
+    "destination_attempts_total": 25000.0,
+    "destination_outcomes_total": {
+      "outcome=delivered": 25000.0
+    },
+    "render_duration": {
+      "count": 25000.0,
+      "mean_s": 0.0004040443365999994,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.00495
+    },
+    "render_failures_total": -0.0,
+    "render_restarts_total": -0.0,
+    "render_wait": {
+      "count": 25000.0,
+      "mean_s": 5.8488826e-6,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.00495
+    }
+  },
+  "negative_delays": 0,
+  "overall_rate": 36.68249996836501,
+  "peak_per_second": 65,
+  "queue": {
+    "max_depth": 1809.0,
+    "max_oldest_s": 39.0,
+    "missed_scrapes": 0,
+    "samples": 458
+  },
+  "unique_delivered": 25000,
+  "unmatched_arrivals": 0,
+  "unreadable_arrival_lines": 0,
+  "verdict": {
+    "complete": true,
+    "met": false,
+    "problems": [],
+    "valid": true
+  },
+  "window": {
+    "end_us": 1792966960749343,
+    "messages": 19999,
+    "rate": 36.130448055006966,
+    "seconds": 553.522059,
+    "start_us": 1792966407227284
+  }
+}

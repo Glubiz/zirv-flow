@@ -1,0 +1,124 @@
+{
+  "arrivals": 60000,
+  "bucket_check": null,
+  "clock_violations": 0,
+  "cpu": {
+    "database": {
+      "max_pct": 1448.75,
+      "mean_pct": 1224.2189473684211,
+      "samples": 57
+    },
+    "sink": {
+      "max_pct": 27.19,
+      "mean_pct": 13.319473684210523,
+      "samples": 57
+    },
+    "worker1": {
+      "max_pct": 57.84,
+      "mean_pct": 39.04578947368422,
+      "samples": 57
+    },
+    "worker2": {
+      "max_pct": 60.2,
+      "mean_pct": 38.87052631578947,
+      "samples": 57
+    },
+    "worker3": {
+      "max_pct": 56.52,
+      "mean_pct": 38.95035087719299,
+      "samples": 57
+    },
+    "worker4": {
+      "max_pct": 58.92,
+      "mean_pct": 39.299824561403504,
+      "samples": 57
+    }
+  },
+  "delay": {
+    "count": 60000,
+    "max_s": 21.237449,
+    "p50_s": 10.157735,
+    "p95_s": 14.971288,
+    "p99_s": 18.995513
+  },
+  "duplicates": 0,
+  "inputs": {
+    "bucket": null,
+    "clocks": {
+      "offset_after_us": 539434,
+      "offset_before_us": 484991,
+      "uncertainty_us": 1198973
+    },
+    "expected": 60000,
+    "label": "c-4w-blocks",
+    "target_rate": 300.0,
+    "tolerance": 0.0,
+    "trim_percent": 10.0
+  },
+  "metrics": {
+    "attempt_record_failures_total": -0.0,
+    "delivery_send_claim_lag": {
+      "count": 60000.0,
+      "mean_s": 4.000187745366667,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 3.8376614111436114,
+      "p95_s": 7.37029501525941,
+      "p99_s": 13.474059003051883
+    },
+    "delivery_send_duration": {
+      "count": 60000.0,
+      "mean_s": 0.06607194989818334,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.06250937734433609,
+      "p95_s": 0.09626781695423858,
+      "p99_s": 0.09926856714178547
+    },
+    "destination_attempts_total": 60000.0,
+    "destination_outcomes_total": {
+      "outcome=delivered": 60000.0
+    },
+    "render_duration": {
+      "count": 60000.0,
+      "mean_s": 0.0007646196358333332,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.002500416736122687,
+      "p95_s": 0.004750791798633106,
+      "p99_s": 0.004950825137522921
+    },
+    "render_failures_total": -0.0,
+    "render_restarts_total": -0.0,
+    "render_wait": {
+      "count": 60000.0,
+      "mean_s": 3.7170430500000015e-6,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.00495
+    }
+  },
+  "negative_delays": 0,
+  "overall_rate": 137.51284653606893,
+  "peak_per_second": 281,
+  "queue": {
+    "max_depth": 1781.0,
+    "max_oldest_s": 10.0,
+    "missed_scrapes": 0,
+    "samples": 282
+  },
+  "unique_delivered": 60000,
+  "unmatched_arrivals": 0,
+  "unreadable_arrival_lines": 0,
+  "verdict": {
+    "complete": true,
+    "met": false,
+    "problems": [],
+    "valid": true
+  },
+  "window": {
+    "end_us": 1792964862695806,
+    "messages": 47999,
+    "rate": 137.98372712505545,
+    "seconds": 347.85986,
+    "start_us": 1792964514835946
+  }
+}

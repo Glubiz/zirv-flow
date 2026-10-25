@@ -1,0 +1,25 @@
+    105 active|-/-|SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)
+     92 active|-/-|SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE
+      8 idle in transaction|Client/ClientRead|SELECT purpose, key_id, wrapped_key, nonce, ciphertext FROM encrypted_secrets WHERE workspace_id = $1 AND id =
+      4 idle in transaction|Client/ClientRead|SELECT start_time, end_time, days FROM quiet_hours WHERE workspace_id = $1
+      4 idle in transaction|Client/ClientRead|SELECT id, workspace_id, traits, trait_sources, merged_into, created_at, updated_at FROM people WHERE workspac
+      4 active|IO/WALSync|COMMIT
+      3 active|IO/WALSync|INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, template_id,
+      2 idle in transaction|Client/ClientRead|SELECT value FROM identities WHERE workspace_id = $1 AND person_id = $2 AND kind = 'email' ORDER BY created_at
+      2 idle in transaction|Client/ClientRead|INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, subje
+      2 active|-/-|SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND v.setting
+      2 active|-/-|INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, properties, source, trace_id,
+      1 idle in transaction|Client/ClientRead|SELECT t.event_id, w.event_name, w.enrollment_id, w.wake_version, e.trace_id, e.cause_kind, e.cause_id FROM un
+      1 idle in transaction|Client/ClientRead|SELECT key, slot, slot_state, slot_generation FROM trait_definitions WHERE workspace_id = $1 AND slot IS NOT N
+      1 idle in transaction|Client/ClientRead|SELECT id, name, slug, timezone, created_at, utm FROM workspaces WHERE id = $1
+      1 idle in transaction|Client/ClientRead|SELECT id, kind, name, config, credential_id, credential_secret_of(workspace_id, credential_id) AS credential_
+      1 idle in transaction|Client/ClientRead|SELECT id, channel, window_hours, message_limit, mode FROM frequency_caps WHERE workspace_id = $1 ORDER BY id
+      1 idle in transaction|Client/ClientRead|SELECT id AS identity_id, domain_id, from_name, from_address, reply_to, archived_at IS NOT NULL AS archived FR
+      1 idle in transaction|Client/ClientRead|SELECT d.key, v.key FROM consent_dimensions d JOIN consent_dimension_values v ON v.workspace_id = d.workspace_
+      1 idle in transaction|Client/ClientRead|SELECT c.fields, c.secret_id, s.purpose, s.key_id, s.wrapped_key, s.nonce, s.ciphertext FROM credentials c JOI
+      1 idle in transaction|Client/ClientRead|RELEASE SAVEPOINT _sqlx_savepoint_1
+      1 idle in transaction|-/-|SELECT template_id, version, document, validation, published_at, published_by, trace_id FROM template_versions
+      1 idle in transaction|-/-|SELECT so.id, so.name, st.mapping, st.last_success_at FROM streams st JOIN sources so ON so.workspace_id = st.
+      1 idle in transaction|-/-|SELECT id, workspace_id, traits, trait_sources, merged_into, created_at, updated_at FROM people WHERE workspac
+      1 idle in transaction|-/-|SELECT id, kind, name, config, credential_id, credential_secret_of(workspace_id, credential_id) AS credential_
+      1 idle in transaction|-/-|SELECT d.key, v.key FROM consent_dimensions d JOIN consent_dimension_values v ON v.workspace_id = d.workspace_

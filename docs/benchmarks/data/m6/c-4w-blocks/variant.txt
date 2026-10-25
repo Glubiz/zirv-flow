@@ -1,0 +1,9 @@
+label=c-4w-blocks people=60000 workers=4 worker_concurrency=4
+template=blocks dest_rate=1000 limits=off dkim=on
+image=0.116.0 render_pool=2 tier=M sink_delay_ms=0
+started=2026-10-25T21:40:26Z
+clock_offset_before_us=484991 bracket_before_us=1152149
+clock_offset_after_us=539434 bracket_after_us=1198973
+finished=2026-10-25T21:48:54Z
+queue_in_window={"max_depth":1781.0,"max_oldest_s":10.0,"missed_scrapes":0,"samples":282} cpu_in_window={"database":{"max_pct":1448.75,"mean_pct":1224.2189473684211,"samples":57},"sink":{"max_pct":27.19,"mean_pct":13.319473684210523,"samples":57},"worker1":{"max_pct":57.84,"mean_pct":39.04578947368422,"samples":57},"worker2":{"max_pct":60.2,"mean_pct":38.87052631578947,"samples":57},"worker3":{"max_pct":56.52,"mean_pct":38.95035087719299,"samples":57},"worker4":{"max_pct":58.92,"mean_pct":39.299824561403504,"samples":57}}
+cargo_samples_in_window=0

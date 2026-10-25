@@ -1,0 +1,190 @@
+# TYPE zirv_flow_flow_enrollments_total counter
+zirv_flow_flow_enrollments_total{trigger="manual",outcome="enrolled"} 5000
+
+# TYPE zirv_flow_jobs_total counter
+zirv_flow_jobs_total{kind="flow.enroll",outcome="completed"} 6
+zirv_flow_jobs_total{kind="segment.reevaluate",outcome="completed"} 5
+zirv_flow_jobs_total{kind="flow.step",outcome="completed"} 5000
+zirv_flow_jobs_total{kind="delivery.send",outcome="completed"} 5000
+
+# TYPE zirv_flow_destination_outcomes_total counter
+zirv_flow_destination_outcomes_total{workspace="92021768-b775-4f52-9f6b-7be1f19cb4f4",destination="01a174ea-af69-754c-b77d-1d536cfb86ca",outcome="delivered"} 5000
+
+# TYPE zirv_flow_destination_attempts_total counter
+zirv_flow_destination_attempts_total{workspace="92021768-b775-4f52-9f6b-7be1f19cb4f4",destination="01a174ea-af69-754c-b77d-1d536cfb86ca"} 5000
+
+# TYPE zirv_flow_db_pool_connections gauge
+zirv_flow_db_pool_connections{pool="heartbeat",state="in_use"} 0
+zirv_flow_db_pool_connections{pool="jobs",state="idle"} 12
+zirv_flow_db_pool_connections{pool="main",state="in_use"} 1
+zirv_flow_db_pool_connections{pool="jobs",state="in_use"} 0
+zirv_flow_db_pool_connections{pool="main",state="idle"} 1
+zirv_flow_db_pool_connections{pool="heartbeat",state="idle"} 4
+
+# TYPE zirv_flow_db_pool_max_connections gauge
+zirv_flow_db_pool_max_connections{pool="heartbeat"} 4
+zirv_flow_db_pool_max_connections{pool="jobs"} 37
+zirv_flow_db_pool_max_connections{pool="main"} 10
+
+# TYPE zirv_flow_render_wait_seconds histogram
+zirv_flow_render_wait_seconds_bucket{le="0.005"} 5000
+zirv_flow_render_wait_seconds_bucket{le="0.01"} 5000
+zirv_flow_render_wait_seconds_bucket{le="0.025"} 5000
+zirv_flow_render_wait_seconds_bucket{le="0.05"} 5000
+zirv_flow_render_wait_seconds_bucket{le="0.1"} 5000
+zirv_flow_render_wait_seconds_bucket{le="0.25"} 5000
+zirv_flow_render_wait_seconds_bucket{le="0.5"} 5000
+zirv_flow_render_wait_seconds_bucket{le="1"} 5000
+zirv_flow_render_wait_seconds_bucket{le="2.5"} 5000
+zirv_flow_render_wait_seconds_bucket{le="5"} 5000
+zirv_flow_render_wait_seconds_bucket{le="+Inf"} 5000
+zirv_flow_render_wait_seconds_sum 0.03896878499999999
+zirv_flow_render_wait_seconds_count 5000
+
+# TYPE zirv_flow_render_duration_seconds histogram
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.005"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.01"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.025"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.05"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.1"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.25"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="0.5"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="1"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="2.5"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="5"} 5000
+zirv_flow_render_duration_seconds_bucket{channel="email",le="+Inf"} 5000
+zirv_flow_render_duration_seconds_sum{channel="email"} 2.0211141630000005
+zirv_flow_render_duration_seconds_count{channel="email"} 5000
+
+# TYPE zirv_flow_job_duration_seconds histogram
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="0.005"} 0
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="0.025"} 4995
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="0.1"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="0.5"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="1"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="2.5"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="5"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="15"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="30"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="60"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="300"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="900"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="3600"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="flow.step",le="+Inf"} 5000
+zirv_flow_job_duration_seconds_sum{kind="flow.step"} 69.280542534
+zirv_flow_job_duration_seconds_count{kind="flow.step"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="0.005"} 0
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="0.025"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="0.1"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="0.5"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="1"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="2.5"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="5"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="15"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="30"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="60"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="300"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="900"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="3600"} 5
+zirv_flow_job_duration_seconds_bucket{kind="segment.reevaluate",le="+Inf"} 5
+zirv_flow_job_duration_seconds_sum{kind="segment.reevaluate"} 0.038483094999999995
+zirv_flow_job_duration_seconds_count{kind="segment.reevaluate"} 5
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="0.005"} 1
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="0.025"} 1
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="0.1"} 1
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="0.5"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="1"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="2.5"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="5"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="15"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="30"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="60"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="300"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="900"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="3600"} 6
+zirv_flow_job_duration_seconds_bucket{kind="flow.enroll",le="+Inf"} 6
+zirv_flow_job_duration_seconds_sum{kind="flow.enroll"} 0.584851153
+zirv_flow_job_duration_seconds_count{kind="flow.enroll"} 6
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="0.005"} 0
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="0.025"} 4912
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="0.1"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="0.5"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="1"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="2.5"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="5"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="15"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="30"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="60"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="300"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="900"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="3600"} 5000
+zirv_flow_job_duration_seconds_bucket{kind="delivery.send",le="+Inf"} 5000
+zirv_flow_job_duration_seconds_sum{kind="delivery.send"} 100.55359545500002
+zirv_flow_job_duration_seconds_count{kind="delivery.send"} 5000
+
+# TYPE zirv_flow_job_claim_lag_seconds histogram
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="0.005"} 1
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="0.025"} 1
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="0.1"} 1
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="0.5"} 1
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="1"} 1
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="2.5"} 1
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="5"} 2
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="15"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="30"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="60"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="300"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="900"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="3600"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.enroll",le="+Inf"} 6
+zirv_flow_job_claim_lag_seconds_sum{kind="flow.enroll"} 40.824051999999995
+zirv_flow_job_claim_lag_seconds_count{kind="flow.enroll"} 6
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="0.005"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="0.025"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="0.1"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="0.5"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="1"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="2.5"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="5"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="15"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="30"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="60"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="300"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="900"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="3600"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="segment.reevaluate",le="+Inf"} 5
+zirv_flow_job_claim_lag_seconds_sum{kind="segment.reevaluate"} 0.37102199999999996
+zirv_flow_job_claim_lag_seconds_count{kind="segment.reevaluate"} 5
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="0.005"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="0.025"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="0.1"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="0.5"} 95
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="1"} 223
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="2.5"} 636
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="5"} 1288
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="15"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="30"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="60"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="300"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="900"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="3600"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="flow.step",le="+Inf"} 5000
+zirv_flow_job_claim_lag_seconds_sum{kind="flow.step"} 36552.19675299999
+zirv_flow_job_claim_lag_seconds_count{kind="flow.step"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="0.005"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="0.025"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="0.1"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="0.5"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="1"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="2.5"} 0
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="5"} 1588
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="15"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="30"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="60"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="300"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="900"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="3600"} 5000
+zirv_flow_job_claim_lag_seconds_bucket{kind="delivery.send",le="+Inf"} 5000
+zirv_flow_job_claim_lag_seconds_sum{kind="delivery.send"} 35634.760509
+zirv_flow_job_claim_lag_seconds_count{kind="delivery.send"} 5000
+

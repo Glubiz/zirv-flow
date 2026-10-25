@@ -1,0 +1,59 @@
+project=zirv-flow-m4bench10m tier=M app_cpuset=0-3 pg_cpuset=8-31
+recorded_at=2026-10-25T20:47:54Z
+image=ghcr.io/glubiz/zirv-flow:0.116.0 id=sha256:98d7d42aeb62ecae876a96254dfc7f97314b1b3aca97057c4e74db877306d0aa digest=ghcr.io/glubiz/zirv-flow@sha256:54e150a68bc6c8e8e0cc5f93ee2f3edec96ff3c4e360290797ab7d400ef12054 created=2026-10-25T20:45:23.373015739Z
+/zirv-flow-m4bench10m-postgres-1 image=postgres:16 cpuset=8-31 mem_limit_bytes=0 shm_bytes=1073741824
+/zirv-flow-m4bench10m-zirv-flow-1 image=ghcr.io/glubiz/zirv-flow:0.116.0 cpuset=0-3 mem_limit_bytes=3436183552 shm_bytes=67108864
+/zirv-flow-m4bench10m-zirv-flow-scheduler-1 image=ghcr.io/glubiz/zirv-flow:0.116.0 cpuset=0-3 mem_limit_bytes=858783744 shm_bytes=67108864
+/zirv-flow-m4bench10m-zirv-flow-worker-1 image=ghcr.io/glubiz/zirv-flow:0.116.0 cpuset=0-3 mem_limit_bytes=4294967296 shm_bytes=67108864
+pg.server_version=16.15 (Debian 16.15-1.pgdg13+2)
+pg.shared_buffers=4GB
+pg.effective_cache_size=16GB
+pg.maintenance_work_mem=1GB
+pg.max_connections=100
+pg.synchronous_commit=on
+pg.wal_level=replica
+pg.fsync=on
+pg.work_mem=4MB
+pg.max_wal_size=8GB
+pg.checkpoint_timeout=15min
+pg.max_parallel_workers_per_gather=2
+pg.max_parallel_workers=8
+pg.max_worker_processes=8
+pg.random_page_cost=4
+zirv-flow ZIRV_FLOW_DATABASE__MIGRATE_ON_START=true
+zirv-flow ZIRV_FLOW_EGRESS__ALLOW=["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"]
+zirv-flow ZIRV_FLOW_INGEST__BURST_PER_KEY=20000
+zirv-flow ZIRV_FLOW_INGEST__DRAIN_SHARDS=8
+zirv-flow ZIRV_FLOW_INGEST__RATE_PER_KEY=10000
+zirv-flow ZIRV_FLOW_LOG__FILTER=warn
+zirv-flow ZIRV_FLOW_RENDER__POOL_SIZE=2
+zirv-flow ZIRV_FLOW_SENDING__RECHECK_HOURS=720
+zirv-flow ZIRV_FLOW_SERVER__BIND=0.0.0.0:8080
+zirv-flow ZIRV_FLOW_SERVER__COOKIE_SECURE=false
+zirv-flow ZIRV_FLOW_WORKER__CONCURRENCY=4
+zirv-flow-worker ZIRV_FLOW_EGRESS__ALLOW=["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"]
+zirv-flow-worker ZIRV_FLOW_INGEST__BURST_PER_KEY=20000
+zirv-flow-worker ZIRV_FLOW_INGEST__DRAIN_SHARDS=8
+zirv-flow-worker ZIRV_FLOW_INGEST__RATE_PER_KEY=10000
+zirv-flow-worker ZIRV_FLOW_LOG__FILTER=warn
+zirv-flow-worker ZIRV_FLOW_OPS__BIND=0.0.0.0:9100
+zirv-flow-worker ZIRV_FLOW_RENDER__POOL_SIZE=2
+zirv-flow-worker ZIRV_FLOW_SENDING__RECHECK_HOURS=720
+zirv-flow-worker ZIRV_FLOW_SERVER__BIND=0.0.0.0:8080
+zirv-flow-worker ZIRV_FLOW_SERVER__COOKIE_SECURE=false
+zirv-flow-worker ZIRV_FLOW_WORKER__CONCURRENCY=4
+zirv-flow-scheduler ZIRV_FLOW_EGRESS__ALLOW=["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"]
+zirv-flow-scheduler ZIRV_FLOW_INGEST__BURST_PER_KEY=20000
+zirv-flow-scheduler ZIRV_FLOW_INGEST__DRAIN_SHARDS=8
+zirv-flow-scheduler ZIRV_FLOW_INGEST__RATE_PER_KEY=10000
+zirv-flow-scheduler ZIRV_FLOW_LOG__FILTER=warn
+zirv-flow-scheduler ZIRV_FLOW_OPS__BIND=0.0.0.0:9101
+zirv-flow-scheduler ZIRV_FLOW_RENDER__POOL_SIZE=2
+zirv-flow-scheduler ZIRV_FLOW_SENDING__RECHECK_HOURS=720
+zirv-flow-scheduler ZIRV_FLOW_SERVER__BIND=0.0.0.0:8080
+zirv-flow-scheduler ZIRV_FLOW_SERVER__COOKIE_SECURE=false
+zirv-flow-scheduler ZIRV_FLOW_WORKER__CONCURRENCY=4
+app.version={"version":"0.116.0"}
+docker=29.2.1 desktop_cpus=32 desktop_mem_bytes=33526321152
+host_cpu=13th Gen Intel(R) Core(TM) i9-13900K
+wsl=WSL version: 3.0.3.0 Kernel version: 6.18.54.1-1 WSLg version: 1.0.79 
