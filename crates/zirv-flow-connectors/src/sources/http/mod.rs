@@ -853,9 +853,7 @@ mod tests {
         let present: BTreeSet<String> = schema.fields.iter().map(|f| f.key.clone()).collect();
         let declared: Vec<_> = Http::SPEC.credential_fields.iter().map(|f| f.key).collect();
 
-        for read in ["token"] {
-            assert!(present.contains(read), "the kind lacks {read}");
-        }
+        assert!(present.contains("token"), "the kind lacks token");
         for key in &present {
             assert!(
                 declared.contains(&key.as_str()),
