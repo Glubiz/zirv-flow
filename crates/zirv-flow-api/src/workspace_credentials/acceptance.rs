@@ -436,7 +436,9 @@ mod tests {
                 "basic",
                 "smtp",
                 "oauth2_client",
-                "signing_secret"
+                "signing_secret",
+                "bearer_token",
+                "tls_client"
             ]
         );
         let smtp = kinds.body[2]["schema"]["fields"].as_array().unwrap();
@@ -1559,6 +1561,102 @@ mod tests {
                 .unwrap();
         assert_eq!(credential.get("username").unwrap().expose(), "reader");
         assert_eq!(credential.get("password").unwrap().expose(), "pw");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_new_built_in_kinds_fit_the_owner_types_that_read_their_fields(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let make = |body: Value| {
+            let fx = &fx;
+            async move {
+                let reply = fx.as_admin("POST", "/credentials", Some(body)).await;
+                assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+                reply.body["id"].as_str().unwrap().to_owned()
+            }
+        };
+        let source = |kind: &str, config: Value, credential: &str| {
+            let fx = &fx;
+            let body = json!({"kind": kind, "name": format!("{kind} {credential}"),
+                              "config": config, "credential_id": credential});
+            async move { fx.as_admin("POST", "/sources", Some(body)).await }
+        };
+        let bearer = make(json!({"kind": "bearer_token", "name": "Feed token",
+                                 "fields": {}, "secret": {"token": "tok"}}))
+        .await;
+        let tls = make(json!({"kind": "tls_client", "name": "Broker identity",
+                              "fields": {"tls_client_cert": "-----BEGIN CERTIFICATE-----"},
+                              "secret": {"tls_client_key": "-----BEGIN PRIVATE KEY-----"}}))
+        .await;
+        let oauth = make(json!({"kind": "oauth2_client", "name": "App client",
+                                "fields": {"client_id": "app"},
+                                "secret": {"client_secret": "shh"}}))
+        .await;
+        let signing = make(json!({"kind": "signing_secret", "name": "Hook signing",
+                                  "fields": {},
+                                  "secret": {"signing_secret": "now", "previous_signing_secret": "old"}}))
+        .await;
+        let manifest = |auth: Value| {
+            json!({"version": "v1", "base_url": "https://api.example.test/v1", "auth": auth,
+                   "streams": [{"name": "people", "path": "/people", "records_path": "/data",
+                                "fields": [{"name": "id", "type": "string"}],
+                                "primary_key": ["id"]}]})
+        };
+
+        let file = source(
+            "file",
+            json!({"url": "https://files.example.com/people.csv", "format": "csv"}),
+            &bearer,
+        )
+        .await;
+        let kafka = source(
+            "kafka",
+            json!({"brokers": "kafka-1.example.com:9093", "topics": "people"}),
+            &tls,
+        )
+        .await;
+        let http_bearer = source(
+            "http",
+            json!({"manifest": manifest(json!({"type": "bearer"}))}),
+            &bearer,
+        )
+        .await;
+        let http_oauth = source(
+            "http",
+            json!({"manifest": manifest(json!({
+                "type": "oauth2_client_credentials",
+                "token_url": "https://auth.example.test/token"}))}),
+            &oauth,
+        )
+        .await;
+        let hook = fx
+            .as_admin(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "webhook", "name": "Hook",
+                            "config": {"url": "https://hooks.example.com/in"},
+                            "credential_id": signing})),
+            )
+            .await;
+
+        for (name, reply) in [
+            ("file", &file),
+            ("kafka", &kafka),
+            ("http bearer", &http_bearer),
+            ("http oauth", &http_oauth),
+            ("webhook", &hook),
+        ] {
+            assert_eq!(
+                reply.status,
+                StatusCode::CREATED,
+                "{name}: {:?}",
+                reply.body
+            );
+        }
+        assert_eq!(
+            hook.body["credential_fields_set"],
+            json!(["previous_signing_secret", "signing_secret"])
+        );
     }
 
     #[sqlx::test]

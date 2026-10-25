@@ -422,6 +422,32 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_client_credential_is_offered_to_and_accepted_by_the_kafka_source() {
+        use std::collections::BTreeSet;
+
+        use zirv_flow_core::credentials::CredentialKind;
+
+        let schema = CredentialKind::TlsClient.schema();
+        let present: BTreeSet<String> = schema.fields.iter().map(|f| f.key.clone()).collect();
+        let declared: Vec<_> = Kafka::SPEC
+            .credential_fields
+            .iter()
+            .map(|f| f.key)
+            .collect();
+
+        for read in ["tls_client_cert", "tls_client_key"] {
+            assert!(present.contains(read), "the kind lacks {read}");
+        }
+        for key in &present {
+            assert!(
+                declared.contains(&key.as_str()),
+                "{key} is not a field of the owner"
+            );
+        }
+        assert!(crate::sources::validate_credential_names(&Kafka::SPEC, &present).is_ok());
+    }
+
+    #[test]
     fn the_spec_lists_the_settings_and_every_credential_field_is_secret() {
         let config: Vec<_> = Kafka::SPEC.config_fields.iter().map(|f| f.key).collect();
         let credentials: Vec<_> = Kafka::SPEC

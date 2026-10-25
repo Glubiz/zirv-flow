@@ -1826,6 +1826,28 @@ mod tests {
     }
 
     #[test]
+    fn a_bearer_token_credential_is_offered_to_and_accepted_by_the_file_source() {
+        use std::collections::BTreeSet;
+
+        use zirv_flow_core::credentials::CredentialKind;
+
+        let schema = CredentialKind::BearerToken.schema();
+        let present: BTreeSet<String> = schema.fields.iter().map(|f| f.key.clone()).collect();
+        let declared: Vec<_> = File::SPEC.credential_fields.iter().map(|f| f.key).collect();
+
+        for read in ["token"] {
+            assert!(present.contains(read), "the kind lacks {read}");
+        }
+        for key in &present {
+            assert!(
+                declared.contains(&key.as_str()),
+                "{key} is not a field of the owner"
+            );
+        }
+        assert!(crate::sources::validate_credential_names(&File::SPEC, &present).is_ok());
+    }
+
+    #[test]
     fn the_spec_declares_secret_credentials_a_required_url_and_a_full_refresh_only_stream() {
         let spec = &File::SPEC;
 
