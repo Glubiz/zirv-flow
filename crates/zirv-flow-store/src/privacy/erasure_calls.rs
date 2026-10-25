@@ -1134,6 +1134,7 @@ mod tests {
     async fn markers(pool: &PgPool, person: Uuid) -> Vec<Uuid> {
         sqlx::query_scalar(
             "SELECT destination_id FROM erasure_handled_markers WHERE person_id = $1 \
+               AND destination_id NOT IN (SELECT id FROM destinations WHERE name = 'seeded sink') \
              ORDER BY destination_id",
         )
         .bind(person)
@@ -1143,7 +1144,9 @@ mod tests {
     }
 
     async fn marker_count(pool: &PgPool) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM erasure_handled_markers")
+        sqlx::query_scalar(
+            "SELECT count(*) FROM erasure_handled_markers WHERE destination_id NOT IN (SELECT id FROM destinations WHERE name = 'seeded sink')",
+        )
             .fetch_one(pool)
             .await
             .unwrap()
