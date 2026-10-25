@@ -235,6 +235,50 @@ impl UtmTags<'_> {
     }
 }
 
+/// The expanded parameters of one message, owned. A caller builds it from the workspace setting
+/// and the message's context, and borrows [`UtmTags`] from it for the render hooks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UtmPlan {
+    source: String,
+    medium: String,
+    campaign: String,
+    content: String,
+    domains: Vec<String>,
+}
+
+impl UtmPlan {
+    /// Expand the four patterns (`source`, `medium`, `campaign`, `content`) with `values`.
+    pub fn new(patterns: [&str; 4], domains: &[String], values: &UtmValues<'_>) -> Self {
+        Self {
+            source: expand(patterns[0], values),
+            medium: expand(patterns[1], values),
+            campaign: expand(patterns[2], values),
+            content: expand(patterns[3], values),
+            domains: domains
+                .iter()
+                .filter_map(|domain| normalize_domain(domain))
+                .collect(),
+        }
+    }
+
+    /// The tags to put in [`crate::Hooks`].
+    pub fn tags(&self) -> UtmTags<'_> {
+        UtmTags {
+            source: &self.source,
+            medium: &self.medium,
+            campaign: &self.campaign,
+            content: &self.content,
+            domains: &self.domains,
+        }
+    }
+
+    /// The tagged form of `url`, or the URL as it is when it would not be tagged. For the live
+    /// example in the settings screen and for tests.
+    pub fn apply(&self, url: &str) -> String {
+        tag_url(url, &self.tags()).unwrap_or_else(|| url.to_owned())
+    }
+}
+
 /// The host of an `http` or `https` URL.
 fn host_of(url: &str) -> Option<&str> {
     let after_scheme = &url[url.find("://")? + 3..];
@@ -587,6 +631,25 @@ mod tests {
         assert!(out.contains("example.com/4?utm_source=acme"));
         assert!(out.contains(r#"data-zf-utm="on""#));
         assert!(!out.contains(r#"data-zf-utm="off""#) && !out.contains("OFF"));
+    }
+
+    #[test]
+    fn a_plan_expands_patterns_once_and_tags_like_the_tags_do() {
+        let values = UtmValues {
+            workspace: "Acme",
+            template: "Hero",
+            ..UtmValues::default()
+        };
+        let plan = UtmPlan::new(
+            ["{workspace}", "email", "{flow}", "{template}"],
+            &["Example.com".to_owned(), "nonsense".to_owned()],
+            &values,
+        );
+        assert_eq!(
+            plan.apply("https://example.com/p"),
+            "https://example.com/p?utm_source=acme&utm_medium=email&utm_content=hero"
+        );
+        assert_eq!(plan.apply("https://other.com/p"), "https://other.com/p");
     }
 
     #[test]
