@@ -684,7 +684,7 @@ pub(crate) mod tests {
                 height: 10,
             }),
         ]]);
-        content.sender = Some("snd".into());
+        content.sender = Some("0192b1a4-7c3e-7000-8000-00000000a001".into());
         content.lang = Some("en".into());
         let json = serde_json::to_string(&content).unwrap();
         assert_eq!(

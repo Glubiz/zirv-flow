@@ -262,10 +262,11 @@ pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Is
         return issues;
     }
 
+    // The sender is the id of a sender identity, as in a code document.
     if content
         .sender
         .as_deref()
-        .is_none_or(|sender| sender.trim().is_empty())
+        .is_none_or(|sender| !crate::validate::is_uuid(sender.trim()))
     {
         issues.push(Issue::new(code::MISSING_SENDER, doc_at("sender")));
     }
@@ -539,6 +540,14 @@ mod tests {
             }),
             [entry(code::MISSING_UNSUBSCRIBE, "/blocks")]
         );
+    }
+
+    #[test]
+    fn a_sender_that_is_not_an_identity_id_is_blocking_as_in_a_code_document() {
+        for sender in [None, Some("snd_1"), Some("")] {
+            let issues = after(|c| c.sender = sender.map(str::to_owned));
+            assert_eq!(issues, [entry(code::MISSING_SENDER, "/blocks/sender")]);
+        }
     }
 
     #[test]

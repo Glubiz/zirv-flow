@@ -1194,7 +1194,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_block_document_is_refused_when_its_sender_is_missing_or_unverified(pool: PgPool) {
-        use zirv_flow_store::sending_fixtures::{plant_domain, plant_identity};
+        use zirv_flow_store::sending_fixtures::{
+            plant_domain, plant_identity, plant_verified_sender,
+        };
 
         let f = fixture(&pool).await;
         let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
@@ -1205,13 +1207,43 @@ mod tests {
             .await
             .unwrap()
             .to_string();
-        let mut unverified = blocks_doc("Welcome", footer);
-        unverified["blocks"]["sender"] = json!(pending);
-        let mut not_an_id = blocks_doc("Welcome", footer);
-        not_an_id["blocks"]["sender"] = json!("snd_1");
+        let theirs = plant_verified_sender(&pool, f.other_ws, "theirs.example.org")
+            .await
+            .unwrap()
+            .to_string();
+        let with_sender = |sender: &str| {
+            let mut document = blocks_doc("Welcome", footer);
+            document["blocks"]["sender"] = json!(sender);
+            document
+        };
 
-        for (name, document) in [("Unverified", unverified), ("Not an id", not_an_id)] {
+        // A sender that names no identity is the same blocking issue as in a code document.
+        let mut missing = blocks_doc("Welcome", footer);
+        missing["blocks"]
+            .as_object_mut()
+            .expect("a blocks object")
+            .remove("sender");
+        let mut code_missing = email_doc("Welcome", "x");
+        code_missing["email"]
+            .as_object_mut()
+            .expect("an email object")
+            .remove("sender");
+        let mut codes = Vec::new();
+        for (name, document) in [
+            ("Code missing", code_missing),
+            ("Block missing", missing),
+            ("Block not an id", with_sender("snd_1")),
+        ] {
             let id = f.create(name, document).await;
+            let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+            assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{name}");
+            codes.push(refused.body["code"].clone());
+        }
+        assert_eq!(codes, ["template_invalid"; 3]);
+
+        // An identity that exists but cannot send is `sender_unverified`.
+        for (name, sender) in [("Unverified", pending), ("Foreign", theirs)] {
+            let id = f.create(name, with_sender(&sender)).await;
             let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
 
             assert_eq!(

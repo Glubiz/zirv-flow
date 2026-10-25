@@ -15,8 +15,8 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
-use zirv_flow_core::Cause;
 use zirv_flow_core::flow::{FlowSettings, Trigger};
+use zirv_flow_core::{Cause, TraceId};
 use zirv_flow_segments::{
     Outcome as Verdict, PersonSnapshot, SnapshotEvent, evaluate, parse_and_validate,
 };
@@ -196,7 +196,7 @@ async fn matching_events(
         })
         .collect();
     // An enrollment continues the trace its event arrived on.
-    let traces: hashbrown::HashMap<Uuid, zirv_flow_core::TraceId> = events
+    let traces: hashbrown::HashMap<Uuid, TraceId> = events
         .iter()
         .map(|event| (event.id, event.trace_id))
         .collect();
@@ -254,7 +254,8 @@ async fn run_audience(
             person: *person,
             occurrence,
             cause: None,
-            trace_id: None,
+            // An audience is not one person's trigger: each enrollment starts a trace of its own.
+            trace_id: Some(TraceId::new()),
         })
         .collect();
     enroll(ctx, job, version, &entries, now).await?;
@@ -315,6 +316,7 @@ async fn enroll(
 mod tests {
     use std::time::{Duration, Instant};
 
+    use hashbrown::HashSet;
     use metrics_exporter_prometheus::PrometheusBuilder;
     use serde_json::json;
     use sqlx::PgPool;
@@ -1204,6 +1206,151 @@ mod tests {
                 .unwrap();
         assert_eq!(occurrence, event);
         assert_eq!((kind.as_str(), cause), ("event", event.to_string()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_event_enrollment_and_a_refusal_are_on_the_trace_of_their_own_event(pool: PgPool) {
+        let env = Env::new(pool).await;
+        env.define_order().await;
+        let flow = env
+            .flow(
+                "Orders",
+                settings(json!({"type": "event", "event": "order"}), once()),
+            )
+            .await;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let record = |email: &str| EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), email.into())],
+            name: "order".into(),
+            properties: json!({"total": 1}).as_object().cloned().unwrap(),
+            timestamp: None,
+            received_at: env.clock.now(),
+            message_id: None,
+            trace: TraceContext::root(Cause::api("event")),
+        };
+        // Ada and Bob are in the flow already, so `once` refuses their second events; Cy is new.
+        let earlier = [record("ada@example.com"), record("bob@example.com")];
+        zirv_flow_store::apply_event_batch(&env.pool, env.ws, &key, &earlier)
+            .await
+            .unwrap();
+        assert_eq!(env.drain(1).await, 1);
+        env.end_enrollments(flow).await;
+        let events = [
+            record("ada@example.com"),
+            record("bob@example.com"),
+            record("cy@example.com"),
+        ];
+        let traces: Vec<Uuid> = events.iter().map(|e| e.trace.trace_id.as_uuid()).collect();
+        zirv_flow_store::apply_event_batch(&env.pool, env.ws, &key, &events)
+            .await
+            .unwrap();
+        // The job is delivered twice, as a lost lease would.
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, kind, payload, trace_id, cause_kind, cause_id)              SELECT gen_random_uuid(), workspace_id, kind, payload, trace_id, cause_kind, cause_id              FROM jobs WHERE kind = 'flow.enroll' AND state = 'ready'",
+        )
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(env.drain(1).await, 2);
+
+        let cy: Uuid = sqlx::query_scalar(
+            "SELECT person_id FROM identities WHERE kind = 'email' AND value = 'cy@example.com'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let enrolled: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT trace_id FROM enrollments WHERE flow_id = $1 AND person_id = $2",
+        )
+        .bind(flow)
+        .bind(cy)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            enrolled,
+            [traces[2]],
+            "enrolled once, on the trace of Cy's event"
+        );
+        assert_eq!(
+            env.enrolled(flow).await.len(),
+            3,
+            "nobody is enrolled twice"
+        );
+        let refused: HashSet<Uuid> = sqlx::query_scalar(
+            "SELECT trace_id FROM decision_records WHERE action = 'flow.enroll'              AND outcome = 'skipped'",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+        assert_eq!(
+            refused,
+            HashSet::from([traces[0], traces[1]]),
+            "each refusal is on the trace of the event it refused"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_enrollment_of_an_audience_run_starts_a_trace_of_its_own(pool: PgPool) {
+        let env = Env::new(pool).await;
+        let (ann, bob) = (env.person("a").await, env.person("b").await);
+        let list = zirv_flow_store::create_list(&env.pool, env.ws, "VIPs", "", None)
+            .await
+            .unwrap()
+            .id;
+        for person in [ann, bob] {
+            sqlx::query(
+                "INSERT INTO list_members (workspace_id, list_id, person_id, source)                  VALUES ($1, $2, $3, 'api')",
+            )
+            .bind(env.ws.as_uuid())
+            .bind(list)
+            .bind(person)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        }
+        let flow = env
+            .flow("By hand", settings(json!({"type": "manual"}), once()))
+            .await;
+        let job_trace = TraceContext::root(Cause::api("start"));
+
+        env.run(
+            &EnrollJobPayload {
+                workspace: env.ws,
+                flow,
+                version: None,
+                trigger: TriggerKind::Manual,
+                work: EnrollWork::Audience {
+                    source: AudienceSource::List(list),
+                    occurrence: Some(Uuid::now_v7()),
+                    after: None,
+                    entered_by: None,
+                },
+            },
+            &job_trace,
+        )
+        .await;
+
+        let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT trace_id, cause_kind, cause_id FROM enrollments WHERE flow_id = $1",
+        )
+        .bind(flow)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].0, rows[1].0, "one trace per enrollment");
+        for (trace, kind, _) in &rows {
+            assert_ne!(*trace, job_trace.trace_id.as_uuid(), "not the job's trace");
+            assert_eq!(kind, "api", "the trigger's cause");
+        }
     }
 
     #[sqlx::test]

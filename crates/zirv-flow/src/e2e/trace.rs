@@ -3,11 +3,11 @@
 
 use std::path::PathBuf;
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde_json::{Value, json};
 
-/// The decisions the trace of the send path must hold: action, outcome and, when it matters, the
-/// reason. The send gates are listed one by one, in the order the pipeline runs them.
+/// The decisions the trace of the send path must hold once: action, outcome and, when it
+/// matters, the reason. What each message must hold is [`GATES`].
 pub(super) const REQUIRED: &[(&str, &str, Option<&str>)] = &[
     // The track call and what it caused.
     ("event.accepted", "valid", None),
@@ -19,26 +19,29 @@ pub(super) const REQUIRED: &[(&str, &str, Option<&str>)] = &[
     ("flow.wake", "timer", None),
     ("flow.step", "done", None),
     ("flow.enrollment", "completed", None),
-    // The gates of a message that went out, and the message.
-    ("send.gate", "passed", Some("enrollment")),
-    ("send.gate", "passed", Some("template")),
-    ("send.gate", "passed", Some("sender")),
-    ("send.gate", "passed", Some("address")),
-    ("send.gate", "passed", Some("consent")),
-    ("send.gate", "passed", Some("suppression")),
-    ("send.gate", "passed", Some("quiet_hours")),
-    ("send.gate", "passed", Some("frequency_cap")),
-    ("send.gate", "passed", Some("render")),
-    ("send.gate", "passed", Some("rate_limit")),
-    ("send.gate", "passed", Some("delivery")),
-    ("message.send", "sent", None),
     // The unsubscribe and the delivery feedback.
     ("consent.change", "changed", Some("unsubscribe_link")),
     ("message.feedback", "recorded", Some("delivered")),
-    // The later send, stopped at the consent gate with its exact reason.
-    ("send.gate", "blocked", Some("consent")),
-    ("message.send", "skipped", Some("no_consent")),
 ];
+
+/// The send gates a message that went out passed, in the order the pipeline runs them.
+pub(super) const GATES: &[&str] = &[
+    "enrollment",
+    "template",
+    "sender",
+    "address",
+    "consent",
+    "suppression",
+    "quiet_hours",
+    "frequency_cap",
+    "render",
+    "rate_limit",
+    "delivery",
+];
+
+/// How many messages the scenario sends, and how many it stops at the consent gate.
+const SENT: usize = 2;
+const SKIPPED: usize = 1;
 
 fn text<'a>(record: &'a Value, key: &str) -> Option<&'a str> {
     record.get(key).and_then(Value::as_str)
@@ -52,7 +55,90 @@ fn describes(record: &Value, wanted: &(&str, &str, Option<&str>)) -> bool {
             .is_none_or(|reason| text(record, "reason") == Some(reason))
 }
 
-/// Names the first decision of [`REQUIRED`] that no record describes.
+/// The cause a record names: the parent link the trace response carries.
+fn cause_id(record: &Value) -> Option<&str> {
+    record.get("cause").and_then(|cause| text(cause, "id"))
+}
+
+/// Whether the records are one tree. A record's cause names the parent: the id of a record or of
+/// a subject (an event, a segment, an enrollment) that another record of the response is about.
+/// Exactly one record, the first, has a cause no record resolves: what started the trace.
+fn one_tree(records: &[Value]) -> Result<(), String> {
+    let mut known: HashSet<&str> = records
+        .iter()
+        .filter_map(|record| text(record, "id"))
+        .collect();
+    for record in records {
+        if let Some(subjects) = record.get("subject_ids").and_then(Value::as_object) {
+            known.extend(subjects.values().filter_map(Value::as_str));
+        }
+    }
+    let roots: Vec<usize> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| cause_id(record).is_none_or(|id| !known.contains(id)))
+        .map(|(index, _)| index)
+        .collect();
+    match roots[..] {
+        [0] => Ok(()),
+        _ => Err(format!(
+            "the trace is not one tree: records {roots:?} have a cause no record of the response              resolves, and only the first may"
+        )),
+    }
+}
+
+/// The message a record is about.
+fn message_of(record: &Value) -> Option<&str> {
+    record
+        .get("subject_ids")
+        .and_then(|subjects| text(subjects, "message"))
+}
+
+/// Checks the gates message by message, so a gate missing from one message is not covered by the
+/// same gate of another: a message that went out passed every gate of [`GATES`], and one that
+/// did not was blocked at the consent gate.
+fn messages_complete(records: &[Value]) -> Result<(), String> {
+    let (mut sent, mut skipped) = (0, 0);
+    for send in records
+        .iter()
+        .filter(|r| text(r, "action") == Some("message.send"))
+    {
+        let message = message_of(send).unwrap_or("(no message)");
+        let outcome = text(send, "outcome").unwrap_or_default();
+        let wanted: Vec<(&str, Option<&str>)> = match outcome {
+            "sent" => {
+                sent += 1;
+                GATES.iter().map(|gate| ("passed", Some(*gate))).collect()
+            }
+            "skipped" => {
+                skipped += 1;
+                vec![("blocked", Some("consent"))]
+            }
+            other => return Err(format!("message {message} ended `{other}`")),
+        };
+        for (gate_outcome, reason) in wanted {
+            let held = records.iter().any(|record| {
+                message_of(record) == Some(message)
+                    && describes(record, &("send.gate", gate_outcome, reason))
+            });
+            if !held {
+                return Err(format!(
+                    "message {message} has no `send.gate` decision with outcome `{gate_outcome}`                      with reason `{}`",
+                    reason.unwrap_or_default()
+                ));
+            }
+        }
+    }
+    if (sent, skipped) != (SENT, SKIPPED) {
+        return Err(format!(
+            "the trace has {sent} sent and {skipped} skipped `message.send` decisions, not              {SENT} and {SKIPPED}"
+        ));
+    }
+    Ok(())
+}
+
+/// Names the first decision of [`REQUIRED`] that no record describes, the first gate a message
+/// lacks, or says the records are not one tree.
 pub(super) fn complete(records: &[Value]) -> Result<(), String> {
     for wanted in REQUIRED {
         if !records.iter().any(|record| describes(record, wanted)) {
@@ -65,7 +151,8 @@ pub(super) fn complete(records: &[Value]) -> Result<(), String> {
             ));
         }
     }
-    Ok(())
+    messages_complete(records)?;
+    one_tree(records)
 }
 
 /// The records of a trace body.
@@ -186,6 +273,59 @@ mod tests {
                 assert!(failure.contains(&format!("`{reason}`")), "{failure}");
             }
         }
+    }
+
+    #[test]
+    fn a_single_gate_missing_from_one_message_fails_naming_the_message_and_the_gate() {
+        let records = records_of(&committed());
+        let sends: Vec<&Value> = records
+            .iter()
+            .filter(|r| text(r, "action") == Some("message.send"))
+            .collect();
+        assert_eq!(sends.len(), SENT + SKIPPED);
+        for send in sends {
+            let message = message_of(send).expect("a message");
+            let skipped = text(send, "outcome") == Some("skipped");
+            // A message that went out needs every gate passed; a skipped one, its blocking gate.
+            let required: Vec<usize> = records
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| text(r, "action") == Some("send.gate"))
+                .filter(|(_, r)| message_of(r) == Some(message))
+                .filter(|(_, r)| (text(r, "outcome") == Some("blocked")) == skipped)
+                .map(|(index, _)| index)
+                .collect();
+            assert!(!required.is_empty());
+            for index in required {
+                let mut without = records.clone();
+                let removed = without.remove(index);
+                let failure = complete(&without).expect_err("a gap is reported");
+                let reason = text(&removed, "reason").unwrap_or_default();
+                assert!(
+                    failure.contains(message) && failure.contains(&format!("`{reason}`")),
+                    "{failure}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_trace_that_is_not_one_tree_fails() {
+        let records = records_of(&committed());
+        assert_eq!(one_tree(&records), Ok(()));
+
+        let mut broken_link = records.clone();
+        broken_link[3]["cause"]["id"] = json!("0192b1a4-7c3e-7000-8000-00000000ffff");
+        let failure = complete(&broken_link).expect_err("a dangling parent is reported");
+        assert!(
+            failure.contains("not one tree") && failure.contains("[0, 3]"),
+            "{failure}"
+        );
+
+        let mut no_root = records.clone();
+        no_root.remove(0);
+        assert!(one_tree(&no_root).is_err(), "no root record is left");
+        assert!(one_tree(&[]).is_err(), "an empty response is no tree");
     }
 
     #[test]

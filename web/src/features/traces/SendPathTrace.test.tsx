@@ -32,6 +32,20 @@ describe("the trace of the send path", () => {
     expect(shown).toEqual(records.map((record) => ({ action: record.action, outcome: record.outcome, at: record.recorded_at })));
   });
 
+  it("renders one tree: a single root, the cause that started the trace, holding every record", () => {
+    render(
+      <MemoryRouter>
+        <TraceTree label="Send path" workspaceId="ws1" records={records} truncated={fixture.truncated} />
+      </MemoryRouter>,
+    );
+
+    const tree = screen.getByRole("list", { name: "Send path" });
+    const roots = tree.querySelectorAll(":scope > li");
+    expect(roots).toHaveLength(1);
+    expect(roots[0]?.querySelector(":scope > .mono")?.textContent).toBe(records[0]?.cause.kind);
+    expect(roots[0]?.querySelectorAll("li.trace-record")).toHaveLength(records.length);
+  });
+
   it("holds every stage of the send path, ending in the skipped send with its gate reason", () => {
     const stages = ["event.accepted", "segment.entered", "flow.enroll", "flow.step", "message.send", "consent.change", "message.feedback"];
     for (const stage of stages) expect(records.some((record) => record.action === stage)).toBe(true);

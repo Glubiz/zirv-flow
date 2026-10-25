@@ -13,7 +13,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
     use sqlx::PgPool;
-    use time::Duration;
+    use time::{Duration, OffsetDateTime};
     use zirv_flow_connectors::destinations::{
         provider_feedback_of, provider_feedback_scheme, sign_provider_feedback,
         verify_dkim_signature,
@@ -25,6 +25,8 @@ mod tests {
     /// A synthetic address. It must appear in no decision, no trace and, once the person is
     /// erased, in no table.
     const ADDRESS: &str = "ada@example.com";
+    /// The allowlisted address of the test send. It too must be gone after the erasure.
+    const TEST_ADDRESS: &str = "qa@example.com";
     const OFFER_URL: &str = "https://shop.example/offer?x=1";
 
     fn html_doc(sender: &str) -> Value {
@@ -224,6 +226,8 @@ mod tests {
 
         // Step 1 and 2: a track call moves the person into the segment, which starts the flow.
         let track_trace = world.track_order(ADDRESS).await;
+        // The flow reaches its wait on this instant of the manual clock.
+        let waited_at = world.clock.now();
         world.settle().await;
         assert_eq!(
             world
@@ -328,7 +332,19 @@ mod tests {
         );
 
         // Step 6: a day later the flow runs its second send, which is skipped for no consent.
+        // The wake was scheduled from the manual clock: a day after the wait began.
+        let scheduled: OffsetDateTime = sqlx::query_scalar(
+            "SELECT run_at FROM jobs WHERE kind = 'flow.step' AND state = 'ready'",
+        )
+        .fetch_one(&world.pool)
+        .await
+        .expect("exactly one step is waiting");
+        assert!(
+            (scheduled - (waited_at + Duration::days(1))).abs() < Duration::milliseconds(1),
+            "the wake is due a day after {waited_at}, not at {scheduled}"
+        );
         world.clock.advance(Duration::days(1));
+        // The queue claims by database time, so the due wake is moved there.
         sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'flow.step'")
             .execute(&world.pool)
             .await
@@ -374,14 +390,18 @@ mod tests {
             panic!("{gap}");
         }
 
-        // No address value in the trace or in any stored decision.
+        // No address value in the trace response or in any stored decision.
         let shown = serde_json::to_string(&records).expect("text");
         assert!(!shown.contains('@'), "an address is in the trace");
+        let body = tree.to_string();
         let decisions = dump_text(&world.pool, Some(&["decision_records", "jobs"])).await;
-        assert!(
-            !decisions.contains("ada@"),
-            "an address is in a stored decision"
-        );
+        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
+            assert!(!body.contains(marker), "{marker} is in the trace response");
+            assert!(
+                !decisions.contains(marker),
+                "{marker} is in a stored decision"
+            );
+        }
 
         // Criterion 9, UI: the trace, normalised, is the fixture the web test renders.
         trace::bless_or_compare(&trace::normalised(&track_trace, records));
@@ -403,7 +423,7 @@ mod tests {
             .api_ok(
                 "POST",
                 "/test-send-allowlist",
-                Some(json!({"address": "qa@example.com"})),
+                Some(json!({"address": TEST_ADDRESS})),
                 StatusCode::CREATED,
             )
             .await;
@@ -412,7 +432,7 @@ mod tests {
                 "POST",
                 &format!("/templates/{offer}/test-send"),
                 Some(json!({"destination_id": smtp, "sender_identity_id": sender,
-                            "to": {"address": "qa@example.com"}})),
+                            "to": {"address": TEST_ADDRESS}})),
                 StatusCode::ACCEPTED,
             )
             .await;
@@ -446,7 +466,7 @@ mod tests {
         .await;
         assert!(!leaked.contains("ada"), "the erased person is still named");
         let everything = dump_text(&world.pool, None).await;
-        for marker in [ADDRESS, "qa@example.com"] {
+        for marker in [ADDRESS, TEST_ADDRESS] {
             assert!(
                 !everything.contains(marker),
                 "{marker} survives the erasure"
