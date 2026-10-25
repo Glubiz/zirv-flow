@@ -564,7 +564,7 @@ mod tests {
 
     fn doc_of(blocks: Vec<Block>) -> TemplateDocument {
         let mut content = BlocksContent::new("Hi");
-        content.sender = Some("snd_1".into());
+        content.sender = Some("0192b1a4-7c3e-7000-8000-00000000a001".into());
         content.lang = Some("en".into());
         content.category = Category::Transactional;
         content.sections.push(super::super::Section {

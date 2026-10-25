@@ -80,11 +80,17 @@ pub struct TemplatePatch {
     pub name: Option<String>,
 }
 
-/// The sender identity id a content document names (`email.sender`, a UUID), if it names one. A
-/// sender that is not a UUID names no identity.
+/// The sender identity id a content document names, if it names one: `email.sender` of a code
+/// document, `blocks.sender` of a block document (both a UUID). A sender that is not a UUID names
+/// no identity.
 pub fn document_sender(document: &Value) -> Option<Uuid> {
+    let pointer = if document.pointer("/mode").and_then(Value::as_str) == Some("blocks") {
+        "/blocks/sender"
+    } else {
+        "/email/sender"
+    };
     document
-        .pointer("/email/sender")
+        .pointer(pointer)
         .and_then(Value::as_str)
         .and_then(|sender| sender.trim().parse().ok())
 }
@@ -322,6 +328,21 @@ mod tests {
 
     use super::*;
     use crate::templates::tests_support::*;
+
+    #[test]
+    fn a_documents_sender_is_read_where_its_content_type_keeps_it() {
+        let id = "0192b1a4-7c3e-7000-8000-00000000a001";
+        let code = serde_json::json!({"mode": "code", "email": {"sender": id}});
+        let blocks = serde_json::json!({"mode": "blocks", "blocks": {"sender": id}});
+        let not_an_identity = serde_json::json!({"mode": "blocks", "blocks": {"sender": "snd_1"}});
+        let wrong_place = serde_json::json!({"mode": "blocks", "email": {"sender": id}});
+
+        assert_eq!(document_sender(&code), id.parse().ok());
+        assert_eq!(document_sender(&blocks), id.parse().ok());
+        assert_eq!(document_sender(&not_an_identity), None);
+        assert_eq!(document_sender(&wrong_place), None);
+        assert_eq!(document_sender(&serde_json::json!({})), None);
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

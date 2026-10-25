@@ -403,6 +403,18 @@ pub(crate) async fn enqueue_event_enrolls(
             _ => by_flow.push((flow, version, vec![(person, event)])),
         }
     }
+    // An enrollment continues the trace of the event that starts it.
+    let traces: HashMap<Uuid, TraceId> = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(&events)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?
+    .into_iter()
+    .map(|(id, trace)| (id, TraceId::from_uuid(trace)))
+    .collect();
     let mut enqueued = 0;
     for (flow, version, pairs) in by_flow {
         for chunk in pairs.chunks(MAX_ENROLL_PEOPLE) {
@@ -417,7 +429,7 @@ pub(crate) async fn enqueue_event_enrolls(
                 work: EnrollWork::People(chunk.to_vec()),
             };
             let trace = TraceContext {
-                trace_id: TraceId::new(),
+                trace_id: traces.get(&first).copied().unwrap_or_else(TraceId::new),
                 cause: Cause::event(first),
             };
             let unique = format!("flow.enroll:event:{flow}:{first}");
@@ -433,6 +445,8 @@ pub(crate) async fn enqueue_event_enrolls(
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggerEvent {
     pub id: Uuid,
+    /// The trace the event arrived on; an enrollment it starts continues it.
+    pub trace_id: TraceId,
     pub person_id: Uuid,
     pub name: String,
     pub occurred_at: OffsetDateTime,
@@ -445,8 +459,8 @@ pub async fn find_events(
     workspace: WorkspaceId,
     ids: &[Uuid],
 ) -> Result<Vec<TriggerEvent>, StoreError> {
-    let rows: Vec<(Uuid, Uuid, String, OffsetDateTime, Value)> = sqlx::query_as(
-        "SELECT id, person_id, name, occurred_at, properties FROM events \
+    let rows: Vec<(Uuid, Uuid, Uuid, String, OffsetDateTime, Value)> = sqlx::query_as(
+        "SELECT id, trace_id, person_id, name, occurred_at, properties FROM events \
          WHERE workspace_id = $1 AND id = ANY($2) AND person_id IS NOT NULL",
     )
     .bind(workspace.as_uuid())
@@ -457,8 +471,9 @@ pub async fn find_events(
     Ok(rows
         .into_iter()
         .map(
-            |(id, person_id, name, occurred_at, properties)| TriggerEvent {
+            |(id, trace_id, person_id, name, occurred_at, properties)| TriggerEvent {
                 id,
+                trace_id: TraceId::from_uuid(trace_id),
                 person_id,
                 name,
                 occurred_at,
@@ -1419,6 +1434,7 @@ mod tests {
                 person,
                 occurrence: Uuid::now_v7(),
                 cause: None,
+                trace_id: None,
             })
             .collect();
         let outcome = enroll_entries(

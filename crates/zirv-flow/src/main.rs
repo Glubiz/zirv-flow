@@ -1,5 +1,7 @@
 mod cli;
 mod config;
+#[cfg(test)]
+mod e2e;
 mod healthcheck;
 mod log;
 mod otlp;
