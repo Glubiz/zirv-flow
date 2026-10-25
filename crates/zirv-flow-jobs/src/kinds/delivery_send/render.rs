@@ -11,14 +11,17 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value, json};
+use sqlx::PgExecutor;
 use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::HmacKey;
+use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::tracking::{TokenKind, sign};
 use zirv_flow_render::{
     Hooks, RenderContext, RenderFailure, RenderPool, Rendered, TemplateDocument, Tracking,
 };
-use zirv_flow_store::VerifiedSender;
+use zirv_flow_store::{StoreError, Template, VerifiedSender, find_workspace};
+use zirv_flow_templates::{UtmPlan, UtmValues};
 
 use super::payload::SendJob;
 
@@ -122,6 +125,51 @@ pub(crate) fn address_links(context: &mut RenderContext, message: Uuid, tracker:
     }
 }
 
+/// The flow a message is sent from, for the UTM placeholders. A preview or a test send has none.
+pub(crate) struct UtmFlow<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) version: i32,
+    pub(crate) step: &'a str,
+}
+
+/// The UTM parameters of one message (#240): `None` when the workspace has the setting off or the
+/// template opts out, so the output is exactly what it was without the step. The values come from
+/// the workspace, the flow, the template and its category (the message's consent category).
+pub(crate) async fn utm_plan<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    template: &Template,
+    template_version: Option<i32>,
+    flow: Option<UtmFlow<'_>>,
+) -> Result<Option<UtmPlan>, StoreError> {
+    if template.utm == "off" {
+        return Ok(None);
+    }
+    let Some(found) = find_workspace(executor, workspace).await? else {
+        return Ok(None);
+    };
+    let utm = &found.utm;
+    if !utm.enabled {
+        return Ok(None);
+    }
+    let flow_version = flow.as_ref().map(|flow| flow.version.to_string());
+    let template_version = template_version.map(|version| version.to_string());
+    let values = UtmValues {
+        workspace: &found.slug,
+        flow: flow.as_ref().map_or("", |flow| flow.name),
+        flow_version: flow_version.as_deref().unwrap_or(""),
+        step: flow.as_ref().map_or("", |flow| flow.step),
+        template: &template.name,
+        template_version: template_version.as_deref().unwrap_or(""),
+        category: &template.category,
+    };
+    Ok(Some(UtmPlan::new(
+        [&utm.source, &utm.medium, &utm.campaign, &utm.content],
+        &utm.domains,
+        &values,
+    )))
+}
+
 /// Renders `document` for `context`, or says why it could not. With a `tracker` the links are
 /// rewritten to the click route and the open pixel is added; the links come back to be recorded.
 /// Without one the message is left as rendered. `recorded` is what the message's earlier attempts
@@ -132,6 +180,7 @@ pub(crate) async fn render(
     context: &RenderContext,
     tracker: Option<&Tracker>,
     recorded: &[(u16, String)],
+    utm: Option<&UtmPlan>,
 ) -> Result<Tracked, &'static str> {
     let Some(pool) = pool else {
         warn!("email not rendered: the worker has no render pool");
@@ -143,7 +192,14 @@ pub(crate) async fn render(
     };
     let Some(tracker) = tracker else {
         let rendered = pool
-            .render_email(&document, context, &Hooks::untracked())
+            .render_email(
+                &document,
+                context,
+                &Hooks {
+                    utm: utm.map(UtmPlan::tags),
+                    ..Hooks::untracked()
+                },
+            )
             .await
             .map_err(failed)?;
         return Ok(Tracked {
@@ -168,7 +224,7 @@ pub(crate) async fn render(
             base_url: &base,
             token: &token,
         },
-        utm: None,
+        utm: utm.map(UtmPlan::tags),
     };
     let mut rendered = pool
         .render_email(&document, context, &hooks)
@@ -430,7 +486,7 @@ mod tests {
         let context = RenderContext::default();
 
         assert_eq!(
-            render(None, json!({}), &context, None, &[])
+            render(None, json!({}), &context, None, &[], None)
                 .await
                 .unwrap_err(),
             RENDER_ERROR
