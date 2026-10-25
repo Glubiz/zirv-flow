@@ -1827,22 +1827,11 @@ mod tests {
 
     #[test]
     fn a_bearer_token_credential_is_offered_to_and_accepted_by_the_file_source() {
-        use std::collections::BTreeSet;
-
-        use zirv_flow_core::credentials::CredentialKind;
-
-        let schema = CredentialKind::BearerToken.schema();
-        let present: BTreeSet<String> = schema.fields.iter().map(|f| f.key.clone()).collect();
-        let declared: Vec<_> = File::SPEC.credential_fields.iter().map(|f| f.key).collect();
-
-        assert!(present.contains("token"), "the kind lacks token");
-        for key in &present {
-            assert!(
-                declared.contains(&key.as_str()),
-                "{key} is not a field of the owner"
-            );
-        }
-        assert!(crate::sources::validate_credential_names(&File::SPEC, &present).is_ok());
+        crate::sources::validate::assert_kind_fits(
+            &File::SPEC,
+            zirv_flow_core::credentials::CredentialKind::BearerToken,
+            &["token"],
+        );
     }
 
     #[test]

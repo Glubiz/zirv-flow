@@ -845,22 +845,11 @@ mod tests {
 
     #[test]
     fn a_bearer_token_credential_is_offered_to_and_accepted_by_the_http_source() {
-        use std::collections::BTreeSet;
-
-        use zirv_flow_core::credentials::CredentialKind;
-
-        let schema = CredentialKind::BearerToken.schema();
-        let present: BTreeSet<String> = schema.fields.iter().map(|f| f.key.clone()).collect();
-        let declared: Vec<_> = Http::SPEC.credential_fields.iter().map(|f| f.key).collect();
-
-        assert!(present.contains("token"), "the kind lacks token");
-        for key in &present {
-            assert!(
-                declared.contains(&key.as_str()),
-                "{key} is not a field of the owner"
-            );
-        }
-        assert!(crate::sources::validate_credential_names(&Http::SPEC, &present).is_ok());
+        crate::sources::validate::assert_kind_fits(
+            &Http::SPEC,
+            zirv_flow_core::credentials::CredentialKind::BearerToken,
+            &["token"],
+        );
     }
 
     #[test]
@@ -869,21 +858,18 @@ mod tests {
 
         use zirv_flow_core::credentials::CredentialKind;
 
-        let schema = CredentialKind::OAuth2Client.schema();
-        let without: BTreeSet<String> = schema
+        let without: BTreeSet<String> = CredentialKind::OAuth2Client
+            .schema()
             .fields
-            .iter()
+            .into_iter()
             .filter(|f| f.required)
-            .map(|f| f.key.clone())
+            .map(|f| f.key)
             .collect();
 
         assert_eq!(
             without.iter().map(String::as_str).collect::<Vec<_>>(),
             ["client_id", "client_secret"]
         );
-        for read in ["client_id", "client_secret"] {
-            assert!(without.contains(read), "the kind lacks {read}");
-        }
         assert!(crate::sources::validate_credential_names(&Http::SPEC, &without).is_ok());
     }
 

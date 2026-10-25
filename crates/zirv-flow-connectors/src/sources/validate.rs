@@ -319,6 +319,27 @@ fn check_value(field: &FieldSpec, value: &Value) -> Option<&'static str> {
     }
 }
 
+/// Test helper: the built-in `kind` supplies every key in `reads`, offers nothing the owner does
+/// not declare, and the owner's name check accepts it.
+#[cfg(test)]
+pub(crate) fn assert_kind_fits(
+    spec: &SourceSpec,
+    kind: zirv_flow_core::credentials::CredentialKind,
+    reads: &[&str],
+) {
+    let present: BTreeSet<String> = kind.schema().fields.into_iter().map(|f| f.key).collect();
+    for read in reads {
+        assert!(present.contains(*read), "the kind lacks {read}");
+    }
+    for key in &present {
+        assert!(
+            spec.credential_fields.iter().any(|f| f.key == key),
+            "{key} is not a field of the owner"
+        );
+    }
+    assert!(validate_credential_names(spec, &present).is_ok());
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
