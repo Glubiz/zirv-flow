@@ -106,6 +106,7 @@ const SUBSCRIBED = {
   topic_name: null,
   status: "subscribed",
   explicit: true,
+  dimensions: {},
   changed_at: "2026-10-02T09:00:00Z",
 };
 

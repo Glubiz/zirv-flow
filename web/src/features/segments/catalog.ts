@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import { client, unwrap, useResource, type components, type Resource } from "../../api";
+import { ENGAGEMENT_PROPERTIES } from "../../ui";
 import { asValueType, type ValueType } from "./operators";
 
 export type TraitDef = components["schemas"]["TraitBody"];
@@ -8,6 +9,7 @@ export type EventDef = components["schemas"]["EventSchemaBody"];
 export type ListDef = components["schemas"]["ListBody"];
 export type SegmentRow = components["schemas"]["SegmentBody"];
 export type TopicDef = components["schemas"]["TopicBody"];
+export type DimensionDef = components["schemas"]["DimensionBody"];
 
 export interface Catalog {
   traits: readonly TraitDef[];
@@ -130,7 +132,16 @@ export function useEventTypes(workspaceId: string, names: readonly string[]): Ev
     }
   }, [workspaceId, wanted]);
 
-  return types;
+  return useMemo(() => {
+    const merged = new Map(types);
+    for (const [event, properties] of Object.entries(ENGAGEMENT_PROPERTIES)) {
+      if (!wanted.split("\n").includes(event)) continue;
+      const known = new Map(merged.get(event));
+      for (const [name, type] of Object.entries(properties)) if (!known.has(name)) known.set(name, type);
+      merged.set(event, known);
+    }
+    return merged;
+  }, [types, wanted]);
 }
 
 export const CatalogContext = createContext<Catalog | null>(null);

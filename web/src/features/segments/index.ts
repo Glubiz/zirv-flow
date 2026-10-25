@@ -1,5 +1,6 @@
 export { ConditionEditor, describeCondition } from "./ConditionEditor";
 export type { ConditionNode } from "./ConditionEditor";
+export type { BuilderMode } from "./ast";
 export { useCatalog } from "./catalog";
 export type { Catalog, CatalogState } from "./catalog";
 export { NewSegmentPage } from "./NewSegmentPage";

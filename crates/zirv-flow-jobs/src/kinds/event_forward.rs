@@ -290,6 +290,7 @@ fn early(verdict: Verdict) -> Attempt {
     Attempt {
         verdict,
         elapsed: Duration::ZERO,
+        may_have_arrived: false,
     }
 }
 

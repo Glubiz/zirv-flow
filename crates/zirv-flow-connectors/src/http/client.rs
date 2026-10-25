@@ -112,7 +112,7 @@ impl GuardedClient {
         headers: &[(&str, &str)],
         body: Vec<u8>,
     ) -> Result<GuardedResponse, HttpError> {
-        let unbuildable = || HttpError::Transport("the request could not be built".to_owned());
+        let unbuildable = || HttpError::NotSent { timed_out: false };
         let url = url::Url::parse(url).map_err(|_| unbuildable())?;
         let mut request = reqwest::Request::new(reqwest::Method::POST, url);
         for (name, value) in headers {
@@ -415,7 +415,7 @@ mod tests {
             refused.unwrap_err(),
             denied("127.0.0.1", AddressClass::Loopback)
         );
-        let unbuildable = HttpError::Transport("the request could not be built".to_owned());
+        let unbuildable = HttpError::NotSent { timed_out: false };
         assert_eq!(bad_header.unwrap_err(), unbuildable);
         assert_eq!(bad_url.unwrap_err(), unbuildable);
     }
@@ -664,6 +664,27 @@ mod tests {
         let guarded = client(&["127.0.0.1/32"], limits);
         let result = get_url(&guarded, &format!("http://local.test:{port}/slow")).await;
         assert_eq!(result.unwrap_err(), HttpError::Timeout);
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_never_left_and_a_slow_answer_may_have_arrived() {
+        // Nothing listens on port 9: the connect fails before anything is written.
+        let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
+        let refused = get_url(&guarded, "http://local.test:9/").await.unwrap_err();
+        assert_eq!(refused, HttpError::NotSent { timed_out: false });
+        assert!(!refused.may_have_arrived());
+
+        // A server that accepted the request and then stalled: the write happened.
+        let (port, _) = serve().await;
+        let limits = HttpLimits {
+            timeout: Duration::from_millis(300),
+            ..HttpLimits::default()
+        };
+        let guarded = client(&["127.0.0.1/32"], limits);
+        let slow = get_url(&guarded, &format!("http://local.test:{port}/slow"))
+            .await
+            .unwrap_err();
+        assert!(slow.may_have_arrived());
     }
 
     #[tokio::test]

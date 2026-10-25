@@ -29,6 +29,8 @@ export function PropertyFilterEditor({ workspaceId, eventName, value, onChange, 
   const api: BuilderApi = {
     readOnly,
     selfId: null,
+    mode: "segment",
+    dimensions: [],
     catalog: catalog.catalog,
     eventTypes,
     issues: [],

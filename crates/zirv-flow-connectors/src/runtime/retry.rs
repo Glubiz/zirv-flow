@@ -71,7 +71,9 @@ pub(crate) fn status_reason(status: StatusCode) -> Option<RetryReason> {
 /// egress policy or an oversized body would fail the same way again.
 pub(crate) fn error_reason(error: &HttpError) -> Option<RetryReason> {
     match error {
-        HttpError::Timeout | HttpError::Transport(_) => Some(RetryReason::Transport),
+        HttpError::Timeout | HttpError::Transport(_) | HttpError::NotSent { .. } => {
+            Some(RetryReason::Transport)
+        }
         HttpError::EgressDenied { .. } | HttpError::BodyTooLarge => None,
     }
 }

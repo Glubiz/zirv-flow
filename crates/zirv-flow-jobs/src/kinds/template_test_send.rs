@@ -858,6 +858,7 @@ mod tests {
         zirv_flow_store::replace_send_limits(
             &mut connection,
             env.ws,
+            0,
             &[NewFrequencyCap {
                 channel: "email".into(),
                 window_hours: 24,
@@ -867,7 +868,8 @@ mod tests {
             None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a fresh workspace is at revision 0");
         drop(connection);
         let first = env.reserve(template, "ada@example.com", Some(member)).await;
         let second = env.reserve(template, "ada@example.com", Some(member)).await;

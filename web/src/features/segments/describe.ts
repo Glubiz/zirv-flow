@@ -69,6 +69,11 @@ export function describeNode(node: Node, names: Names): string {
     if (channel === undefined) return `Consent for the message is ${status.replaceAll("_", " ")}`;
     return `Consent for ${channel}${topic ? `, topic ${topic},` : ""} is ${status.replaceAll("_", " ")}`;
   }
-  if ("messages" in node) return `Has sent messages on ${node.messages.channel}`;
+  if ("messages" in node) {
+    const { channel, agg, window } = node.messages;
+    const what = agg.fn === "last_time" ? `The latest message sent on ${channel}` : `Messages sent on ${channel}`;
+    const when = window !== undefined && "last" in window ? ` in the last ${window.last}` : "";
+    return `${what}${when} ${comparison(agg.op, agg.value)}`;
+  }
   return `Has a ${node.identifier} identifier`;
 }
