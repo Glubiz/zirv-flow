@@ -272,6 +272,28 @@ describe("dead letters", () => {
     expect(calls.filter((call) => call.path.endsWith("/dead-letters")).at(-1)?.search).toContain("before=cursor-1");
     expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
   });
+
+  it("hides Show more when the next page is empty and has no further cursor", async () => {
+    const calls = mockApi(
+      base({
+        [`GET ${WS}/forwarding/dead-letters`]: (() => {
+          let page = 0;
+          return () => {
+            page += 1;
+            return page === 1 ? json({ letters: [letter()], next_before: "cursor-1" }) : json({ letters: [], next_before: null });
+          };
+        })(),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Show more" }));
+
+    await waitFor(() => expect(calls.filter((call) => call.path.endsWith("/dead-letters"))).toHaveLength(2));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument());
+    expect(screen.getByText("http_4xx")).toBeInTheDocument();
+  });
 });
 
 describe("forwarding access", () => {

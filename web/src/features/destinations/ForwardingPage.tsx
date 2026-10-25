@@ -264,6 +264,7 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
   const [destinationId, setDestinationId] = useState("");
   const [extra, setExtra] = useState<DeadLetter[]>([]);
   const [before, setBefore] = useState<string | null>(null);
+  const [pagedOn, setPagedOn] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [more, setMore] = useState<ErrorSummary | null>(null);
   const [scope, setScope] = useState<Scope | null>(null);
@@ -291,6 +292,7 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
         }),
       );
       setExtra((current) => [...current, ...page.letters]);
+      setPagedOn(true);
       setBefore(page.next_before ?? null);
     } catch (error) {
       setMore(describeError(error));
@@ -303,10 +305,11 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
     setDestinationId(id);
     setExtra([]);
     setBefore(null);
+    setPagedOn(false);
     setResult(null);
   }
 
-  const cursor = extra.length > 0 ? before : first.status === "ready" ? (first.data.next_before ?? null) : null;
+  const cursor = pagedOn ? before : first.status === "ready" ? (first.data.next_before ?? null) : null;
 
   return (
     <Panel title="Dead letters" flush>
@@ -400,6 +403,7 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
             setResult(`${plural(count, "row", "rows")} put back in the queue.`);
             setExtra([]);
             setBefore(null);
+            setPagedOn(false);
             first.reload();
             onRedriven();
           }}
