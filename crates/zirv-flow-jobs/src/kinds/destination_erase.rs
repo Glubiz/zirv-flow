@@ -440,18 +440,27 @@ mod tests {
         /// Claims one erase call job and runs one attempt as a worker does: the work commits with
         /// the job's completion, and an error rolls it back and puts the job up again at once.
         async fn attempt(&self) -> Option<Result<(), JobError>> {
+            self.attempt_with(true).await
+        }
+
+        /// As [`attempt`](Self::attempt); without `pool` the handler has no pool and fails.
+        async fn attempt_with(&self, pool: bool) -> Option<Result<(), JobError>> {
             let claimed = self.claim(DestinationErase::KIND).await?;
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let egress = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap());
             let result = {
-                let mut ctx = JobContext::new(&mut tx, &claimed)
-                    .with_outbound(None, egress, Arc::default())
-                    .with_ingest(IngestSettings {
+                let ctx =
+                    JobContext::new(&mut tx, &claimed).with_outbound(None, egress, Arc::default());
+                let mut ctx = if pool {
+                    ctx.with_ingest(IngestSettings {
                         pool: self.pool.clone(),
                         redaction_key: None,
                         batch_size: 1,
                         shards: 1,
-                    });
+                    })
+                } else {
+                    ctx
+                };
                 DestinationErase
                     .run(&mut ctx, claimed.payload.clone())
                     .await
@@ -792,5 +801,79 @@ mod tests {
         zirv_flow_store::enqueue(&env.pool, &broken).await.unwrap();
         let error = env.attempt().await.unwrap().unwrap_err();
         assert_eq!(error.message(), "the payload is not an erase call");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_destination_archived_before_the_erasure_still_gets_a_row_and_fails_unavailable(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let archived = env
+            .destination(
+                "fake",
+                "archived",
+                json!({"ledger": format!("erase-{}", Uuid::now_v7())}),
+            )
+            .await;
+        env.forwarded(archived, "pending").await;
+        zirv_flow_store::archive_destination(&env.pool, env.ws, archived)
+            .await
+            .unwrap();
+
+        let ledger = env.erase().await;
+        env.attempt().await.unwrap().unwrap();
+
+        let calls = env.calls(ledger).await;
+        assert_eq!(
+            calls.len(),
+            1,
+            "an archived destination that handled them is planned"
+        );
+        assert_eq!(calls[0].outcome, EraseCallOutcome::Failed);
+        assert_eq!(
+            calls[0].error_code.as_deref(),
+            Some(DESTINATION_UNAVAILABLE)
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_errors_through_its_last_attempt_dies_and_leaves_no_pending_call(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let destination = env
+            .destination(
+                "fake",
+                "unlucky",
+                json!({"ledger": format!("erase-{}", Uuid::now_v7())}),
+            )
+            .await;
+        env.forwarded(destination, "pending").await;
+        let ledger = env.erase().await;
+
+        let mut errors = 0;
+        while let Some(result) = env.attempt_with(false).await {
+            assert_eq!(result.unwrap_err().message(), "the worker has no pool");
+            errors += 1;
+        }
+
+        assert_eq!(errors, zirv_flow_store::ERASE_CALL_ATTEMPTS);
+        let calls = env.calls(ledger).await;
+        assert_eq!(calls[0].outcome, EraseCallOutcome::Failed);
+        assert_eq!(calls[0].error_code.as_deref(), Some("job_dead"));
+        let dead: Vec<(String, Value)> =
+            sqlx::query_as("SELECT state, payload FROM jobs WHERE kind = $1")
+                .bind(DestinationErase::KIND)
+                .fetch_all(&env.pool)
+                .await
+                .unwrap();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].0, "dead");
+        assert!(
+            dead[0].1.get("external_key").is_none(),
+            "the key is scrubbed"
+        );
     }
 }

@@ -136,9 +136,9 @@ pub use flows::{
     find_event_of_person, find_events, find_flow, find_flow_version, flow_source,
     flow_state_for_step, has_webhook_signing_secret, hold_enrollment, list_flow_enrollments,
     list_flow_versions, list_flows, live_signing_keys, load_enrollment_path, lock_audience_page,
-    lock_enrollment, lock_flow, lock_webhook_person, occurrence_of, pause_flow, publish_flow,
-    read_webhook_subject, reconcile_flow_schedules, record_send_outcome, record_steps,
-    record_webhook_outcome, register_wait, release_enrollment, reopen_failed_step,
+    lock_enrollment, lock_flow, lock_sync_person, lock_webhook_person, occurrence_of, pause_flow,
+    publish_flow, read_webhook_subject, reconcile_flow_schedules, record_send_outcome,
+    record_steps, record_webhook_outcome, register_wait, release_enrollment, reopen_failed_step,
     resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
     save_enrollment, segment_is_watched, segment_trigger_flows, settle_wait_step, step_zones,
     unhealthy_inputs, update_flow_draft, version_node_counts, wait_filters,
@@ -217,8 +217,8 @@ pub use privacy::{
     ExportDownload, ExportStatus, ExternalKey, MISSING_KEY, PrivacyExport, ReplayReport,
     build_export, delete_person, download_export, erase_person, expire_exports,
     find_erasure_request, find_privacy_export, finish_erasure_call, idempotency_key,
-    list_erasure_calls, list_erasure_requests, list_privacy_exports, replay_erasures,
-    request_erasure, request_export,
+    list_erasure_calls, list_erasure_requests, list_privacy_exports, lock_person_call_shared,
+    replay_erasures, request_erasure, request_export,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;

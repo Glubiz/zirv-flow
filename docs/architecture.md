@@ -2662,6 +2662,24 @@ the result per destination.
 - **Payload lifetime.** A job that ends is deleted by `complete_job`, payload included. A job that
   dies is scrubbed of `external_key` by `fail_job` and `reap_expired`; a retried dead job records
   `failed` with `key_unavailable` and makes no call.
+- **Per-person call lock (sync and erasure).** A sync calls its destination and writes the
+  `sync.succeeded`/`sync.failed` outcome afterwards, so an erasure could commit in between and see
+  no handling evidence. Both sides therefore take a PostgreSQL transaction-level advisory lock
+  (class `0x7a636c6b`, key a bucket of `hashtext(workspace/person)` modulo 1024). `delivery.sync`
+  takes it shared (`lock_sync_person`) before it reads the person and keeps it, on its own job
+  connection, through the call and the outcome write. `erase_person` takes it exclusively for the
+  group's buckets, in ascending bucket order, before any row lock (so a sync waiting for the person
+  row cannot deadlock with it), and holds it through commit. A sync that gets the lock after an
+  erasure reads no subject (the person is gone) and makes no call and writes no outcome. Buckets
+  bound the lock-table cost to one lock per sync and at most 1024 per erasure however large a merged
+  group is; a collision only makes a sync and an unrelated erasure wait for each other. A sync
+  holds its shared lock for the length of its call (the client timeout bounds it), so an erasure of
+  that person waits at most that long. Deliveries and forwarding write their evidence before the
+  call, so they need no such lock.
+- **Settling.** A call row never stays `pending` after its job dies: `fail_job` and `reap_expired`
+  mark it `failed` with `job_dead`, in the statement that buries the job, so an error on the last
+  attempt (a database error, an unopenable credential, a missing pool) is recorded too. Archived
+  destinations that handled the person are planned and settle as `destination_unavailable`.
 - **Forwarding.** `delete_person` deletes pending and dead outbox rows; the suppression hash stays.
 - **API.** `GET .../privacy/erasures` (admin) adds `destination_calls` (destination id, outcome,
   attempts, error code, times) to each request; never a key.

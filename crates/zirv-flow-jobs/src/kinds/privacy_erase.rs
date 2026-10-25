@@ -36,7 +36,7 @@ impl JobKind for PrivacyErase {
             .identifier_key()
             .ok_or(JobError::new("the worker has no master key"))?;
         let trace = ctx.trace().clone();
-        let destinations = list_destinations(ctx.conn(), workspace, false).await?;
+        let destinations = list_destinations(ctx.conn(), workspace, true).await?;
         let targets = erase_targets(&destinations);
         match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &key, &targets, &trace)
             .await?

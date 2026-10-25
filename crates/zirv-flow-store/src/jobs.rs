@@ -409,7 +409,16 @@ pub async fn fail_job<'e>(
                                THEN payload - 'external_key' ELSE payload END, \
                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE id = $1 AND lease_token = $2 AND NOT purge_on_release \
-             RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
+             RETURNING id, workspace_id, kind, payload, state, attempts, trace_id, cause_kind, \
+                       cause_id), \
+         settled AS ( \
+             UPDATE erasure_destination_calls c SET outcome = 'failed', error_code = 'job_dead', \
+                attempts = updated.attempts, updated_at = now() FROM updated \
+             WHERE updated.state = 'dead' AND updated.kind = 'destination.erase' \
+               AND c.outcome = 'pending' \
+               AND c.erasure_id::text = updated.payload ->> 'ledger_id' \
+               AND c.destination_id::text = updated.payload ->> 'destination_id' \
+             RETURNING c.erasure_id), \
          recorded AS ( \
              INSERT INTO decision_records \
                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
@@ -490,7 +499,16 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
                                THEN payload - 'external_key' ELSE payload END, \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE id IN (SELECT id FROM locked WHERE NOT purge_on_release) \
-             RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
+             RETURNING id, workspace_id, kind, payload, state, attempts, trace_id, cause_kind, \
+                       cause_id), \
+         settled AS ( \
+             UPDATE erasure_destination_calls c SET outcome = 'failed', error_code = 'job_dead', \
+                attempts = updated.attempts, updated_at = now() FROM updated \
+             WHERE updated.state = 'dead' AND updated.kind = 'destination.erase' \
+               AND c.outcome = 'pending' \
+               AND c.erasure_id::text = updated.payload ->> 'ledger_id' \
+               AND c.destination_id::text = updated.payload ->> 'destination_id' \
+             RETURNING c.erasure_id), \
          recorded AS ( \
              INSERT INTO decision_records \
                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \

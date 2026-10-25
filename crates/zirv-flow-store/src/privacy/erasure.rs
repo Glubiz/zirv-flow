@@ -279,10 +279,22 @@ pub async fn erase_person(
     // after this commits the drain finds its locked person gone, which is a retryable race, and the
     // batch retries into a new person.
     let mut values: Vec<String> = Vec::new();
+    // The call lock comes before every row lock: a sync that holds it shared across its call, and
+    // then waits for the person row, must never meet an erasure that holds the row and waits for
+    // the lock. Once the erasure has it, no sync is between its call and its outcome for these
+    // people, so the evidence `erasure_calls::plan` reads is complete.
+    let mut known = people.clone();
+    known.push(person);
+    if let Some(current) = crate::current_person(&mut *connection, workspace, person).await? {
+        known.extend(group_ids(connection, workspace, current).await?);
+    }
+    erasure_calls::lock_person_calls_exclusive(connection, workspace, &known).await?;
     let inbox = lock_inbox(connection, workspace, key).await?;
     let mut survivor: Option<Uuid> = None;
     if let Some(group) = lock_group(connection, workspace, person).await? {
         survivor = Some(group.current);
+        // A merge that committed meanwhile may have added members.
+        erasure_calls::lock_person_calls_exclusive(connection, workspace, &group.ids).await?;
         for &id in &group.ids {
             if !people.contains(&id) {
                 people.push(id);

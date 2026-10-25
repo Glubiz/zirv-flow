@@ -382,14 +382,18 @@ pub fn default_rate(config: &Value) -> Option<(i32, i32)> {
     let (_, provider) = provider_of(config).ok()?;
     // The destination's own limit, else the strictest an operation declares.
     let limit = provider.rate_limit.or_else(|| {
-        [&provider.upsert_profile, &provider.remove_profile]
-            .into_iter()
-            .flatten()
-            .filter_map(|spec| spec.rate_limit)
-            .min_by(|a, b| {
-                (u64::from(a.requests) * u64::from(b.per_seconds))
-                    .cmp(&(u64::from(b.requests) * u64::from(a.per_seconds)))
-            })
+        [
+            &provider.upsert_profile,
+            &provider.remove_profile,
+            &provider.erase_profile,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|spec| spec.rate_limit)
+        .min_by(|a, b| {
+            (u64::from(a.requests) * u64::from(b.per_seconds))
+                .cmp(&(u64::from(b.requests) * u64::from(a.per_seconds)))
+        })
     })?;
     let per_second = limit.requests.div_ceil(limit.per_seconds).clamp(1, 100_000);
     let burst = limit.requests.clamp(per_second, 100_000);
@@ -1335,6 +1339,41 @@ mod tests {
         );
         assert_eq!(profile_key_source(&email, SyncOperation::Upsert), None);
         assert_eq!(default_rate(&profiles), Some((10, 10)));
+    }
+
+    #[test]
+    fn the_default_rate_counts_an_erase_profiles_limit_and_an_erase_only_manifest_has_one() {
+        let erase = |limit: Option<Value>| {
+            let mut manifest = serde_json::from_str::<Value>(PROFILES).unwrap();
+            manifest["destination"] = json!({"erase_profile": {
+                "path": "/erasures/{key}",
+                "idempotency_header": "Idempotency-Key",
+                "key_from": {"identity": "email"}
+            }});
+            if let Some(limit) = limit {
+                manifest["destination"]["erase_profile"]["rate_limit"] = limit;
+            }
+            json!({"manifest": manifest})
+        };
+        let strictest = serde_json::from_str::<Value>(PROFILES).unwrap();
+        let mut both = strictest;
+        both["destination"]["erase_profile"] = json!({
+            "path": "/erasures/{key}",
+            "idempotency_header": "Idempotency-Key",
+            "key_from": {"identity": "email"},
+            "rate_limit": {"requests": 2, "per_seconds": 1}
+        });
+
+        assert_eq!(
+            default_rate(&erase(Some(json!({"requests": 4, "per_seconds": 2})))),
+            Some((2, 4))
+        );
+        assert_eq!(default_rate(&erase(None)), None);
+        assert_eq!(
+            default_rate(&json!({"manifest": both})),
+            Some((2, 2)),
+            "the erase limit is stricter than the upsert's 10 per second"
+        );
     }
 
     #[test]

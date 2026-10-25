@@ -162,6 +162,72 @@ async fn resolve(
         .filter(|text| !text.is_empty()))
 }
 
+/// The advisory-lock class of the per-person call lock.
+const CALL_LOCK_CLASS: i32 = 0x7a63_6c6b;
+/// The buckets the call lock hashes people into. A lock is taken per bucket, never per person, so
+/// an erasure of a large merged group takes at most this many locks, and a sync takes one.
+const CALL_LOCK_BUCKETS: i32 = 1024;
+
+/// The distinct lock buckets of `people`, in ascending order: the order every taker locks in.
+async fn call_buckets(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<Vec<i32>, StoreError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT (hashtext($1::text || '/' || p::text) & ($3 - 1)) AS bucket \
+         FROM unnest($2::uuid[]) AS p ORDER BY 1",
+    )
+    .bind(workspace.as_uuid().to_string())
+    .bind(people)
+    .bind(CALL_LOCK_BUCKETS)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
+/// Takes the shared per-person call lock, held to the end of the caller's transaction. A job that
+/// calls a destination about a person and records the outcome afterwards (`delivery.sync`) takes it
+/// before it reads the person and keeps it through the call and the outcome write, so an erasure
+/// cannot plan its erase calls from evidence that has not been written yet. The lock is a
+/// transaction-level advisory lock on the job's own connection; it is bucketed (one lock, shared
+/// with about 1/1024 of all people), which only ever costs a wait.
+pub async fn lock_person_call_shared(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person: Uuid,
+) -> Result<(), StoreError> {
+    for bucket in call_buckets(connection, workspace, &[person]).await? {
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1, $2)")
+            .bind(CALL_LOCK_CLASS)
+            .bind(bucket)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    Ok(())
+}
+
+/// Takes the exclusive call lock of every person in `people`, in bucket order, held to the end of
+/// the transaction. Taking a lock again is free, so the erasure calls it for the people it knows
+/// and again for the group it then locks. It runs before any row lock of the erasure, so a sync
+/// that holds the shared lock and waits for the person row cannot deadlock with it.
+pub(super) async fn lock_person_calls_exclusive(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    for bucket in call_buckets(connection, workspace, people).await? {
+        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+            .bind(CALL_LOCK_CLASS)
+            .bind(bucket)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    }
+    Ok(())
+}
+
 /// The idempotency key of a ledger and destination pair: stable across every retry.
 pub fn idempotency_key(erasure: Uuid, destination: Uuid) -> String {
     format!("erase:{erasure}:{destination}")
@@ -712,6 +778,191 @@ mod tests {
         assert_eq!(find(plan.synced).outcome, EraseCallOutcome::Failed);
         assert_eq!(find(plan.synced).error_code.as_deref(), Some("http_4xx"));
         assert_eq!(find(plan.forwarded).outcome, EraseCallOutcome::Pending);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_job_of_a_person_id_keyed_target_survives_the_purge_of_the_erasure(pool: PgPool) {
+        let plan = planned(&pool).await;
+
+        erase(&pool, &plan).await;
+
+        let rows: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT state, payload FROM jobs WHERE kind = $1 \
+                AND payload ->> 'destination_id' = $2",
+        )
+        .bind(ERASE_CALL_JOB_KIND)
+        .bind(plan.forwarded.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "the person-id keyed job is not purged");
+        assert_eq!(rows[0].0, "ready");
+        assert_eq!(
+            rows[0].1[EXTERNAL_KEY_FIELD],
+            json!(plan.seeded.person.to_string())
+        );
+        assert!(rows[0].1.get("person_id").is_none());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_waits_for_a_sync_between_its_call_and_its_outcome_then_plans_the_call(
+        pool: PgPool,
+    ) {
+        let mut plan = planned(&pool).await;
+        let (ws, person) = (plan.seeded.ws, plan.seeded.person);
+        let late = destination(&pool, ws, "late").await;
+        plan.targets.push(EraseTarget {
+            destination: late,
+            key: ExternalKey::PersonId,
+        });
+        // A sync that has called its destination and has not written its outcome yet.
+        let mut sync = begin(&pool).await.unwrap();
+        lock_person_call_shared(&mut sync, ws, person)
+            .await
+            .unwrap();
+
+        let erasure = {
+            let pool = pool.clone();
+            let targets = plan.targets.clone();
+            let request = plan.request;
+            tokio::spawn(async move {
+                let mut tx = begin(&pool).await.unwrap();
+                erase_person(&mut tx, ws, request, &identifier_key(), &targets, &trace())
+                    .await
+                    .unwrap();
+                commit(tx).await.unwrap();
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        assert!(!erasure.is_finished(), "the erasure waits for the sync");
+
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             VALUES (gen_random_uuid(), $1, $3, $4, now(), now(), \
+                jsonb_build_object('destination_id', $2::text), 'flows', gen_random_uuid(), \
+                'valid')",
+        )
+        .bind(ws.as_uuid())
+        .bind(late)
+        .bind(person)
+        .bind(SYNC_SUCCEEDED_EVENT)
+        .execute(&mut *sync)
+        .await
+        .unwrap();
+        commit(sync).await.unwrap();
+        erasure.await.unwrap();
+
+        let calls = list_erasure_calls(&pool, ws, &[plan.request])
+            .await
+            .unwrap();
+        assert!(
+            calls.iter().any(
+                |call| call.destination_id == late && call.outcome == EraseCallOutcome::Pending
+            ),
+            "the call to the destination the sync reached is planned"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_that_gets_the_lock_after_an_erasure_finds_nobody_to_call(pool: PgPool) {
+        let plan = planned(&pool).await;
+        let ws = plan.seeded.ws;
+        let enrollment: Uuid = sqlx::query_scalar(
+            "SELECT id FROM enrollments WHERE workspace_id = $1 AND person_id = $2",
+        )
+        .bind(ws.as_uuid())
+        .bind(plan.seeded.person)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        erase(&pool, &plan).await;
+        let mut tx = begin(&pool).await.unwrap();
+
+        crate::lock_sync_person(&mut tx, ws, enrollment)
+            .await
+            .unwrap();
+        let subject = crate::read_webhook_subject(&mut tx, ws, enrollment, &[])
+            .await
+            .unwrap();
+
+        assert!(
+            subject.is_none(),
+            "no call and no outcome for an erased person"
+        );
+    }
+
+    /// Plans one pending call with a job of one attempt, claimed.
+    async fn dying_call(pool: &PgPool, lease: std::time::Duration) -> (Planned, crate::ClaimedJob) {
+        let plan = planned(pool).await;
+        erase(pool, &plan).await;
+        sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = $1")
+            .bind(ERASE_CALL_JOB_KIND)
+            .execute(pool)
+            .await
+            .unwrap();
+        let claimed = crate::claim_job(pool, "w", &[ERASE_CALL_JOB_KIND], lease, None)
+            .await
+            .unwrap()
+            .unwrap();
+        (plan, claimed)
+    }
+
+    async fn call_of(pool: &PgPool, plan: &Planned, claimed: &crate::ClaimedJob) -> ErasureCall {
+        let destination: Uuid = claimed.payload["destination_id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        list_erasure_calls(pool, plan.seeded.ws, &[plan.request])
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|call| call.destination_id == destination)
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_dies_by_failing_settles_its_pending_call_as_failed(pool: PgPool) {
+        let (plan, claimed) = dying_call(&pool, std::time::Duration::from_secs(30)).await;
+        assert_eq!(
+            call_of(&pool, &plan, &claimed).await.outcome,
+            EraseCallOutcome::Pending
+        );
+
+        let outcome = crate::fail_job(
+            &pool,
+            claimed.id,
+            claimed.lease_token,
+            std::time::Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, Some(crate::FailOutcome::Dead));
+        let call = call_of(&pool, &plan, &claimed).await;
+        assert_eq!(call.outcome, EraseCallOutcome::Failed);
+        assert_eq!(call.error_code.as_deref(), Some("job_dead"));
+        assert_eq!(call.attempts, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_job_that_dies_by_expiring_settles_its_pending_call_as_failed(pool: PgPool) {
+        let (plan, claimed) = dying_call(&pool, std::time::Duration::from_millis(1)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let reaped = crate::reap_expired(&pool).await.unwrap();
+
+        assert_eq!(reaped.dead, 1);
+        let call = call_of(&pool, &plan, &claimed).await;
+        assert_eq!(call.outcome, EraseCallOutcome::Failed);
+        assert_eq!(call.error_code.as_deref(), Some("job_dead"));
     }
 
     #[test]

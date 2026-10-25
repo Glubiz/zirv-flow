@@ -187,6 +187,9 @@ impl JobKind for DeliverySync {
         {
             keys.push(key.clone());
         }
+        // The shared per-person call lock, to the end of this transaction: an erasure waits for the
+        // outcome below, or runs first and leaves no person to read (architecture 16.3, #227).
+        zirv_flow_store::lock_sync_person(ctx.conn(), job.workspace, job.enrollment).await?;
         let Some(WebhookSubject { person, traits }) =
             read_webhook_subject(ctx.conn(), job.workspace, job.enrollment, &keys).await?
         else {
@@ -1339,5 +1342,42 @@ mod tests {
                 reason: "missing_key"
             }
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_that_meets_an_erasure_in_flight_waits_for_it_then_skips_the_person(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let person = env.person().await;
+        let enrolled = env.enroll(person).await;
+        env.queue(&enrolled, "upsert", 5).await;
+        let claimed = env.claim().await.expect("the sync is ready");
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+        let trace = TraceContext::root(Cause::api("erase"));
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let request = zirv_flow_store::request_erasure(&mut tx, env.ws, person, &key, None, &trace)
+            .await
+            .unwrap()
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        // The erasure has the person's call lock and has not committed.
+        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+        zirv_flow_store::erase_person(&mut erasure, env.ws, request.id, &key, &[], &trace)
+            .await
+            .unwrap();
+
+        let commit_when_the_sync_waits = async {
+            wait_until_something_waits_for_a_lock(&env.pool).await;
+            zirv_flow_store::commit(erasure).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(env.attempt_claimed(claimed), commit_when_the_sync_waits);
+
+        result.unwrap();
+        assert_eq!(env.fake.requests(), 0, "the sync made no call");
+        assert!(env.events("sync.succeeded").await.is_empty());
+        assert!(env.events("sync.failed").await.is_empty());
     }
 }

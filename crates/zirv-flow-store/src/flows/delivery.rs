@@ -34,6 +34,23 @@ pub struct WebhookSubject {
     pub traits: Map<String, Value>,
 }
 
+/// Takes the shared per-person call lock of the person of `enrollment`, held to the end of the
+/// caller's transaction (architecture 16.3, "As built (erase calls, #227)"). A sync takes it before
+/// [`read_webhook_subject`] and keeps it through the destination call and the outcome write: an
+/// erasure takes the same lock exclusively before it reads which destinations handled the person,
+/// so it either waits for the sync's outcome or finds the person gone for the sync, which then
+/// reads no subject and makes no call. Does nothing for an enrollment that is gone.
+pub async fn lock_sync_person(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    enrollment: Uuid,
+) -> Result<(), StoreError> {
+    if let Some(found) = find_enrollment(connection, workspace, enrollment).await? {
+        crate::lock_person_call_shared(connection, workspace, found.person_id).await?;
+    }
+    Ok(())
+}
+
 /// Reads the person of `enrollment` and `trait_keys`, taking no row lock, so the HTTP call that
 /// follows holds nothing an ingest batch or an erasure could wait for. None when the enrollment
 /// or its person is gone (erased), the enrollment exited, or the person was merged into another:

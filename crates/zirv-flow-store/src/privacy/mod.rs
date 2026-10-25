@@ -19,7 +19,7 @@ pub use erasure::{
 pub use erasure_calls::{
     ERASE_CALL_ATTEMPTS, ERASE_CALL_JOB_KIND, EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseTarget,
     ErasureCall, ExternalKey, MISSING_KEY, finish_erasure_call, idempotency_key,
-    list_erasure_calls,
+    list_erasure_calls, lock_person_call_shared,
 };
 pub use export::{
     BuildOutcome, EXPORT_FORMAT, EXPORT_JOB_KIND, ExportCursor, ExportDownload, ExportStatus,
