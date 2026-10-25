@@ -18,7 +18,7 @@ pub(crate) mod rate;
 pub(crate) mod verdict;
 
 pub(crate) use attempt::settle;
-pub(crate) use verdict::{Verdict, verdict_of};
+pub(crate) use verdict::{Verdict, arrived, verdict_of};
 
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,10 @@ pub(crate) struct Attempt {
     pub(crate) verdict: Verdict,
     /// How long the call took.
     pub(crate) elapsed: Duration,
+    /// Whether the destination may have received the call, so it may have acted on it even though
+    /// the verdict is a failure (a timeout or reset after the request was written). Only
+    /// `delivery.send` reads it.
+    pub(crate) may_have_arrived: bool,
 }
 
 /// Delivers `message` through `destination` and judges the answer at `now`.
@@ -49,6 +53,7 @@ pub(crate) async fn send(
     Attempt {
         verdict: verdict_of(&result, now),
         elapsed: started.elapsed(),
+        may_have_arrived: arrived(&result),
     }
 }
 
@@ -286,6 +291,7 @@ mod tests {
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
+            may_have_arrived: false,
         };
 
         let recorded = settle(&mut ctx, None, 1, &done).await.unwrap();
@@ -388,6 +394,7 @@ mod tests {
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
+            may_have_arrived: false,
         };
         settle(&mut ctx, Some(&second), 2, &done).await.unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
@@ -516,6 +523,7 @@ mod tests {
         let done = Attempt {
             verdict: Verdict::Succeeded { status: 200 },
             elapsed: Duration::ZERO,
+            may_have_arrived: false,
         };
 
         // One poll starts the recording and waits for it; the future is dropped there, as the

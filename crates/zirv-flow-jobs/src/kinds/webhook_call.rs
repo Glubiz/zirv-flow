@@ -194,6 +194,7 @@ impl JobKind for WebhookCall {
             Prepared::Failed(verdict) => Attempt {
                 verdict,
                 elapsed: Duration::ZERO,
+                may_have_arrived: false,
             },
         };
 
@@ -343,6 +344,7 @@ async fn deliver(
     let early = |verdict| Attempt {
         verdict,
         elapsed: Duration::ZERO,
+        may_have_arrived: false,
     };
     let Some(keys) = live_signing_keys(ctx.conn(), call.workspace, now).await? else {
         return Ok(early(Verdict::Terminal {

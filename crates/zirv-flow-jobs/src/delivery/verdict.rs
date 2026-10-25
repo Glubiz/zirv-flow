@@ -87,6 +87,13 @@ pub(crate) fn judge_error(error: &HttpError) -> Verdict {
     }
 }
 
+/// Whether a failed call may have reached the destination (a timeout or reset after the request
+/// was written, an oversized answer). A call that never left, an answer, and a mail server's lost
+/// reply (its own verdict, [`DELIVERY_UNCONFIRMED`]) are not this.
+pub(crate) fn arrived(result: &Result<Delivered, DestinationError>) -> bool {
+    matches!(result, Err(DestinationError::Egress(error)) if error.may_have_arrived())
+}
+
 /// The request never got an answer.
 fn transport_failed() -> Verdict {
     Verdict::Retry {
@@ -187,6 +194,51 @@ mod tests {
     use zirv_flow_core::egress::AddressClass;
 
     use super::*;
+
+    #[test]
+    fn only_a_failure_after_the_write_may_have_arrived() {
+        let denied = HttpError::EgressDenied {
+            host: "h".into(),
+            class: AddressClass::Private,
+        };
+        let table = [
+            (Err(DestinationError::Egress(HttpError::Timeout)), true),
+            (
+                Err(DestinationError::Egress(HttpError::Transport("x".into()))),
+                true,
+            ),
+            (Err(DestinationError::Egress(HttpError::BodyTooLarge)), true),
+            (
+                Err(DestinationError::Egress(HttpError::NotSent {
+                    timed_out: true,
+                })),
+                false,
+            ),
+            (
+                Err(DestinationError::Egress(HttpError::NotSent {
+                    timed_out: false,
+                })),
+                false,
+            ),
+            (Err(DestinationError::Egress(denied)), false),
+            (Err(DestinationError::Unreachable), false),
+            (Err(DestinationError::Unconfirmed), false),
+        ];
+        for (result, expected) in table {
+            assert_eq!(arrived(&result), expected, "{result:?}");
+        }
+    }
+
+    #[test]
+    fn a_connect_timeout_keeps_the_timeout_reason_and_a_refused_connect_the_transport_one() {
+        let reason = |error| match judge_error(&error) {
+            Verdict::Retry { reason, .. } => reason,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(reason(HttpError::NotSent { timed_out: true }), "timeout");
+        assert_eq!(reason(HttpError::NotSent { timed_out: false }), "transport");
+        assert_eq!(reason(HttpError::Timeout), "timeout");
+    }
 
     #[test]
     fn every_error_of_a_destination_has_a_verdict_that_agrees_with_its_disposition() {

@@ -440,13 +440,15 @@ async fn decide(
             return Err(error);
         }
     };
-    // A reply lost after the final dot leaves the message possibly accepted. The mark is written
-    // before the attempt is settled, so a settle that fails or a lease that is lost cannot skip it.
+    // A reply lost after the final dot, or a timeout or reset after an HTTP request was written,
+    // leaves the message possibly accepted. The mark is written before the attempt is settled, so
+    // a settle that fails or a lease that is lost cannot skip it.
     let lost_reply = matches!(
         done.verdict,
         Verdict::Retry { reason, .. } if reason == DELIVERY_UNCONFIRMED
     );
-    if lost_reply {
+    let possibly_accepted = lost_reply || done.may_have_arrived;
+    if possibly_accepted {
         mark_message_unconfirmed(&pool, workspace, job.message).await?;
     } else if !matches!(done.verdict, Verdict::Succeeded { .. }) {
         // The outcome proves this call was not accepted: it no longer counts as in flight. A
@@ -462,7 +464,7 @@ async fn decide(
     trail.attempts = number;
     // Once an earlier call may have been accepted, nothing that goes wrong after it shows that it
     // was not: every ending but a sent message and a verdict about the address is unconfirmed.
-    let unconfirmed = carried || lost_reply;
+    let unconfirmed = carried || possibly_accepted;
     match done.verdict {
         Verdict::Succeeded { .. } => {
             trail.pass(GateRecord::passed("delivery"));
@@ -4569,6 +4571,122 @@ mod tests {
         assert_eq!(fake.accepted()[0].key, queued.message.to_string());
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_call_cut_off_after_the_write_ends_delivery_unconfirmed(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        // One attempt, so the retries are exhausted by the cut-off call.
+        let queued = env.queue(person, template, 1).await;
+        fake.script(FakeProviderScript::DropAfterAccept);
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "the provider holds the message, so it is not a definite failure"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_call_refused_at_connect_still_ends_as_a_transport_failure(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 1).await;
+        // The provider goes away: nothing listens, so the request never leaves.
+        drop(fake);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("transport"))
+        );
+        assert!(
+            !message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_message_after_a_cut_off_provider_call_as_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::DropAfterAccept);
+        env.attempt().await.unwrap_err();
+        assert!(
+            message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "a call cut off after the write leaves the unconfirmed mark"
+        );
+        bury_the_jobs(&env).await;
+
+        end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_message_whose_provider_call_never_left_as_an_internal_error(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        drop(fake);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        env.attempt().await.unwrap_err();
+        bury_the_jobs(&env).await;
+
+        end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("internal_error"))
+        );
+    }
+
     /// Gives the person a newer email identity, which the send address then follows.
     async fn move_address(env: &Env, person: Uuid, address: &str) {
         sqlx::query(
@@ -4614,11 +4732,12 @@ mod tests {
         let queued = env.queue(person, template, 5).await;
         fake.script(FakeProviderScript::DropAfterAccept);
         env.attempt().await.unwrap_err();
-        // A provider call cut off by a transport failure is judged not accepted; the carried state
-        // is what a crash after an accepted call leaves, so the test sets it.
-        mark_message_unconfirmed(&env.pool, env.ws, queued.message)
-            .await
-            .unwrap();
+        // The call was cut off after the write, so the first attempt left the message carried.
+        assert!(
+            message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap()
+        );
         move_address(&env, person, "bob@example.com").await;
         // The first attempt spent the gate's only token; the bucket holds one for the next take.
         sqlx::query(
