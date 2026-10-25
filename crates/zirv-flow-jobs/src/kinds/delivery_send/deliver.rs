@@ -13,31 +13,31 @@ use zirv_flow_connectors::destinations::{
     DestinationContext, DkimSigner, ErasedDestination, Outbound,
 };
 use zirv_flow_connectors::http::HttpLimits;
-use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{Destination, VerifiedSender, find_sending_domain};
 
+use crate::delivery::credential::{credential_unavailable, open_credential};
 use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError};
 
 /// One email to hand to a destination.
-pub(super) struct Call<'a> {
-    pub(super) workspace: WorkspaceId,
-    pub(super) destination: &'a Destination,
-    pub(super) driver: &'static dyn ErasedDestination,
+pub(crate) struct Call<'a> {
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) destination: &'a Destination,
+    pub(crate) driver: &'static dyn ErasedDestination,
     /// The sender identity on its verified domain: whose DKIM key signs the message.
-    pub(super) sender: &'a VerifiedSender,
+    pub(crate) sender: &'a VerifiedSender,
     /// The message id: the idempotency key at the destination.
-    pub(super) message: Uuid,
-    pub(super) address: &'a str,
-    pub(super) payload: &'a Value,
+    pub(crate) message: Uuid,
+    pub(crate) address: &'a str,
+    pub(crate) payload: &'a Value,
 }
 
 /// Delivers one email and judges the destination's answer. An error is a failure of this worker or
 /// of the database; the destination's answer, and a credential that cannot be opened, are a
 /// [`Verdict`].
-pub(super) async fn deliver(
+pub(crate) async fn deliver(
     ctx: &mut JobContext<'_>,
     call: &Call<'_>,
     now: OffsetDateTime,
@@ -96,31 +96,6 @@ pub(super) async fn deliver(
     .await)
 }
 
-/// The destination's workspace credential, opened from its sealed secret and merged with its
-/// non-secret fields; an empty one for a destination with none. A credential that cannot be
-/// opened (the worker has no master key, a wrong one, or the credential is gone) is retried like
-/// a transport error and, on the last attempt, recorded as the message's failure.
-async fn open_credential(
-    ctx: &mut JobContext<'_>,
-    workspace: WorkspaceId,
-    destination: &Destination,
-) -> Result<Result<Credential, Verdict>, JobError> {
-    let Some(id) = destination.credential_id else {
-        return Ok(Ok(Credential::new()));
-    };
-    let Some(keyring) = ctx.keyring().cloned() else {
-        return Ok(Err(credential_unavailable()));
-    };
-    match zirv_flow_store::open_credential(ctx.conn(), &keyring, workspace, id).await {
-        Ok(opened) => match Credential::from_parts(&opened.secret, &opened.fields) {
-            Ok(credential) => Ok(Ok(credential)),
-            Err(_) => Ok(Err(credential_unavailable())),
-        },
-        Err(OpenError::Store(error)) => Err(error.into()),
-        Err(OpenError::NotFound | OpenError::Unopenable) => Ok(Err(credential_unavailable())),
-    }
-}
-
 /// The sender domain's DKIM key, opened from its sealed secret and parsed. A key that cannot be
 /// opened (no master key, a wrong one, the domain or its secret gone, or bytes that are not an RSA
 /// key) is the same retryable verdict as an unopenable credential.
@@ -151,15 +126,6 @@ async fn open_signer(
         ),
         Err(OpenError::Store(error)) => Err(error.into()),
         Err(OpenError::NotFound | OpenError::Unopenable) => Ok(Err(credential_unavailable())),
-    }
-}
-
-fn credential_unavailable() -> Verdict {
-    Verdict::Retry {
-        status: None,
-        reason: "credential_unavailable",
-        message: "the destination credential could not be opened",
-        retry_after: None,
     }
 }
 

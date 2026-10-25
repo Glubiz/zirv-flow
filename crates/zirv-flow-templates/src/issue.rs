@@ -201,6 +201,15 @@ pub struct FieldCatalog {
     pub event: BTreeMap<String, PropertyType>,
 }
 
+impl FieldCatalog {
+    /// The catalog plus the reserved `person.email`, a string whatever the registry holds.
+    pub fn with_reserved_email(mut self) -> Self {
+        self.person
+            .insert(crate::context::RESERVED_EMAIL.to_owned(), TraitType::String);
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

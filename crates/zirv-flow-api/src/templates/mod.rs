@@ -15,17 +15,38 @@ pub(crate) mod publish;
 pub(crate) mod where_used;
 
 use serde_json::Value;
-use zirv_flow_store::{Template, TemplateError, TemplateFieldCatalog};
+use zirv_flow_store::{Template, TemplateError, TemplateFieldCatalog, Workspace};
 use zirv_flow_templates::{
     BlocksError, Category, Channel, EmailContent, FieldCatalog, Issue, Mode, Severity,
     TemplateDocument, WebhookContent, parse_template_document,
 };
 
+use crate::AppState;
+use crate::auth::{Need, Principal, authorize};
 use crate::problem::{ApiError, TemplateIssueProblem};
 
-/// The reserved person field the send address will arrive in (`person.email`). It is a string and
-/// always known to a template, whatever the field registry holds.
-const RESERVED_EMAIL: &str = "email";
+/// Authorizes a render of a template: the write role for a sample person, the admin role for a
+/// real one (their values are shown), whose refusal is `template_preview_values_forbidden`.
+pub(crate) async fn authorize_render(
+    state: &AppState,
+    principal: &Principal,
+    ws: zirv_flow_core::WorkspaceId,
+    real_person: bool,
+) -> Result<Workspace, ApiError> {
+    if !real_person {
+        return authorize(state, principal, ws, Need::Write).await;
+    }
+    // Until the `view_pii` grant exists, a real person's values are for admins.
+    authorize(state, principal, ws, Need::Admin)
+        .await
+        .map_err(|error| {
+            if error.status_code() == axum::http::StatusCode::FORBIDDEN {
+                ApiError::template_preview_values_forbidden()
+            } else {
+                error
+            }
+        })
+}
 
 /// The problem for a refused template write.
 pub(crate) fn template_error(error: TemplateError) -> ApiError {
@@ -50,15 +71,11 @@ pub(crate) fn name_taken(error: zirv_flow_store::StoreError) -> ApiError {
 
 /// The renderer's field catalog from the store's read, plus the reserved `person.email`.
 pub(crate) fn field_catalog(read: TemplateFieldCatalog) -> FieldCatalog {
-    let mut catalog = FieldCatalog {
+    FieldCatalog {
         person: read.traits.into_iter().collect(),
         event: read.event_properties.into_iter().collect(),
-    };
-    catalog.person.insert(
-        RESERVED_EMAIL.to_owned(),
-        zirv_flow_core::people::TraitType::String,
-    );
-    catalog
+    }
+    .with_reserved_email()
 }
 
 /// The document as the renderer reads it, or the 422 that says it is not a template document. A

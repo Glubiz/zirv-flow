@@ -38,7 +38,8 @@ pub use content::{
     validate_document,
 };
 pub use context::{
-    MessageContext, RenderContext, SAMPLE_PREFERENCES_URL, SAMPLE_UNSUBSCRIBE_URL, SystemValues,
+    MessageContext, RESERVED_EMAIL, RenderContext, SAMPLE_EMAIL, SAMPLE_PREFERENCES_URL,
+    SAMPLE_UNSUBSCRIBE_URL, SystemValues,
 };
 pub use document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,

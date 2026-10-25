@@ -8,6 +8,7 @@ use crate::{ErasedKind, JobError};
 
 mod ai_transcripts;
 mod delivery_send;
+mod event_forward;
 mod events_retention;
 mod flow_enroll;
 mod flow_lifecycle;
@@ -28,6 +29,7 @@ pub(crate) mod segment_refresh;
 mod sending_domain_verify;
 mod sync_run;
 mod sync_tokens;
+mod template_test_send;
 mod traits_recompute;
 mod traits_slot;
 mod webhook_call;
@@ -59,7 +61,9 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &flow_lifecycle::FlowLifecycle,
     &webhook_call::WebhookCall,
     &delivery_send::DeliverySend,
+    &event_forward::EventForward,
     &sending_domain_verify::SendingDomainVerify,
+    &template_test_send::TemplateTestSend,
 ];
 
 /// The `workspace_id` and the uuid under `id_key` of a payload; `expected` is the error text

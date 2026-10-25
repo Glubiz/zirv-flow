@@ -130,7 +130,9 @@ mod tests {
                 "flow.lifecycle",
                 "webhook.call",
                 "delivery.send",
-                "sending_domain.verify"
+                "event.forward",
+                "sending_domain.verify",
+                "template.test_send"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -180,7 +182,9 @@ mod tests {
                 "flow.lifecycle",
                 "webhook.call",
                 "delivery.send",
+                "event.forward",
                 "sending_domain.verify",
+                "template.test_send",
                 "test.first",
                 "test.second"
             ]

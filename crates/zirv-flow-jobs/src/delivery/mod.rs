@@ -14,6 +14,7 @@
 //! row for the foreign key, so it would wait on a lock its own job holds.
 
 pub(crate) mod attempt;
+pub(crate) mod credential;
 pub(crate) mod rate;
 pub(crate) mod verdict;
 

@@ -50,12 +50,12 @@
 //! last attempt the message fails. A 429 also slows the destination's bucket (`throttle_bucket`).
 //! An attempt row is recorded for every call, and counted after it commits.
 
-mod deliver;
-mod gates;
+pub(crate) mod deliver;
+pub(crate) mod gates;
 mod payload;
 mod policy;
 mod quiet;
-mod render;
+pub(crate) mod render;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -564,7 +564,7 @@ async fn person_gates(
 
 /// A destination answered 429: halve its bucket's rate until its `Retry-After` has passed (the
 /// store caps the wait). A failure to record it is logged and does not change the job's result.
-async fn slow_down(
+pub(crate) async fn slow_down(
     pool: &PgPool,
     destination: &Destination,
     retry_after: Option<Duration>,

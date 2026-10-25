@@ -52,6 +52,8 @@ pub struct RetentionReport {
     pub partitions_dropped: u64,
     pub rejects_deleted: u64,
     pub dedupe_deleted: u64,
+    /// Test-send log rows past their 13 months (architecture 16.3).
+    pub test_sends_deleted: u64,
 }
 
 /// Applies the retention rules as of `now`. Run it in the job's transaction: a rerun after
@@ -106,6 +108,8 @@ pub async fn apply_event_retention(
         |query| query.bind(longest_cutoff).bind(RETENTION_BATCH),
     )
     .await?;
+
+    report.test_sends_deleted = crate::delete_test_sends_before(connection, now).await?;
 
     // Last, so the lock a drop takes is held briefly.
     report.partitions_dropped = drop_old_partitions(connection, default_days, now).await?;
@@ -586,5 +590,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rejects, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn test_sends_older_than_13_months_go_and_newer_ones_stay(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        for age in [10, 300, 420, 500] {
+            sqlx::query(
+                "INSERT INTO test_sends (id, workspace_id, template_id, destination_id, \
+                    sender_identity_id, recipient_hash, render_context, created_at) \
+                 VALUES ($1, $2, $1, $1, $1, $3, 'sample', $4)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(vec![0_u8; 32])
+            .bind(NOW - Duration::days(age))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let report = run(&pool).await;
+
+        assert_eq!(report.test_sends_deleted, 2);
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM test_sends")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 2);
     }
 }

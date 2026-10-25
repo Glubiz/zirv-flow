@@ -9573,6 +9573,714 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/forwarding/dead-letters": {
+      "get": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "The workspace's dead letters, newest first, without their payloads.",
+        "operationId": "list_forwarding_dead_letters",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Letters per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination_id",
+            "in": "query",
+            "description": "Only this destination's letters",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of dead letters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeadLettersBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed limit, cursor or destination id",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/forwarding/re-drive": {
+      "post": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "Puts dead rows back in the queue: one row (`id`), every dead row of a destination\n(`destination_id`), or every dead row of the workspace (an empty body). Attempts start again.\nA re-drive writes no event and starts no flow. Audited as `forwarding.redriven`.",
+        "operationId": "redrive_forwarding",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RedriveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "How many rows were put back",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedriveBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Both `id` and `destination_id` were given",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/forwarding/rules": {
+      "get": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "The workspace's rules, ordered by name.",
+        "operationId": "list_forwarding_rules",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RuleBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "Creates a rule. Audited as `forwarding.rule_created`.",
+        "operationId": "create_forwarding_rule",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A rule with that name exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/forwarding/rules/{id}": {
+      "get": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "One rule.",
+        "operationId": "get_forwarding_rule",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or rule, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "Deletes a rule. Rows it already queued are still delivered. Audited as\n`forwarding.rule_deleted`.",
+        "operationId": "delete_forwarding_rule",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or rule, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "Changes a rule. Audited as `forwarding.rule_updated`.",
+        "operationId": "update_forwarding_rule",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Rule id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRuleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuleBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or rule, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another rule has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid field, no field at all, or `too_many_rules` when turning a rule on",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/forwarding/status": {
+      "get": {
+        "tags": [
+          "forwarding"
+        ],
+        "summary": "The queue depth and the oldest pending lag of each destination that forwards events.",
+        "operationId": "get_forwarding_status",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per destination status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForwardingStatusBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/identity-conflicts": {
       "get": {
         "tags": [
@@ -19664,6 +20372,137 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/templates/{id}/test-send": {
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Sends a template to one workspace member or allowlisted address through a real destination,\nmarked `[TEST]`, with no tracking and no trace in the message log. The reply is the log row,\n`queued`; poll the log for the outcome. At most 10 tests per member and 100 per workspace start in\nany rolling hour. Needs the write role, or the admin role with `person_id`, and the CSRF token.\nAudited as `template.test_sent`, with ids only.",
+        "operationId": "test_send_template",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestSendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The log row, queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestSendBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, a missing CSRF token, or a person asked for without the admin role (`code` is `template_preview_values_forbidden`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, template, version, destination or person, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The template is archived (`template_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The recipient is neither a member nor allowlisted (`recipient_not_allowed`), the template or destination does not do email, or the body is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The member or the workspace reached its hourly limit; `Retry-After` is the seconds until a slot frees (`test_send_rate_limited`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/templates/{id}/versions": {
       "get": {
         "tags": [
@@ -19904,6 +20743,371 @@
           },
           "404": {
             "description": "No such workspace or template, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/test-send-allowlist": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The workspace's test-send allowlist, oldest first.",
+        "operationId": "list_test_send_allowlist",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllowlistBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Allows test sends to an address. The address is normalised, hashed here and stored as the hash,\na masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as\n`test_send.allowlist_added`, with the entry id and nothing else.",
+        "operationId": "add_test_send_allowlist_entry",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AllowlistAddRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllowlistEntryBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The address is on the list already",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The address is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server has no master key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/test-send-allowlist/{id}": {
+      "delete": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "Removes an entry from the allowlist. Needs the workspace admin role and the CSRF token. Audited\nas `test_send.allowlist_removed`, with the entry id and nothing else.",
+        "operationId": "delete_test_send_allowlist_entry",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Entry id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or entry, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/test-sends": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The workspace's test-send log, newest first, optionally of one template (`template_id`).",
+        "operationId": "list_test_sends",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "template_id",
+            "in": "query",
+            "description": "Only the tests of this template",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of the log",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestSendsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit or template_id is out of range or malformed, or before is not a cursor",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22449,6 +23653,56 @@
           }
         }
       },
+      "AllowlistAddRequest": {
+        "type": "object",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The email address a test send may go to.",
+            "example": "qa@example.com"
+          }
+        }
+      },
+      "AllowlistBody": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AllowlistEntryBody"
+            }
+          }
+        }
+      },
+      "AllowlistEntryBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "display_hint",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "display_hint": {
+            "type": "string",
+            "description": "The first character, `***`, then `@domain`. The address itself is stored only sealed and never returned.",
+            "example": "q***@example.com"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "ApiKeyBody": {
         "type": "object",
         "required": [
@@ -23638,6 +24892,50 @@
           }
         }
       },
+      "CreateRuleRequest": {
+        "type": "object",
+        "required": [
+          "destination_id",
+          "name",
+          "event_name",
+          "mapping"
+        ],
+        "properties": {
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Default true. At most 20 rules are active in a workspace."
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "filter": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {},
+            "description": "Default: no predicate."
+          },
+          "mapping": {
+            "type": "object",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 128 characters; unique in the workspace, ignoring case."
+          }
+        }
+      },
       "CreateSegmentRequest": {
         "type": "object",
         "required": [
@@ -24452,6 +25750,80 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/JobBody"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          }
+        }
+      },
+      "DeadLetterBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "destination_id",
+          "rule_id",
+          "event_id",
+          "attempts",
+          "created_at",
+          "died_at"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Attempts in all, re-drives included."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "died_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A fixed code, such as `http_4xx` or `egress_denied`.",
+            "example": "http_4xx"
+          },
+          "event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The outbox row; the id to re-drive it by."
+          },
+          "rule_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "DeadLettersBody": {
+        "type": "object",
+        "required": [
+          "letters"
+        ],
+        "properties": {
+          "letters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeadLetterBody"
             },
             "description": "Newest first."
           },
@@ -27974,6 +29346,20 @@
         },
         "additionalProperties": false
       },
+      "ForwardingStatusBody": {
+        "type": "object",
+        "required": [
+          "destinations"
+        ],
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueStatusBody"
+            }
+          }
+        }
+      },
       "FrequencyCapBody": {
         "type": "object",
         "description": "One frequency cap.",
@@ -30686,6 +32072,36 @@
           }
         }
       },
+      "QueueStatusBody": {
+        "type": "object",
+        "required": [
+          "destination_id",
+          "depth",
+          "oldest_lag_seconds",
+          "dead"
+        ],
+        "properties": {
+          "dead": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Dead letters waiting for a re-drive."
+          },
+          "depth": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows waiting for delivery, a row backed off for a retry included."
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "oldest_lag_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds the oldest waiting row has been past its due time; 0 when none is."
+          }
+        }
+      },
       "QueuedBody": {
         "type": "object",
         "description": "A request that was queued.",
@@ -30812,6 +32228,41 @@
               "type": "string"
             },
             "description": "IP addresses with the host part zeroed: the last IPv4 octet, or all but the first\n48 bits of an IPv6 address. A value that is not an address is removed."
+          }
+        }
+      },
+      "RedriveBody": {
+        "type": "object",
+        "required": [
+          "redriven"
+        ],
+        "properties": {
+          "redriven": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows put back to pending.",
+            "minimum": 0
+          }
+        }
+      },
+      "RedriveRequest": {
+        "type": "object",
+        "properties": {
+          "destination_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Re-drives every dead row of this destination."
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Re-drives this one row, dead or pending."
           }
         }
       },
@@ -31083,6 +32534,71 @@
           "secret": {
             "type": "string",
             "description": "The new shared secret. The old one stopped working when this was issued."
+          }
+        }
+      },
+      "RuleBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "destination_id",
+          "name",
+          "event_name",
+          "filter",
+          "mapping",
+          "active",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The destination the selected events are delivered to."
+          },
+          "event_name": {
+            "type": "string",
+            "description": "The exact name of the events the rule selects.",
+            "example": "order.completed"
+          },
+          "filter": {
+            "type": "array",
+            "items": {},
+            "description": "Property predicates that must all hold, in the segment `where` form."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mapping": {
+            "type": "object",
+            "description": "Output key to source. A source is `{\"from\": \"event.id\"}`, `event.name`, `event.time`,\n`event.received_at`, `person.id`, `{\"from\": \"event.properties\", \"pointer\": \"/a/b\"}`, or\n`{\"value\": <string|number|boolean>}`.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string",
+            "example": "Paid orders"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -34258,6 +35774,173 @@
         },
         "additionalProperties": false
       },
+      "TestSendBody": {
+        "type": "object",
+        "description": "A test send as the log shows it. It holds no address, no hash and no person.",
+        "required": [
+          "id",
+          "template_id",
+          "destination_id",
+          "sender_identity_id",
+          "render_context",
+          "outcome",
+          "created_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "destination_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Also the idempotency key at the destination."
+          },
+          "member_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who asked; null for an API key."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`queued`, `sent`, `suppressed`, `sender_unverified`, `render_failed`, `unconfirmed` or\n`failed`.",
+            "example": "queued"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A fixed code that says why a test did not go out."
+          },
+          "recipient_member_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The workspace member the test went to; null for an allowlisted address."
+          },
+          "render_context": {
+            "type": "string",
+            "description": "`person` when a person's values rendered the template, else `sample`.",
+            "example": "sample"
+          },
+          "sender_identity_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "template_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "template_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The published version sent; null for the draft."
+          }
+        }
+      },
+      "TestSendRecipient": {
+        "type": "object",
+        "description": "Who a test goes to. Exactly one of the two fields is given.",
+        "properties": {
+          "address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An address on the workspace's test-send allowlist.",
+            "example": "qa@example.com"
+          },
+          "member": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "A member of this workspace; the test goes to the address on their account."
+          }
+        }
+      },
+      "TestSendRequest": {
+        "type": "object",
+        "required": [
+          "destination_id",
+          "sender_identity_id",
+          "to"
+        ],
+        "properties": {
+          "destination_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The destination to send through, as a send node names it."
+          },
+          "person_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Render with this person's values; needs the workspace admin role, as a preview does.\nAbsent: the sample person. The person is not recorded in the log."
+          },
+          "sender_identity_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The sender identity, as a send node names it. It must be live on a verified domain, or the\ntest ends `sender_unverified`."
+          },
+          "to": {
+            "$ref": "#/components/schemas/TestSendRecipient"
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The published version to send. Absent: the current draft."
+          }
+        }
+      },
+      "TestSendsBody": {
+        "type": "object",
+        "required": [
+          "test_sends"
+        ],
+        "properties": {
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; null when there is none."
+          },
+          "test_sends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TestSendBody"
+            },
+            "description": "Newest first."
+          }
+        }
+      },
       "TimelineBody": {
         "type": "object",
         "required": [
@@ -34965,6 +36648,46 @@
               "string",
               "null"
             ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateRuleRequest": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "event_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "filter": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {}
+          },
+          "mapping": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "name": {
             "type": [

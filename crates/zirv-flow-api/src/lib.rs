@@ -11,6 +11,7 @@ mod destinations;
 mod events;
 mod feedback;
 mod flows;
+mod forwarding;
 mod health;
 mod imports;
 mod ingest;
@@ -35,6 +36,7 @@ mod setup;
 mod sources;
 mod state;
 mod templates;
+mod test_sends;
 mod trace;
 mod traces;
 mod tracking;
@@ -326,6 +328,19 @@ fn routes() -> Router<AppState> {
             post(templates::preview::preview),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/test-send",
+            post(test_sends::test_send),
+        )
+        .route("/api/v1/workspaces/{ws}/test-sends", get(test_sends::list))
+        .route(
+            "/api/v1/workspaces/{ws}/test-send-allowlist",
+            get(test_sends::allowlist_list).post(test_sends::allowlist_add),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/test-send-allowlist/{id}",
+            delete(test_sends::allowlist_delete),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/segments",
             get(segments::crud::list).post(segments::crud::create),
         )
@@ -553,6 +568,28 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/destinations/{id}/domain-status",
             get(destinations::domain_status::get),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/forwarding/rules",
+            get(forwarding::rules::list).post(forwarding::rules::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/forwarding/rules/{id}",
+            get(forwarding::rules::get)
+                .patch(forwarding::rules::update)
+                .delete(forwarding::rules::remove),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/forwarding/dead-letters",
+            get(forwarding::queue::dead_letters),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/forwarding/status",
+            get(forwarding::queue::status),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/forwarding/re-drive",
+            post(forwarding::queue::redrive),
         )
         .route(
             "/api/v1/workspaces/{ws}/credential-kinds",

@@ -552,7 +552,7 @@ pub async fn rotate_master_key(
 /// Maps the store's refusal of a secret write: a process whose keyring does not hold the key
 /// that wraps the HMAC root would store a row no later keyring opens after a rotation, and a
 /// missing root cannot be ordered against a rotation (serve and worker create it at start).
-fn write_refusal(error: secrets::SecretWriteError) -> AdminError {
+pub(crate) fn write_refusal(error: secrets::SecretWriteError) -> AdminError {
     match error {
         secrets::SecretWriteError::NoRoot => AdminError::Conflict(
             "no HMAC root exists yet; start the server or worker once before storing secrets",

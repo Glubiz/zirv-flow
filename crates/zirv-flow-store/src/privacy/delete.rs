@@ -135,6 +135,7 @@ const DELETIONS: &[&str] = &[
     "DELETE FROM consent WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM debugger_feed WHERE workspace_id = $1 AND (event_id IN         (SELECT id FROM events WHERE workspace_id = $1 AND person_id = ANY($2))         OR reject_id IN         (SELECT id FROM ingest_rejects WHERE workspace_id = $1 AND person_id = ANY($2)))",
+    "DELETE FROM forwarding_outbox WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM events WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM event_dedupe WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM ingest_rejects WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -159,6 +160,8 @@ macro_rules! names_erased_person {
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'delivery.send' AND payload ->> 'person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
+            OR (kind = 'template.test_send' AND payload ->> 'person_id' IN \
+                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)))"
     };
@@ -179,7 +182,7 @@ macro_rules! names_erased_person {
 /// wait for it. So after the mark no matching job changes state, and the delete that follows sees
 /// the rows as they were marked. Marking only the running jobs would miss one that is ready at
 /// the mark, claimed before the delete's snapshot and failed back to ready after it.
-async fn purge_jobs(
+pub(super) async fn purge_jobs(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     people: &[Uuid],
@@ -1081,7 +1084,9 @@ mod tests {
         let enrollment = enrollment_of(&pool, person).await;
         let payload = match kind {
             "flow.step" => serde_json::json!({ "enrollment_id": enrollment }),
-            "webhook.call" | "delivery.send" => serde_json::json!({ "person_id": person }),
+            "webhook.call" | "delivery.send" | "template.test_send" => {
+                serde_json::json!({ "person_id": person })
+            }
             "person.merge.rewrite" => {
                 serde_json::json!({ "workspace_id": ws, "merged_person_id": merged })
             }
@@ -1173,6 +1178,7 @@ mod tests {
         running_flow_step: "flow.step",
         running_webhook_call: "webhook.call",
         running_delivery_send: "delivery.send",
+        running_template_test_send: "template.test_send",
         running_merge_rewrite: "person.merge.rewrite",
         running_flow_enroll: "flow.enroll",
     }

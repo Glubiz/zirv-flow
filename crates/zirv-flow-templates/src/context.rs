@@ -15,6 +15,12 @@ pub const SAMPLE_UNSUBSCRIBE_URL: &str = "https://unsubscribe.sample.invalid/u";
 /// The preference-centre URL of the sample context.
 pub const SAMPLE_PREFERENCES_URL: &str = "https://preferences.sample.invalid/p";
 
+/// The address a sample person has.
+pub const SAMPLE_EMAIL: &str = "sample@example.invalid";
+/// The reserved person field the send address arrives in (`person.email`). It is a string and
+/// always known to a template, whatever the field registry holds.
+pub const RESERVED_EMAIL: &str = "email";
+
 /// The values behind `person`, `event`, `message` and `system` in a template.
 ///
 /// Person traits and event properties carry their registry type (string, number, boolean, list):
@@ -62,6 +68,36 @@ impl RenderContext {
         context.message.id = "msg_sample".to_owned();
         context.system.unsubscribe_url = SAMPLE_UNSUBSCRIBE_URL.to_owned();
         context.system.preferences_url = SAMPLE_PREFERENCES_URL.to_owned();
+        context
+    }
+
+    /// [`Self::sample`] with the sample person's address as `person.email`: what a preview of a
+    /// sample person and a test send with no person render.
+    pub fn sample_person(catalog: &FieldCatalog) -> Self {
+        let mut context = Self::sample(catalog);
+        context
+            .person
+            .insert(RESERVED_EMAIL.to_owned(), Value::from(SAMPLE_EMAIL));
+        context
+    }
+
+    /// The context of a real person: the values of the traits the catalog knows (a trait the
+    /// registry archived is not offered to templates), their own address as `person.email` when
+    /// they have one, and sample event properties, because a preview or a test send has no
+    /// triggering event. `traits` is the person's stored traits object.
+    pub fn real_person(catalog: &FieldCatalog, traits: &Value, email: Option<String>) -> Self {
+        let mut context = Self::sample(catalog);
+        context.person.clear();
+        for key in catalog.person.keys() {
+            if let Some(value) = traits.get(key) {
+                context.person.insert(key.clone(), value.clone());
+            }
+        }
+        if let Some(email) = email {
+            context
+                .person
+                .insert(RESERVED_EMAIL.to_owned(), Value::from(email));
+        }
         context
     }
 }
@@ -113,6 +149,32 @@ mod tests {
         assert_eq!(sample.message.id, "msg_sample");
         assert_eq!(sample.system.unsubscribe_url, SAMPLE_UNSUBSCRIBE_URL);
         assert_eq!(sample, RenderContext::sample(&catalog));
+    }
+
+    #[test]
+    fn the_sample_person_has_the_sample_address() {
+        let sample = RenderContext::sample_person(&FieldCatalog::default());
+        assert_eq!(sample.person[RESERVED_EMAIL], Value::from(SAMPLE_EMAIL));
+        assert_eq!(sample.message.id, "msg_sample");
+    }
+
+    #[test]
+    fn a_real_person_gets_only_the_fields_the_catalog_knows() {
+        let mut catalog = FieldCatalog::default().with_reserved_email();
+        catalog.person.insert("plan".into(), TraitType::String);
+        catalog.person.insert("age".into(), TraitType::Number);
+        let traits = serde_json::json!({"plan": "pro", "secret": "x"});
+
+        let context = RenderContext::real_person(&catalog, &traits, Some("ann@example.com".into()));
+
+        assert_eq!(context.person["plan"], Value::from("pro"));
+        assert_eq!(context.person["email"], Value::from("ann@example.com"));
+        assert!(!context.person.contains_key("secret"));
+        assert!(!context.person.contains_key("age"));
+        let without = RenderContext::real_person(&catalog, &traits, None);
+        assert!(!without.person.contains_key("email"));
+        let not_an_object = RenderContext::real_person(&catalog, &Value::Null, None);
+        assert!(not_an_object.person.is_empty());
     }
 
     #[test]

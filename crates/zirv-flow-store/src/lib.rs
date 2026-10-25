@@ -14,6 +14,7 @@ mod destinations;
 mod events;
 mod feedback;
 mod flows;
+mod forwarding;
 mod identities;
 mod imports;
 mod ingest;
@@ -35,6 +36,7 @@ mod stream_offsets;
 mod suppressions;
 mod sync_runs;
 mod templates;
+mod test_sends;
 mod tracking;
 mod webhooks;
 mod workspace_credentials;
@@ -140,6 +142,14 @@ pub use flows::{
     resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
     save_enrollment, segment_is_watched, segment_trigger_flows, settle_wait_step, step_zones,
     unhealthy_inputs, update_flow_draft, version_node_counts, wait_filters,
+};
+pub use forwarding::{
+    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
+    ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate, RuleWrite, Settled, claim_due,
+    create_rule, defer_row, delete_rule, enqueue_forwarding, enqueue_segment_forwarding,
+    ensure_forward_job, extend_lease, find_rule, forwarding_report, forwarding_status,
+    list_dead_letters, list_rules, lock_rule, next_due, purge_delivered, redrive, settle_row,
+    update_rule,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,
@@ -285,6 +295,15 @@ pub use templates::{
     create_template, document_sender, find_template, find_template_draft, find_template_version,
     list_template_versions, list_templates, lock_template, publish_template,
     read_template_field_catalog, save_template_draft, template_where_used, update_template,
+};
+pub use test_sends::{
+    ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
+    TEST_SEND_JOB_KIND, TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome,
+    TestSendReservation, WORKSPACE_HOURLY_LIMIT, abandon_orphaned_test_sends, add_allowlist_entry,
+    delete_allowlist_by_hash, delete_allowlist_entry, delete_test_sends_before,
+    delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
+    is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
+    reserve_test_send, test_send_may_go,
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,
