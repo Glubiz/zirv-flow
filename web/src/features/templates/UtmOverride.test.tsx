@@ -4,8 +4,9 @@ import { describe, expect, it } from "vitest";
 
 import { mockApi, problem } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
-import { templateDetail, templateRoutes, TEMPLATE_ID } from "../../test/templatesApi";
+import { SENDER_ID, templateDetail, templateRoutes, TEMPLATE_ID } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
+import { DEFAULT_STYLE } from "./blocks/document";
 
 function mount() {
   return renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
@@ -79,6 +80,28 @@ describe("the UTM override of a template", () => {
 
     await screen.findByRole("heading", { name: "Trial nudge" });
     expect(screen.queryByRole("combobox", { name: "UTM parameters on links" })).not.toBeInTheDocument();
+  });
+
+  it("is in the Message tab of the block editor and changing it sends the template update", async () => {
+    const document = {
+      schema: 1,
+      channel: "email",
+      mode: "blocks",
+      blocks: { subject: "Hello", preheader: "", category: "marketing", sender: SENDER_ID, settings: { ...DEFAULT_STYLE }, sections: [] },
+    };
+    const base = templateDetail({}, document);
+    const calls = mockApi(templateRoutes({ detail: { ...base, draft: { ...base.draft, content_type: "blocks" } } }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Message" }));
+    const select = await screen.findByRole("combobox", { name: "UTM parameters on links" });
+    expect(select).toHaveValue("inherit");
+    await user.selectOptions(select, "off");
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT" && !call.path.endsWith("/draft"))).toBe(true));
+    expect(calls.find((call) => call.method === "PUT" && !call.path.endsWith("/draft"))?.body).toEqual({ utm: "off" });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "UTM parameters on links" })).toHaveValue("off"));
   });
 });
 

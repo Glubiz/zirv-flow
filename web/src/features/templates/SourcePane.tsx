@@ -41,7 +41,7 @@ export function SourcePane(props: Props) {
     );
   }
   if (doc.kind === "blocks") {
-    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} canAdmin={props.canAdmin} issues={props.issues} checked={props.checked} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
+    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} canAdmin={props.canAdmin} issues={props.issues} checked={props.checked} template={props.template} onTemplate={props.onTemplate} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
   }
   return doc.kind === "email" ? <EmailPane {...props} doc={doc} /> : <WebhookPane {...props} doc={doc} />;
 }
