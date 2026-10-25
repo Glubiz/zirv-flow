@@ -17035,7 +17035,7 @@
         "tags": [
           "sending"
         ],
-        "summary": "Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or\nquiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.",
+        "summary": "Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or\nquiet hours left out are removed. The body names the revision that was read; settings replaced\nsince are refused with a 409. Workspace admins only. Audited as `send_settings.updated`.",
         "operationId": "put_send_settings",
         "parameters": [
           {
@@ -17092,6 +17092,16 @@
           },
           "404": {
             "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The settings are not at the revision named (`send_settings_revision_mismatch`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -34239,6 +34249,9 @@
       "SendSettingsBody": {
         "type": "object",
         "description": "The send limits of a workspace.",
+        "required": [
+          "revision"
+        ],
         "properties": {
           "frequency_caps": {
             "type": "array",
@@ -34257,6 +34270,11 @@
                 "description": "The quiet hours; null or absent for none."
               }
             ]
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The revision of the settings: counts the replaces, 0 when they were never replaced. A\nreplace names the revision it read; settings replaced since are a 409\n`send_settings_revision_mismatch` and nothing is written. The response carries the new\nrevision."
           }
         }
       },

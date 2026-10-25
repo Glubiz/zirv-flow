@@ -31,3 +31,4 @@ export type { Transform, TraitType, TransformDraft, TransformOp } from "./transf
 export { formatAgo, formatDate, formatDateTime, formatDuration, shortId } from "./format";
 export { builtInRuleText, gateLabel, reasonLabel, SEND_GATES, waitLabel } from "./sendLabels";
 export type { SendGate } from "./sendLabels";
+export { defaultEventFilters, ENGAGEMENT_PROPERTIES, isMachineFilter, MACHINE_HINT, machineFilter, OPENED_EVENT } from "./engagement";

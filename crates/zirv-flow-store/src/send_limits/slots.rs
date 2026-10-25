@@ -221,7 +221,7 @@ mod tests {
             })
             .collect();
         let mut conn = pool.acquire().await.unwrap();
-        replace_send_limits(&mut conn, ws, &caps, None)
+        replace_send_limits(&mut conn, ws, 0, &caps, None)
             .await
             .unwrap();
         drop(conn);

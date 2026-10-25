@@ -2793,7 +2793,8 @@ export interface paths {
         get: operations["get_send_settings"];
         /**
          * Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or
-         *     quiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.
+         *     quiet hours left out are removed. The body names the revision that was read; settings replaced
+         *     since are refused with a 409. Workspace admins only. Audited as `send_settings.updated`.
          */
         put: operations["put_send_settings"];
         post?: never;
@@ -8170,6 +8171,14 @@ export interface components {
             /** @description The frequency caps; all must pass. */
             frequency_caps?: components["schemas"]["FrequencyCapBody"][];
             quiet_hours?: null | components["schemas"]["QuietHoursBody"];
+            /**
+             * Format: int32
+             * @description The revision of the settings: counts the replaces, 0 when they were never replaced. A
+             *     replace names the revision it read; settings replaced since are a 409
+             *     `send_settings_revision_mismatch` and nothing is written. The response carries the new
+             *     revision.
+             */
+            revision: number;
         };
         /** @description A sender identity. */
         SenderIdentityBody: {
@@ -20954,6 +20963,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The settings are not at the revision named (`send_settings_revision_mismatch`) */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

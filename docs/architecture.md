@@ -1191,6 +1191,33 @@ it further, for example by product vertical. Zirv Flow therefore separates:
   channel and dimension values) and a `messages` leaf (count, or the last send,
   on a channel within a window, filterable by dimension values).
 
+**As built (consent UI, #230).**
+
+- **Pages.** `features/consent` gains Dimensions (`w/:ws/consent/dimensions`) and Policy (`w/:ws/consent/policy`),
+  next to Topics and Suppressions under one **Consent** entry with a menu of its own. `features/sending-settings` is new
+  and holds caps and quiet hours (`w/:ws/settings/sending`, **Sending** in the main menu).
+- **Dimensions.** A catalog editor over `/consent/dimensions`: `topic` first and read-only (its values are the topics),
+  declared dimensions with renameable, archivable values, all admin-only. The consent panel on a profile records a choice
+  scoped to dimension values and shows the values each state is scoped to. The consent import dialog (admin, from the
+  Dimensions page) previews with `dry_run` first and names the `dimension:<key>` column of each declared dimension. The
+  suppression import has no dimension values, because suppressions are not scoped by them.
+- **Policy builder.** Ordered rule cards, each with a name and a condition from the segments builder, which takes a
+  `mode`: in `policy` mode its type list also offers the `messages` leaf and the channel-less `consent` leaf
+  (`granted`, `denied`, `none`), and a segment never offers them. Rules reorder with up and down buttons that announce
+  the move in a live region; the built-in `recorded consent` rule moves but has no delete. Save sends the draft
+  `revision` (a 409 offers the latest draft), the issues of a refused draft land on the card that has them, and publish
+  is admin-only and works on the saved revision. The check panel calls `evaluate`, which runs the **published** version,
+  so it names the deciding rule of that version and marks the card in the draft with the same rule id, if there is one.
+  A shared fixture (`web/src/features/consent/__fixtures__/launch-policy.json`) is the body the builder sends for an
+  account-state rule, recorded consent and a cooldown; an API acceptance test publishes it and checks `evaluate`.
+- **OQ-10 default.** Choosing `email.opened` in the segment builder or in a flow's wait, trigger, goal or exit event adds
+  `machine = false` as an ordinary property filter, with the hint "not detected as machine-generated"; removing it counts
+  every open. The AST is unchanged. The builder also knows the `machine` and `machine_reason` properties of the built-in
+  event, which event schemas do not list.
+- **Sending limits.** `GET` and `PUT .../sending/settings`: the form holds the whole document and the `PUT` replaces it.
+  Windows are typed in hours (1 to 744) and sent as ISO 8601 (`P1D` when they divide into days, `PT12H` otherwise). The
+  zone note reads: the person's `timezone` field, then the workspace zone.
+
 **Suppression scope (OQ-19, decided)**. Suppression rows carry
 the scope `workspace` or `organization`. A hard bounce suppresses
 organization-wide, because the address does not exist. Complaints and
