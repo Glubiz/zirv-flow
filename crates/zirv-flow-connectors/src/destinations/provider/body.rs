@@ -108,7 +108,7 @@ mod tests {
                     "secret_field": "hook"}}
             }
         });
-        validate(&manifest).unwrap().provider.unwrap().send
+        validate(&manifest).unwrap().provider.unwrap().send.unwrap()
     }
 
     fn payload() -> Value {

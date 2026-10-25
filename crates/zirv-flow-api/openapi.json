@@ -27989,6 +27989,51 @@
         },
         "additionalProperties": false
       },
+      "FlowActionSyncNode": {
+        "type": "object",
+        "description": "Keeps the person's profile in an external system through a provider destination: `upsert` sends the listed traits under the person's external key, `remove` deletes the profile. Port `next`.",
+        "required": [
+          "type",
+          "id",
+          "destination",
+          "operation"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A live destination whose manifest declares the operation."
+          },
+          "id": {
+            "type": "string",
+            "description": "A stable id, unique in the graph.",
+            "maxLength": 64,
+            "minLength": 1
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "upsert",
+              "remove"
+            ]
+          },
+          "trait_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The traits an upsert sends; a remove lists none.",
+            "maxItems": 50
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "action.sync"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "FlowActionUpdateTraitNode": {
         "type": "object",
         "description": "Changes one trait as the flow's own contribution. Port `next`.",
@@ -28533,6 +28578,7 @@
               "invalid_trait_key",
               "invalid_trait_value",
               "too_many_trait_keys",
+              "trait_keys_not_allowed",
               "invalid_dimension",
               "too_many_dimensions",
               "invalid_cron",
@@ -28552,7 +28598,9 @@
               "webhook_template_unusable",
               "send_template_unusable",
               "send_destination_unusable",
-              "unknown_dimension"
+              "unknown_dimension",
+              "sync_destination_unusable",
+              "operation_unsupported"
             ]
           },
           "edge": {
@@ -28634,6 +28682,9 @@
           },
           {
             "$ref": "#/components/schemas/FlowActionWebhookNode"
+          },
+          {
+            "$ref": "#/components/schemas/FlowActionSyncNode"
           },
           {
             "$ref": "#/components/schemas/FlowActionSendNode"

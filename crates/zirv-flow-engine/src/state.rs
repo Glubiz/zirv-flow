@@ -8,7 +8,7 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zirv_flow_core::flow::{EventMatch, FlowGraph, ListChange, TraitChange};
+use zirv_flow_core::flow::{EventMatch, FlowGraph, ListChange, SyncOperation, TraitChange};
 
 use crate::error::EngineError;
 
@@ -132,6 +132,13 @@ pub enum EffectKind {
         url: String,
         trait_keys: Vec<String>,
         template: Option<Uuid>,
+    },
+    /// External: keeps the person's profile in the external system of `destination`: `operation`
+    /// is an upsert of the listed `trait_keys` or a remove (architecture 10.2).
+    Sync {
+        destination: Uuid,
+        operation: SyncOperation,
+        trait_keys: Vec<String>,
     },
     /// External: one message of `template` through `destination`, passed through the send gates
     /// when the job runs (architecture 10.1). `topic` and `dimensions` are the message's consent

@@ -11,6 +11,7 @@ mod destination;
 mod issue;
 mod model;
 mod parse;
+mod profile;
 
 use serde_json::Value;
 
@@ -22,6 +23,9 @@ pub use issue::{Issue, code};
 pub use model::{
     Auth, CredentialSpec, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation,
     Manifest, PaginationSpec, RateLimitSpec, StreamSpec,
+};
+pub use profile::{
+    KEY_PLACEHOLDER, KeySource, MAX_PROFILE_TRAITS, ProfileMethod, ProfileSpec, TraitPlacement,
 };
 
 use issue::{child, index};

@@ -86,6 +86,9 @@ else.
 - split.random: {\"arms\": [{\"weight\": n}, ...]}, two to ten arms whose weights are positive \
 and add up to 100. Ports: arm_0, arm_1, ...
 - action.webhook: {\"url\": an http or https URL, \"trait_keys\": [trait keys] (optional)}.
+- action.sync: {\"destination\": id of a live provider destination that declares the operation, \
+\"operation\": \"upsert\" or \"remove\", \"trait_keys\": [trait keys] (an upsert only, at most 50)}: \
+keeps the person's profile in that external system.
 - action.send: {\"template\": id of a published email template, \"destination\": id of a live \
 destination, \"topic\": id of a consent topic (optional), \"dimensions\": {dimension key: value \
 key} (optional)}: sends the person that email. Consent, suppression and the sender are checked \

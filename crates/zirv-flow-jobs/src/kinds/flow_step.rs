@@ -34,11 +34,12 @@ use zirv_flow_segments::{
 use zirv_flow_store::{
     EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
     GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, SEND_JOB_KIND, STEP_JOB_KIND,
-    StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent, WEBHOOK_JOB_KIND,
-    append_decisions, apply_flow_list, apply_flow_trait, clear_waits, enqueue, find_enrollment,
-    find_event_of_person, find_flow_version, flow_state_for_step, hold_enrollment, lock_enrollment,
-    record_steps, register_wait, release_enrollment, reopen_failed_step, run_person_batch,
-    save_enrollment, segment_catalog, settle_wait_step, step_zones, unhealthy_inputs, wait_filters,
+    SYNC_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent,
+    WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait, clear_waits, enqueue,
+    find_enrollment, find_event_of_person, find_flow_version, flow_state_for_step, hold_enrollment,
+    lock_enrollment, record_steps, register_wait, release_enrollment, reopen_failed_step,
+    run_person_batch, save_enrollment, segment_catalog, settle_wait_step, step_zones,
+    unhealthy_inputs, wait_filters,
 };
 
 use super::delivery_send::Queued;
@@ -766,6 +767,37 @@ async fn apply_effect(
             }
             .payload()
             .ok_or_else(|| JobError::new("the time cannot be formatted"))?;
+            enqueue(&mut *conn, &job).await?;
+            Ok(Some(label))
+        }
+        EffectKind::Sync {
+            destination,
+            operation,
+            trait_keys,
+        } => {
+            let label = input_freshness(conn, walk).await?;
+            let key = effect
+                .effect_key
+                .clone()
+                .ok_or_else(|| JobError::new("an external effect has no key"))?;
+            let mut job = NewJob::new(SYNC_JOB_KIND, enrollment.trace.clone());
+            job.workspace_id = Some(walk.workspace);
+            job.unique_key = Some(key.clone());
+            job.payload = json!({
+                "workspace_id": walk.workspace,
+                "flow_id": enrollment.flow_id,
+                "version": enrollment.flow_version,
+                "node_id": effect.node,
+                "enrollment_id": enrollment.id,
+                "person_id": enrollment.person_id,
+                "trace_id": enrollment.trace.trace_id,
+                "idempotency_key": key,
+                // The subject of the delivery attempts, minted in the step's transaction.
+                "sync_id": Uuid::now_v7(),
+                "destination_id": destination,
+                "operation": operation.as_str(),
+                "trait_keys": trait_keys,
+            });
             enqueue(&mut *conn, &job).await?;
             Ok(Some(label))
         }
@@ -2411,6 +2443,63 @@ pub(super) mod tests {
         assert_eq!(jobs[0].1["person_id"], ada.to_string());
         assert_eq!(jobs[0].1["idempotency_key"], format!("{id}:hook:webhook"));
         assert_eq!(jobs[0].1["trait_keys"], json!(["plan"]));
+        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_step_enqueues_its_job_under_the_stable_key_with_ids_and_keys_only(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let ada = env
+            .person("ada@example.com", json!({"plan": "SENTINEL"}))
+            .await;
+        let destination = Uuid::from_u128(500);
+        let flow = env
+            .flow(
+                "Sync",
+                json!({"v": 1, "nodes": [
+                    {"id": "push", "type": "action.sync", "destination": destination,
+                     "operation": "upsert", "trait_keys": ["plan"]},
+                    {"id": "drop", "type": "action.sync", "destination": destination,
+                     "operation": "remove"},
+                    {"id": "end", "type": "exit"}
+                ], "edges": [
+                    edge("e1", "push", "next", "drop"),
+                    edge("e2", "drop", "next", "end")
+                ]}),
+            )
+            .await;
+        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+
+        env.run_due().await;
+
+        let mut jobs: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT unique_key, payload FROM jobs WHERE kind = 'delivery.sync' ORDER BY unique_key",
+        )
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(jobs.len(), 2);
+        let (drop_key, drop_payload) = jobs.remove(0);
+        let (push_key, push_payload) = jobs.remove(0);
+        assert_eq!(drop_key, format!("{id}:drop:sync"));
+        assert_eq!(push_key, format!("{id}:push:sync"));
+        assert_eq!(push_payload["operation"], "upsert");
+        assert_eq!(push_payload["trait_keys"], json!(["plan"]));
+        assert_eq!(push_payload["destination_id"], destination.to_string());
+        assert_eq!(push_payload["idempotency_key"], push_key);
+        assert_eq!(push_payload["enrollment_id"], id.to_string());
+        assert_eq!(drop_payload["operation"], "remove");
+        assert_eq!(drop_payload["trait_keys"], json!([]));
+        assert_ne!(push_payload["sync_id"], drop_payload["sync_id"]);
+        let queued = format!("{push_payload}{drop_payload}");
+        assert!(
+            !queued.contains("SENTINEL") && !queued.contains("ada@"),
+            "{queued}"
+        );
         assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
     }
 

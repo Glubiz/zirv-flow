@@ -71,6 +71,9 @@ pub struct Accepted {
     pub key: String,
     /// How many idempotency headers the request carried.
     pub key_headers: usize,
+    /// The HTTP method of the request.
+    pub method: String,
+    /// The path as it arrived on the wire, percent-encoding included.
     pub path: String,
     pub body: Value,
     /// The `Authorization` header, if any.
@@ -371,6 +374,7 @@ fn decide(state: &Mutex<State>, request: &Request) -> Plan {
     state.accepted.push(Accepted {
         key: key.clone(),
         key_headers,
+        method: request.method.clone(),
         path: request.path.clone(),
         body,
         authorization: request.header("authorization").map(str::to_owned),

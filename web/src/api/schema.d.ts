@@ -5848,6 +5848,22 @@ export interface components {
             /** @enum {string} */
             type: "action.send";
         };
+        /** @description Keeps the person's profile in an external system through a provider destination: `upsert` sends the listed traits under the person's external key, `remove` deletes the profile. Port `next`. */
+        FlowActionSyncNode: {
+            /**
+             * Format: uuid
+             * @description A live destination whose manifest declares the operation.
+             */
+            destination: string;
+            /** @description A stable id, unique in the graph. */
+            id: string;
+            /** @enum {string} */
+            operation: "upsert" | "remove";
+            /** @description The traits an upsert sends; a remove lists none. */
+            trait_keys?: string[];
+            /** @enum {string} */
+            type: "action.sync";
+        };
         /** @description Changes one trait as the flow's own contribution. Port `next`. */
         FlowActionUpdateTraitNode: {
             change: components["schemas"]["FlowTraitChange"];
@@ -6001,7 +6017,7 @@ export interface components {
             /** @description A JSON pointer into the node, the edge or the settings object. Inside a condition or a filter it continues with the segment pointer. */
             at?: string;
             /** @enum {string} */
-            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "invalid_dimension" | "too_many_dimensions" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing" | "webhook_template_unusable" | "send_template_unusable" | "send_destination_unusable" | "unknown_dimension";
+            code: "unsupported_version" | "too_many_nodes" | "too_many_edges" | "invalid_id" | "duplicate_node_id" | "duplicate_edge_id" | "unknown_node" | "unknown_port" | "port_wired_twice" | "port_not_wired" | "no_entry" | "multiple_entries" | "cycle" | "unreachable" | "invalid_duration" | "invalid_time" | "invalid_weekdays" | "invalid_event_name" | "invalid_filter" | "no_conditions" | "too_many_conditions" | "invalid_condition" | "too_few_arms" | "too_many_arms" | "invalid_weight" | "weights_not_100" | "invalid_url" | "invalid_trait_key" | "invalid_trait_value" | "too_many_trait_keys" | "trait_keys_not_allowed" | "invalid_dimension" | "too_many_dimensions" | "invalid_cron" | "invalid_timezone" | "exit_on_goal_without_goal" | "goal_criterion_without_goal" | "leaves_segment_without_segment_trigger" | "too_many_exit_criteria" | "unknown_segment" | "unknown_list" | "unknown_trait" | "unknown_event" | "unknown_property" | "unknown_topic" | "webhook_url_refused" | "webhook_secret_missing" | "webhook_template_unusable" | "send_template_unusable" | "send_destination_unusable" | "unknown_dimension" | "sync_destination_unusable" | "operation_unsupported";
             /** @description The id of the edge it concerns, when it does. */
             edge?: string;
             /** @description The id of the node it concerns, when it does. */
@@ -6024,7 +6040,7 @@ export interface components {
             type: "manual";
         };
         /** @description One node of a flow graph: an object whose `type` selects its fields. Unknown keys are refused. */
-        FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionSendNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
+        FlowNode: components["schemas"]["FlowWaitDurationNode"] | components["schemas"]["FlowWaitUntilTimeNode"] | components["schemas"]["FlowWaitUntilEventNode"] | components["schemas"]["FlowBranchNode"] | components["schemas"]["FlowSplitRandomNode"] | components["schemas"]["FlowActionWebhookNode"] | components["schemas"]["FlowActionSyncNode"] | components["schemas"]["FlowActionSendNode"] | components["schemas"]["FlowActionUpdateTraitNode"] | components["schemas"]["FlowActionListNode"] | components["schemas"]["FlowGoalNode"] | components["schemas"]["FlowExitNode"];
         /** @description What a leaf condition saw, flattened out of the evaluation tree. */
         FlowObservedBody: {
             /**
