@@ -1719,6 +1719,72 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rotation_that_drops_a_field_a_provider_manifest_requires_is_refused(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let manifest = provider_manifest(
+            "basic",
+            &[
+                ("username", true),
+                ("password", true),
+                ("hook_secret", true),
+            ],
+            "hook_secret",
+        );
+        let credential = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Basic mail",
+                            "schema": {"fields": [
+                                {"key": "username", "label": "U", "type": "string", "secret": true},
+                                {"key": "password", "label": "P", "type": "string", "secret": true},
+                                {"key": "hook_secret", "label": "H", "type": "string", "secret": true},
+                                {"key": "token", "label": "T", "type": "string", "secret": true}]},
+                            "secret": {"username": "u", "password": "p", "hook_secret": "h"}})),
+            )
+            .await;
+        assert_eq!(
+            credential.status,
+            StatusCode::CREATED,
+            "{:?}",
+            credential.body
+        );
+        let id = credential.body["id"].as_str().unwrap().to_owned();
+        let created = fx
+            .as_admin(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "provider", "name": "Mail",
+                            "config": {"manifest": manifest}, "credential_id": id})),
+            )
+            .await;
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        let rotate = |secret: Value| {
+            let fx = &fx;
+            let path = format!("/credentials/{id}/secret");
+            async move {
+                fx.as_admin("PUT", &path, Some(json!({"secret": secret})))
+                    .await
+            }
+        };
+
+        let refused = rotate(json!({"token": "t"})).await;
+        let kept = rotate(json!({"username": "u2", "password": "p2", "hook_secret": "h2"})).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        let detail = refused.body["detail"].as_str().unwrap();
+        assert!(detail.contains("credential.username"), "{detail}");
+        assert!(detail.contains("required by the manifest"), "{detail}");
+        assert_eq!(kept.status, StatusCode::OK, "{:?}", kept.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_credential_needs_the_master_key(pool: PgPool) {
         zirv_flow_store::migrate(&pool).await.unwrap();
         let name = WorkspaceName::parse("ours").unwrap();

@@ -170,6 +170,7 @@ pub(crate) async fn check_owners(
                 let schema = (destination.kind == "provider")
                     .then(|| manifest_schema(&destination.config))
                     .flatten();
+                check_schema_credential(schema.as_ref(), Some(after))?;
                 zirv_flow_connectors::destinations::validate_credential_fit_with(
                     driver.spec(),
                     &schema_field_names(schema.as_ref()),
