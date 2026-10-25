@@ -48,3 +48,25 @@ pub(crate) fn mark_partition(table: &str) -> String {
     let columns = event_columns("e");
     format!("WITH gone AS (SELECT {columns} FROM {table} e) {WRITE_MARKERS}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_marking_delete_wraps_the_delete_and_counts_its_rows() {
+        let sql = delete_and_mark("DELETE FROM t RETURNING a");
+
+        assert!(sql.starts_with("WITH gone AS (DELETE FROM t RETURNING a), marked AS ("));
+        assert!(sql.ends_with("SELECT count(*) FROM gone"));
+        assert!(sql.contains("ON CONFLICT DO NOTHING"));
+    }
+
+    #[test]
+    fn event_columns_name_a_destination_only_for_sync_outcomes() {
+        let columns = event_columns("e");
+
+        assert!(columns.contains(SYNC_SUCCEEDED_EVENT) && columns.contains(SYNC_FAILED_EVENT));
+        assert!(columns.contains("AS destination") && columns.contains("AS handled_at"));
+    }
+}
