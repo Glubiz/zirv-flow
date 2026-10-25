@@ -193,7 +193,8 @@ pub struct Report {
     pub clock_violations: u64,
     pub bucket_check: Option<BucketCheck>,
     pub queue: Option<QueueStats>,
-    pub db_cpu: Option<CpuStats>,
+    /// CPU of named containers inside the steady window, percent of one core.
+    pub cpu: std::collections::BTreeMap<String, CpuStats>,
     pub verdict: Verdict,
 }
 
@@ -299,7 +300,7 @@ pub fn build(inputs: Inputs, arrivals: &[Arrival], enrolled: &HashMap<String, u6
         clock_violations: violations,
         bucket_check,
         queue: None,
-        db_cpu: None,
+        cpu: std::collections::BTreeMap::new(),
         verdict: Verdict {
             met,
             complete,
@@ -329,19 +330,21 @@ impl Report {
         self
     }
 
-    /// Adds the database CPU samples (`t_us`, percent of one core) inside the steady window.
-    pub fn with_db_cpu(mut self, samples: &[(u64, f64)]) -> Self {
+    /// Adds the CPU samples (`t_us`, percent of one core) of one container inside the steady
+    /// window, under `label`.
+    pub fn with_cpu(mut self, label: &str, samples: &[(u64, f64)]) -> Self {
         let values: Vec<f64> = samples
             .iter()
             .filter(|(t, _)| *t >= self.window.start_us && *t <= self.window.end_us)
             .map(|(_, v)| *v)
             .collect();
-        self.db_cpu = Some(CpuStats {
+        let stats = CpuStats {
             samples: values.len() as u64,
             mean_pct: (!values.is_empty())
                 .then(|| values.iter().sum::<f64>() / values.len() as f64),
             max_pct: values.iter().copied().reduce(f64::max),
-        });
+        };
+        self.cpu.insert(label.to_owned(), stats);
         self
     }
 
@@ -430,9 +433,9 @@ impl Report {
                 ));
             }
         }
-        if let Some(cpu) = &self.db_cpu {
+        for (label, cpu) in &self.cpu {
             out.push_str(&format!(
-                "Database CPU (steady window, {} samples): mean {}, max {} percent of one core\n",
+                "CPU {label} (steady window, {} samples): mean {}, max {} percent of one core\n",
                 cpu.samples,
                 cpu.mean_pct.map_or("n/a".to_owned(), |v| format!("{v:.0}")),
                 cpu.max_pct.map_or("n/a".to_owned(), |v| format!("{v:.0}"))
@@ -785,7 +788,11 @@ mod tests {
 ";
         let cpu = parse_docker_cpu(stats, "pg");
         assert_eq!(cpu.len(), 4);
-        let cpu = report.with_db_cpu(&cpu).db_cpu.unwrap_or_default();
+        let cpu = report
+            .with_cpu("database", &cpu)
+            .cpu
+            .remove("database")
+            .unwrap_or_default();
         assert_eq!(cpu.samples, 2);
         assert_eq!(cpu.mean_pct, Some(150.0));
         assert_eq!(cpu.max_pct, Some(200.0));

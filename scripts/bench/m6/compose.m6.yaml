@@ -5,23 +5,23 @@
 # verified by SQL, so the leader's re-check, which would find no real DNS records, is pushed out to
 # its maximum (720 hours). Several workers: `up --scale zirv-flow-worker=N`; each replica
 # publishes its ops port on the next free host port of 9110-9119.
+# Docker Desktop resolves host.docker.internal itself (192.168.65.254): an extra_hosts host-gateway
+# entry resolved to an IPv6 unique-local address that the egress policy refused, so none is set
+# (on a Linux host add one). The public URL must be https: the renderer refuses tracking links on a
+# plain http base (render_error), so a fixture https name is used; nothing connects to it.
 x-m6-env: &m6-env
   ZIRV_FLOW_EGRESS__ALLOW: ${BENCH_EGRESS_ALLOW:-["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"]}
   ZIRV_FLOW_SENDING__RECHECK_HOURS: "720"
-  ZIRV_FLOW_SERVER__PUBLIC_URL: http://localhost:8080
+  ZIRV_FLOW_SERVER__PUBLIC_URL: ${BENCH_PUBLIC_URL:-https://flow.bench.example.com}
   ZIRV_FLOW_RENDER__POOL_SIZE: ${BENCH_RENDER_POOL:-2}
 
 services:
   zirv-flow:
     environment: *m6-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   zirv-flow-worker:
     environment:
       <<: *m6-env
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     ports: !override
       - "127.0.0.1:9110-9119:9100"
 

@@ -62,16 +62,16 @@ fi
 # SMTP credential and destination on the sink.
 cred="$(state_get M6_CRED)"
 if [ -z "$cred" ] || ! api GET "/workspaces/$ws/credentials/$cred" >/dev/null 2>&1; then
-  cred="$(api_json POST "/workspaces/$ws/credentials" "$(jq -nc --arg h "$M6_SINK_HOST" --argjson p "$M6_SINK_PORT" \
-    '{kind: "smtp", name: "Bench sink", fields: {host: $h, port: $p, tls: "starttls", username: "bench"}, secret: {password: "bench"}}')" | jq -r .id)"
+  cred="$(api_json POST "/workspaces/$ws/credentials" "$(jq -nc --arg n "Bench sink $M6_SINK_HOST" --arg h "$M6_SINK_HOST" --argjson p "$M6_SINK_PORT" \
+    '{kind: "smtp", name: $n, fields: {host: $h, port: $p, tls: "starttls", username: "bench"}, secret: {password: "bench"}}')" | jq -r .id)"
   [ -n "$cred" ] && [ "$cred" != null ] || die "the credential was not created"
   state_put M6_CRED "$cred"
 fi
 config="$(jq -nc --rawfile ca "$M6_SINK_DIR/ca.pem" '{ca_certificate: $ca}')"
 dest="$(state_get M6_DEST)"
 if [ -z "$dest" ] || ! api GET "/workspaces/$ws/destinations/$dest" >/dev/null 2>&1; then
-  dest="$(api_json POST "/workspaces/$ws/destinations" "$(jq -nc --argjson c "$config" --arg cr "$cred" \
-    '{kind: "smtp", name: "Bench sink", config: $c, credential_id: $cr, rate: 1000, burst: 1000}')" | jq -r .id)"
+  dest="$(api_json POST "/workspaces/$ws/destinations" "$(jq -nc --arg n "Bench sink $M6_SINK_HOST" --argjson c "$config" --arg cr "$cred" \
+    '{kind: "smtp", name: $n, config: $c, credential_id: $cr, rate: 1000, burst: 1000}')" | jq -r .id)"
   [ -n "$dest" ] && [ "$dest" != null ] || die "the destination was not created"
   state_put M6_DEST "$dest"
 else

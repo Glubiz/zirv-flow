@@ -7,7 +7,7 @@
 #   BENCH_IMAGE_TAG    release tag of ghcr.io/glubiz/zirv-flow; required for stack.sh up
 #   M6_OUT             results, default <main checkout>/.zirv/work/m6-send-out
 #   M6_SINK_PORT       the sink's port on the host, default 2525
-#   M6_SINK_HOST       the name containers use for the host, default host.docker.internal
+#   M6_SINK_HOST       the sink container's name on the project network, default zirv-m6-sink
 #   M6_DOMAIN          the fixture sending domain, default bench-send.example.com
 #   M6_RCPT_DOMAIN     the people's address domain, default bench.example.com
 #   SENDBENCH          the sendbench binary, default <repo>/target/release/sendbench
@@ -33,7 +33,8 @@ BENCH_IMAGE_TAG_SET="$BENCH_IMAGE_TAG"
 # m4/common.sh defaults the tag; the send bench wants it named explicitly.
 [ -n "$BENCH_IMAGE_TAG_SET" ] || BENCH_IMAGE_TAG_UNSET=1
 M6_SINK_PORT="${M6_SINK_PORT:-2525}"
-M6_SINK_HOST="${M6_SINK_HOST:-host.docker.internal}"
+M6_SINK_HOST="${M6_SINK_HOST:-zirv-m6-sink}"
+M6_SINK_CONTAINER="${M6_SINK_CONTAINER:-zirv-m6-sink}"
 M6_DOMAIN="${M6_DOMAIN:-bench-send.example.com}"
 M6_RCPT_DOMAIN="${M6_RCPT_DOMAIN:-bench.example.com}"
 SENDBENCH="${SENDBENCH:-$m6_root/target/release/sendbench}"

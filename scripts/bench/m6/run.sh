@@ -58,7 +58,7 @@ tpl_key=M6_TPL_HTML
 tpl="$(state_get "$tpl_key")"
 [ -n "$dest" ] && [ -n "$tpl" ] || die "run setup.sh first"
 login || die "cannot sign in; run stack.sh up"
-[ -f "$M6_SINK_DIR/sink.pid" ] && kill -0 "$(cat "$M6_SINK_DIR/sink.pid")" 2>/dev/null || die "the sink is not running; sink.sh start"
+[ "$(docker inspect -f '{{.State.Running}}' "$M6_SINK_CONTAINER" 2>/dev/null)" = true ] || die "the sink is not running; sink.sh start"
 wait_no_cargo
 busy="$(pgc -At -c "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND state IN ('ready', 'running')")"
 [ "$busy" = 0 ] || die "$busy delivery.send jobs are still ready or running: let the previous run drain first"
@@ -66,11 +66,16 @@ busy="$(pgc -At -c "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND s
 # clock_offset: the database clock minus the host clock, microseconds, from the midpoint of a host
 # time bracket around SELECT clock_timestamp(); prints "offset bracket_width".
 clock_offset() {
-  local h1 db h2
-  h1="$(date +%s%6N)"
-  db="$(pgc -At -c "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint")"
-  h2="$(date +%s%6N)"
-  echo "$((db - (h1 + h2) / 2)) $((h2 - h1))"
+  local h1 db h2 best="" best_w=0 i w
+  # `docker exec` makes one bracket slow; keep the tightest of seven.
+  for i in 1 2 3 4 5 6 7; do
+    h1="$(date +%s%6N)"
+    db="$(pgc -At -c "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint")"
+    h2="$(date +%s%6N)"
+    w=$((h2 - h1))
+    if [ -z "$best" ] || [ "$w" -lt "$best_w" ]; then best="$((db - (h1 + h2) / 2))"; best_w="$w"; fi
+  done
+  echo "$best $best_w"
 }
 
 # 1. Workers: fresh processes, so the metrics cover this run only.
@@ -114,9 +119,9 @@ pgc -At -v ws="$ws" -v pat="sb-%@$M6_RCPT_DOMAIN" -v n="$people" -c \
   | split -l 1000 - "$tmp/ids-"
 total=0
 for part in "$tmp"/ids-*; do
-  ids="$(jq -Rsc 'split("\n") | map(select(length > 0))' "$part")"
-  api_json POST "/workspaces/$ws/lists/$list/members" "$(jq -nc --argjson p "$ids" '{person_ids: $p}')" >/dev/null
-  total=$((total + $(jq length <<<"$ids")))
+  jq -Rsc '{person_ids: (split("\n") | map(select(length > 0)))}' "$part" >"$part.json"
+  api POST "/workspaces/$ws/lists/$list/members" "$part.json" >/dev/null
+  total=$((total + $(wc -l <"$part")))
 done
 [ "$total" -eq "$people" ] || die "only $total of $people people exist; run seed.sh with SEED_PEOPLE=$people"
 graph="$(jq -nc --arg t "$tpl" --arg d "$dest" '{v: 1,
@@ -128,23 +133,15 @@ flow="$(api_json POST "/workspaces/$ws/flows" "$(jq -nc --arg n "bench-$label" -
 api POST "/workspaces/$ws/flows/$flow/publish" >/dev/null
 
 # 4. Sampler, start, wait.
-# The sink's cumulative CPU seconds (tasklist, one second resolution) and whether cargo.exe runs.
-sink_cpu_s() {
-  local pid
-  pid="$(cat "$M6_SINK_DIR/winpid" 2>/dev/null)" || return 0
-  tasklist //V //FI "PID eq $pid" //FO CSV //NH 2>/dev/null \
-    | awk -F'","' 'NF > 8 {t = $8; gsub(/"/, "", t); split(t, a, ":"); print a[1] * 3600 + a[2] * 60 + a[3]}'
-}
+# CPU of the database, the workers and the sink (`docker stats`, percent of one core), and whether
+# cargo.exe runs, every few seconds.
 sampler() {
-  local cpu
   while [ ! -e "$out/stop" ]; do
     # shellcheck disable=SC2046
-    docker stats --no-stream --format '{{json .}}' $(compose ps -q) 2>/dev/null \
+    docker stats --no-stream --format '{{json .}}' "$(pg_container)" $(compose ps -q zirv-flow-worker) "$M6_SINK_CONTAINER" 2>/dev/null \
       | jq -c --arg t "$(date -u +%FT%T.%6NZ)" '. + {t: $t}' >>"$out/docker-stats.ndjson" || true
-    cpu="$(sink_cpu_s)"
-    [ -z "$cpu" ] || echo "$(date +%s%6N),$cpu" >>"$out/sink-cpu.csv"
     echo "$(date +%s%6N),$(tasklist //FI 'IMAGENAME eq cargo.exe' 2>/dev/null | grep -ci cargo.exe || true)" >>"$out/cargo.log"
-    sleep 3
+    sleep 1
   done
 }
 # The destination queue gauges are the scheduler leader's (the workers do not publish them), for
@@ -185,7 +182,7 @@ sampler &
 sampler_pid=$!
 queue_sampler &
 queue_pid=$!
-count_since() { awk -F'[:,]' -v t="$1" '$2 + 0 >= t' "$M6_SINK_DIR/arrivals.ndjson" | wc -l; }
+count_since() { MSYS_NO_PATHCONV=1 docker exec "$M6_SINK_CONTAINER" awk -F'[:,]' -v t="$1" '$2 + 0 >= t' /var/arrivals.ndjson | wc -l; }
 
 read -r offset_before width_before < <(clock_offset)
 t0="$(date +%s%6N)"
@@ -210,7 +207,7 @@ read -r offset_after width_after < <(clock_offset)
 uncertainty=$(( width_before > width_after ? width_before : width_after ))
 
 # 5. Collect.
-awk -F'[:,]' -v t="$t0" '$2 + 0 >= t' "$M6_SINK_DIR/arrivals.ndjson" >"$out/arrivals.ndjson"
+MSYS_NO_PATHCONV=1 docker exec "$M6_SINK_CONTAINER" awk -F'[:,]' -v t="$t0" '$2 + 0 >= t' /var/arrivals.ndjson >"$out/arrivals.ndjson"
 for i in "${!ports[@]}"; do
   curl -fsS "http://127.0.0.1:${ports[$i]}/metrics" >"$out/metrics-w$((i + 1)).txt" || true
 done
@@ -222,6 +219,9 @@ pgc -At -v flow="$flow" -c \
   "SELECT 'messages.' || status || coalesce('/' || reason, '') || ' ' || n FROM (SELECT status, reason, count(*) AS n FROM messages WHERE flow_id = :'flow' GROUP BY status, reason) t ORDER BY 1" >"$out/messages.txt"
 pgc -At -c "SELECT 'jobs.' || kind || '.' || state || ' ' || n FROM (SELECT kind, state, count(*) AS n FROM jobs WHERE state IN ('dead', 'ready', 'running') GROUP BY kind, state) t ORDER BY 1" >>"$out/messages.txt"
 pgname="$(docker inspect --format '{{.Name}}' "$(pg_container)" | sed 's|^/||')"
+cpu_args=(--cpu "sink=$M6_SINK_CONTAINER")
+wi=0
+for wname in $(compose ps zirv-flow-worker --format '{{.Name}}'); do wi=$((wi + 1)); cpu_args+=(--cpu "worker$wi=$wname"); done
 {
   echo "clock_offset_before_us=$offset_before bracket_before_us=$width_before"
   echo "clock_offset_after_us=$offset_after bracket_after_us=$width_after"
@@ -243,17 +243,12 @@ for f in "$out"/metrics-w*.txt; do metrics_args+=(--metrics "$f"); done
   "${metrics_args[@]}" --label "$label" --target 300 --tolerance "$tol" --expected "$people" \
   --offset-before-us "$offset_before" --offset-after-us "$offset_after" --uncertainty-us "$uncertainty" \
   "${bucket_args[@]}" --queue "$out/queue.csv" --queue-misses "$(wc -l <"$out/queue.misses" 2>/dev/null || echo 0)" --docker-stats "$out/docker-stats.ndjson" \
-  --db-container "$pgname" --out "$out/report.json" | tee "$out/report.txt"
+  "${cpu_args[@]}" --db-container "$pgname" --out "$out/report.json" | tee "$out/report.txt"
 # Whether the bucket (or the workers) was the limit: a queue stood in the steady window.
-echo "queue_in_window=$(jq -c .queue "$out/report.json") db_cpu_in_window=$(jq -c .db_cpu "$out/report.json")" >>"$out/variant.txt"
+echo "queue_in_window=$(jq -c .queue "$out/report.json") cpu_in_window=$(jq -c .cpu "$out/report.json")" >>"$out/variant.txt"
 jq -c .metrics "$out/report.json" >&2
-# The sink's CPU over the steady window (cores = CPU seconds / wall seconds; tasklist has one
-# second resolution) and whether cargo.exe ran inside it.
+# Whether cargo.exe ran inside the steady window.
 ws_us="$(jq -r .window.start_us "$out/report.json")"
 we_us="$(jq -r .window.end_us "$out/report.json")"
-awk -F, -v s="$ws_us" -v e="$we_us" '
-  $1 >= s && $1 <= e {if (!n++) {t0 = $1; c0 = $2}; t1 = $1; c1 = $2}
-  END {if (n > 1 && t1 > t0) printf "{\"samples\":%d,\"cpu_seconds\":%s,\"mean_cores\":%.2f}\n", n, c1 - c0, (c1 - c0) / ((t1 - t0) / 1e6); else print "{\"samples\":" n + 0 ",\"mean_cores\":null}"}' \
-  "$out/sink-cpu.csv" >"$out/sink-cpu.json"
 cargo_in_window="$(awk -F, -v s="$ws_us" -v e="$we_us" '$1 >= s && $1 <= e && $2 > 0 {n++} END {print n + 0}' "$out/cargo.log")"
-echo "sink_cpu_in_window=$(cat "$out/sink-cpu.json") cargo_samples_in_window=$cargo_in_window" >>"$out/variant.txt"
+echo "cargo_samples_in_window=$cargo_in_window" >>"$out/variant.txt"

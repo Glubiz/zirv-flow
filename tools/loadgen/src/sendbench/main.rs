@@ -127,6 +127,9 @@ enum Command {
         /// The container name whose CPU is the database's.
         #[arg(long, default_value = "")]
         db_container: String,
+        /// More containers whose CPU to report: `label=container` (repeatable).
+        #[arg(long = "cpu")]
+        cpu: Vec<String>,
         /// Write the JSON report here.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -228,6 +231,7 @@ fn run_report(command: Command) -> Result<(), String> {
         queue_misses,
         docker_stats,
         db_container,
+        cpu,
         out,
     } = command
     else {
@@ -260,10 +264,14 @@ fn run_report(command: Command) -> Result<(), String> {
         built = built.with_queue(&report::parse_queue(&read(path, "--queue")?), queue_misses);
     }
     if let Some(path) = &docker_stats {
-        built = built.with_db_cpu(&report::parse_docker_cpu(
-            &read(path, "--docker-stats")?,
-            &db_container,
-        ));
+        let text = read(path, "--docker-stats")?;
+        if !db_container.is_empty() {
+            built = built.with_cpu("database", &report::parse_docker_cpu(&text, &db_container));
+        }
+        for entry in &cpu {
+            let (label, name) = entry.split_once('=').ok_or("--cpu is label=container")?;
+            built = built.with_cpu(label, &report::parse_docker_cpu(&text, name));
+        }
     }
     let mut samples = Vec::new();
     for path in &metrics {
