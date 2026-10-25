@@ -217,6 +217,21 @@ describe("dead letters", () => {
     expect(bodies[1]).toEqual({ destination_id: DEST_ID });
   });
 
+  it("offers the whole-workspace re-drive only without a filter, and says which scope each button covers", async () => {
+    mockApi(base());
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByRole("button", { name: "Re-drive all dead letters" })).toBeInTheDocument();
+    expect(screen.getByText("Re-drives the dead letters of the whole workspace.")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Destination", { selector: "select" }), DEST_ID);
+
+    expect(screen.queryByRole("button", { name: "Re-drive all dead letters" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Re-drive this destination" })).toBeInTheDocument();
+    expect(screen.getByText("Re-drives only the dead letters of Order hook.")).toBeInTheDocument();
+  });
+
   it("shows an empty state when nothing is dead", async () => {
     mockApi(base({ [`GET ${WS}/forwarding/dead-letters`]: () => json({ letters: [], next_before: null }) }));
     mount();

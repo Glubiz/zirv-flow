@@ -325,9 +325,15 @@ function DeadLettersPanel({ workspaceId, known, onRedriven }: { workspaceId: str
           </SelectField>
           {destinationId !== "" ? (
             <Button onClick={() => setScope({ kind: "destination", id: destinationId })}>Re-drive this destination</Button>
-          ) : null}
-          <Button onClick={() => setScope({ kind: "all" })}>Re-drive all dead letters</Button>
+          ) : (
+            <Button onClick={() => setScope({ kind: "all" })}>Re-drive all dead letters</Button>
+          )}
         </div>
+        <p className="faint">
+          {destinationId !== ""
+            ? `Re-drives only the dead letters of ${nameOf(known, destinationId)}.`
+            : "Re-drives the dead letters of the whole workspace."}
+        </p>
         <p role="status" className="muted">
           {result}
         </p>
