@@ -75,13 +75,15 @@ pub(crate) fn judge_error(error: &HttpError) -> Verdict {
             status: None,
             reason: "egress_denied",
         },
-        HttpError::Timeout => Verdict::Retry {
+        HttpError::Timeout | HttpError::NotSent { timed_out: true } => Verdict::Retry {
             status: None,
             reason: "timeout",
             message: "the request to the destination timed out",
             retry_after: None,
         },
-        HttpError::BodyTooLarge | HttpError::Transport(_) => transport_failed(),
+        HttpError::BodyTooLarge
+        | HttpError::Transport(_)
+        | HttpError::NotSent { timed_out: false } => transport_failed(),
     }
 }
 
