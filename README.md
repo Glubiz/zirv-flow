@@ -2217,6 +2217,19 @@ prefetch_user_agents = ["my-gateway-fetcher"]
 
 or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
+## Template editor and delivery counts
+
+The web app has a Templates page. A template is written as HTML or MJML (chosen when it is made; the
+Blocks mode arrives with the block editor) in a split view: the code fields on the left, the preview on
+the right. The draft is saved as you type and the server renders it again for the preview, shown in a
+sandboxed iframe, so the app never renders template HTML itself. Admins can preview as a real person,
+publish, and send tests. A flow's send step chooses a published template and a destination; a sync step
+chooses a destination and the traits to keep in an external system.
+
+`GET /api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts` also returns, per node, the delivery counts
+read from the version's message rows when asked: `sent`, `send_failed` and `skipped`, a list of
+`{reason, count}` sorted by reason. Test messages and messages still pending or sending are not counted.
+
 ## Template test sends
 
 A test send sends one template through a real destination to one person who agreed to receive it: a
