@@ -16,7 +16,6 @@ interface Props {
   doc: Editable;
   onChange: (next: Editable) => void;
   readOnly: boolean;
-  canAdmin: boolean;
   onConvert?: () => void;
   issues: readonly TemplateIssue[];
   checked: boolean;
@@ -37,7 +36,7 @@ export function SourcePane(props: Props) {
     );
   }
   if (doc.kind === "blocks") {
-    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} canAdmin={props.canAdmin} issues={props.issues} checked={props.checked} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
+    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} issues={props.issues} checked={props.checked} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
   }
   return doc.kind === "email" ? <EmailPane {...props} doc={doc} /> : <WebhookPane {...props} doc={doc} />;
 }
@@ -58,7 +57,7 @@ function insertInto(element: Field | null, value: string, tag: string, set: (nex
   }
 }
 
-function EmailPane({ workspaceId, doc, onChange, readOnly, canAdmin, issues, checked }: Props & { doc: Extract<Editable, { kind: "email" }> }) {
+function EmailPane({ workspaceId, doc, onChange, readOnly, issues, checked }: Props & { doc: Extract<Editable, { kind: "email" }> }) {
   const [tab, setTab] = useState<EmailTab>("source");
   const field = useRef<HTMLTextAreaElement>(null);
   const email = doc.email;
@@ -85,7 +84,7 @@ function EmailPane({ workspaceId, doc, onChange, readOnly, canAdmin, issues, che
       <TabBar label="Editor fields" tabs={tabs} tab={tab} onTab={setTab} />
       <div role="tabpanel" aria-label={tabs.find((entry) => entry.id === tab)?.label} className="stack">
         {tab === "settings" ? (
-          <Settings workspaceId={workspaceId} doc={doc} onChange={set} readOnly={readOnly} canAdmin={canAdmin} issues={issues} />
+          <Settings workspaceId={workspaceId} doc={doc} onChange={set} readOnly={readOnly} issues={issues} />
         ) : (
           <>
             <TextAreaField
@@ -122,30 +121,18 @@ function Settings({
   doc,
   onChange,
   readOnly,
-  canAdmin,
   issues,
 }: {
   workspaceId: string;
   doc: Extract<Editable, { kind: "email" }>;
   onChange: (patch: Partial<Extract<Editable, { kind: "email" }>["email"]>) => void;
   readOnly: boolean;
-  canAdmin: boolean;
   issues: readonly TemplateIssue[];
 }) {
   const email = doc.email;
   return (
     <div className="stack">
-      {canAdmin ? (
-        <SenderPicker workspaceId={workspaceId} value={email.sender} onChange={(sender) => onChange({ sender })} disabled={readOnly} />
-      ) : (
-        <TextField
-          label="Sender identity"
-          value={email.sender}
-          readOnly
-          mono
-          hint="Workspace admins choose the sender."
-        />
-      )}
+      <SenderPicker workspaceId={workspaceId} value={email.sender} onChange={(sender) => onChange({ sender })} disabled={readOnly} />
       <FieldIssues issues={issuesAt(issues, "/email/sender")} />
       <TextField
         label="Language"

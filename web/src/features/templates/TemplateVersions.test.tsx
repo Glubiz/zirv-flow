@@ -72,13 +72,13 @@ describe("publishing", () => {
     expect(await within(dialog).findByText("The draft has blocking issues.")).toBeInTheDocument();
   });
 
-  it("hides publishing from a member who is not an admin", async () => {
+  it("hides publishing from a member who is not an admin, and offers the test send", async () => {
     mockApi(templateRoutes({ role: "member" }));
     mount();
 
     await screen.findByTitle("Preview of the message");
     expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Test send" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Test send" })).toBeInTheDocument();
   });
 
   it("waits for the preview before it allows a publish", async () => {

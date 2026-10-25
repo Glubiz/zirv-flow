@@ -231,7 +231,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             Save draft
           </Button>
         ) : null}
-        {editable && canAdmin && template.channel === "email" ? (
+        {editable && template.channel === "email" ? (
           <Button onClick={() => setTesting(true)}>Test send</Button>
         ) : null}
         {editable && canAdmin ? (
@@ -259,7 +259,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} />
           {canWrite ? (
             <PreviewPane
               workspaceId={workspaceId}

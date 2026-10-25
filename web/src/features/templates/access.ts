@@ -5,7 +5,7 @@ interface TemplateAccess {
   ready: boolean;
   /** Create templates, save drafts and preview a sample person: any member. */
   canWrite: boolean;
-  /** Publish, preview a real person and read the destination and sender lists: workspace admins and the owner. */
+  /** Publish and preview a real person: workspace admins and the owner. */
   canAdmin: boolean;
 }
 

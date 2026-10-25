@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   DESTINATION_ID,
   deliveryRoutes,
+  destinationOptions,
   FLOW_ID,
   flowRoutes,
   HOOK_TEMPLATE_ID,
@@ -12,6 +13,7 @@ import {
   TEMPLATE_ID,
   TOPIC_ID,
   versionBody,
+  WEBHOOK_DESTINATION_ID,
   WS,
 } from "../../test/flowsApi";
 import { lastGraph, mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
@@ -138,17 +140,105 @@ describe("the send and sync steps in the editor", () => {
     }, SAVE);
   });
 
-  it("shows the chosen destination to a member who cannot list the destinations", async () => {
-    mockApi(
-      routes({ [`GET ${WS}/destinations`]: () => problem(403, "Forbidden", "Only workspace admins can list destinations.") }, "member"),
-    );
+  it("shows the chosen destination's id to a reader who cannot read the options", async () => {
+    mockApi(routes({ [`GET ${WS}/destinations/options`]: () => problem(403, "Forbidden", "Needs the write role.") }, "member"));
     const user = userEvent.setup();
     mount();
 
     const sheet = await openSheetOf(user, /^Send an email: Send an email/);
 
     expect(await within(sheet).findByText(DESTINATION_ID)).toBeInTheDocument();
-    expect(within(sheet).getByText(/Workspace admins choose them/)).toBeInTheDocument();
+    expect(within(sheet).getByText("Needs the write role.")).toBeInTheDocument();
+  });
+
+  it("shows an error with a retry when the destinations cannot load", async () => {
+    let attempts = 0;
+    mockApi(
+      routes({
+        [`GET ${WS}/destinations/options`]: () => {
+          attempts += 1;
+          return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json(destinationOptions());
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const retries = await within(sheet).findAllByRole("button", { name: "Try again" });
+    await user.click(retries[0] as HTMLElement);
+
+    expect(await within(sheet).findByLabelText("Destination")).toHaveValue(DESTINATION_ID);
+  });
+
+  it("says Loading destinations while the options are on their way", async () => {
+    mockApi(routes({ [`GET ${WS}/destinations/options`]: () => new Promise<Response>(() => undefined) }));
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+
+    expect(await within(sheet).findByRole("option", { name: "Loading destinations" })).toBeInTheDocument();
+  });
+
+  it("lists only the destinations that can send email in a send step, by name", async () => {
+    mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+    const select = await within(sheet).findByLabelText("Destination");
+
+    expect(within(select).getByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: "Order hook" })).not.toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: "Profile store" })).not.toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: "Old mail" })).not.toBeInTheDocument();
+  });
+
+  it("lists only the destinations that can sync profiles in a sync step", async () => {
+    mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openSheetOf(user, /^Sync a profile: /);
+    const select = await within(sheet).findByLabelText("Destination");
+
+    expect(within(select).getByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "Profile store" })).toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: "Order hook" })).not.toBeInTheDocument();
+    expect(within(select).queryByRole("option", { name: "Old mail" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the name of a chosen destination that can no longer send, with a warning", async () => {
+    mockApi(
+      routes({
+        [`GET ${WS}/destinations/options`]: () =>
+          json([{ id: DESTINATION_ID, name: "Transactional mail", archived: false, capabilities: { send: false, sync: true, erase: false } }]),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+
+    expect(await within(sheet).findByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
+    expect(within(sheet).getByText(/Transactional mail cannot send email/)).toBeInTheDocument();
+  });
+
+  it("says why when no destination can send email and shows a chosen unknown id", async () => {
+    mockApi(
+      routes({
+        [`GET ${WS}/destinations/options`]: () =>
+          json([{ id: WEBHOOK_DESTINATION_ID, name: "Order hook", archived: false, capabilities: { send: false, sync: false, erase: false } }]),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const sheet = await openSheetOf(user, /^Send an email: Send an email/);
+
+    expect(await within(sheet).findByText(/No destination can send email/)).toBeInTheDocument();
+    expect(within(sheet).getByRole("option", { name: DESTINATION_ID })).toBeInTheDocument();
   });
 
   it("shows an error with a retry when the templates cannot load", async () => {

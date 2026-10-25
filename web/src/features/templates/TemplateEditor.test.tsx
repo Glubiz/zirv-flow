@@ -10,6 +10,7 @@ import {
   previewBody,
   previews,
   templateDetail,
+  SENDER_ID,
   templateRoutes,
   TEMPLATE_ID,
   type Doc,
@@ -188,5 +189,15 @@ describe("editing a code template", () => {
 
     await waitFor(() => expect(drafts(calls)).toHaveLength(1), WAIT);
     expect(((drafts(calls)[0] as Doc)["webhook"] as Doc)["headers"]).toEqual({ "X-Key": "{{ person.city }}" });
+  });
+  it("lets a writer who is not an admin pick the sender by name on the Settings tab", async () => {
+    mockApi(templateRoutes({ role: "member" }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Settings" }));
+
+    expect(await screen.findByRole("option", { name: "Acme <hello@mail.acme.example>" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Sender identity")).toHaveValue(SENDER_ID);
   });
 });

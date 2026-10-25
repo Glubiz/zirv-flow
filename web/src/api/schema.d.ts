@@ -1025,6 +1025,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/destinations/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's destinations as picker options, archived ones included and marked, ordered by
+         *     name. Needs the write role: this is what a writer picks a flow step's destination from.
+         */
+        get: operations["list_destination_options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/destinations/{id}": {
         parameters: {
             query?: never;
@@ -2728,6 +2748,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/sender-identities/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's sender identities as picker options, archived ones included and marked, by
+         *     address. Needs the write role: this is what a writer picks a template's sender from.
+         */
+        get: operations["list_sender_identity_options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/sender-identities/{id}": {
         parameters: {
             query?: never;
@@ -3447,6 +3487,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/test-send-allowlist/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The test-send allowlist as picker options, oldest first. Needs the write role: this is what a
+         *     writer picks a test recipient from.
+         */
+        get: operations["list_test_send_allowlist_options"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/test-send-allowlist/{id}": {
         parameters: {
             query?: never;
@@ -4019,6 +4079,16 @@ export interface components {
             display_hint: string;
             /** Format: uuid */
             id: string;
+        };
+        /** @description One allowlisted address a writer may pick as a test recipient. */
+        AllowlistOptionBody: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description The masked address, as the admin list shows it. The address itself is never returned.
+             * @example q***@example.com
+             */
+            name: string;
         };
         ApiKeyBody: {
             /** Format: date-time */
@@ -5101,6 +5171,15 @@ export interface components {
             /** @description The sync modes the stream supports: `full_refresh`, `incremental`, `stream`. */
             sync_modes: string[];
         };
+        /** @description What a destination can do, from its type and, for a provider, its manifest. */
+        DestinationAbilitiesBody: {
+            /** @description Declares the erase capability. */
+            erase: boolean;
+            /** @description Delivers email: an `action.send` step may name it. */
+            send: boolean;
+            /** @description Runs profile operations: an `action.sync` step may name it. */
+            sync: boolean;
+        };
         DestinationBody: {
             /** @description An archived destination is read-only history. */
             archived: boolean;
@@ -5109,6 +5188,8 @@ export interface components {
              * @description The most deliveries it may take at once.
              */
             burst: number;
+            /** @description What the destination can do. */
+            capabilities: components["schemas"]["DestinationAbilitiesBody"];
             /** @description The plain settings. Never holds a credential. */
             config: {
                 [key: string]: unknown;
@@ -5185,6 +5266,18 @@ export interface components {
              */
             kind: string;
             label: string;
+        };
+        /** @description One destination a writer may pick: no settings, no credential. */
+        DestinationOptionBody: {
+            /**
+             * @description An archived destination is listed so a step that names it still shows its name; it
+             *     cannot be picked.
+             */
+            archived: boolean;
+            capabilities: components["schemas"]["DestinationAbilitiesBody"];
+            /** Format: uuid */
+            id: string;
+            name: string;
         };
         DestinationStatsBody: {
             /**
@@ -8351,6 +8444,20 @@ export interface components {
             reply_to?: string | null;
             /** Format: date-time */
             updated_at: string;
+        };
+        /** @description One sender identity a writer may pick: the display name and address, no domain settings. */
+        SenderIdentityOptionBody: {
+            /**
+             * @description An archived identity is listed so a template that names it still shows its name; it
+             *     cannot send.
+             */
+            archived: boolean;
+            /** @example news@example.com */
+            from_address: string;
+            /** Format: uuid */
+            id: string;
+            /** @description The display name. */
+            name: string;
         };
         /** @description A sending domain. It never carries the private key or the id of its secret. */
         SendingDomainBody: {
@@ -13634,6 +13741,56 @@ export interface operations {
             };
             /** @description The server has no master key to seal the credential */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_destination_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The options: id, name, state and capabilities, nothing else */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationOptionBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20649,6 +20806,56 @@ export interface operations {
             };
         };
     };
+    list_sender_identity_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The options: id, name, address and state, nothing else */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SenderIdentityOptionBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_sender_identity: {
         parameters: {
             query?: never;
@@ -23898,6 +24105,56 @@ export interface operations {
             };
             /** @description The server has no master key */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_send_allowlist_options: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The options: id and masked address, nothing else */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistOptionBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
