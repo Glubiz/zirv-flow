@@ -243,6 +243,26 @@ describe("delivery counts on the canvas", () => {
     expect(within(wait).queryByText(/sent|skipped/)).not.toBeInTheDocument();
   });
 
+  it("offers a retry when the counts cannot be read", async () => {
+    let attempts = 0;
+    const base = countsRoutes();
+    mockApi({
+      ...base,
+      [`GET ${FLOW}/versions/2/counts`]: (request) => {
+        attempts += 1;
+        return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : (base[`GET ${FLOW}/versions/2/counts`] as Handler)(request);
+      },
+    });
+    const user = userEvent.setup();
+    mount();
+    await openCounts(user);
+
+    const card = await screen.findByRole("group", { name: "Counts and versions" });
+    await user.click(await within(card).findByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByRole("group", { name: /^Send an email.*30 entered/ })).toBeInTheDocument();
+  });
+
   it("lists the delivery counts in words in the table", async () => {
     mockApi(countsRoutes());
     const user = userEvent.setup();

@@ -123,7 +123,9 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
             <SelectField label="Destination" value={destination} onChange={(event) => setDestination(event.target.value)}>
               <option value="">Choose a destination</option>
               {destinations.status === "ready"
-                ? destinations.data.map((entry) => (
+                ? destinations.data
+                    .filter((entry) => !entry.archived)
+                    .map((entry) => (
                     <option key={entry.id} value={entry.id}>
                       {entry.name}
                     </option>

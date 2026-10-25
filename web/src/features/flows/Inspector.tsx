@@ -442,7 +442,12 @@ function Tally({
     );
   }
   if (counts.status === "error") {
-    return <InlineError {...describeError(counts.error)} />;
+    return (
+      <div className="stack">
+        <InlineError {...describeError(counts.error)} />
+        <Button onClick={counts.reload}>Try again</Button>
+      </div>
+    );
   }
   return (
     <details>

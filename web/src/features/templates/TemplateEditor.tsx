@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, InlineError, Pill } from "../../ui";
+import { Button, Dialog, InlineError, Pill } from "../../ui";
+import { useLeaveGuard } from "../segments";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
 import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
+import { TabBar } from "./TabBar";
 import { TestSendDialog } from "./TestSendDialog";
 import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
@@ -65,8 +67,10 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const timer = useRef<number | undefined>(undefined);
   const live = useRef(true);
 
-  /** Saves the draft if it changed. Resolves false when the save failed. */
-  const flush = useCallback(async (): Promise<boolean> => {
+  /** The saves queued so far: one runs at a time, so an older draft never lands after a newer one. */
+  const queue = useRef<Promise<boolean>>(Promise.resolve(true));
+
+  const saveDraft = useCallback(async (): Promise<boolean> => {
     if (!dirty.current) return true;
     const sent = revision.current;
     setSave("saving");
@@ -93,6 +97,17 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
       return false;
     }
   }, [workspaceId, template.id]);
+
+  /** Saves the draft if it changed, after any save already running. Resolves false when the save failed. */
+  const flush = useCallback((): Promise<boolean> => {
+    const next = queue.current.then(saveDraft);
+    queue.current = next;
+    return next;
+  }, [saveDraft]);
+  const flushNow = useRef(flush);
+  useEffect(() => {
+    flushNow.current = flush;
+  });
 
   const refresh = useCallback(async () => {
     const mine = ++run.current;
@@ -133,6 +148,9 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     live.current = true;
     return () => {
       live.current = false;
+      window.clearTimeout(timer.current);
+      // Leaving inside the debounce, or while a save runs, still saves the newest content.
+      if (dirty.current) void flushNow.current();
     };
   }, []);
 
@@ -150,6 +168,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     void refresh();
   }
 
+  const guard = useLeaveGuard(editable && save !== "saved");
   const issues: readonly TemplateIssue[] = preview.status === "ready" ? preview.data.issues : [];
   const blocking = blockingCount(issues);
   const status = statusOf(template);
@@ -171,21 +190,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           <Pill tone={status.tone}>{status.label}</Pill>
           <span className="faint">{modeLabel(doc)}</span>
         </span>
-        <div className="fl-tabs" role="tablist" aria-label="Template views">
-          {TABS.map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              role="tab"
-              className="fl-tab"
-              aria-selected={tab === entry.id}
-              tabIndex={tab === entry.id ? 0 : -1}
-              onClick={() => setTab(entry.id)}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </div>
+        <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={setTab} />
         <div className="fl-status" role="status">
           {!editable ? (
             <span className="muted">{archived ? "This template is archived. You can look at it but not change it." : "You can look at this template but not change it."}</span>
@@ -204,7 +209,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             Save draft
           </Button>
         ) : null}
-        {editable && canAdmin ? (
+        {editable && canAdmin && template.channel === "email" ? (
           <Button onClick={() => setTesting(true)}>Test send</Button>
         ) : null}
         {editable && canAdmin ? (
@@ -264,6 +269,17 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             setPublished(`Published version ${version.version}. Flows that send this template use it from their next send.`);
           }}
         />
+      ) : null}
+      {guard.pending !== null ? (
+        <Dialog title="Leave without saving?" onClose={guard.stay}>
+          <p className="muted">The draft has changes that are not saved yet. They are lost if you leave now.</p>
+          <div className="dialog-actions">
+            <Button onClick={guard.stay}>Keep editing</Button>
+            <Button variant="primary" onClick={guard.leave}>
+              Leave
+            </Button>
+          </div>
+        </Dialog>
       ) : null}
       {testing ? <TestSendDialog workspaceId={workspaceId} template={template} flush={flush} personId={person?.id ?? null} onClose={() => setTesting(false)} /> : null}
     </div>

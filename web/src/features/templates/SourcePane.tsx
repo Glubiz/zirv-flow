@@ -1,9 +1,10 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useRef, useState } from "react";
 
 import { client, describeError, unwrap, useResource } from "../../api";
 import { Button, ErrorState, LoadingState, SelectField, TextAreaField, TextField } from "../../ui";
 import { FieldIssues, IssueList } from "./IssueList";
 import { MergeTagPicker } from "./MergeTagPicker";
+import { TabBar } from "./TabBar";
 import { issuesAt, type Editable, type TemplateIssue } from "./model";
 
 type EmailTab = "subject" | "source" | "text" | "settings";
@@ -34,46 +35,6 @@ export function SourcePane(props: Props) {
     );
   }
   return doc.kind === "email" ? <EmailPane {...props} doc={doc} /> : <WebhookPane {...props} doc={doc} />;
-}
-
-function TabBar<T extends string>({
-  label,
-  tabs,
-  tab,
-  onTab,
-}: {
-  label: string;
-  tabs: readonly { id: T; label: string }[];
-  tab: T;
-  onTab: (next: T) => void;
-}) {
-  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-    const at = tabs.findIndex((entry) => entry.id === tab);
-    const next = tabs[(at + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
-    if (next) {
-      onTab(next.id);
-      event.currentTarget.querySelector<HTMLElement>(`[data-tab="${next.id}"]`)?.focus();
-    }
-  }
-  return (
-    <div className="seg-tabs" role="tablist" aria-label={label} onKeyDown={onKeyDown}>
-      {tabs.map((entry) => (
-        <button
-          key={entry.id}
-          type="button"
-          role="tab"
-          data-tab={entry.id}
-          className={entry.id === tab ? "seg seg-on" : "seg"}
-          aria-selected={entry.id === tab}
-          tabIndex={entry.id === tab ? 0 : -1}
-          onClick={() => onTab(entry.id)}
-        >
-          {entry.label}
-        </button>
-      ))}
-    </div>
-  );
 }
 
 type Field = HTMLTextAreaElement | HTMLInputElement;
