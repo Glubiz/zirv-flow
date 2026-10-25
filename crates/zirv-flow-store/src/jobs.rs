@@ -405,6 +405,8 @@ pub async fn fail_job<'e>(
                 run_at = CASE WHEN attempts >= max_attempts THEN run_at \
                               ELSE now() + make_interval(secs => $3) END, \
                 dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
+                payload = CASE WHEN attempts >= max_attempts AND kind = 'destination.erase' \
+                               THEN payload - 'external_key' ELSE payload END, \
                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE id = $1 AND lease_token = $2 AND NOT purge_on_release \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
@@ -484,6 +486,8 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
                 state = CASE WHEN attempts >= max_attempts THEN 'dead' ELSE 'ready' END, \
                 run_at = now(), last_error = 'lease expired', \
                 dead_at = CASE WHEN attempts >= max_attempts THEN now() END, \
+                payload = CASE WHEN attempts >= max_attempts AND kind = 'destination.erase' \
+                               THEN payload - 'external_key' ELSE payload END, \
                 lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
              WHERE id IN (SELECT id FROM locked WHERE NOT purge_on_release) \
              RETURNING id, workspace_id, state, attempts, trace_id, cause_kind, cause_id), \
@@ -1628,6 +1632,55 @@ mod tests {
         let stored = find_job(&pool, claimed.id).await.unwrap().unwrap();
         assert_eq!(stored.state, "dead");
         assert!(stored.dead_at.is_some());
+    }
+
+    /// An erase call job holding an external key, and a job of another kind holding the same
+    /// field, each with one attempt.
+    fn keyed(kind: &str) -> NewJob {
+        let mut new = dead_candidate(kind);
+        new.payload = serde_json::json!({"external_key": "SENTINEL-KEY", "ledger_id": "l-1"});
+        new
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erase_call_that_dies_loses_its_external_key_and_other_kinds_keep_theirs(
+        pool: PgPool,
+    ) {
+        let erase = make_dead(&pool, keyed(crate::ERASE_CALL_JOB_KIND)).await;
+        let other = make_dead(&pool, keyed("other.kind")).await;
+
+        let erase = find_job(&pool, erase).await.unwrap().unwrap();
+        let other = find_job(&pool, other).await.unwrap().unwrap();
+
+        assert_eq!(erase.payload, serde_json::json!({"ledger_id": "l-1"}));
+        assert_eq!(other.payload["external_key"], "SENTINEL-KEY");
+        assert_eq!(crate::EXTERNAL_KEY_FIELD, "external_key");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erase_call_reaped_dead_loses_its_external_key(pool: PgPool) {
+        enqueue(&pool, &keyed(crate::ERASE_CALL_JOB_KIND))
+            .await
+            .unwrap();
+        let claimed = claim_job(
+            &pool,
+            "w",
+            &[crate::ERASE_CALL_JOB_KIND],
+            Duration::from_millis(1),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let reaped = reap_expired(&pool).await.unwrap();
+
+        assert_eq!(reaped.dead, 1);
+        let stored = find_job(&pool, claimed.id).await.unwrap().unwrap();
+        assert_eq!(stored.payload, serde_json::json!({"ledger_id": "l-1"}));
     }
 
     #[sqlx::test(migrations = false)]

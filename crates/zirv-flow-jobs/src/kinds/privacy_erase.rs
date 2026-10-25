@@ -27,7 +27,9 @@ impl JobKind for PrivacyErase {
             .identifier_key()
             .ok_or(JobError::new("the worker has no master key"))?;
         let trace = ctx.trace().clone();
-        match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &key, &trace).await? {
+        match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &key, &[], &trace)
+            .await?
+        {
             EraseOutcome::Completed { .. } | EraseOutcome::AlreadyCompleted => Ok(()),
             EraseOutcome::NoSuchRequest => Err(JobError::new("the erasure request does not exist")),
         }

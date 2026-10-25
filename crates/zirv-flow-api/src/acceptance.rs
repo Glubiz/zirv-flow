@@ -6887,6 +6887,7 @@ email,b@example.com,
                 &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
             )
             .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
+            &[],
             &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
         )
         .await

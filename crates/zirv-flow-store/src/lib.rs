@@ -211,11 +211,14 @@ pub use people::{
 };
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use privacy::{
-    BuildOutcome, DeleteReason, ERASE_JOB_KIND, EXPORT_FORMAT, EXPORT_JOB_KIND, EraseOutcome,
-    ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor, ExportDownload, ExportStatus,
-    PrivacyExport, ReplayReport, build_export, delete_person, download_export, erase_person,
-    expire_exports, find_erasure_request, find_privacy_export, list_erasure_requests,
-    list_privacy_exports, replay_erasures, request_erasure, request_export,
+    BuildOutcome, DeleteReason, ERASE_CALL_ATTEMPTS, ERASE_CALL_JOB_KIND, ERASE_JOB_KIND,
+    EXPORT_FORMAT, EXPORT_JOB_KIND, EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseOutcome,
+    EraseTarget, ErasureCall, ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor,
+    ExportDownload, ExportStatus, ExternalKey, MISSING_KEY, PrivacyExport, ReplayReport,
+    build_export, delete_person, download_export, erase_person, expire_exports,
+    find_erasure_request, find_privacy_export, finish_erasure_call, idempotency_key,
+    list_erasure_calls, list_erasure_requests, list_privacy_exports, replay_erasures,
+    request_erasure, request_export,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;
