@@ -972,7 +972,12 @@ their hashes (and the group's ids) to the ledger row, suppresses every email and
 of them, so a row drained later cannot create the person again (an `erased` suppression overrides any other reason and can never be removed); it deletes the group exactly as above; it completes the ledger row; and it audits `privacy.erased`
 with the request id. A failure rolls everything back and the job is retried; a request whose job
 ran out of attempts shows as `failed`. `GET .../privacy/erasures` lists the requests, newest
-first. The ledger is the one place that keeps the person id of an erased person, by design.
+first, each with the erase call made to every destination that declares erase and handled the person
+(`destination_calls`: outcome `pending`, `done` or `failed`, attempts and a fixed error code; admins
+only). The `destination.erase` job makes those calls after the erasure commits, once per
+destination, with an idempotency key that is stable across retries; a failing destination is retried
+and then shown as `failed`, and never blocks the erasure. The ledger is the one place that keeps the
+person id of an erased person, by design.
 
 Erasure removes what was held or pending when it ran. Data that arrives while it runs, or after it,
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
@@ -1007,8 +1012,8 @@ after the export is ready and then answers 410; the scheduler leader drops expir
 hourly. Erasing the person deletes their exports.
 
 Everything above is on the **Privacy** page of the web UI, visible to workspace admins and the
-owner. Erasing asks you to type `ERASE` first. Erasure does not reach destinations yet (that
-comes with them) and does not rewrite files outside the database.
+owner. Erasing asks you to type `ERASE` first. Erasure reaches only destinations that declare an
+erase call and does not rewrite files outside the database.
 
 ## Ingestion
 
@@ -2323,6 +2328,12 @@ profile operation, or both. The `action.sync` flow node (`destination`, `operati
 a `sync.succeeded` or `sync.failed` person event and a decision that hold no key and no trait value.
 Keeping a segment in an external system is two flows, entry and exit: `docs/profile-sync.md` has the
 manifest, the worked flows and the details.
+
+**Erase call.** The `destination` section may declare `erase_profile`, with the shape of
+`remove_profile` (`key` and `static` body placements only). When a person is erased, every
+destination of that manifest that handled them (a message, a forwarded event or a sync) gets one
+call, keyed by the `key_from` identity or trait, under an idempotency key that is stable across
+retries. A destination without it, including `webhook` and SMTP, gets none.
 
 ## Event forwarding
 

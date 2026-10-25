@@ -1512,8 +1512,9 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `operation`; the decision is `sync.upsert` or `sync.remove` under the enrollment's trace, with the
   enrollment, person, event, flow and destination ids and a fixed reason. Never the key or a trait
   value, in an event, a decision, a log line or a metric.
-- **Erasure.** No table. `delivery.sync` is in `names_erased_person!`. Calling the destination's erase
-  capability on person erasure is #227.
+- **Erasure.** No table. `delivery.sync` is in `names_erased_person!`. The destination's erase call
+  on person erasure is made by `destination.erase` (#227, 16.3); the manifest declares it as
+  `erase_profile`.
 
 ## 11. Templates and the builder
 
@@ -2090,7 +2091,8 @@ before and after on the same input.
 - **Erasure and merge.** `delete_person` deletes the person's outbox rows and the erasure scan test
   covers the table; the job payload names only the destination, so `names_erased_person!` has
   nothing to purge. A merge re-points `forwarding_outbox.person_id` through `REWRITE_TARGETS`. The
-  destination's own erase call is #227.
+  destination's own erase call is `destination.erase` (#227, 16.3); the erasure flow asserts that
+  pending and dead outbox rows are gone and the suppression hash stays.
 - **Ingest cost (#209).** `apply_event_batch` over 200 batches of 500 events after 20 warm-up
   batches, local PostgreSQL, release build without LTO, each case alone on a fresh database
   (`ZIRV_MEASURE_CASE`, an ignored test in `forwarding/outbox.rs`): enqueue switched off
@@ -2301,7 +2303,7 @@ has a partial index `(priority, run_at) WHERE state = 'ready'` and a partial
 unique index on `unique_key WHERE state IN ('ready','running')`. `schedules(kind,
 cron, timezone, next_run_at, payload)` holds recurring work. Kinds: `sync.run`,
 `kafka.consume`, `ingest.drain`, `ingest.replay`, `event.forward`, `person.merge.rewrite`, `segment.reevaluate`, `segment.refresh`,
-`flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `webhook.call`,
+`flow.enroll`, `flow.step`, `delivery.send`, `delivery.sync`, `destination.erase`, `webhook.call`,
 `template.test_send`, `privacy.export`, `privacy.erase`, `maintenance.*`.
 Handlers implement `JobKind` (a `KIND` name and `run(ctx, payload)`), with one
 line in the job registry. The M6 kinds are `delivery.send` (10.1),
@@ -2632,6 +2634,41 @@ M6 adds the rest: it erases the `messages` rows and their message links, the tes
 entries and the pending and dead forwarding payloads of the person, and calls
 `erase` on each forwarding or delivery destination that declares it, recording
 the result per destination.
+
+**As built (erase calls, #227).**
+
+- **Who decides.** `zirv-flow-store` reads no manifest. `privacy.erase` (jobs) lists the
+  workspace's live destinations and decides, with the destination registry, which declare erase: a
+  built-in type through `Capabilities.erase` (keyed on the person id), a provider destination when
+  its manifest has `erase_profile` (keyed on the identity or trait its `key_from` names). `webhook`
+  and SMTP declare none. It passes these to `erase_person` as `EraseTarget { destination, key:
+  ExternalKey }`, with `ExternalKey` one of `PersonId`, `Identity(kind)` or `Trait(key)`.
+- **Plan, in the erasure transaction, before the delete.** `erase_person` keeps the targets that
+  handled the person's group (a `messages` or `forwarding_outbox` row at the destination, or a
+  `sync.succeeded`/`sync.failed` event naming it; `delivery_attempts` names those items and no
+  person), resolves each key from the group's rows, writes an `erasure_destination_calls` row
+  `pending` and enqueues one `destination.erase` job, unique key `destination.erase:{ledger}:{destination}`.
+  A key that cannot be resolved records `failed` with `missing_key` and no job.
+- **Table.** `erasure_destination_calls` (migration 0057): ledger id, destination id, `outcome`
+  (`pending`, `done`, `failed`), `attempts`, a fixed `error_code` (set exactly when failed) and the
+  times. It is keyed to the ledger and has no person column, so the erasure scan finds nothing.
+- **Job.** `destination.erase` payload: `workspace_id`, `ledger_id`, `destination_id`,
+  `external_key`; no trait value. The call runs after the erasure commits, through the shared
+  delivery path (rate bucket, the common verdict), with the idempotency key `erase:{ledger}:{destination}`,
+  stable across retries. Retryable failures back off as the other delivery kinds do (8 attempts; a
+  wait for a rate token spends one). A terminal failure or the last attempt records `failed` with
+  the verdict's code and the job ends as done; a destination deleted or archived first records
+  `destination_unavailable`; the erasure is never blocked or rolled back.
+- **Payload lifetime.** A job that ends is deleted by `complete_job`, payload included. A job that
+  dies is scrubbed of `external_key` by `fail_job` and `reap_expired`; a retried dead job records
+  `failed` with `key_unavailable` and makes no call.
+- **Forwarding.** `delete_person` deletes pending and dead outbox rows; the suppression hash stays.
+- **API.** `GET .../privacy/erasures` (admin) adds `destination_calls` (destination id, outcome,
+  attempts, error code, times) to each request; never a key.
+- **Manifest.** `erase_profile` has the shape and validation of `remove_profile` (`key` and
+  `static` body placements only, never traits). Existing manifests validate as before.
+- **Open.** Events and forwarded rows age out by retention, so a destination that handled a person
+  only before that is not called.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's
