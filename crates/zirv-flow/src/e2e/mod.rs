@@ -394,13 +394,8 @@ mod tests {
         let shown = serde_json::to_string(&records).expect("text");
         assert!(!shown.contains('@'), "an address is in the trace");
         let body = tree.to_string();
-        let decisions = dump_text(&world.pool, Some(&["decision_records", "jobs"])).await;
         for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
             assert!(!body.contains(marker), "{marker} is in the trace response");
-            assert!(
-                !decisions.contains(marker),
-                "{marker} is in a stored decision"
-            );
         }
 
         // Criterion 9, UI: the trace, normalised, is the fixture the web test renders.
@@ -438,6 +433,14 @@ mod tests {
             .await;
         world.settle().await;
         assert_eq!(world.count("SELECT count(*) FROM test_sends").await, 1);
+        // No address in any stored decision or job, the test send's included.
+        let decisions = dump_text(&world.pool, Some(&["decision_records", "jobs"])).await;
+        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
+            assert!(
+                !decisions.contains(marker),
+                "{marker} is in a stored decision"
+            );
+        }
 
         // The erasure scan, once, at the end: the person is erased, and nothing of them is left
         // in `messages`, `message_links` or `test_sends`, nor anywhere else.

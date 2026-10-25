@@ -60,30 +60,52 @@ fn cause_id(record: &Value) -> Option<&str> {
     record.get("cause").and_then(|cause| text(cause, "id"))
 }
 
+/// The ids a record answers to as a parent: its own and those of what it is about.
+fn ids_of(record: &Value) -> Vec<&str> {
+    let subjects = record.get("subject_ids").and_then(Value::as_object);
+    text(record, "id")
+        .into_iter()
+        .chain(
+            subjects
+                .into_iter()
+                .flat_map(|s| s.values().filter_map(Value::as_str)),
+        )
+        .collect()
+}
+
 /// Whether the records are one tree. A record's cause names the parent: the id of a record or of
-/// a subject (an event, a segment, an enrollment) that another record of the response is about.
-/// Exactly one record, the first, has a cause no record resolves: what started the trace.
+/// a subject (an event, a segment, an enrollment) that another record is about. The first record
+/// is the root, started by a cause outside the response; every other record must be reached from
+/// it by following those links.
 fn one_tree(records: &[Value]) -> Result<(), String> {
-    let mut known: HashSet<&str> = records
-        .iter()
-        .filter_map(|record| text(record, "id"))
-        .collect();
-    for record in records {
-        if let Some(subjects) = record.get("subject_ids").and_then(Value::as_object) {
-            known.extend(subjects.values().filter_map(Value::as_str));
+    let Some(root) = records.first() else {
+        return Err("the trace is not one tree: it has no records".to_owned());
+    };
+    let mut known: HashSet<&str> = ids_of(root).into_iter().collect();
+    let mut reached = vec![false; records.len()];
+    reached[0] = true;
+    loop {
+        let mut grew = false;
+        for (index, record) in records.iter().enumerate() {
+            if !reached[index] && cause_id(record).is_some_and(|id| known.contains(id)) {
+                reached[index] = true;
+                known.extend(ids_of(record));
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
         }
     }
-    let roots: Vec<usize> = records
-        .iter()
-        .enumerate()
-        .filter(|(_, record)| cause_id(record).is_none_or(|id| !known.contains(id)))
-        .map(|(index, _)| index)
+    let cut_off: Vec<usize> = (0..records.len())
+        .filter(|index| !reached[*index])
         .collect();
-    match roots[..] {
-        [0] => Ok(()),
-        _ => Err(format!(
-            "the trace is not one tree: records {roots:?} have a cause no record of the response              resolves, and only the first may"
-        )),
+    if cut_off.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the trace is not one tree: records {cut_off:?} cannot be reached from the root"
+        ))
     }
 }
 
@@ -318,7 +340,7 @@ mod tests {
         broken_link[3]["cause"]["id"] = json!("0192b1a4-7c3e-7000-8000-00000000ffff");
         let failure = complete(&broken_link).expect_err("a dangling parent is reported");
         assert!(
-            failure.contains("not one tree") && failure.contains("[0, 3]"),
+            failure.contains("not one tree") && failure.contains("[3]"),
             "{failure}"
         );
 
@@ -326,6 +348,17 @@ mod tests {
         no_root.remove(0);
         assert!(one_tree(&no_root).is_err(), "no root record is left");
         assert!(one_tree(&[]).is_err(), "an empty response is no tree");
+
+        // Two records whose causes name each other, and nothing else, are cut off from the root.
+        let mut island = records.clone();
+        island.push(json!({"id": "a", "cause": {"kind": "event", "id": "b"}, "subject_ids": {}}));
+        island.push(json!({"id": "b", "cause": {"kind": "event", "id": "a"}, "subject_ids": {}}));
+        let failure = one_tree(&island).expect_err("an island is reported");
+        let (first, second) = (records.len(), records.len() + 1);
+        assert!(
+            failure.contains(&format!("[{first}, {second}]")),
+            "{failure}"
+        );
     }
 
     #[test]
