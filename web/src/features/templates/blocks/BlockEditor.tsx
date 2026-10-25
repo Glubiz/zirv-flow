@@ -4,7 +4,7 @@ import { Button, MenuButton } from "../../../ui";
 import { IssueList } from "../IssueList";
 import { MergeTagPicker } from "../MergeTagPicker";
 import { TabBar } from "../TabBar";
-import type { Editable, TemplateIssue } from "../model";
+import type { Editable, Template, TemplateIssue } from "../model";
 import { BlockCanvas } from "./BlockCanvas";
 import { BlockSettings, SectionSettings } from "./BlockSettings";
 import { DocumentStyleForm, MessageForm } from "./DocumentPanel";
@@ -53,12 +53,15 @@ interface Props {
   canAdmin: boolean;
   issues: readonly TemplateIssue[];
   checked: boolean;
+  /** The template, for its UTM override in the Message tab. */
+  template: Template;
+  onTemplate: (next: Template) => void;
   /** Opens the one-way conversion to MJML code. Absent when the caller cannot convert. */
   onConvert?: () => void;
 }
 
 /** The block editor pane: palette, canvas, a docked settings panel, the validation list and the merge-tag picker. */
-export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, issues, checked, onConvert }: Props) {
+export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, issues, checked, template, onTemplate, onConvert }: Props) {
   const content = doc.content;
   const locked = readOnly || doc.newer;
   const [selected, setSelected] = useState<string | null>(null);
@@ -244,7 +247,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
           {tab === "block" && !block && !section ? <p className="faint">Select a block or a section to edit its settings.</p> : null}
           {tab === "style" ? <DocumentStyleForm content={content} readOnly={locked} issues={issues} onChange={commit} /> : null}
           {tab === "message" ? (
-            <MessageForm workspaceId={workspaceId} content={content} readOnly={locked} canAdmin={canAdmin} issues={issues} onChange={commit} onTarget={setTarget} />
+            <MessageForm workspaceId={workspaceId} content={content} readOnly={locked} canAdmin={canAdmin} issues={issues} onChange={commit} onTarget={setTarget} template={template} onTemplate={onTemplate} />
           ) : null}
         </div>
       </div>

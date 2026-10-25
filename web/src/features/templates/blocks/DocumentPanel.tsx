@@ -1,8 +1,9 @@
 import { SelectField, TextField } from "../../../ui";
 import { NumberField } from "./NumberField";
 import { FieldIssues } from "../IssueList";
-import { issuesAt, type TemplateIssue } from "../model";
+import { issuesAt, type Template, type TemplateIssue } from "../model";
 import { SenderPicker } from "../SenderPicker";
+import { UtmOverride } from "../UtmOverride";
 import { FONT_STACKS, omit, type BlocksContent, type DocumentStyle } from "./document";
 import { fieldTarget, type InsertTarget } from "./insertTarget";
 
@@ -63,7 +64,15 @@ export function MessageForm({
   canAdmin,
   issues,
   onTarget,
-}: Props & { workspaceId: string; canAdmin: boolean; onTarget: (target: InsertTarget) => void }) {
+  template,
+  onTemplate,
+}: Props & {
+  workspaceId: string;
+  canAdmin: boolean;
+  onTarget: (target: InsertTarget) => void;
+  template: Template;
+  onTemplate: (next: Template) => void;
+}) {
   const set = (patch: Partial<BlocksContent>) => onChange({ ...content, ...patch });
   const merge = (label: string) => ({
     onFocus: (event: { currentTarget: HTMLInputElement }) => onTarget(fieldTarget(label, event.currentTarget)),
@@ -97,6 +106,7 @@ export function MessageForm({
         onChange={(event) => set(withOptional(content, "lang", event.target.value))}
       />
       <FieldIssues issues={issuesAt(issues, "/blocks/lang")} />
+      <UtmOverride workspaceId={workspaceId} template={template} editable={!readOnly} onSaved={onTemplate} />
     </div>
   );
 }

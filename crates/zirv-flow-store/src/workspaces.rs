@@ -10,8 +10,37 @@ use crate::StoreError;
 
 macro_rules! workspace_columns {
     () => {
-        "id, name, slug, timezone, created_at"
+        "id, name, slug, timezone, created_at, utm"
     };
+}
+
+/// The workspace setting for automatic UTM parameters on email links (#240). The patterns are
+/// stored as typed; the API validates them against the placeholder set before saving, and the
+/// renderer crate expands them. Stored as one jsonb document, read with defaults so an older
+/// document still loads.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct UtmSettings {
+    pub enabled: bool,
+    pub source: String,
+    pub medium: String,
+    pub campaign: String,
+    pub content: String,
+    /// The link domains that get parameters; their subdomains do too.
+    pub domains: Vec<String>,
+}
+
+impl Default for UtmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            source: "{workspace}".to_owned(),
+            medium: "email".to_owned(),
+            campaign: "{flow}".to_owned(),
+            content: "{template}".to_owned(),
+            domains: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -22,6 +51,8 @@ pub struct Workspace {
     /// The IANA time zone name of the workspace; `UTC` until it is set.
     pub timezone: String,
     pub created_at: OffsetDateTime,
+    /// The automatic UTM parameter setting (#240); disabled until an admin turns it on.
+    pub utm: UtmSettings,
 }
 
 #[derive(FromRow)]
@@ -31,6 +62,10 @@ struct WorkspaceRow {
     slug: String,
     timezone: String,
     created_at: OffsetDateTime,
+    /// Absent when the row was read before migration 0058 (the credential backfill tests) or by
+    /// a create, which returns the defaults.
+    #[sqlx(default)]
+    utm: Option<sqlx::types::Json<UtmSettings>>,
 }
 
 impl From<WorkspaceRow> for Workspace {
@@ -41,6 +76,7 @@ impl From<WorkspaceRow> for Workspace {
             slug: row.slug,
             timezone: row.timezone,
             created_at: row.created_at,
+            utm: row.utm.map(|json| json.0).unwrap_or_default(),
         }
     }
 }
@@ -77,7 +113,7 @@ pub async fn create_workspace<'e>(
 ) -> Result<Workspace, StoreError> {
     let row: WorkspaceRow = sqlx::query_as(concat!(
         "INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3) RETURNING ",
-        workspace_columns!(),
+        "id, name, slug, timezone, created_at",
         ""
     ))
     .bind(WorkspaceId::new().as_uuid())
@@ -113,7 +149,7 @@ pub async fn list_workspaces_for_user<'e>(
     is_owner: bool,
 ) -> Result<Vec<Workspace>, StoreError> {
     let rows: Vec<WorkspaceRow> = sqlx::query_as(
-        "SELECT w.id, w.name, w.slug, w.timezone, w.created_at FROM workspaces w \
+        "SELECT w.id, w.name, w.slug, w.timezone, w.created_at, w.utm FROM workspaces w \
          WHERE $2 OR EXISTS (SELECT 1 FROM memberships m \
                              WHERE m.workspace_id = w.id AND m.user_id = $1) \
          ORDER BY w.created_at, w.id",
@@ -271,6 +307,25 @@ pub async fn set_workspace_timezone<'e>(
     Ok(row.map(Into::into))
 }
 
+/// Sets the workspace UTM setting and returns the saved workspace, or `None` when there is no such
+/// workspace. The caller has validated the patterns and the domains; the store only keeps them.
+pub async fn set_workspace_utm<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    settings: &UtmSettings,
+) -> Result<Option<Workspace>, StoreError> {
+    let row: Option<WorkspaceRow> = sqlx::query_as(concat!(
+        "UPDATE workspaces SET utm = $2 WHERE id = $1 RETURNING ",
+        workspace_columns!()
+    ))
+    .bind(workspace.as_uuid())
+    .bind(sqlx::types::Json(settings))
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(row.map(Into::into))
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -308,6 +363,40 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_utm_setting_starts_disabled_with_the_defaults_and_is_kept(pool: PgPool) {
+        let created = workspace(&pool, "Acme").await;
+        let other = workspace(&pool, "Other").await;
+        assert_eq!(created.utm, UtmSettings::default());
+        assert!(!created.utm.enabled);
+        assert_eq!(created.utm.source, "{workspace}");
+        assert_eq!(created.utm.medium, "email");
+        assert_eq!(created.utm.campaign, "{flow}");
+        assert_eq!(created.utm.content, "{template}");
+        assert!(created.utm.domains.is_empty());
+
+        let settings = UtmSettings {
+            enabled: true,
+            domains: vec!["example.com".into()],
+            ..UtmSettings::default()
+        };
+        let saved = set_workspace_utm(&pool, created.id, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        let missing = set_workspace_utm(&pool, WorkspaceId::new(), &settings)
+            .await
+            .unwrap();
+
+        assert_eq!(saved.utm, settings);
+        assert!(missing.is_none());
+        let found = find_workspace(&pool, created.id).await.unwrap().unwrap();
+        assert_eq!(found.utm, settings);
+        let untouched = find_workspace(&pool, other.id).await.unwrap().unwrap();
+        assert_eq!(untouched.utm, UtmSettings::default());
     }
 
     #[sqlx::test]

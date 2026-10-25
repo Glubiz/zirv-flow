@@ -3163,6 +3163,10 @@ main:focus {
   gap: 12px;
 }
 
+.tp-utm {
+  max-width: 360px;
+}
+
 .tp-why {
   margin: 0;
 }

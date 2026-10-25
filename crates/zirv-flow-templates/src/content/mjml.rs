@@ -759,6 +759,7 @@ mod tests {
                 base_url: "https://t.example/c",
                 token: &tok,
             },
+            utm: None,
         };
         let direct = render_email(&doc, &context(), &live).unwrap();
         assert_eq!(direct.headers.len(), 2);

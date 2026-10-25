@@ -259,7 +259,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
           {canWrite ? (
             <PreviewPane
               workspaceId={workspaceId}

@@ -234,15 +234,13 @@ async fn decide(
 
     // Gate 1. Read with no lock: the delivery below can take as long as the destination does,
     // and nothing an ingest batch, a resume or an erasure needs may be held for that long.
-    match find_flow(ctx.conn(), workspace, job.flow)
-        .await?
-        .map(|flow| flow.state)
-    {
-        Some(FlowState::Paused) => return stopped(ctx, job, trail, "flow_paused").await,
-        Some(FlowState::Archived) | None => {
-            return stopped(ctx, job, trail, "flow_inactive").await;
-        }
-        Some(FlowState::Draft | FlowState::Published) => {}
+    let Some(flow) = find_flow(ctx.conn(), workspace, job.flow).await? else {
+        return stopped(ctx, job, trail, "flow_inactive").await;
+    };
+    match flow.state {
+        FlowState::Paused => return stopped(ctx, job, trail, "flow_paused").await,
+        FlowState::Archived => return stopped(ctx, job, trail, "flow_inactive").await,
+        FlowState::Draft | FlowState::Published => {}
     }
     let catalog = read_template_field_catalog(ctx.conn(), workspace).await?;
     let keys: Vec<String> = catalog.traits.keys().cloned().collect();
@@ -339,12 +337,25 @@ async fn decide(
     let pool_for_render = ctx.render_pool().cloned();
     let tracked = (!transactional).then_some(()).and(tracker.as_ref());
     let recorded = find_message_links(&pool, job.message).await?;
+    let utm = render::utm_plan(
+        ctx.conn(),
+        workspace,
+        &template,
+        Some(version.version),
+        Some(render::UtmFlow {
+            name: &flow.name,
+            version: job.version,
+            step: &job.node,
+        }),
+    )
+    .await?;
     let tracked = match render::render(
         pool_for_render.as_ref(),
         version.document,
         &context,
         tracked,
         &recorded,
+        utm.as_ref(),
     )
     .await
     {
@@ -1573,6 +1584,111 @@ mod tests {
         );
     }
 
+    const UTM_QUERY: &str =
+        "utm_source=utm-ws&utm_medium=email&utm_campaign=utm-flow&utm_content=utm-tpl";
+
+    /// Turns the UTM setting on for the env's workspace with `shop.example.test` listed.
+    async fn enable_utm(env: &Env) {
+        zirv_flow_store::set_workspace_utm(
+            &env.pool,
+            env.ws,
+            &zirv_flow_store::UtmSettings {
+                enabled: true,
+                source: "utm-ws".into(),
+                campaign: "utm-flow".into(),
+                content: "utm-tpl".into(),
+                domains: vec!["shop.example.test".into()],
+                ..zirv_flow_store::UtmSettings::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_utm_on_the_recorded_links_and_the_click_targets_carry_the_parameters(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::tracking::{TokenKind, verify};
+
+        let mut env = Env::new(pool, "utm-on").await;
+        env.render = Some(start_pool("serve", "").await);
+        enable_utm(&env).await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.template("marketing", LINKED).await;
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        assert_eq!(env.message(queued.message).await.status, "sent");
+        let links: Vec<(i32, String)> = sqlx::query_as(
+            "SELECT link_index, url FROM message_links WHERE message_id = $1 ORDER BY link_index",
+        )
+        .bind(queued.message)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            links,
+            [
+                (0, format!("https://shop.example.test/a?x=1&{UTM_QUERY}")),
+                (1, format!("https://shop.example.test/b?{UTM_QUERY}"))
+            ]
+        );
+        // The click redirect target is the recorded, tagged link.
+        let sent = env.sent();
+        let html = sent[0].payload["html"].as_str().unwrap();
+        let token = html
+            .split("/t/c/")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .unwrap();
+        let claims = verify(&tracking_key(), TokenKind::Click, token).unwrap();
+        let target = zirv_flow_store::find_message_link(&env.pool, claims.message, claims.link)
+            .await
+            .unwrap();
+        assert_eq!(
+            target,
+            Some(format!("https://shop.example.test/a?x=1&{UTM_QUERY}"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_that_opts_out_records_the_links_as_they_were(pool: PgPool) {
+        let mut env = Env::new(pool, "utm-off").await;
+        env.render = Some(start_pool("serve", "").await);
+        enable_utm(&env).await;
+        let person = env.person("ada@example.com").await;
+        env.subscribe(person).await;
+        let template = env.template("marketing", LINKED).await;
+        sqlx::query("UPDATE templates SET utm = 'off' WHERE id = $1")
+            .bind(template)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        let queued = env.queue(person, template, 5).await;
+
+        env.attempt().await.unwrap();
+
+        let links: Vec<String> = sqlx::query_scalar(
+            "SELECT url FROM message_links WHERE message_id = $1 ORDER BY link_index",
+        )
+        .bind(queued.message)
+        .fetch_all(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            links,
+            [
+                "https://shop.example.test/a?x=1",
+                "https://shop.example.test/b"
+            ]
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn two_renders_with_reordered_links_each_redirect_to_their_own_displayed_urls(
@@ -1627,6 +1743,7 @@ mod tests {
                 &context,
                 Some(&tracker),
                 &recorded,
+                None,
             )
             .await
             .unwrap();

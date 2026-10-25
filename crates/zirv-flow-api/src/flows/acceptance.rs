@@ -189,6 +189,29 @@ mod tests {
         .unwrap();
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_valid_time_zone_with_a_refused_utm_part_changes_neither(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let uri = format!("/api/v1/workspaces/{}", f.ws.as_uuid());
+        let mut body = utm_body(false, "{person.email}", &[]).unwrap();
+        body["timezone"] = json!("Europe/Copenhagen");
+
+        let reply = f
+            .call("PATCH", &uri, Some(body), Auth::Session(&f.lead))
+            .await;
+        let read_back = f.call("GET", &uri, None, Auth::Key(&f.read)).await;
+
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.body["code"], "utm_pattern_invalid");
+        assert_eq!(read_back.body["timezone"], "UTC");
+        assert_eq!(read_back.body["utm"]["source"], "{workspace}");
+        let audits = f
+            .count("SELECT count(*) FROM audit_log WHERE action LIKE 'workspace.%updated'")
+            .await;
+        assert_eq!(audits, 0);
+    }
+
     impl Fixture {
         fn flows(&self, tail: &str) -> String {
             format!("/api/v1/workspaces/{}/flows{tail}", self.ws.as_uuid())
@@ -1198,6 +1221,129 @@ mod tests {
             .count("SELECT count(*) FROM audit_log WHERE action = 'workspace.updated'")
             .await;
         assert_eq!(audits, 2);
+    }
+
+    fn utm_body(enabled: bool, source: &str, domains: &[&str]) -> Option<Value> {
+        Some(json!({"utm": {
+            "enabled": enabled, "source": source, "medium": "email",
+            "campaign": "{flow}", "content": "{template}", "domains": domains,
+        }}))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_an_admin_changes_the_utm_setting_and_it_is_audited_without_values(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let uri = format!("/api/v1/workspaces/{}", f.ws.as_uuid());
+        let on = || utm_body(true, "{workspace}", &["Example.com", "example.com"]);
+
+        let default = f.call("GET", &uri, None, Auth::Key(&f.read)).await;
+        let by_member = f.call("PATCH", &uri, on(), Auth::Session(&f.member)).await;
+        let by_write_key = f.call("PATCH", &uri, on(), Auth::Key(&f.write)).await;
+        let unchanged = f.call("GET", &uri, None, Auth::Key(&f.read)).await;
+        let by_admin = f.call("PATCH", &uri, on(), Auth::Session(&f.lead)).await;
+        let read_back = f.call("GET", &uri, None, Auth::Key(&f.read)).await;
+
+        assert_eq!(default.body["utm"]["enabled"], false);
+        assert_eq!(default.body["utm"]["source"], "{workspace}");
+        assert_eq!(default.body["utm"]["medium"], "email");
+        assert_eq!(default.body["utm"]["campaign"], "{flow}");
+        assert_eq!(default.body["utm"]["content"], "{template}");
+        assert_eq!(default.body["utm"]["domains"], json!([]));
+        assert_eq!(by_member.status, StatusCode::FORBIDDEN);
+        assert_eq!(by_write_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(unchanged.body["utm"]["enabled"], false);
+        assert_eq!(by_admin.status, StatusCode::OK, "{:?}", by_admin.body);
+        assert_eq!(by_admin.body["utm"]["enabled"], true);
+        assert_eq!(read_back.body["utm"]["domains"], json!(["example.com"]));
+        // The time zone is untouched by a UTM-only change.
+        assert_eq!(read_back.body["timezone"], "UTC");
+        let audits = f
+            .count("SELECT count(*) FROM audit_log WHERE action = 'workspace.utm_updated'")
+            .await;
+        assert_eq!(audits, 1);
+        let summary: Value = sqlx::query_scalar(
+            "SELECT summary FROM audit_log WHERE action = 'workspace.utm_updated'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(summary, json!({"enabled": true, "domains": 1}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_utm_pattern_with_an_unknown_or_person_placeholder_is_refused_and_named(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let uri = format!("/api/v1/workspaces/{}", f.ws.as_uuid());
+
+        let mut codes = Vec::new();
+        for source in ["{person.email}", "{nope}", "{{ person.email }}", "{flow"] {
+            let reply = f
+                .call(
+                    "PATCH",
+                    &uri,
+                    utm_body(false, source, &[]),
+                    Auth::Session(&f.lead),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+            codes.push(reply.body["code"].clone());
+            if source == "{person.email}" {
+                let detail = reply.body["detail"].as_str().unwrap();
+                assert!(detail.contains("person.email"), "{detail}");
+                assert!(detail.contains("utm.source"), "{detail}");
+            }
+        }
+        let read_back = f.call("GET", &uri, None, Auth::Key(&f.read)).await;
+
+        assert_eq!(codes, vec![json!("utm_pattern_invalid"); 4]);
+        assert_eq!(read_back.body["utm"]["source"], "{workspace}");
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action = 'workspace.utm_updated'")
+                .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enabling_utm_with_no_domain_is_refused_and_a_bad_domain_too(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let uri = format!("/api/v1/workspaces/{}", f.ws.as_uuid());
+
+        let none = f
+            .call(
+                "PATCH",
+                &uri,
+                utm_body(true, "{workspace}", &[]),
+                Auth::Session(&f.lead),
+            )
+            .await;
+        let bad = f
+            .call(
+                "PATCH",
+                &uri,
+                utm_body(true, "{workspace}", &["not a domain"]),
+                Auth::Session(&f.lead),
+            )
+            .await;
+        let off_without_domains = f
+            .call(
+                "PATCH",
+                &uri,
+                utm_body(false, "{workspace}", &[]),
+                Auth::Session(&f.lead),
+            )
+            .await;
+
+        assert_eq!(none.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(none.body["code"], "utm_domains_required");
+        assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(bad.body["code"], "utm_domain_invalid");
+        assert_eq!(off_without_domains.status, StatusCode::OK);
     }
 
     impl Fixture {

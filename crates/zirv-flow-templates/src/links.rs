@@ -7,6 +7,7 @@
 use std::ops::Range;
 
 use crate::error::RenderError;
+use crate::utm::UtmTags;
 
 /// The token every rewritten link carries in inert (preview) mode.
 pub const INERT_TOKEN: &str = "inert";
@@ -36,6 +37,9 @@ pub enum Tracking<'a> {
 #[derive(Clone, Copy)]
 pub struct Hooks<'a> {
     pub tracking: Tracking<'a>,
+    /// Automatic UTM parameters (architecture 10.2), applied before click tracking. `None`
+    /// leaves the output exactly as it was without the step.
+    pub utm: Option<UtmTags<'a>>,
 }
 
 impl Hooks<'_> {
@@ -43,23 +47,32 @@ impl Hooks<'_> {
     pub const fn untracked() -> Hooks<'static> {
         Hooks {
             tracking: Tracking::Off,
+            utm: None,
         }
     }
 }
 
 /// The byte span of one `href` value inside an `<a>` tag.
-struct Href {
+pub(crate) struct Href {
     /// The value, without quotes.
-    value: Range<usize>,
+    pub(crate) value: Range<usize>,
     /// The span to replace: the value with its quotes, if it had any.
-    outer: Range<usize>,
+    pub(crate) outer: Range<usize>,
+}
+
+/// A `data-zf-utm="off"` attribute on an `<a>` tag, with or without an `href`.
+pub(crate) struct OptOut {
+    /// The span of the attribute, with the whitespace before it.
+    pub(crate) attribute: Range<usize>,
+    /// The value span of the first `href` of the same tag, if it has one.
+    pub(crate) href: Option<Range<usize>>,
 }
 
 /// The elements whose content is text, not markup: an `<a>` inside is not a link.
 const RAW_TEXT_ELEMENTS: [&str; 4] = ["script", "style", "textarea", "title"];
 
 /// The position of `needle` (lower-case ASCII) in `html` from `from`, ignoring ASCII case.
-fn find_ignore_case(html: &str, needle: &str, from: usize) -> Option<usize> {
+pub(crate) fn find_ignore_case(html: &str, needle: &str, from: usize) -> Option<usize> {
     let bytes = html.as_bytes();
     let needle = needle.as_bytes();
     (from..bytes.len().saturating_sub(needle.len().saturating_sub(1)))
@@ -100,9 +113,20 @@ fn skip_non_markup(html: &str, start: usize) -> Option<usize> {
 
 /// The first `href` of every `<a>` tag, in document order. Comments and the content of raw-text
 /// elements hold no links.
-fn hrefs(html: &str) -> Vec<Href> {
+pub(crate) fn hrefs(html: &str) -> Vec<Href> {
+    anchors(html).0
+}
+
+/// The `data-zf-utm="off"` attribute of every `<a>` tag, in document order.
+pub(crate) fn opt_outs(html: &str) -> Vec<OptOut> {
+    anchors(html).1
+}
+
+/// The links and the opt-out attributes of every `<a>` tag, from one scan.
+fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>) {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
+    let mut opted_out = Vec::new();
     let mut at = 0;
     while let Some(offset) = html[at..].find('<') {
         let start = at + offset;
@@ -117,21 +141,33 @@ fn hrefs(html: &str) -> Vec<Href> {
             && bytes
                 .get(start + 2)
                 .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0));
-        if !is_anchor {
+        if is_anchor {
+            at = scan_tag(html, start + 2, &mut found, &mut opted_out);
             continue;
         }
-        at = scan_tag(html, start + 2, &mut found);
+        // Any other tag is walked over with the same quote-aware attribute scan, so markup inside
+        // a quoted value (`title='<a href=...>'`) is not read as a tag of its own.
+        let name_start = start + 1 + usize::from(bytes.get(start + 1) == Some(&b'/'));
+        if bytes.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            let name_end = html[name_start..]
+                .find(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>' | '\0'))
+                .map_or(html.len(), |n| name_start + n);
+            at = scan_tag(html, name_end, &mut Vec::new(), &mut Vec::new());
+        }
     }
-    found
+    (found, opted_out)
 }
 
 /// Scan the attributes of one tag from `from`; returns the position after the tag.
-fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
+fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>, opted_out: &mut Vec<OptOut>) -> usize {
     let bytes = html.as_bytes();
     let mut at = from;
     // Browsers use the first `href` of a tag and ignore the rest.
     let mut seen_href = false;
-    loop {
+    let first_found = found.len();
+    let mut offs: Vec<Range<usize>> = Vec::new();
+    let end = loop {
+        let gap_start = at;
         while bytes
             .get(at)
             .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0))
@@ -139,8 +175,8 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
             at += 1;
         }
         match bytes.get(at) {
-            None => return at,
-            Some(b'>') => return at + 1,
+            None => break at,
+            Some(b'>') => break at + 1,
             Some(_) => {}
         }
         let name_start = at;
@@ -181,13 +217,23 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
                 }
                 (value_start..at, value_start..at)
             }
-            None => return at,
+            None => break at,
         };
         if name.eq_ignore_ascii_case("href") && !seen_href {
             seen_href = true;
             found.push(Href { value, outer });
+        } else if name.eq_ignore_ascii_case("data-zf-utm")
+            && html[value.clone()].trim().eq_ignore_ascii_case("off")
+        {
+            offs.push(gap_start..at);
         }
-    }
+    };
+    let href = found.get(first_found).map(|href| href.value.clone());
+    opted_out.extend(offs.into_iter().map(|attribute| OptOut {
+        attribute,
+        href: href.clone(),
+    }));
+    end
 }
 
 /// Decode the entities an attribute value is escaped with: the named `amp`, `lt`, `gt`, `quot`
@@ -529,5 +575,22 @@ mod tests {
                 "{url:?}"
             );
         }
+    }
+
+    #[test]
+    fn markup_inside_a_quoted_attribute_value_is_not_a_link() {
+        let html = concat!(
+            r#"<div title='<a data-zf-utm=off href=https://example.com/a>'>x</div>"#,
+            r#"<img alt="<a href='https://example.com/b'>"></p>"#,
+            r#"<a href="https://example.com/real">r</a>"#,
+        );
+        let found: Vec<&str> = hrefs(html)
+            .into_iter()
+            .map(|href| &html[href.value])
+            .collect();
+        assert_eq!(found, ["https://example.com/real"]);
+        assert!(opt_outs(html).is_empty());
+        let kept = rewrite_links(html, &Tracking::Off, &[]);
+        assert_eq!(kept, html);
     }
 }

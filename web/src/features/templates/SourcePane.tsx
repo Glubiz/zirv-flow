@@ -6,7 +6,8 @@ import { BlockEditor } from "./blocks/BlockEditor";
 import { MergeTagPicker } from "./MergeTagPicker";
 import { SenderPicker } from "./SenderPicker";
 import { TabBar } from "./TabBar";
-import { issuesAt, type Editable, type TemplateIssue } from "./model";
+import { UtmOverride } from "./UtmOverride";
+import { issuesAt, type Editable, type Template, type TemplateIssue } from "./model";
 
 type EmailTab = "subject" | "source" | "text" | "settings";
 type WebhookTab = "headers" | "body";
@@ -20,6 +21,9 @@ interface Props {
   onConvert?: () => void;
   issues: readonly TemplateIssue[];
   checked: boolean;
+  /** The template, for its UTM override in the settings tab. */
+  template: Template;
+  onTemplate: (next: Template) => void;
 }
 
 /** The editor pane: the code fields of the template, the merge-tag picker and the validation list. */
@@ -37,7 +41,7 @@ export function SourcePane(props: Props) {
     );
   }
   if (doc.kind === "blocks") {
-    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} canAdmin={props.canAdmin} issues={props.issues} checked={props.checked} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
+    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} canAdmin={props.canAdmin} issues={props.issues} checked={props.checked} template={props.template} onTemplate={props.onTemplate} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
   }
   return doc.kind === "email" ? <EmailPane {...props} doc={doc} /> : <WebhookPane {...props} doc={doc} />;
 }
@@ -58,7 +62,7 @@ function insertInto(element: Field | null, value: string, tag: string, set: (nex
   }
 }
 
-function EmailPane({ workspaceId, doc, onChange, readOnly, canAdmin, issues, checked }: Props & { doc: Extract<Editable, { kind: "email" }> }) {
+function EmailPane({ workspaceId, doc, onChange, readOnly, canAdmin, issues, checked, template, onTemplate }: Props & { doc: Extract<Editable, { kind: "email" }> }) {
   const [tab, setTab] = useState<EmailTab>("source");
   const field = useRef<HTMLTextAreaElement>(null);
   const email = doc.email;
@@ -85,7 +89,7 @@ function EmailPane({ workspaceId, doc, onChange, readOnly, canAdmin, issues, che
       <TabBar label="Editor fields" tabs={tabs} tab={tab} onTab={setTab} />
       <div role="tabpanel" aria-label={tabs.find((entry) => entry.id === tab)?.label} className="stack">
         {tab === "settings" ? (
-          <Settings workspaceId={workspaceId} doc={doc} onChange={set} readOnly={readOnly} canAdmin={canAdmin} issues={issues} />
+          <Settings workspaceId={workspaceId} doc={doc} onChange={set} readOnly={readOnly} canAdmin={canAdmin} issues={issues} template={template} onTemplate={onTemplate} />
         ) : (
           <>
             <TextAreaField
@@ -124,8 +128,12 @@ function Settings({
   readOnly,
   canAdmin,
   issues,
+  template,
+  onTemplate,
 }: {
   workspaceId: string;
+  template: Template;
+  onTemplate: (next: Template) => void;
   doc: Extract<Editable, { kind: "email" }>;
   onChange: (patch: Partial<Extract<Editable, { kind: "email" }>["email"]>) => void;
   readOnly: boolean;
@@ -156,6 +164,7 @@ function Settings({
         autoComplete="off"
       />
       <FieldIssues issues={issuesAt(issues, "/email/lang")} />
+      <UtmOverride workspaceId={workspaceId} template={template} editable={!readOnly} onSaved={onTemplate} />
     </div>
   );
 }
