@@ -40,8 +40,9 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::flow::SyncOperation;
 use zirv_flow_store::{
     Admission, Destination, NewJob, PgPool, SYNC_JOB_KIND, SubjectKind, SyncDetail, WebhookOutcome,
-    WebhookPerson, WebhookResult, WebhookSubject, find_destination, list_identities,
-    lock_webhook_person, read_webhook_subject, record_webhook_outcome, throttle_bucket,
+    WebhookPerson, WebhookResult, WebhookSubject, current_person, find_destination,
+    list_identities, lock_webhook_person, read_webhook_subject, record_sync_evidence,
+    record_webhook_outcome, throttle_bucket,
 };
 
 use crate::delivery::attempt::AttemptTarget;
@@ -259,33 +260,54 @@ impl JobKind for DeliverySync {
         }
         // The person is locked only now, for the short outcome write, and the enrollment checked
         // again: an erasure that committed during the call leaves no event and no decision.
-        match lock_webhook_person(ctx.conn(), job.workspace, job.enrollment, person).await? {
-            WebhookPerson::Held => {}
-            WebhookPerson::Gone | WebhookPerson::Moved => return Ok(()),
+        let held = lock_webhook_person(ctx.conn(), job.workspace, job.enrollment, person).await?;
+        if held == WebhookPerson::Gone {
+            return Ok(());
         }
         let trace = ctx.trace().clone();
         let job_ref = (ctx.job_id(), attempts);
-        record_webhook_outcome(
-            ctx.conn(),
-            &WebhookOutcome {
-                workspace: job.workspace,
-                enrollment: job.enrollment,
-                person,
-                node: &job.node,
-                result,
-                status,
-                attempts: number,
-                reason,
-                trace: &trace,
-                now,
-                job: job_ref,
-                sync: Some(SyncDetail {
-                    destination: job.destination,
-                    operation: job.operation,
-                }),
-            },
-        )
-        .await?;
+        let mut outcome = WebhookOutcome {
+            workspace: job.workspace,
+            enrollment: job.enrollment,
+            person,
+            node: &job.node,
+            result,
+            status,
+            attempts: number,
+            reason,
+            trace: &trace,
+            now,
+            job: job_ref,
+            sync: Some(SyncDetail {
+                destination: job.destination,
+                operation: job.operation,
+            }),
+        };
+        if held == WebhookPerson::Held {
+            record_webhook_outcome(ctx.conn(), &outcome).await?;
+            return Ok(());
+        }
+        // The person was merged away during the call. The destination holds them, so the outcome
+        // is not dropped: it is recorded under the survivor, whose erasure must reach the
+        // destination. The full outcome (event, decision, steps) when the enrollment is the
+        // survivor's; else the event alone, and the flow's bookkeeping for the moved enrollment
+        // stays as the merge left it.
+        let Some(survivor) = current_person(ctx.conn(), job.workspace, person).await? else {
+            return Ok(());
+        };
+        if survivor == person {
+            return Ok(());
+        }
+        outcome.person = survivor;
+        match lock_webhook_person(ctx.conn(), job.workspace, job.enrollment, survivor).await? {
+            WebhookPerson::Held => {
+                record_webhook_outcome(ctx.conn(), &outcome).await?;
+            }
+            WebhookPerson::Moved => {
+                record_sync_evidence(ctx.conn(), &outcome).await?;
+            }
+            WebhookPerson::Gone => {}
+        }
         Ok(())
     }
 }
@@ -1379,5 +1401,129 @@ mod tests {
         assert_eq!(env.fake.requests(), 0, "the sync made no call");
         assert!(env.events("sync.succeeded").await.is_empty());
         assert!(env.events("sync.failed").await.is_empty());
+    }
+
+    /// Requests the erasure of `person` and carries it out with `targets`, as `privacy.erase` does.
+    async fn erase_with(env: &Env, person: Uuid, targets: &[zirv_flow_store::EraseTarget]) -> Uuid {
+        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+        let trace = TraceContext::root(Cause::api("erase"));
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let request = zirv_flow_store::request_erasure(&mut tx, env.ws, person, &key, None, &trace)
+            .await
+            .unwrap()
+            .unwrap();
+        zirv_flow_store::erase_person(&mut tx, env.ws, request.id, &key, targets, &trace)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        request.id
+    }
+
+    fn email_target(env: &Env) -> zirv_flow_store::EraseTarget {
+        zirv_flow_store::EraseTarget {
+            destination: env.destination,
+            key: zirv_flow_store::ExternalKey::Identity("email".into()),
+        }
+    }
+
+    async fn planned_destinations(env: &Env, ledger: Uuid) -> Vec<Uuid> {
+        zirv_flow_store::list_erasure_calls(&env.pool, env.ws, &[ledger])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|call| call.destination_id)
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_between_a_retryable_sync_attempt_and_its_retry_plans_the_erase_call(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let person = env.person().await;
+        let enrolled = env.enroll(person).await;
+        env.queue(&enrolled, "upsert", 5).await;
+        // The destination takes the request and the answer is lost: the attempt is retryable and
+        // its transaction rolls back, so no outcome event exists.
+        env.fake.script(FakeProviderScript::Status {
+            status: 503,
+            body: json!({}),
+            retry_after: None,
+        });
+        env.attempt().await.unwrap_err();
+        assert!(env.events("sync.failed").await.is_empty());
+
+        let ledger = erase_with(&env, person, &[email_target(&env)]).await;
+
+        assert_eq!(
+            planned_destinations(&env, ledger).await,
+            [env.destination],
+            "the queued retry is evidence that the destination may hold the person"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_whose_person_was_merged_during_the_call_leaves_evidence_for_the_survivor(
+        pool: PgPool,
+    ) {
+        let env = Env::new(pool).await;
+        let other = ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: "grace".into(),
+            identifiers: vec![("email".into(), "grace@example.com".into())],
+            traits: json!({}).as_object().cloned().unwrap(),
+            observed_at: time::OffsetDateTime::now_utc() - time::Duration::days(1),
+            trace: TraceContext::root(Cause::api("t")),
+        };
+        zirv_flow_store::apply_profile_batch(&env.pool, env.ws, &[other])
+            .await
+            .unwrap();
+        // Grace is the older person, so she survives the merge.
+        let ada = env.person().await;
+        let enrolled = env.enroll(ada).await;
+        env.queue(&enrolled, "upsert", 5).await;
+        // The destination answers late, and the two people are merged meanwhile.
+        env.fake
+            .script(FakeProviderScript::HangAfterAccept(Duration::from_millis(
+                800,
+            )));
+        let merge = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let both = ProfileRecord {
+                source: "crm".into(),
+                stream: "contacts".into(),
+                record_key: "merge".into(),
+                identifiers: vec![
+                    ("email".into(), EMAIL.into()),
+                    ("email".into(), "grace@example.com".into()),
+                ],
+                traits: json!({}).as_object().cloned().unwrap(),
+                observed_at: time::OffsetDateTime::now_utc(),
+                trace: TraceContext::root(Cause::api("t")),
+            };
+            zirv_flow_store::apply_profile_batch(&env.pool, env.ws, &[both])
+                .await
+                .unwrap();
+        };
+
+        let (result, ()) = tokio::join!(env.attempt(), merge);
+
+        result.unwrap();
+        assert_eq!(env.fake.accepted().len(), 1, "the destination was called");
+        let survivor = zirv_flow_store::current_person(&env.pool, env.ws, ada)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(survivor, ada, "the sync's person was merged away");
+        let ledger = erase_with(&env, survivor, &[email_target(&env)]).await;
+        assert_eq!(
+            planned_destinations(&env, ledger).await,
+            [env.destination],
+            "the survivor's erasure reaches the destination contacted during the merge"
+        );
     }
 }

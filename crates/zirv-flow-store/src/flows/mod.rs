@@ -34,7 +34,7 @@ pub use crud::{
 };
 pub use delivery::{
     SyncDetail, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject, lock_sync_person,
-    lock_webhook_person, read_webhook_subject, record_webhook_outcome,
+    lock_webhook_person, read_webhook_subject, record_sync_evidence, record_webhook_outcome,
 };
 pub use effects::{EffectError, FlowTraitWrite, apply_flow_list, apply_flow_trait, flow_source};
 pub use enroll::{

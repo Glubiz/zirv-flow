@@ -2676,6 +2676,19 @@ the result per destination.
   holds its shared lock for the length of its call (the client timeout bounds it), so an erasure of
   that person waits at most that long. Deliveries and forwarding write their evidence before the
   call, so they need no such lock.
+- **What counts as sync evidence.** A destination handled a person for the erasure when any of
+  these exists for the group: a `messages` or `forwarding_outbox` row at it; a `sync.succeeded` or
+  `sync.failed` event naming it; or a `delivery.sync` job, in any state (queued, running,
+  retrying, dead), whose enrollment belongs to the group and which names it. The last covers an
+  attempt whose answer was lost: its transaction rolled back, so it left no event, only the queued
+  retry. The jobs are read before `delete_person` purges them; a job that never ran adds a harmless
+  extra erase call. A sync whose person was merged away during its call records its outcome under
+  the survivor: the full outcome (event, decision, steps) if the enrollment is the survivor's,
+  else the `sync.*` event alone (`record_sync_evidence`), so the survivor's erasure reaches the
+  destination. A bucket the erasure finds only after it holds row locks (a merge that committed
+  meanwhile) is tried with `pg_try_advisory_xact_lock` and, if held, is a retryable error that
+  makes the job retry the whole transaction, so it never waits for a lock while holding rows.
+  The `job_dead` settlement matches the call's workspace to the dead job's.
 - **Settling.** A call row never stays `pending` after its job dies: `fail_job` and `reap_expired`
   mark it `failed` with `job_dead`, in the statement that buries the job, so an error on the last
   attempt (a database error, an unopenable credential, a missing pool) is recorded too. Archived

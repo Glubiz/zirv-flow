@@ -293,8 +293,9 @@ pub async fn erase_person(
     let mut survivor: Option<Uuid> = None;
     if let Some(group) = lock_group(connection, workspace, person).await? {
         survivor = Some(group.current);
-        // A merge that committed meanwhile may have added members.
-        erasure_calls::lock_person_calls_exclusive(connection, workspace, &group.ids).await?;
+        // A merge that committed meanwhile may have added members; a bucket for one is tried, never
+        // waited for, now that row locks are held.
+        erasure_calls::lock_person_calls_late(connection, workspace, &group.ids).await?;
         for &id in &group.ids {
             if !people.contains(&id) {
                 people.push(id);

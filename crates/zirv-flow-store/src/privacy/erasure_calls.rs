@@ -102,7 +102,9 @@ type CallRow = (
 );
 
 /// Whether the destination handled any of `people`: a message or a forwarding item for them, or
-/// the outcome event of a profile sync. (`delivery_attempts` names those items, never a person.)
+/// the outcome event of a profile sync, or a `delivery.sync` job of one of their enrollments in any
+/// state (an attempt whose answer was lost leaves no event, only its queued retry). The jobs are read
+/// here, before `delete_person` purges them. (`delivery_attempts` names those items, never a person.)
 async fn handled(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -115,13 +117,20 @@ async fn handled(
              OR EXISTS (SELECT 1 FROM forwarding_outbox WHERE workspace_id = $1 \
                           AND destination_id = $2 AND person_id = ANY($3)) \
              OR EXISTS (SELECT 1 FROM events WHERE workspace_id = $1 AND person_id = ANY($3) \
-                          AND name IN ($4, $5) AND properties ->> 'destination_id' = $2::text)",
+                          AND name IN ($4, $5) AND properties ->> 'destination_id' = $2::text) \
+             OR EXISTS (SELECT 1 FROM jobs j JOIN enrollments e \
+                          ON e.workspace_id = j.workspace_id \
+                         AND e.id::text = j.payload ->> 'enrollment_id' \
+                        WHERE j.workspace_id = $1 AND j.kind = $6 \
+                          AND j.payload ->> 'destination_id' = $2::text \
+                          AND e.person_id = ANY($3))",
     )
     .bind(workspace.as_uuid())
     .bind(destination)
     .bind(people)
     .bind(SYNC_SUCCEEDED_EVENT)
     .bind(SYNC_FAILED_EVENT)
+    .bind(crate::SYNC_JOB_KIND)
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)
@@ -224,6 +233,29 @@ pub(super) async fn lock_person_calls_exclusive(
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
+    }
+    Ok(())
+}
+
+/// Takes the exclusive call lock of people found after a row lock is held (a merge that committed
+/// since [`lock_person_calls_exclusive`] ran). It must not wait: another erasure may hold such a
+/// bucket while it waits for a row lock this transaction holds. A bucket that is held is a
+/// retryable error, so the job retries the whole transaction.
+pub(super) async fn lock_person_calls_late(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    people: &[Uuid],
+) -> Result<(), StoreError> {
+    for bucket in call_buckets(connection, workspace, people).await? {
+        let taken: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1, $2)")
+            .bind(CALL_LOCK_CLASS)
+            .bind(bucket)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        if !taken {
+            return Err(StoreError::retryable_race());
+        }
     }
     Ok(())
 }
@@ -963,6 +995,106 @@ mod tests {
         let call = call_of(&pool, &plan, &claimed).await;
         assert_eq!(call.outcome, EraseCallOutcome::Failed);
         assert_eq!(call.error_code.as_deref(), Some("job_dead"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_bucket_found_late_that_is_held_gives_a_retryable_error_and_does_not_wait(
+        pool: PgPool,
+    ) {
+        let ws = crate::privacy::testing::workspace(&pool, "late").await;
+        let person = Uuid::now_v7();
+        let mut holder = begin(&pool).await.unwrap();
+        lock_person_calls_exclusive(&mut holder, ws, &[person])
+            .await
+            .unwrap();
+        let mut eraser = begin(&pool).await.unwrap();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            lock_person_calls_late(&mut eraser, ws, &[person]),
+        )
+        .await
+        .expect("a bucket found late is never waited for");
+
+        assert!(outcome.unwrap_err().is_retryable());
+        drop(eraser);
+        commit(holder).await.unwrap();
+        let mut free = begin(&pool).await.unwrap();
+        lock_person_calls_late(&mut free, ws, &[person])
+            .await
+            .unwrap();
+    }
+
+    /// A pending call of a workspace and a job of ANOTHER workspace that names it and dies.
+    async fn foreign_dying_job(
+        pool: &PgPool,
+        lease: std::time::Duration,
+    ) -> (Planned, crate::ClaimedJob) {
+        let plan = planned(pool).await;
+        erase(pool, &plan).await;
+        let other = crate::privacy::testing::workspace(pool, "other").await;
+        sqlx::query("DELETE FROM jobs WHERE kind = $1")
+            .bind(ERASE_CALL_JOB_KIND)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut job = NewJob::new(ERASE_CALL_JOB_KIND, trace());
+        job.workspace_id = Some(other);
+        job.max_attempts = 1;
+        job.payload = json!({
+            "workspace_id": other.as_uuid(),
+            "ledger_id": plan.request,
+            "destination_id": plan.messaged,
+            "external_key": "k",
+        });
+        enqueue(pool, &job).await.unwrap();
+        let claimed = crate::claim_job(pool, "w", &[ERASE_CALL_JOB_KIND], lease, None)
+            .await
+            .unwrap()
+            .unwrap();
+        (plan, claimed)
+    }
+
+    async fn messaged_call(pool: &PgPool, plan: &Planned) -> EraseCallOutcome {
+        list_erasure_calls(pool, plan.seeded.ws, &[plan.request])
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|call| call.destination_id == plan.messaged)
+            .unwrap()
+            .outcome
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dead_job_settles_only_its_own_workspaces_call_when_it_fails(pool: PgPool) {
+        let (plan, claimed) = foreign_dying_job(&pool, std::time::Duration::from_secs(30)).await;
+
+        let outcome = crate::fail_job(
+            &pool,
+            claimed.id,
+            claimed.lease_token,
+            std::time::Duration::ZERO,
+            "boom",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, Some(crate::FailOutcome::Dead));
+        assert_eq!(messaged_call(&pool, &plan).await, EraseCallOutcome::Pending);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_dead_job_settles_only_its_own_workspaces_call_when_it_expires(pool: PgPool) {
+        let (plan, _) = foreign_dying_job(&pool, std::time::Duration::from_millis(1)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let reaped = crate::reap_expired(&pool).await.unwrap();
+
+        assert_eq!(reaped.dead, 1);
+        assert_eq!(messaged_call(&pool, &plan).await, EraseCallOutcome::Pending);
     }
 
     #[test]

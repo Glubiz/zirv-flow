@@ -219,13 +219,19 @@ impl WebhookOutcome<'_> {
     }
 }
 
-/// Records the outcome: the `webhook.succeeded` or `webhook.failed` event of the person (source
-/// `flows`, properties the node and enrollment ids, the status and the attempt count, never the
-/// response), a `webhook.call` decision under the enrollment's trace, and the steps of every
-/// enrollment that waits for the event. Returns the event's id. A profile sync writes the
-/// `sync.` event and a `sync.upsert` or `sync.remove` decision instead, with the destination and
-/// the operation as well; never the external key or a trait value.
-pub async fn record_webhook_outcome(
+/// Writes the outcome event alone, with no decision, no forwarding and no step woken: the
+/// evidence an erasure reads to find the destinations that handled a person. A sync whose person
+/// was merged away during its call records it under the survivor (`outcome.person`) when the
+/// enrollment does not belong to them, so the survivor's erasure still reaches the destination.
+pub async fn record_sync_evidence(
+    connection: &mut PgConnection,
+    outcome: &WebhookOutcome<'_>,
+) -> Result<Uuid, StoreError> {
+    insert_outcome_event(connection, outcome).await
+}
+
+/// Inserts the `webhook.` or `sync.` event of an outcome and returns its id.
+async fn insert_outcome_event(
     connection: &mut PgConnection,
     outcome: &WebhookOutcome<'_>,
 ) -> Result<Uuid, StoreError> {
@@ -256,6 +262,20 @@ pub async fn record_webhook_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    Ok(event)
+}
+
+/// Records the outcome: the `webhook.succeeded` or `webhook.failed` event of the person (source
+/// `flows`, properties the node and enrollment ids, the status and the attempt count, never the
+/// response), a `webhook.call` decision under the enrollment's trace, and the steps of every
+/// enrollment that waits for the event. Returns the event's id. A profile sync writes the
+/// `sync.` event and a `sync.upsert` or `sync.remove` decision instead, with the destination and
+/// the operation as well; never the external key or a trait value.
+pub async fn record_webhook_outcome(
+    connection: &mut PgConnection,
+    outcome: &WebhookOutcome<'_>,
+) -> Result<Uuid, StoreError> {
+    let event = insert_outcome_event(connection, outcome).await?;
     crate::forwarding::enqueue_forwarding_of(connection, outcome.workspace, event, outcome.now)
         .await?;
     // The flow and version the call belongs to, for the trace to link from; an erased enrollment has
