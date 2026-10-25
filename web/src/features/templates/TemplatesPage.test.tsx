@@ -104,13 +104,20 @@ describe("making a template", () => {
     expect(email["syntax"]).toBe("mjml");
   });
 
-  it("lists the Blocks mode as unavailable and cannot choose it", async () => {
-    mockApi(routes());
-    const { dialog } = await openDialog();
+  it("makes a block template with the v1 block document and no blocks", async () => {
+    const calls = mockApi(routes());
+    const { user, dialog } = await openDialog();
 
-    const blocks = within(dialog).getByRole("radio", { name: /Blocks/ });
-    expect(blocks).toBeDisabled();
-    expect(within(dialog).getByText(/not available yet/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("radio", { name: /Blocks/ }));
+    await user.click(within(dialog).getByRole("button", { name: "Create template" }));
+
+    await waitFor(() => expect(created(calls)).toHaveLength(1));
+    expect(created(calls)[0]?.["document"]).toMatchObject({
+      schema: 1,
+      channel: "email",
+      mode: "blocks",
+      blocks: { subject: "", category: "marketing", sections: [] },
+    });
   });
 
   it("makes a webhook template with the server's empty document", async () => {

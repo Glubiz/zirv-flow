@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
 import { useLeaveGuard } from "../segments";
+import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
 import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
@@ -54,6 +55,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const [person, setPerson] = useState<PersonChoice | null>(null);
   const [publishing, setPublishing] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
   const [versionsKey, setVersionsKey] = useState(0);
 
@@ -163,6 +165,20 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     schedule(DEBOUNCE_MS);
   }
 
+  /** The draft the server converted replaces the blocks the editor held; the editor continues in code mode. */
+  function converted(detail: TemplateDetail) {
+    const next = readDocument(detail.draft.document);
+    docRef.current = next;
+    dirty.current = false;
+    setDoc(next);
+    setTemplate(detail);
+    setSave("saved");
+    setSaveFailure(null);
+    setConverting(false);
+    setPublished("Converted to MJML code. The draft is now written as code; published versions are unchanged.");
+    schedule(0);
+  }
+
   function saveNow() {
     window.clearTimeout(timer.current);
     void refresh();
@@ -237,7 +253,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} issues={issues} checked={preview.status === "ready"} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} />
           {canWrite ? (
             <PreviewPane
               workspaceId={workspaceId}
@@ -269,6 +285,9 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             setPublished(`Published version ${version.version}. Flows that send this template use it from their next send.`);
           }}
         />
+      ) : null}
+      {converting ? (
+        <ConvertDialog workspaceId={workspaceId} templateId={template.id} flush={flush} onClose={() => setConverting(false)} onConverted={converted} />
       ) : null}
       {guard.pending !== null ? (
         <Dialog title="Leave without saving?" onClose={guard.stay}>

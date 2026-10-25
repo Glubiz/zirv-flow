@@ -3251,3 +3251,111 @@ main:focus {
     max-width: 100%;
   }
 }
+
+/* The block editor (#239). */
+.be-pane {
+  gap: 14px;
+}
+
+.be-head,
+.be-bar,
+.be-actions,
+.be-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.be-actions {
+  margin-left: auto;
+}
+
+.be-palette {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.be-canvas {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.be-section {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.be-section-on,
+.be-block-on {
+  outline: 2px solid var(--accent, #1a5fb4);
+  outline-offset: 1px;
+}
+
+.be-columns {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.be-column {
+  min-width: 0;
+}
+
+.be-block {
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.be-summary {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.be-handle {
+  cursor: grab;
+  padding: 0 6px;
+  user-select: none;
+}
+
+.be-slot {
+  min-height: 6px;
+  border-radius: 3px;
+}
+
+.be-dragging .be-slot-open {
+  min-height: 14px;
+  background: var(--accent, #1a5fb4);
+  opacity: 0.35;
+}
+
+.be-empty-column {
+  margin: 4px 0;
+}
+
+.be-tool {
+  min-width: 36px;
+}
+
+.be-editable {
+  min-height: 96px;
+  overflow: auto;
+}
+
+.be-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
