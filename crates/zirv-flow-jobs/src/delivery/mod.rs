@@ -97,6 +97,7 @@ pub(crate) async fn erase(
     Attempt {
         verdict: verdict_of(&result, now),
         elapsed: started.elapsed(),
+        may_have_arrived: arrived(&result),
     }
 }
 
