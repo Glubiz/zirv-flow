@@ -446,6 +446,7 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         flows::inspector::EnrollmentWaitBody,
         flows::inspector::EnrollmentPathBody,
         flows::inspector::NodeCountBody,
+        flows::inspector::SkippedCountBody,
         flows::inspector::VersionCountsBody,
         traces::CauseKindBody,
         flows::operator::EnrollmentActionBody,
