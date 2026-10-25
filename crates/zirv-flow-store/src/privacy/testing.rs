@@ -421,6 +421,17 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         .unwrap();
     }
 
+    // A handled marker the retention left for the survivor at that destination.
+    sqlx::query(
+        "INSERT INTO erasure_handled_markers (workspace_id, person_id, destination_id)          VALUES ($1, $2, $3)",
+    )
+    .bind(ws.as_uuid())
+    .bind(person)
+    .bind(destination)
+    .execute(pool)
+    .await
+    .unwrap();
+
     // Undrained inbox rows: the person's, spelled differently, and the bystander's.
     let item = |email: &str, message_id: &str| IngestItem {
         identifiers: vec![("email".into(), email.into())],
