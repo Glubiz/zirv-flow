@@ -14,7 +14,6 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use time::Duration;
-    use time::format_description::well_known::Rfc3339;
     use zirv_flow_connectors::destinations::{
         provider_feedback_of, provider_feedback_scheme, sign_provider_feedback,
         verify_dkim_signature,
@@ -221,45 +220,10 @@ mod tests {
             .await;
 
         // The person exists and subscribed.
-        let identify = call(
-            &world.router,
-            "POST",
-            "/api/v1/ingest/identify",
-            Some(json!({"identifiers": {"email": ADDRESS}})),
-            Some(&world.ingest),
-        )
-        .await;
-        assert_eq!(identify.status, StatusCode::ACCEPTED, "{}", identify.text);
-        world.settle().await;
-        let person = world.the_person().await;
-        world
-            .api_ok(
-                "PUT",
-                &format!("/people/{person}/consent"),
-                Some(json!({"channel": "email", "status": "subscribed"})),
-                StatusCode::OK,
-            )
-            .await;
-        world.clock.advance(Duration::minutes(1));
+        let person = world.subscribed_person(ADDRESS).await;
 
         // Step 1 and 2: a track call moves the person into the segment, which starts the flow.
-        let at = world.clock.now().format(&Rfc3339).expect("a time");
-        let track = call(
-            &world.router,
-            "POST",
-            "/api/v1/ingest/track",
-            Some(
-                json!({"identifiers": {"email": ADDRESS}, "event": "order_placed",
-                        "messageId": "order-1", "timestamp": at}),
-            ),
-            Some(&world.ingest),
-        )
-        .await;
-        assert_eq!(track.status, StatusCode::ACCEPTED, "{}", track.text);
-        let track_trace = track.headers["x-trace-id"]
-            .to_str()
-            .expect("a trace id")
-            .to_owned();
+        let track_trace = world.track_order(ADDRESS).await;
         world.settle().await;
         assert_eq!(
             world
@@ -516,37 +480,8 @@ mod tests {
                        "reentry": {"mode": "once"}}),
             )
             .await;
-        call(
-            &world.router,
-            "POST",
-            "/api/v1/ingest/identify",
-            Some(json!({"identifiers": {"email": ADDRESS}})),
-            Some(&world.ingest),
-        )
-        .await;
-        world.settle().await;
-        let person = world.the_person().await;
-        world
-            .api_ok(
-                "PUT",
-                &format!("/people/{person}/consent"),
-                Some(json!({"channel": "email", "status": "subscribed"})),
-                StatusCode::OK,
-            )
-            .await;
-        world.clock.advance(Duration::minutes(1));
-        let at = world.clock.now().format(&Rfc3339).expect("a time");
-        call(
-            &world.router,
-            "POST",
-            "/api/v1/ingest/track",
-            Some(
-                json!({"identifiers": {"email": ADDRESS}, "event": "order_placed",
-                        "messageId": "order-1", "timestamp": at}),
-            ),
-            Some(&world.ingest),
-        )
-        .await;
+        let person = world.subscribed_person(ADDRESS).await;
+        world.track_order(ADDRESS).await;
         world.settle().await;
 
         let captured = world.sink.messages();

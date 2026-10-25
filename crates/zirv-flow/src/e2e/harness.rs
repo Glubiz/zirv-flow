@@ -12,6 +12,7 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
@@ -498,9 +499,54 @@ impl World {
             .await
             .expect("exactly one person")
     }
-}
 
-impl World {
+    /// Identifies the person with `address` through the ingest endpoint and subscribes them to
+    /// email. Returns their id.
+    pub(super) async fn subscribed_person(&self, address: &str) -> Uuid {
+        let identify = call(
+            &self.router,
+            "POST",
+            "/api/v1/ingest/identify",
+            Some(json!({"identifiers": {"email": address}})),
+            Some(&self.ingest),
+        )
+        .await;
+        assert_eq!(identify.status, StatusCode::ACCEPTED, "{}", identify.text);
+        self.settle().await;
+        let person = self.the_person().await;
+        self.api_ok(
+            "PUT",
+            &format!("/people/{person}/consent"),
+            Some(json!({"channel": "email", "status": "subscribed"})),
+            StatusCode::OK,
+        )
+        .await;
+        person
+    }
+
+    /// A minute on, a track call of the `order_placed` event for `address`. Returns the trace id
+    /// the call answered with.
+    pub(super) async fn track_order(&self, address: &str) -> String {
+        self.clock.advance(time::Duration::minutes(1));
+        let at = self.clock.now().format(&Rfc3339).expect("a time");
+        let track = call(
+            &self.router,
+            "POST",
+            "/api/v1/ingest/track",
+            Some(
+                json!({"identifiers": {"email": address}, "event": "order_placed",
+                        "messageId": "order-1", "timestamp": at}),
+            ),
+            Some(&self.ingest),
+        )
+        .await;
+        assert_eq!(track.status, StatusCode::ACCEPTED, "{}", track.text);
+        track.headers["x-trace-id"]
+            .to_str()
+            .expect("a trace id")
+            .to_owned()
+    }
+
     /// Publishes an event name that carries no properties, so segments can name it.
     pub(super) async fn event_schema(&self, name: &str) {
         self.api_ok(
