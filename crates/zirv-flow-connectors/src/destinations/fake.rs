@@ -133,7 +133,7 @@ impl Destination for Fake {
             secret: true,
         }],
         capabilities: Capabilities {
-            channels: &["email"],
+            channels: &["email", "event"],
             idempotency_key: true,
             batching: false,
             rate_limit: true,

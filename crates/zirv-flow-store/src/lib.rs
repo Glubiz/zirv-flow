@@ -14,6 +14,7 @@ mod destinations;
 mod events;
 mod feedback;
 mod flows;
+mod forwarding;
 mod identities;
 mod imports;
 mod ingest;
@@ -125,10 +126,10 @@ pub use flows::{
     INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow, NewStepExecution,
     NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND,
-    SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SendOutcome, SettleItem,
-    SettlePayload, Signal, SigningKey, SigningKeys, StepJobInput, StepJobPayload, StepOutcome,
-    StepRecord, StoredEvent, TriggerEvent, TriggerKind, TriggeredFlow, UnhealthyInput,
-    WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
+    SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome,
+    SettleItem, SettlePayload, Signal, SigningKey, SigningKeys, StepJobInput, StepJobPayload,
+    StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind, TriggeredFlow,
+    UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
     apply_flow_list, apply_flow_trait, archive_flow, audience_page, clear_waits,
     count_in_flight_enrollments, create_flow, create_signing_key, end_orphaned_messages,
     enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch, find_enrollment,
@@ -141,6 +142,14 @@ pub use flows::{
     resolve_survivors, resume_batch, resume_failed, resume_flow, rotate_signing_key,
     save_enrollment, segment_is_watched, segment_trigger_flows, settle_wait_step, step_zones,
     unhealthy_inputs, update_flow_draft, version_node_counts, wait_filters,
+};
+pub use forwarding::{
+    ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
+    ForwardingStat, NewRule, QueueStatus, Redrive, RuleUpdate, RuleWrite, Settled, claim_due,
+    create_rule, defer_row, delete_rule, enqueue_forwarding, enqueue_segment_forwarding,
+    ensure_forward_job, extend_lease, find_rule, forwarding_report, forwarding_status,
+    list_dead_letters, list_rules, lock_rule, next_due, purge_delivered, redrive, settle_row,
+    update_rule,
 };
 pub use identities::{
     OidcLogin, create_oidc_login, delete_expired_oidc_logins, find_identity_user, link_identity,

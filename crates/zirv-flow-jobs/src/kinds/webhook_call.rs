@@ -253,6 +253,7 @@ impl JobKind for WebhookCall {
                 trace: &trace,
                 now,
                 job,
+                sync: None,
             },
         )
         .await?;

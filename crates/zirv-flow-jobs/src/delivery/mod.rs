@@ -14,6 +14,7 @@
 //! row for the foreign key, so it would wait on a lock its own job holds.
 
 pub(crate) mod attempt;
+pub(crate) mod credential;
 pub(crate) mod rate;
 pub(crate) mod verdict;
 
@@ -24,7 +25,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use time::OffsetDateTime;
-use zirv_flow_connectors::destinations::{DestinationContext, ErasedDestination, Outbound};
+use zirv_flow_connectors::destinations::{
+    DestinationContext, ErasedDestination, Outbound, ProfileCall,
+};
 use zirv_flow_connectors::sources::Credential;
 
 /// One call to a destination and how it went.
@@ -50,6 +53,25 @@ pub(crate) async fn send(
 ) -> Attempt {
     let started = Instant::now();
     let result = destination.deliver(ctx, config, credential, message).await;
+    Attempt {
+        verdict: verdict_of(&result, now),
+        elapsed: started.elapsed(),
+        may_have_arrived: arrived(&result),
+    }
+}
+
+/// Runs one profile operation through `destination` and judges the answer at `now`, as [`send`]
+/// does for a message.
+pub(crate) async fn sync(
+    destination: &dyn ErasedDestination,
+    ctx: &DestinationContext,
+    config: &Value,
+    credential: &Credential,
+    call: &ProfileCall<'_>,
+    now: OffsetDateTime,
+) -> Attempt {
+    let started = Instant::now();
+    let result = destination.sync(ctx, config, credential, call).await;
     Attempt {
         verdict: verdict_of(&result, now),
         elapsed: started.elapsed(),

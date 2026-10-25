@@ -10,6 +10,7 @@ pub mod egress;
 mod email;
 pub mod events;
 pub mod flow;
+pub mod forwarding;
 pub mod freshness;
 mod ids;
 pub mod mapping;

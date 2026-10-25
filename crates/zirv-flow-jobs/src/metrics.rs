@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 use zirv_flow_core::Freshness;
-use zirv_flow_store::{DestinationStat, DrainOutcome, QueueDepth, StreamFreshness};
+use zirv_flow_store::{DestinationStat, DrainOutcome, ForwardingStat, QueueDepth, StreamFreshness};
 
 /// How a job attempt ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -332,9 +332,34 @@ fn count_gauge(workspace: Uuid, state: Freshness, count: f64) {
 #[derive(Default)]
 pub(crate) struct DestinationGauges {
     published: BTreeSet<(Uuid, Uuid)>,
+    forwarding: BTreeSet<(Uuid, Uuid)>,
 }
 
 impl DestinationGauges {
+    /// Publishes the forwarding gauges, labelled `workspace` and `destination` ids only:
+    /// - `zirv_flow_destination_forwarding_depth`, outbox rows waiting for delivery;
+    /// - `zirv_flow_destination_forwarding_lag_seconds`, how long the oldest has been past due.
+    ///
+    /// A destination that dropped out of the report is set to 0.
+    pub(crate) fn update_forwarding(&mut self, report: &[ForwardingStat]) {
+        let current: BTreeSet<(Uuid, Uuid)> = report
+            .iter()
+            .map(|stat| (stat.workspace_id, stat.destination_id))
+            .collect();
+        for (workspace, destination) in self.forwarding.difference(&current) {
+            forwarding_gauges(*workspace, *destination, 0.0, 0.0);
+        }
+        for stat in report {
+            forwarding_gauges(
+                stat.workspace_id,
+                stat.destination_id,
+                stat.depth as f64,
+                stat.oldest_lag_seconds as f64,
+            );
+        }
+        self.forwarding = current;
+    }
+
     pub(crate) fn update(&mut self, report: &[DestinationStat]) {
         let current: BTreeSet<(Uuid, Uuid)> = report
             .iter()
@@ -357,7 +382,23 @@ impl DestinationGauges {
     /// Sets everything this instance has published to 0, for an instance that stops leading.
     pub(crate) fn zero_all(&mut self) {
         self.update(&[]);
+        self.update_forwarding(&[]);
     }
+}
+
+fn forwarding_gauges(workspace: Uuid, destination: Uuid, depth: f64, lag_seconds: f64) {
+    metrics::gauge!(
+        "zirv_flow_destination_forwarding_depth",
+        "workspace" => workspace.to_string(),
+        "destination" => destination.to_string(),
+    )
+    .set(depth);
+    metrics::gauge!(
+        "zirv_flow_destination_forwarding_lag_seconds",
+        "workspace" => workspace.to_string(),
+        "destination" => destination.to_string(),
+    )
+    .set(lag_seconds);
 }
 
 fn destination_gauges(workspace: Uuid, destination: Uuid, depth: f64, oldest_seconds: f64) {
@@ -870,6 +911,42 @@ mod tests {
         assert_eq!(sample(&second, oldest, gone), Some(0.0), "{second}");
         // The leader publishes no counter: attempts are counted where they are recorded.
         assert!(!first.contains("_total"), "{first}");
+    }
+
+    #[test]
+    fn the_forwarding_gauges_follow_the_report_and_zero_when_stepping_down() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let mut gauges = DestinationGauges::default();
+        let ws = Uuid::from_u128(1);
+        let (kept, gone) = (Uuid::from_u128(10), Uuid::from_u128(11));
+        let stat = |destination, depth, lag| ForwardingStat {
+            workspace_id: ws,
+            destination_id: destination,
+            depth,
+            oldest_lag_seconds: lag,
+            has_job: true,
+        };
+
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update_forwarding(&[stat(kept, 3, 40), stat(gone, 7, 9)]);
+        });
+        let first = handle.render();
+        metrics::with_local_recorder(&recorder, || {
+            gauges.update_forwarding(&[stat(kept, 1, 5)]);
+        });
+        let second = handle.render();
+        metrics::with_local_recorder(&recorder, || gauges.zero_all());
+        let third = handle.render();
+
+        let depth = "zirv_flow_destination_forwarding_depth";
+        let lag = "zirv_flow_destination_forwarding_lag_seconds";
+        assert_eq!(sample(&first, depth, kept), Some(3.0), "{first}");
+        assert_eq!(sample(&first, lag, kept), Some(40.0), "{first}");
+        assert_eq!(sample(&second, depth, kept), Some(1.0), "{second}");
+        assert_eq!(sample(&second, depth, gone), Some(0.0), "{second}");
+        assert_eq!(sample(&third, depth, kept), Some(0.0), "{third}");
+        assert_eq!(sample(&third, lag, kept), Some(0.0), "{third}");
     }
 
     #[test]

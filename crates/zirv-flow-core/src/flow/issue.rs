@@ -40,6 +40,7 @@ pub mod code {
     pub const INVALID_TRAIT_KEY: &str = "invalid_trait_key";
     pub const INVALID_TRAIT_VALUE: &str = "invalid_trait_value";
     pub const TOO_MANY_TRAIT_KEYS: &str = "too_many_trait_keys";
+    pub const TRAIT_KEYS_NOT_ALLOWED: &str = "trait_keys_not_allowed";
     pub const INVALID_DIMENSION: &str = "invalid_dimension";
     pub const TOO_MANY_DIMENSIONS: &str = "too_many_dimensions";
     // Settings.
@@ -52,7 +53,7 @@ pub mod code {
     pub const TOO_MANY_EXIT_CRITERIA: &str = "too_many_exit_criteria";
 
     /// Every code.
-    pub const ALL: [&str; 38] = [
+    pub const ALL: [&str; 39] = [
         UNSUPPORTED_VERSION,
         TOO_MANY_NODES,
         TOO_MANY_EDGES,
@@ -83,6 +84,7 @@ pub mod code {
         INVALID_TRAIT_KEY,
         INVALID_TRAIT_VALUE,
         TOO_MANY_TRAIT_KEYS,
+        TRAIT_KEYS_NOT_ALLOWED,
         INVALID_DIMENSION,
         TOO_MANY_DIMENSIONS,
         INVALID_CRON,

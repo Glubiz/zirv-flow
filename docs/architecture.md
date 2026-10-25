@@ -1478,6 +1478,51 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Machine rule.** `email.opened` carries `machine` and `machine_reason`. It is a machine open (`user_agent`) when a token of the lower-cased user agent (split on non-alphanumeric characters) ends with `proxy`, `prefetch`, `preview`, `scanner`, `crawler` or `bot`, so a fused fetcher name is caught and `bot` in the middle of a longer word is a person, or when the user agent contains a fragment from `tracking.prefetch_user_agents` (a case-insensitive substring match; default empty; operators add the exact fragments of the fetchers they see), and otherwise (`delivery_delay`) when it arrives less than 10 seconds after the message's `completed_at`.
 - **Never stored.** Neither the IP address nor the user agent is stored or logged, and no event, decision or log line holds a URL, an address or a token. `message_links.url` is the rendered link and goes with its message.
 
+**As built (profile sync, #226).** The guide is `docs/profile-sync.md`.
+
+- **Manifest.** The `destination` section gains `upsert_profile` and `remove_profile`
+  (`manifest/profile.rs`). `send` and `feedback` become optional as a pair, and a provider manifest
+  declares the pair, a profile operation, or both; each issue is named by pointer. An operation has a
+  `method`, a `path` with at most one `{key}` placeholder, an `idempotency_header`, `key_from`
+  (`{"identity": kind}` or `{"trait": key}`), a `body` placing the key, the listed traits (`traits`
+  as one object, or `fields` one by one; a remove has neither) and `static` values at JSON pointers,
+  an optional `rate_limit` and `errors` (checked before the destination's own; a `recipient_failure`
+  action is refused). The feedback secret and a declared credential schema are required only with
+  `feedback`. The destination's default rate is its own `rate_limit`, else the strictest an operation
+  declares.
+- **Runtime.** `Destination` gains `sync(ctx, config, credential, ProfileCall)`, `Unsupported` by
+  default; only `provider` implements it. The external key is percent-encoded as one path segment
+  (every byte but `A-Za-z0-9-._~`), and is at most 512 bytes. A key of `.` or `..` would still be a
+  path dot segment, so it is refused as a configuration error, with no call. A trait the
+  person has no value for is sent as `null`. Capabilities stay static per kind (`provider` lists the
+  `profile_sync` channel); which operations a destination supports is read from its manifest
+  (`provider_profile_support`), by publish and by the job. A provider manifest with no `send` is not
+  a destination `action.send` may name.
+- **Node.** `action.sync { destination, operation, trait_keys }`, port `next`, effect key
+  `{step_key}:sync`. Structural validation: at most 50 distinct trait keys, none for a remove
+  (`trait_keys_not_allowed`). Publish: the destination exists, is not archived and has the profile
+  channel (`sync_destination_unusable`), its manifest declares the operation (`operation_unsupported`),
+  and the traits are known (`unknown_trait`). Test mode captures the effect (destination, operation,
+  traits at the walk's values) and calls and writes nothing.
+- **Job.** `delivery.sync`, enqueued by `flow.step` under the effect key, with a `sync_id` minted in
+  the step's transaction as the subject of its `delivery_attempts` rows. It reads the destination, the
+  person, the key and the traits without a lock, takes a token from the destination's bucket, opens the
+  credential, calls through `delivery::sync` (the shared verdicts) and records the attempt, then locks
+  the person `FOR KEY SHARE` for the outcome write. A person gone, exited or merged away is a no-op. A
+  person without the key ends `sync.failed` with `missing_key`, with no call and no attempt row. An
+  empty bucket re-enqueues the job (unique key `{effect key}:wait:{n}`, six hours at the most, then
+  `rate_limited`) without spending an attempt; the copy is inserted under the person's `FOR KEY
+  SHARE` lock, so an erasure either finds and purges it or leaves nothing to insert. A 429 slows the bucket; the last attempt of a retried
+  failure is recorded as a failure.
+- **Outcome.** `sync.succeeded` and `sync.failed` are reserved names. They are written by the store
+  writer `webhook.call` uses (`record_webhook_outcome`, with a `SyncDetail`), so no second event
+  writer exists: properties `node_id`, `enrollment_id`, `status`, `attempts`, `destination_id` and
+  `operation`; the decision is `sync.upsert` or `sync.remove` under the enrollment's trace, with the
+  enrollment, person, event, flow and destination ids and a fixed reason. Never the key or a trait
+  value, in an event, a decision, a log line or a metric.
+- **Erasure.** No table. `delivery.sync` is in `names_erased_person!`. Calling the destination's erase
+  capability on person erasure is #227.
+
 ## 11. Templates and the builder
 
 A template is Zirv Flow's own channel-aware content document, stored as
@@ -1992,6 +2037,76 @@ an event whose transaction commits late.
 outbox step is set-based per batch. With no active forwarding destination in the
 workspace, it costs at most one cached or indexed lookup. Ingest is measured
 before and after on the same input.
+
+**As built (forwarding, #225).**
+
+- **Tables (migration 0054).** `forwarding_rules` holds the workspace, the destination, a name (unique
+  ignoring case), the exact `event_name`, the `filter` (the segment `where` list) and the `mapping`
+  (output key to source), an `active` flag and the times. A workspace has at most 20 active rules
+  (422 `too_many_rules`, counted under an advisory lock). `forwarding_outbox` holds the workspace,
+  destination, rule and event ids, `person_id`, the idempotency key (`sha256` of `event id:destination
+  id`), the mapped `payload`, `state` (`pending`, `delivered`, `dead`), `attempts` of the current
+  cycle, `attempt_offset` (the attempts of earlier cycles, so the numbers in `delivery_attempts`, which
+  names the row as a `forwarding` subject, never repeat), a fixed `last_error` code, `next_attempt_at`
+  and the times, with `UNIQUE (destination_id, event_id)`. Partial indexes serve the due-row claim and
+  the depth and lag reads, the dead-letter list, the purge of delivered rows, and the job lookup.
+- **The mapping and the filter** are typed in `zirv-flow-core::forwarding` and evaluated in SQL by the
+  outbox insert: sources are `event.id`, `event.name`, `event.time`, `event.received_at`, `person.id`,
+  `event.properties` at a JSON pointer (at most eight tokens; a missing value is `null`) and static
+  strings, numbers and booleans. Keys, pointers and values are bound, never spliced. A filter uses the
+  segment AST `where` form with the operators `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`,
+  `exists`, `not_exists`, `gt`, `gte`, `lt`, `lte` and `between`; the API validates it with the segment
+  validator against the published schema of the event name. Comparisons need the property present and
+  of the value's type. The rule's destination must declare the `event` channel
+  (`webhook` does, the email destinations do not: 422 `destination_unsupported`).
+- **The enqueue.** `enqueue_forwarding(connection, workspace, refs)` runs in the writer's transaction
+  after its inserts. It is called by `EventBatch::finish` (ingest, sync, inbound webhooks and the
+  apply-batch path), the `webhook.*` writer, the `email.*` send, feedback and engagement writers, and
+  after a segment pass for its `segment.entered` and `segment.exited` events (which are written by SQL
+  and read back by name, time and segment). With no active rule in the workspace it costs one indexed
+  `EXISTS`; otherwise it runs one `INSERT ... SELECT ... ON CONFLICT (destination_id, event_id) DO
+  NOTHING` per active rule over the whole batch, joined to `events` by its primary key. Replay writes
+  no outbox row. A source scan test fails when a file that inserts events is not on the list of
+  writers that call the enqueue.
+- **The job.** `event.forward` (one registry line) delivers one destination. At most one is ready per
+  destination: the enqueue and a re-drive pull a ready job forward or insert one, and two alternating
+  unique keys let a running job leave its successor. The job claims up to 25 due rows
+  (`FOR UPDATE SKIP LOCKED`), counting the attempt, setting a fresh `claim_token` and moving
+  `next_attempt_at` a five-minute lease ahead so no lock is held across the call. Each row's lease is
+  renewed, fenced on its token, right before its call, and a row whose claim was taken over or
+  re-driven is skipped. It delivers through the shared delivery code (`webhook` signing, the guarded
+  client with no redirects, the destination's rate bucket, the attempt row and metrics). Outcomes
+  are written fenced on the claim token, so an older claim's outcome never lands: a delivered row
+  loses its payload; a retryable verdict sets `next_attempt_at` with the worker backoff (5 s doubling
+  to an hour, or a longer `Retry-After`); a terminal verdict, or the eighth attempt, makes the row
+  `dead`. Each retry and dead letter appends an `event.forward` decision in the same transaction
+  (destination, rule, event and outbox ids and the reason code). A rate-limit wait gives the row
+  back without spending an attempt. When rows remain, the job leaves its successor, due at the
+  earliest `next_attempt_at`. It never calls `enqueue_arrivals` and never writes an event. The
+  leader gives a destination with waiting rows and no job a new one. Delivered rows are purged
+  after seven days.
+- **Re-drive.** `POST .../forwarding/re-drive` sets one row (dead or pending), a destination's dead
+  rows or every dead row of the workspace to `pending`, due now, with the cycle's attempts moved
+  into `attempt_offset`, and ensures a job. It starts no flow.
+- **API and metrics.** Rule CRUD, the dead-letter list (ids, code, attempts and times; no payload),
+  the status (per destination `depth`, `oldest_lag_seconds`, `dead`) and re-drive are Admin,
+  workspace-level and audited (`forwarding.rule_created`, `rule_updated`, `rule_deleted`,
+  `redriven`). The leader publishes `zirv_flow_destination_forwarding_depth` and
+  `zirv_flow_destination_forwarding_lag_seconds`, and the attempts and outcomes are the
+  `zirv_flow_destination_attempts_total` and `zirv_flow_destination_outcomes_total` of the shared
+  delivery code; labels are ids only.
+- **Erasure and merge.** `delete_person` deletes the person's outbox rows and the erasure scan test
+  covers the table; the job payload names only the destination, so `names_erased_person!` has
+  nothing to purge. A merge re-points `forwarding_outbox.person_id` through `REWRITE_TARGETS`. The
+  destination's own erase call is #227.
+- **Ingest cost (#209).** `apply_event_batch` over 200 batches of 500 events after 20 warm-up
+  batches, local PostgreSQL, release build without LTO, each case alone on a fresh database
+  (`ZIRV_MEASURE_CASE`, an ignored test in `forwarding/outbox.rs`): enqueue switched off
+  (the cost before the outbox) p50 1991 ms, p99 2179 ms; no active rule p50 1971 ms, p99 2351 ms; one
+  active rule matching 10% of the events p50 1915 ms, p99 2215 ms. The no-rule case is within the
+  run-to-run noise of about 5% (its p50 is 1% lower and its p99 8% higher than switched off, and the
+  rule case is lower than both, so the order is noise): the one `EXISTS` is below what the
+  500 events of the batch cost.
 
 ## 13. LLM assistance
 

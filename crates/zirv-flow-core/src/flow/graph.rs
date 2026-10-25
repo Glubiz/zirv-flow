@@ -13,13 +13,14 @@ use crate::segment::{self, EventCondition, Node as Condition};
 pub const GRAPH_VERSION: u64 = 1;
 
 /// The `type` of every node kind.
-pub const NODE_TYPES: [&str; 11] = [
+pub const NODE_TYPES: [&str; 12] = [
     "wait.duration",
     "wait.until_time",
     "wait.until_event",
     "branch",
     "split.random",
     "action.webhook",
+    "action.sync",
     "action.send",
     "action.update_trait",
     "action.list",
@@ -118,6 +119,17 @@ pub enum NodeKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         template: Option<Uuid>,
     },
+    /// Keeps the person's profile in an external system through a provider destination: `upsert`
+    /// sends the listed traits under the person's external key, `remove` deletes the profile.
+    /// Port `next`.
+    #[serde(rename = "action.sync")]
+    ActionSync {
+        destination: Uuid,
+        operation: SyncOperation,
+        /// The traits an upsert sends; a remove lists none.
+        #[serde(default)]
+        trait_keys: Vec<String>,
+    },
     /// Sends a person a message: the published `template` through the `destination`, with the
     /// message's consent coordinates in `topic` (a topic id) and `dimensions` (dimension key to
     /// value key). The send passes the gates of architecture 10.1 when it runs, so consent and
@@ -181,6 +193,7 @@ impl NodeKind {
             Self::Branch { .. } => "branch",
             Self::SplitRandom { .. } => "split.random",
             Self::ActionWebhook { .. } => "action.webhook",
+            Self::ActionSync { .. } => "action.sync",
             Self::ActionSend { .. } => "action.send",
             Self::ActionUpdateTrait { .. } => "action.update_trait",
             Self::ActionList { .. } => "action.list",
@@ -195,6 +208,7 @@ impl NodeKind {
             Self::WaitDuration { .. }
             | Self::WaitUntilTime { .. }
             | Self::ActionWebhook { .. }
+            | Self::ActionSync { .. }
             | Self::ActionSend { .. }
             | Self::ActionUpdateTrait { .. }
             | Self::ActionList { .. }
@@ -218,6 +232,26 @@ impl NodeKind {
             }
             Self::SplitRandom { arms } => indexed_port(port, "arm_", arms.len()),
             _ => self.ports().iter().any(|own| own == port),
+        }
+    }
+}
+
+/// What an `action.sync` node does to the person's profile at the external system.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncOperation {
+    /// Creates or updates the profile with the listed traits.
+    Upsert,
+    /// Removes the profile.
+    Remove,
+}
+
+impl SyncOperation {
+    /// The word on the wire and in a decision.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upsert => "upsert",
+            Self::Remove => "remove",
         }
     }
 }
@@ -356,6 +390,16 @@ mod tests {
                 url: "https://example.com/hook".into(),
                 trait_keys: vec!["plan".into()],
                 template: None,
+            },
+            NodeKind::ActionSync {
+                destination: Uuid::from_u128(8),
+                operation: SyncOperation::Upsert,
+                trait_keys: vec!["plan".into()],
+            },
+            NodeKind::ActionSync {
+                destination: Uuid::from_u128(8),
+                operation: SyncOperation::Remove,
+                trait_keys: vec![],
             },
             NodeKind::ActionSend {
                 template: Uuid::from_u128(7),
