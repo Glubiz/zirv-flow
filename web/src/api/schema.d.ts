@@ -369,8 +369,9 @@ export interface paths {
         options?: never;
         head?: never;
         /**
-         * Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the workspace admin role and the
-         *     CSRF token. Audited as `workspace.updated`.
+         * Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the
+         *     workspace admin role and the CSRF token. Audited as `workspace.updated` for the time zone and
+         *     `workspace.utm_updated` for the UTM setting, in one transaction.
          */
         patch: operations["update_workspace"];
         trace?: never;

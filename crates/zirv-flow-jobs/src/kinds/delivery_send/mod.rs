@@ -234,15 +234,13 @@ async fn decide(
 
     // Gate 1. Read with no lock: the delivery below can take as long as the destination does,
     // and nothing an ingest batch, a resume or an erasure needs may be held for that long.
-    match find_flow(ctx.conn(), workspace, job.flow)
-        .await?
-        .map(|flow| flow.state)
-    {
-        Some(FlowState::Paused) => return stopped(ctx, job, trail, "flow_paused").await,
-        Some(FlowState::Archived) | None => {
-            return stopped(ctx, job, trail, "flow_inactive").await;
-        }
-        Some(FlowState::Draft | FlowState::Published) => {}
+    let Some(flow) = find_flow(ctx.conn(), workspace, job.flow).await? else {
+        return stopped(ctx, job, trail, "flow_inactive").await;
+    };
+    match flow.state {
+        FlowState::Paused => return stopped(ctx, job, trail, "flow_paused").await,
+        FlowState::Archived => return stopped(ctx, job, trail, "flow_inactive").await,
+        FlowState::Draft | FlowState::Published => {}
     }
     let catalog = read_template_field_catalog(ctx.conn(), workspace).await?;
     let keys: Vec<String> = catalog.traits.keys().cloned().collect();
@@ -339,13 +337,12 @@ async fn decide(
     let pool_for_render = ctx.render_pool().cloned();
     let tracked = (!transactional).then_some(()).and(tracker.as_ref());
     let recorded = find_message_links(&pool, job.message).await?;
-    let flow = find_flow(ctx.conn(), workspace, job.flow).await?;
     let utm = render::utm_plan(
         ctx.conn(),
         workspace,
         &template,
         Some(version.version),
-        flow.as_ref().map(|flow| render::UtmFlow {
+        Some(render::UtmFlow {
             name: &flow.name,
             version: job.version,
             step: &job.node,

@@ -4,7 +4,6 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -54,6 +53,19 @@ pub(crate) struct UtmSettingsBody {
     content: String,
     /// The link domains that get parameters; their subdomains do too. Enabling needs at least one.
     domains: Vec<String>,
+}
+
+impl From<UtmSettingsBody> for UtmSettings {
+    fn from(body: UtmSettingsBody) -> Self {
+        Self {
+            enabled: body.enabled,
+            source: body.source,
+            medium: body.medium,
+            campaign: body.campaign,
+            content: body.content,
+            domains: body.domains,
+        }
+    }
 }
 
 impl From<&UtmSettings> for UtmSettingsBody {
@@ -193,8 +205,9 @@ pub(crate) async fn get(
     Ok(Json(WorkspaceBody::from(&workspace)))
 }
 
-/// Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the workspace admin role and the
-/// CSRF token. Audited as `workspace.updated`.
+/// Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the
+/// workspace admin role and the CSRF token. Audited as `workspace.updated` for the time zone and
+/// `workspace.utm_updated` for the UTM setting, in one transaction.
 #[utoipa::path(
     patch,
     operation_id = "update_workspace",
@@ -226,35 +239,15 @@ pub(crate) async fn update(
     {
         return Err(ValidationError::new("timezone", "must be an IANA time zone name").into());
     }
-    let mut saved = workspace;
-    if let Some(utm) = body.utm {
-        let change = admin::UtmChange {
-            enabled: utm.enabled,
-            source: utm.source,
-            medium: utm.medium,
-            campaign: utm.campaign,
-            content: utm.content,
-            domains: utm.domains,
-        };
-        saved = admin::update_workspace_utm(&state.pool, &principal.context(), saved.id, &change)
-            .await?;
-    }
-    if let Some(timezone) = body.timezone {
-        let mut tx = zirv_flow_store::begin(&state.pool).await?;
-        saved = zirv_flow_store::set_workspace_timezone(&mut *tx, saved.id, &timezone)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        admin::audit(
-            &mut tx,
-            &principal.context(),
-            Some(saved.id),
-            "workspace.updated",
-            Some(("workspace", saved.id.as_uuid())),
-            json!({ "timezone": saved.timezone }),
-        )
-        .await?;
-        zirv_flow_store::commit(tx).await?;
-    }
+    let utm = body.utm.map(UtmSettings::from);
+    let saved = admin::update_workspace(
+        &state.pool,
+        &principal.context(),
+        workspace.id,
+        body.timezone.as_deref(),
+        utm.as_ref(),
+    )
+    .await?;
     Ok(Json(WorkspaceBody::from(&saved)))
 }
 

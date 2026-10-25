@@ -189,6 +189,29 @@ mod tests {
         .unwrap();
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_valid_time_zone_with_a_refused_utm_part_changes_neither(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let uri = format!("/api/v1/workspaces/{}", f.ws.as_uuid());
+        let mut body = utm_body(false, "{person.email}", &[]).unwrap();
+        body["timezone"] = json!("Europe/Copenhagen");
+
+        let reply = f
+            .call("PATCH", &uri, Some(body), Auth::Session(&f.lead))
+            .await;
+        let read_back = f.call("GET", &uri, None, Auth::Key(&f.read)).await;
+
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.body["code"], "utm_pattern_invalid");
+        assert_eq!(read_back.body["timezone"], "UTC");
+        assert_eq!(read_back.body["utm"]["source"], "{workspace}");
+        let audits = f
+            .count("SELECT count(*) FROM audit_log WHERE action LIKE 'workspace.%updated'")
+            .await;
+        assert_eq!(audits, 0);
+    }
+
     impl Fixture {
         fn flows(&self, tail: &str) -> String {
             format!("/api/v1/workspaces/{}/flows{tail}", self.ws.as_uuid())

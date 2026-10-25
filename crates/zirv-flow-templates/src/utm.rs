@@ -224,13 +224,14 @@ impl UtmTags<'_> {
 
     /// Whether `host` is a listed domain or a subdomain of one, on label boundaries.
     fn lists(&self, host: &str) -> bool {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let host = host.trim_end_matches('.').as_bytes();
         self.domains.iter().any(|domain| {
-            let domain = domain.to_ascii_lowercase();
-            host == domain
-                || host
-                    .strip_suffix(domain.as_str())
-                    .is_some_and(|head| head.ends_with('.'))
+            let domain = domain.as_bytes();
+            let Some(split) = host.len().checked_sub(domain.len()) else {
+                return false;
+            };
+            let (head, tail) = host.split_at(split);
+            tail.eq_ignore_ascii_case(domain) && (head.is_empty() || head.ends_with(b"."))
         })
     }
 }

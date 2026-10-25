@@ -2,21 +2,11 @@ import type { components } from "../../api";
 
 export type UtmSettings = components["schemas"]["UtmSettingsBody"];
 
-/** What a workspace starts with: off, with the default patterns and no domains. */
-export const DEFAULT_UTM: UtmSettings = {
-  enabled: false,
-  source: "{workspace}",
-  medium: "email",
-  campaign: "{flow}",
-  content: "{template}",
-  domains: [],
-};
-
 /** The placeholders a pattern may use; the server refuses any other. */
 export const UTM_PLACEHOLDERS = ["workspace", "flow", "flow_version", "step", "template", "template_version", "category"] as const;
 
-export const MAX_PATTERN_BYTES = 200;
-export const MAX_DOMAINS = 50;
+const MAX_PATTERN_BYTES = 200;
+const MAX_DOMAINS = 50;
 
 export type UtmField = "source" | "medium" | "campaign" | "content";
 
@@ -56,7 +46,7 @@ export function checkPattern(pattern: string): string | undefined {
 }
 
 /** Lowercase, with runs of other characters turned into one hyphen. */
-export function slug(text: string): string {
+function slug(text: string): string {
   return text
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, "-")
@@ -64,7 +54,7 @@ export function slug(text: string): string {
 }
 
 /** The values of a live example: what a send from a flow would put in. */
-export interface ExampleValues {
+interface ExampleValues {
   workspace: string;
   flow: string;
   flow_version: string;
@@ -74,7 +64,7 @@ export interface ExampleValues {
   category: string;
 }
 
-export const EXAMPLE_VALUES: Omit<ExampleValues, "workspace"> = {
+const EXAMPLE_VALUES: Omit<ExampleValues, "workspace"> = {
   flow: "welcome-series",
   flow_version: "3",
   step: "send-welcome",
@@ -84,7 +74,7 @@ export const EXAMPLE_VALUES: Omit<ExampleValues, "workspace"> = {
 };
 
 /** Expands a valid pattern: placeholder values slugged, the whole result URL-encoded. */
-export function expandPattern(pattern: string, values: ExampleValues): string {
+function expandPattern(pattern: string, values: ExampleValues): string {
   const text = pattern.replace(/\{([^{}]*)\}/g, (_, name: string) => slug(values[name as keyof ExampleValues]));
   return encodeURIComponent(text).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 }
@@ -102,7 +92,7 @@ export function parseDomains(text: string): string[] {
 const LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
 const DOMAIN = new RegExp(`^${LABEL}(\\.${LABEL})+$`);
 
-export function badDomains(domains: readonly string[]): string[] {
+function badDomains(domains: readonly string[]): string[] {
   return domains.filter((domain) => !DOMAIN.test(domain));
 }
 

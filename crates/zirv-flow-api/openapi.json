@@ -1486,7 +1486,7 @@
         "tags": [
           "workspaces"
         ],
-        "summary": "Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the workspace admin role and the\nCSRF token. Audited as `workspace.updated`.",
+        "summary": "Changes the workspace's settings: its time zone and its automatic UTM parameters. Needs the\nworkspace admin role and the CSRF token. Audited as `workspace.updated` for the time zone and\n`workspace.utm_updated` for the UTM setting, in one transaction.",
         "operationId": "update_workspace",
         "parameters": [
           {
