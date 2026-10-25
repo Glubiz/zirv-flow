@@ -260,13 +260,11 @@ async fn sync_facts(
             zirv_flow_store::find_destination(&mut *connection, workspace, *destination).await?;
         if let Some(found) = found.filter(|found| {
             found.archived_at.is_none()
-                && registry.get(&found.kind).is_some_and(|driver| {
-                    driver
-                        .spec()
-                        .capabilities
-                        .channels
-                        .contains(&"profile_sync")
-                })
+                // A provider stays in the facts even when its manifest has no profile operation:
+                // the operation check then answers `operation_unsupported`.
+                && registry
+                    .get(&found.kind)
+                    .is_some_and(|driver| driver.spec().capabilities.channels.contains(&"profile_sync"))
         }) {
             facts
                 .destinations
@@ -340,10 +338,7 @@ async fn send_facts(
             destination.archived_at.is_none()
                 && registry
                     .get(&destination.kind)
-                    .is_some_and(|driver| driver.spec().capabilities.channels.contains(&"email"))
-                // A provider manifest of profile operations only has no email to send.
-                && (destination.kind != "provider"
-                    || provider_profile_support(&destination.config).email)
+                    .is_some_and(|driver| driver.spec().abilities(&destination.config).send)
         }) {
             facts.destinations.insert(*destination);
         }

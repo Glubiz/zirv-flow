@@ -48,7 +48,7 @@ pub use smtp::{
     SINK_PASSWORD as SMTP_SINK_PASSWORD, SINK_USER as SMTP_SINK_USER,
     SinkOptions as SmtpSinkOptions, SinkStage as SmtpSinkStage, SinkTls as SmtpSinkTls, SmtpSink,
 };
-pub use spec::{Capabilities, DestinationSpec};
+pub use spec::{Abilities, Capabilities, DestinationSpec};
 pub use validate::{
     validate_config, validate_credential, validate_credential_fit, validate_credential_fit_with,
     validate_credential_names,

@@ -1,9 +1,10 @@
 import { useState } from "react";
 
-import { client, describeError, unwrap, useResource, type components } from "../../api";
+import { client, describeError, offeredDestinations, unwrap, useDestinationOptions, useResource, type components } from "../../api";
 import {
   Button,
   ENGAGEMENT_PROPERTIES,
+  ErrorState,
   InlineError,
   isMachineFilter,
   MACHINE_HINT,
@@ -360,32 +361,43 @@ interface DestinationSelectProps {
   workspaceId: string;
   label: string;
   value: string;
+  /** What the step needs the destination to do: the list offers only destinations that can. */
+  capability: "send" | "sync";
   onChange: (value: string) => void;
   disabled: boolean;
   error?: string;
   hint?: string;
 }
 
-/** A live destination. Only workspace admins can list them, so anyone else sees the chosen id and cannot change it. */
-export function DestinationSelect({ workspaceId, label, value, onChange, disabled, error, hint }: DestinationSelectProps) {
-  const destinations = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/destinations", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
+const CAPABILITY_PHRASE = { send: "send email", sync: "sync profiles" } as const;
+
+/** A live destination that can do what the step needs. A chosen one that is not offered keeps its name, or its id with a warning. */
+export function DestinationSelect({ workspaceId, label, value, capability, onChange, disabled, error, hint }: DestinationSelectProps) {
+  const destinations = useDestinationOptions(workspaceId);
   const chosen = value === NIL_UUID ? "" : value;
   if (destinations.status === "error") {
     return (
       <div className="field">
         <span className="field-label">{label}</span>
         <p className="faint">{chosen === "" ? "No destination chosen." : <span className="mono">{chosen}</span>}</p>
-        <p className="field-hint">The destinations can not be listed: {describeError(destinations.error).title}. Workspace admins choose them.</p>
+        <ErrorState {...describeError(destinations.error)} onRetry={destinations.reload} />
         {error ? <span className="field-error">{error}</span> : null}
-        <Button onClick={destinations.reload}>Try again</Button>
       </div>
     );
   }
-  const list = destinations.status === "ready" ? destinations.data.filter((entry) => !entry.archived) : [];
-  const known = list.some((entry) => entry.id === chosen);
+  const ready = destinations.status === "ready";
+  const list = ready ? offeredDestinations(destinations.data, capability) : [];
+  const offered = list.some((entry) => entry.id === chosen);
+  const named = ready ? destinations.data.find((entry) => entry.id === chosen) : undefined;
+  const notes = hint ? [hint] : [];
+  if (ready && list.length === 0) notes.push(`No destination can ${CAPABILITY_PHRASE[capability]}. An admin adds one under destinations.`);
+  if (ready && chosen !== "" && !offered) {
+    notes.push(
+      named
+        ? `Warning: ${named.name} ${named.archived ? "is archived" : `cannot ${CAPABILITY_PHRASE[capability]}`}. Choose another.`
+        : "Warning: the chosen destination is not in this workspace's list. Choose another.",
+    );
+  }
   return (
     <SelectField
       label={label}
@@ -393,13 +405,13 @@ export function DestinationSelect({ workspaceId, label, value, onChange, disable
       onChange={(event) => onChange(event.target.value || NIL_UUID)}
       disabled={disabled || destinations.status === "loading"}
       error={error}
-      hint={hint}
+      hint={notes.length > 0 ? notes.join(" ") : undefined}
     >
       <option value="">{destinations.status === "loading" ? "Loading destinations" : "Choose a destination"}</option>
-      {chosen !== "" && !known && destinations.status === "ready" ? <option value={chosen}>A destination that is not in the list</option> : null}
+      {ready && chosen !== "" && !offered ? <option value={chosen}>{named ? `${named.name}${named.archived ? " (archived)" : ""}` : chosen}</option> : null}
       {list.map((entry) => (
         <option key={entry.id} value={entry.id}>
-          {entry.name} ({entry.kind})
+          {entry.name}
         </option>
       ))}
     </SelectField>

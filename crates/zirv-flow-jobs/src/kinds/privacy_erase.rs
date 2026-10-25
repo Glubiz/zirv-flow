@@ -63,7 +63,7 @@ fn erase_key(spec: &DestinationSpec, config: &Value) -> Option<ExternalKey> {
 
 /// Whether a destination of this type and configuration declares the erase capability.
 pub(super) fn declares_erase(spec: &DestinationSpec, config: &Value) -> bool {
-    erase_key(spec, config).is_some()
+    spec.abilities(config).erase
 }
 
 /// The destinations that declare erase, with where each one's key comes from. The store keeps the

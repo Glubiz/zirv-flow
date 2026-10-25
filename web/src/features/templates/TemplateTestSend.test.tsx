@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { json, MEMBER, mockApi, problem } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
-import { DESTINATION_ID, SENDER_ID, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
+import { DESTINATION_ID, SENDER_ID, SENDER_OPTIONS, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
 
 function mount() {
@@ -137,7 +137,7 @@ describe("the test-send dialog", () => {
     let attempts = 0;
     mockApi({
       ...templateRoutes(),
-      [`GET ${WS}/destinations`]: () => {
+      [`GET ${WS}/destinations/options`]: () => {
         attempts += 1;
         return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json([]);
       },
@@ -150,5 +150,87 @@ describe("the test-send dialog", () => {
     await user.click(await within(dialog).findByRole("button", { name: "Try again" }));
 
     expect(await within(dialog).findByRole("form", { name: "Test send" })).toBeInTheDocument();
+  });
+  it("shows a writer the names of the senders, the destinations and the allowlisted recipients", async () => {
+    const calls = mockApi(templateRoutes({ role: "member" }));
+    const user = userEvent.setup();
+    mount();
+
+    const dialog = await openDialog(user);
+    await user.selectOptions(within(dialog).getByLabelText("Send it to"), "address");
+
+    expect(within(dialog).getByRole("option", { name: "Transactional mail" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("option", { name: "Acme <hello@mail.acme.example>" })).toBeInTheDocument();
+    expect(within(dialog).getByText(/On the allowlist: q\*\*\*@example\.com/)).toBeInTheDocument();
+    const reads = calls.filter((call) => call.method === "GET").map((call) => call.path);
+    expect(reads).toEqual(
+      expect.arrayContaining([`${WS}/destinations/options`, `${WS}/sender-identities/options`, `${WS}/test-send-allowlist/options`]),
+    );
+    expect(reads).not.toContain(`${WS}/destinations`);
+    expect(reads).not.toContain(`${WS}/sender-identities`);
+    expect(reads).not.toContain(`${WS}/test-send-allowlist`);
+  });
+
+  it("hides a destination that cannot send email and says why when none can", async () => {
+    mockApi(templateRoutes());
+    const user = userEvent.setup();
+    mount();
+
+    const dialog = await openDialog(user);
+
+    expect(within(dialog).queryByRole("option", { name: "Order hook" })).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("option", { name: "Old mail" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the template's archived sender as the choice and warns about it", async () => {
+    mockApi({
+      ...templateRoutes(),
+      [`GET ${WS}/sender-identities/options`]: () => json([{ ...SENDER_OPTIONS[0], archived: true }]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const dialog = await openDialog(user);
+
+    expect(within(dialog).getByRole("option", { name: "Acme <hello@mail.acme.example> (archived)" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Sender identity")).toHaveValue(SENDER_ID);
+    expect(within(dialog).getByText(/the chosen sender is archived/)).toBeInTheDocument();
+  });
+
+  it("reads the sender options once while the editor's picker and the dialog are both open", async () => {
+    const calls = mockApi(templateRoutes());
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Settings" }));
+    await screen.findByLabelText("Sender identity");
+    await openDialog(user);
+
+    expect(calls.filter((call) => call.path === `${WS}/sender-identities/options`)).toHaveLength(1);
+  });
+
+  it("says no destination can send email when the list holds none that can", async () => {
+    mockApi({
+      ...templateRoutes(),
+      [`GET ${WS}/destinations/options`]: () =>
+        json([{ id: "d-hook", name: "Order hook", archived: false, capabilities: { send: false, sync: false, erase: false } }]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const dialog = await openDialog(user);
+
+    expect(within(dialog).getByText(/No destination can send email/)).toBeInTheDocument();
+  });
+
+  it("says it is loading while the recipients and options are on their way", async () => {
+    mockApi({ ...templateRoutes(), [`GET ${WS}/test-send-allowlist/options`]: () => new Promise<Response>(() => undefined) });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Test send" }));
+    const dialog = await screen.findByRole("dialog", { name: "Send a test" });
+
+    expect(await within(dialog).findByText("Loading destinations and recipients")).toBeInTheDocument();
   });
 });

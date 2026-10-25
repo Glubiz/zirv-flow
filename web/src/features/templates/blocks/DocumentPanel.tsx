@@ -61,14 +61,12 @@ export function MessageForm({
   content,
   onChange,
   readOnly,
-  canAdmin,
   issues,
   onTarget,
   template,
   onTemplate,
 }: Props & {
   workspaceId: string;
-  canAdmin: boolean;
   onTarget: (target: InsertTarget) => void;
   template: Template;
   onTemplate: (next: Template) => void;
@@ -91,11 +89,7 @@ export function MessageForm({
         onChange={(event) => set({ preheader: event.target.value })}
       />
       <FieldIssues issues={issuesAt(issues, "/blocks/preheader")} />
-      {canAdmin ? (
-        <SenderPicker workspaceId={workspaceId} value={content.sender ?? ""} disabled={readOnly} onChange={(sender) => set(withOptional(content, "sender", sender))} />
-      ) : (
-        <TextField label="Sender identity" value={content.sender ?? ""} readOnly mono hint="Workspace admins choose the sender." />
-      )}
+      <SenderPicker workspaceId={workspaceId} value={content.sender ?? ""} disabled={readOnly} onChange={(sender) => set(withOptional(content, "sender", sender))} />
       <FieldIssues issues={issuesAt(issues, "/blocks/sender")} />
       <TextField
         label="Language"

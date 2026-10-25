@@ -34,6 +34,32 @@ use crate::workspace_credentials::resolve::{
 pub(crate) const DEFAULT_RATE: i32 = 10;
 const MAX_RATE: i32 = 100_000;
 
+/// What a destination can do, from its type and, for a provider, its manifest.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct DestinationAbilitiesBody {
+    /// Delivers email: an `action.send` step may name it.
+    send: bool,
+    /// Runs profile operations: an `action.sync` step may name it.
+    sync: bool,
+    /// Declares the erase capability.
+    erase: bool,
+}
+
+impl DestinationAbilitiesBody {
+    /// The abilities of a stored destination; none when its type is not in this build.
+    fn of(kind: &str, config: &Value) -> Self {
+        let abilities = registry()
+            .get(kind)
+            .map(|driver| driver.spec().abilities(config))
+            .unwrap_or_default();
+        Self {
+            send: abilities.send,
+            sync: abilities.sync,
+            erase: abilities.erase,
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct DestinationBody {
     id: Uuid,
@@ -56,6 +82,8 @@ pub(crate) struct DestinationBody {
     burst: i32,
     /// An archived destination is read-only history.
     archived: bool,
+    /// What the destination can do.
+    capabilities: DestinationAbilitiesBody,
     /// The user who created it; null when an API key did.
     created_by: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339")]
@@ -78,6 +106,7 @@ impl From<&Destination> for DestinationBody {
             rate: destination.rate,
             burst: destination.burst,
             archived: destination.archived_at.is_some(),
+            capabilities: DestinationAbilitiesBody::of(&destination.kind, &destination.config),
             created_by: destination.created_by,
             created_at: destination.created_at,
             updated_at: destination.updated_at,
@@ -405,6 +434,53 @@ pub(crate) async fn list(
     ))
 }
 
+/// One destination a writer may pick: no settings, no credential.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct DestinationOptionBody {
+    id: Uuid,
+    name: String,
+    /// An archived destination is listed so a step that names it still shows its name; it
+    /// cannot be picked.
+    archived: bool,
+    capabilities: DestinationAbilitiesBody,
+}
+
+/// The workspace's destinations as picker options, archived ones included and marked, ordered by
+/// name. Needs the write role: this is what a writer picks a flow step's destination from.
+#[utoipa::path(
+    get,
+    operation_id = "list_destination_options",
+    path = "/api/v1/workspaces/{ws}/destinations/options",
+    tag = "destinations",
+    params(("ws" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "The options: id, name, state and capabilities, nothing else", body = Vec<DestinationOptionBody>),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn options(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(ws): Path<String>,
+) -> Result<Json<Vec<DestinationOptionBody>>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let destinations = zirv_flow_store::list_destinations(&state.pool, workspace.id, true).await?;
+    Ok(Json(
+        destinations
+            .iter()
+            .map(|destination| DestinationOptionBody {
+                id: destination.id,
+                name: destination.name.clone(),
+                archived: destination.archived_at.is_some(),
+                capabilities: DestinationAbilitiesBody::of(&destination.kind, &destination.config),
+            })
+            .collect(),
+    ))
+}
+
 /// Creates a destination and seals its credential. Workspace admins only. Audited as
 /// `destination.created`.
 #[utoipa::path(
@@ -584,6 +660,37 @@ mod tests {
         assert_eq!(json["archived"], false);
         assert!(json.get("credential_secret_id").is_none());
         assert!(json.get("credential").is_none());
+    }
+
+    #[test]
+    fn a_destination_body_has_the_capabilities_of_its_type() {
+        let capabilities = |kind: &str| {
+            let mut found = destination();
+            found.kind = kind.into();
+            serde_json::to_value(DestinationBody::from(&found)).unwrap()["capabilities"].clone()
+        };
+
+        assert_eq!(
+            capabilities("smtp"),
+            json!({"send": true, "sync": false, "erase": false})
+        );
+        assert_eq!(
+            capabilities("webhook"),
+            json!({"send": false, "sync": false, "erase": false})
+        );
+        assert_eq!(
+            capabilities("fake"),
+            json!({"send": true, "sync": false, "erase": true})
+        );
+        // A provider with no usable manifest declares nothing; a type this build lacks, nothing.
+        assert_eq!(
+            capabilities("provider"),
+            json!({"send": false, "sync": false, "erase": false})
+        );
+        assert_eq!(
+            capabilities("gone"),
+            json!({"send": false, "sync": false, "erase": false})
+        );
     }
 
     #[test]

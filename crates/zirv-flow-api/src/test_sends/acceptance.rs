@@ -824,4 +824,135 @@ mod tests {
         assert_eq!(archived.status, StatusCode::CONFLICT);
         assert_eq!(archived.body["code"], "template_archived");
     }
+
+    const OPTION_ROUTES: [&str; 3] = [
+        "/destinations/options",
+        "/sender-identities/options",
+        "/test-send-allowlist/options",
+    ];
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_write_member_and_a_write_key_read_the_options_and_a_read_key_and_another_workspace_do_not(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        f.allow("qa@example.org").await;
+
+        for tail in OPTION_ROUTES {
+            let member = f.call("GET", tail, None, Auth::Session(&f.member)).await;
+            let write = f.call("GET", tail, None, Auth::Key(&f.write)).await;
+            let read = f.call("GET", tail, None, Auth::Key(&f.read)).await;
+            let stranger = f.call("GET", tail, None, Auth::Key(&f.other_admin)).await;
+            let anonymous = f.call("GET", tail, None, Auth::Anonymous).await;
+
+            assert_eq!(member.status, StatusCode::OK, "{tail}");
+            assert_eq!(member.body.as_array().unwrap().len(), 1, "{tail}");
+            assert_eq!(write.status, StatusCode::OK, "{tail}");
+            assert_eq!(write.body, member.body, "{tail}");
+            assert_eq!(read.status, StatusCode::FORBIDDEN, "{tail}");
+            assert_eq!(stranger.status, StatusCode::NOT_FOUND, "{tail}");
+            assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED, "{tail}");
+        }
+        let destinations = f
+            .call("GET", "/destinations/options", None, Auth::Key(&f.write))
+            .await;
+        assert_eq!(destinations.body[0]["id"], json!(f.destination));
+        assert_eq!(destinations.body[0]["name"], "Mail");
+        assert_eq!(destinations.body[0]["archived"], false);
+        assert_eq!(
+            destinations.body[0]["capabilities"],
+            json!({"send": true, "sync": false, "erase": true})
+        );
+        let senders = f
+            .call(
+                "GET",
+                "/sender-identities/options",
+                None,
+                Auth::Key(&f.write),
+            )
+            .await;
+        assert_eq!(senders.body[0]["id"], json!(f.sender));
+        assert_eq!(senders.body[0]["archived"], false);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_options_hold_no_settings_no_credential_and_no_address(pool: PgPool) {
+        let f = fixture(&pool).await;
+        f.allow("qa@example.org").await;
+        let keys = |value: &Value| {
+            let mut keys: Vec<_> = value[0].as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+
+        let destinations = f
+            .call("GET", "/destinations/options", None, Auth::Key(&f.write))
+            .await;
+        let senders = f
+            .call(
+                "GET",
+                "/sender-identities/options",
+                None,
+                Auth::Key(&f.write),
+            )
+            .await;
+        let allowlist = f
+            .call(
+                "GET",
+                "/test-send-allowlist/options",
+                None,
+                Auth::Key(&f.write),
+            )
+            .await;
+
+        assert_eq!(
+            keys(&destinations.body),
+            ["archived", "capabilities", "id", "name"]
+        );
+        assert_eq!(
+            keys(&senders.body),
+            ["archived", "from_address", "id", "name"]
+        );
+        assert_eq!(keys(&allowlist.body), ["id", "name"]);
+        assert_eq!(allowlist.body[0]["name"], "q***@example.org");
+        let all = format!("{} {} {}", destinations.body, senders.body, allowlist.body);
+        assert!(!all.contains("qa@example.org"));
+        assert!(!all.contains("\"mode\""));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archived_destination_and_sender_stay_in_the_options_marked_archived(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let archived = |tail: String| {
+            let f = &f;
+            async move {
+                f.call("DELETE", &tail, None, Auth::Key(&f.admin))
+                    .await
+                    .status
+            }
+        };
+
+        let destination = archived(format!("/destinations/{}", f.destination)).await;
+        let sender = archived(format!("/sender-identities/{}", f.sender)).await;
+        let destinations = f
+            .call("GET", "/destinations/options", None, Auth::Key(&f.write))
+            .await;
+        let senders = f
+            .call(
+                "GET",
+                "/sender-identities/options",
+                None,
+                Auth::Key(&f.write),
+            )
+            .await;
+
+        assert_eq!(destination, StatusCode::NO_CONTENT);
+        assert_eq!(sender, StatusCode::NO_CONTENT);
+        assert_eq!(destinations.body[0]["name"], "Mail");
+        assert_eq!(destinations.body[0]["archived"], true);
+        assert_eq!(senders.body[0]["archived"], true);
+    }
 }

@@ -132,6 +132,19 @@ export function aiSettings(enabled: boolean) {
 export const TEMPLATE_ID = "77777777-0000-4000-8000-000000000001";
 export const HOOK_TEMPLATE_ID = "77777777-0000-4000-8000-000000000002";
 export const DESTINATION_ID = "99999999-0000-4000-8000-000000000001";
+export const WEBHOOK_DESTINATION_ID = "99999999-0000-4000-8000-000000000002";
+export const PROFILE_DESTINATION_ID = "99999999-0000-4000-8000-000000000003";
+export const ARCHIVED_DESTINATION_ID = "99999999-0000-4000-8000-000000000004";
+
+/** What the writers' destination read returns: one that sends and syncs, one that does neither, one that only syncs, an archived one. */
+export function destinationOptions() {
+  return [
+    { id: DESTINATION_ID, name: "Transactional mail", archived: false, capabilities: { send: true, sync: true, erase: false } },
+    { id: WEBHOOK_DESTINATION_ID, name: "Order hook", archived: false, capabilities: { send: false, sync: false, erase: false } },
+    { id: PROFILE_DESTINATION_ID, name: "Profile store", archived: false, capabilities: { send: false, sync: true, erase: false } },
+    { id: ARCHIVED_DESTINATION_ID, name: "Old mail", archived: true, capabilities: { send: true, sync: true, erase: false } },
+  ];
+}
 export const TOPIC_ID = "44444444-0000-4000-8000-000000000001";
 
 /** A wait, a send, a profile sync and an exit, wired in a line. */
@@ -178,21 +191,7 @@ export function deliveryRoutes(): Record<string, Handler> {
         publishedTemplate("77777777-0000-4000-8000-000000000003", "Unpublished", "email"),
         publishedTemplate(HOOK_TEMPLATE_ID, "CRM payload", "webhook"),
       ].map((entry) => (entry.name === "Unpublished" ? { ...entry, current_version: null } : entry))),
-    [`GET ${WS}/destinations`]: () =>
-      json([
-        {
-          id: DESTINATION_ID,
-          name: "Transactional mail",
-          kind: "smtp",
-          archived: false,
-          burst: 10,
-          rate: 5,
-          config: {},
-          credential_fields_set: [],
-          created_at: "2026-10-01T09:00:00Z",
-          updated_at: "2026-10-01T09:00:00Z",
-        },
-      ]),
+    [`GET ${WS}/destinations/options`]: () => json(destinationOptions()),
     [`GET ${WS}/consent/dimensions`]: () =>
       json([
         {
