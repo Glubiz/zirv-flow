@@ -1484,7 +1484,8 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   declares.
 - **Runtime.** `Destination` gains `sync(ctx, config, credential, ProfileCall)`, `Unsupported` by
   default; only `provider` implements it. The external key is percent-encoded as one path segment
-  (every byte but `A-Za-z0-9-._~`, and `.` and `..` whole), and is at most 512 bytes. A trait the
+  (every byte but `A-Za-z0-9-._~`), and is at most 512 bytes. A key of `.` or `..` would still be a
+  path dot segment, so it is refused as a configuration error, with no call. A trait the
   person has no value for is sent as `null`. Capabilities stay static per kind (`provider` lists the
   `profile_sync` channel); which operations a destination supports is read from its manifest
   (`provider_profile_support`), by publish and by the job. A provider manifest with no `send` is not
@@ -1502,7 +1503,8 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   the person `FOR KEY SHARE` for the outcome write. A person gone, exited or merged away is a no-op. A
   person without the key ends `sync.failed` with `missing_key`, with no call and no attempt row. An
   empty bucket re-enqueues the job (unique key `{effect key}:wait:{n}`, six hours at the most, then
-  `rate_limited`) without spending an attempt. A 429 slows the bucket; the last attempt of a retried
+  `rate_limited`) without spending an attempt; the copy is inserted under the person's `FOR KEY
+  SHARE` lock, so an erasure either finds and purges it or leaves nothing to insert. A 429 slows the bucket; the last attempt of a retried
   failure is recorded as a failure.
 - **Outcome.** `sync.succeeded` and `sync.failed` are reserved names. They are written by the store
   writer `webhook.call` uses (`record_webhook_outcome`, with a `SyncDetail`), so no second event

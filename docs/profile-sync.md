@@ -51,7 +51,7 @@ Each operation is one HTTP request:
 | Key | Meaning |
 |-----|---------|
 | `method` | `POST`, `PUT` or `PATCH` for an upsert (default `POST`); also `DELETE` for a remove (default `DELETE`). |
-| `path` | Starts with `/`. It may hold the placeholder `{key}` once; no other placeholder exists. The external key is percent-encoded as one path segment, so a key holding `/`, `?` or `#` cannot change the route. |
+| `path` | Starts with `/`. It may hold the placeholder `{key}` once; no other placeholder exists. The external key is percent-encoded as one path segment, so a key holding `/`, `?` or `#` cannot change the route; a key of `.` or `..` is refused, and the sync fails with no call. |
 | `idempotency_header` | Carries the step's effect key on every attempt, so a retry cannot duplicate. |
 | `key_from` | Where the external key comes from: `{"identity": "email"}` (any identifier kind) or `{"trait": "<trait key>"}`. |
 | `body.key` | Places the external key at a JSON pointer. The key goes in the path, the body, or both. |
