@@ -198,6 +198,3 @@ export function providerStatusText(status: string): { text: string; tone: Tone }
   }
 }
 
-export function plural(count: number, one: string, many: string): string {
-  return `${count} ${count === 1 ? one : many}`;
-}

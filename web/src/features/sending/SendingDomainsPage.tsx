@@ -2,9 +2,9 @@ import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
-import { Button, Dialog, EmptyState, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView, TextField } from "../../ui";
+import { Button, Dialog, EmptyState, formatDateTime, InlineError, PageHeader, Panel, Pill, plural, ResourceView, TextField } from "../../ui";
 import { RequireAdmin } from "../members";
-import { matching, plural } from "./labels";
+import { matching } from "./labels";
 
 export function SendingDomainsPage() {
   const { ws = "" } = useParams();

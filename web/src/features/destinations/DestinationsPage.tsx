@@ -1,9 +1,9 @@
 import { Link, useParams } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
-import { EmptyState, formatDateTime, PageHeader, Panel, Pill, ResourceView } from "../../ui";
+import { EmptyState, formatDateTime, PageHeader, Panel, Pill, plural, ResourceView } from "../../ui";
 import { RequireAdmin } from "../members";
-import { kindLabel, plural } from "./labels";
+import { kindLabel } from "./labels";
 import { SigningSecretPanel } from "./SigningSecretPanel";
 
 export function DestinationsPage() {

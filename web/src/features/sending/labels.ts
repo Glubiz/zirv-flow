@@ -65,11 +65,7 @@ export function mergedSpf(observed: readonly string[], expected: string): string
   const current = observed.find((text) => SPF_PREFIX.test(text.trim()));
   if (!current) return null;
   const have = current.trim().split(/\s+/);
-  const wanted = expected
-    .trim()
-    .split(/\s+/)
-    .slice(1)
-    .filter((term) => !/^[-~+?]?all$/i.test(term));
+  const wanted = spfMechanisms(expected);
   const missing = wanted.filter((term) => !have.includes(term));
   if (missing.length === 0) return null;
   const last = have[have.length - 1] ?? "";
@@ -92,6 +88,3 @@ export function blockedReason(domain: SendingDomain): string | null {
   return domain.status === "verified" ? null : "domain not verified";
 }
 
-export function plural(count: number, one: string, many: string): string {
-  return `${count} ${count === 1 ? one : many}`;
-}

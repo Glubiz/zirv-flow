@@ -11,12 +11,13 @@ import {
   PageHeader,
   Panel,
   Pill,
+  plural,
   ResourceView,
   SelectField,
   shortId,
 } from "../../ui";
 import { RequireAdmin } from "../members";
-import { lagText, plural, type DeadLetter, type Destination, type QueueStatus, type Rule } from "./labels";
+import { lagText, type DeadLetter, type Destination, type QueueStatus, type Rule } from "./labels";
 import { forwardingTargets, RuleDialog } from "./RuleDialog";
 
 export function ForwardingPage() {
