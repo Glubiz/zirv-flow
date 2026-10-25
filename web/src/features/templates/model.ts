@@ -1,4 +1,5 @@
 import type { components } from "../../api";
+import { BLOCKS_SCHEMA, emptyContent, readContent, type BlocksContent } from "./blocks/document";
 
 export type Template = components["schemas"]["TemplateBody"];
 export type TemplateDetail = components["schemas"]["TemplateDetailBody"];
@@ -9,13 +10,13 @@ export type TemplateVersionSummary = components["schemas"]["TemplateVersionSumma
 export type TemplateVersion = components["schemas"]["TemplateVersionBody"];
 export type TestSend = components["schemas"]["TestSendBody"];
 
-/** How a template is written. Blocks is built by the block editor and cannot be chosen yet. */
+/** How a template is written. Blocks is built by the block editor. */
 export type EditMode = "html" | "mjml" | "blocks";
 
 export const MODES: readonly { id: EditMode; label: string; hint: string; available: boolean }[] = [
   { id: "html", label: "HTML", hint: "Write the HTML and the text part yourself.", available: true },
   { id: "mjml", label: "MJML", hint: "Write MJML; the server turns it into responsive HTML.", available: true },
-  { id: "blocks", label: "Blocks", hint: "Build the message from blocks.", available: false },
+  { id: "blocks", label: "Blocks", hint: "Build the message from blocks.", available: true },
 ];
 
 export interface EmailDraft {
@@ -35,6 +36,7 @@ export interface WebhookDraft {
 export type Editable =
   | { kind: "email"; mode: "html" | "mjml"; email: EmailDraft; rest: Record<string, unknown> }
   | { kind: "webhook"; webhook: WebhookDraft; rest: Record<string, unknown> }
+  | { kind: "blocks"; content: BlocksContent; /** The document is of a newer schema than this editor knows: it is shown, not changed. */ newer: boolean; rest: Record<string, unknown> }
   | { kind: "unsupported"; mode: string; rest: Record<string, unknown> };
 
 function record(value: unknown): Record<string, unknown> {
@@ -63,6 +65,10 @@ export function readDocument(document: unknown): Editable {
       },
       rest: doc,
     };
+  }
+  if (doc["mode"] === "blocks" && doc["channel"] === "email" && typeof doc["blocks"] === "object" && doc["blocks"] !== null) {
+    const schema = doc["schema"];
+    return { kind: "blocks", content: readContent(doc["blocks"]), newer: typeof schema === "number" && schema > BLOCKS_SCHEMA, rest: doc };
   }
   if (doc["mode"] === "code" && doc["channel"] === "webhook" && doc["webhook"] !== undefined) {
     const headers = record(webhook["headers"]);
@@ -94,6 +100,9 @@ export function writeDocument(editable: Editable): Record<string, unknown> {
     if (editable.mode === "mjml") email["syntax"] = "mjml";
     return { ...editable.rest, email };
   }
+  if (editable.kind === "blocks") {
+    return editable.newer ? editable.rest : { ...editable.rest, blocks: editable.content };
+  }
   if (editable.kind === "webhook") {
     const headers: Record<string, string> = {};
     for (const header of editable.webhook.headers) {
@@ -116,6 +125,9 @@ export function startingDocument(
   category: "marketing" | "transactional",
 ): Record<string, unknown> | null {
   if (channel === "webhook") return null;
+  if (mode === "blocks") {
+    return { schema: BLOCKS_SCHEMA, channel: "email", mode: "blocks", blocks: emptyContent(category) };
+  }
   return {
     schema: 1,
     channel: "email",
@@ -126,6 +138,7 @@ export function startingDocument(
 
 export function modeLabel(editable: Editable): string {
   if (editable.kind === "webhook") return "Webhook template";
+  if (editable.kind === "blocks") return "Blocks template";
   if (editable.kind === "email") return editable.mode === "mjml" ? "MJML template" : "HTML template";
   return "Blocks template";
 }
@@ -166,6 +179,16 @@ const ISSUE_TEXT: Record<string, string> = {
   preheader_too_long: "The preheader is longer than most inboxes show.",
   sample_render_failed: "A sample render failed, so some checks did not run.",
   url_from_merge_field: "A link address comes from a merge tag.",
+  invalid_setting: "A style setting is not valid.",
+  invalid_columns: "A section holds one to three columns.",
+  duplicate_block_id: "Two blocks share an id.",
+  invalid_block_id: "A block id is not valid.",
+  invalid_url: "A web address is not valid. Use https, http or mailto.",
+  image_without_alt: "An image has no alt text. Screen readers skip it.",
+  markup_in_plain_field: "A plain text field holds markup.",
+  blocks_limit: "The email has more sections or blocks than the editor allows.",
+  mjml_in_raw_html: "Raw HTML cannot hold MJML tags.",
+  sanitizer_rejected: "Some of the text is not allowed in rich text.",
 };
 
 /** What an issue says, in words. */
@@ -185,6 +208,9 @@ export function issueWhere(issue: TemplateIssue): string {
   if (at.startsWith("/email/html")) return "Source";
   if (at.startsWith("/email/text")) return "Text";
   if (at.startsWith("/email/sender") || at.startsWith("/email/lang")) return "Settings";
+  if (at.startsWith("/blocks/block/")) return "Block";
+  if (at.startsWith("/blocks/settings")) return "Document style";
+  if (/^\/blocks\/(subject|preheader|sender|lang)/.test(at)) return "Message";
   if (at.startsWith("/webhook/headers")) return "Headers";
   if (at.startsWith("/webhook/body")) return "Body";
   return "Template";
