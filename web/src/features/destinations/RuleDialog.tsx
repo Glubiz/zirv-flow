@@ -139,6 +139,17 @@ export function RuleDialog({ workspaceId, destinations, existing, onClose, onSav
           <p className="faint">Each output key of the delivered JSON reads one source.</p>
           {rows.map((row, at) => {
             const label = `row ${at + 1}`;
+            if (row.raw) {
+              return (
+                <div key={at} className="filter-row" role="group" aria-label={`Mapping ${label}`}>
+                  <span className="strong mono">{row.key}</span>
+                  <span className="faint">Not editable here: kept as it is.</span>
+                  <Button onClick={() => setRows(rows.filter((_, index) => index !== at))}>
+                    Remove <span className="visually-hidden">{label}</span>
+                  </Button>
+                </div>
+              );
+            }
             return (
               <div key={at} className="filter-row" role="group" aria-label={`Mapping ${label}`}>
                 <TextField

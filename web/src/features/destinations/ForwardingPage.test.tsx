@@ -118,6 +118,26 @@ describe("forwarding status and rules", () => {
     expect(body).not.toHaveProperty("destination_id");
   });
 
+  it("sends an unrecognised mapping entry back unchanged when the rule is saved without edits", async () => {
+    const mapping = { id: { from: "event.id" }, empty: { value: null }, odd: { from: "event.something_new" } };
+    const calls = mockApi(
+      base({
+        [`GET ${WS}/forwarding/rules`]: () => json([rule({ mapping })]),
+        [`PATCH ${WS}/forwarding/rules/${RULE_ID}`]: () => json(rule()),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Change Paid orders" }));
+    const dialog = await screen.findByRole("dialog", { name: "Change Paid orders" });
+    expect(within(dialog).getAllByText("Not editable here: kept as it is.")).toHaveLength(2);
+    await user.click(within(dialog).getByRole("button", { name: "Save the rule" }));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PATCH")).toBe(true));
+    expect((calls.find((call) => call.method === "PATCH")?.body as { mapping: unknown }).mapping).toEqual(mapping);
+  });
+
   it("offers only destinations that carry events, and points to a webhook when there is none", async () => {
     mockApi(
       base({

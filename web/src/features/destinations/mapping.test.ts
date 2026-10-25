@@ -52,4 +52,21 @@ describe("forwarding mapping", () => {
     expect(result.ok).toBe(false);
     expect(Object.keys(result.ok ? {} : result.errors)).toEqual(["1", "2", "3", "4"]);
   });
+
+  it("keeps an entry it does not recognise as it is, so an unedited save sends it back unchanged", () => {
+    const mapping = {
+      id: { from: "event.id" },
+      empty: { value: null },
+      odd: { from: "event.something_new" },
+      text: "plain",
+      list: [1, 2],
+      bad_pointer: { from: "event.properties", pointer: 7 },
+    };
+
+    const rows = rowsFromMapping(mapping);
+    const result = mappingFromRows(rows);
+
+    expect(rows.filter((row) => row.raw !== undefined).map((row) => row.key)).toEqual(["empty", "odd", "text", "list", "bad_pointer"]);
+    expect(result).toEqual({ ok: true, mapping });
+  });
 });

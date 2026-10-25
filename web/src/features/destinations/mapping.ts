@@ -20,6 +20,8 @@ export interface MappingRow {
   valueType: ValueType;
   /** The fixed value as typed. */
   value: string;
+  /** An entry this editor does not understand, kept as it came and sent back unchanged. */
+  raw?: { entry: unknown };
 }
 
 export function newRow(): MappingRow {
@@ -38,16 +40,15 @@ export function rowsFromMapping(mapping: Record<string, unknown>): MappingRow[] 
       }
       if (from === "event.properties") {
         const pointer = (source as { pointer?: unknown }).pointer;
-        return { ...row, source: "event.properties" as const, pointer: typeof pointer === "string" ? pointer : "" };
-      }
-      if ("value" in source) {
+        if (typeof pointer === "string") return { ...row, source: "event.properties" as const, pointer };
+      } else if ("value" in source) {
         const value = source.value;
         if (typeof value === "number") return { ...row, source: "value" as const, valueType: "number" as const, value: String(value) };
         if (typeof value === "boolean") return { ...row, source: "value" as const, valueType: "boolean" as const, value: String(value) };
-        return { ...row, source: "value" as const, value: typeof value === "string" ? value : "" };
+        if (typeof value === "string") return { ...row, source: "value" as const, value };
       }
     }
-    return { ...row, source: "value" as const, value: "" };
+    return { ...row, raw: { entry: source } };
   });
 }
 
@@ -71,7 +72,9 @@ export function mappingFromRows(rows: readonly MappingRow[]): MappingResult {
       return;
     }
     seen.add(key);
-    if (row.source === "event.properties") {
+    if (row.raw) {
+      mapping[key] = row.raw.entry;
+    } else if (row.source === "event.properties") {
       if (!row.pointer.startsWith("/")) {
         errors[at] = "A property pointer starts with a slash, such as /order/total.";
         return;
