@@ -164,11 +164,14 @@ pub(crate) async fn publish_template(
     // The sender the document names must be a live identity on a verified domain. The check runs
     // in the publishing transaction, after the draft is pinned, so the sender that is checked is
     // the sender that is published.
-    if let Some(email) = &doc.email {
-        let sender = email
-            .sender
-            .as_deref()
-            .and_then(|sender| sender.trim().parse::<Uuid>().ok());
+    // A code document names its sender in `email`, a block document in `blocks`.
+    let named_sender = doc
+        .email
+        .as_ref()
+        .map(|email| email.sender.as_deref())
+        .or_else(|| doc.blocks.as_ref().map(|blocks| blocks.sender.as_deref()));
+    if let Some(named) = named_sender {
+        let sender = named.and_then(|sender| sender.trim().parse::<Uuid>().ok());
         let Some(sender) = sender else {
             return Err(sender_error(SenderError::Unknown));
         };

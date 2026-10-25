@@ -45,8 +45,8 @@ pub struct EnrollRequest<'a> {
     pub occurrence: Occurrence,
     /// The re-entry interval is measured against this instant.
     pub now: OffsetDateTime,
-    /// The trace of the work that enrolls. A refused person's decision is on it; each enrollment
-    /// starts a trace of its own with the same cause.
+    /// The trace of the work that enrolls. A refused person's decision is on it, and each
+    /// enrollment continues it with the same cause.
     pub trace: &'a TraceContext,
 }
 
@@ -55,7 +55,7 @@ pub struct EnrollRequest<'a> {
 pub struct Enrolled {
     pub person: Uuid,
     pub enrollment: Uuid,
-    /// The enrollment's trace.
+    /// The enrollment's trace: the trigger's trace id and cause.
     pub trace: TraceContext,
 }
 
@@ -117,6 +117,7 @@ pub async fn enroll(
             person: *person,
             occurrence: request.occurrence.id,
             cause: None,
+            trace_id: None,
         })
         .collect();
     enroll_entries(
@@ -144,6 +145,9 @@ pub struct EnrollEntry {
     /// The cause of this enrollment when it is not the request trace's (an event trigger is
     /// caused by its own event).
     pub cause: Option<Cause>,
+    /// The trace this enrollment continues when it is not the request trace (an event trigger
+    /// continues the trace its event arrived on).
+    pub trace_id: Option<TraceId>,
 }
 
 /// Who to enroll in which version of which flow, each person for an occurrence of their own.
@@ -271,7 +275,7 @@ pub async fn enroll_entries(
             person: entry.person,
             enrollment: Uuid::now_v7(),
             trace: TraceContext {
-                trace_id: TraceId::new(),
+                trace_id: entry.trace_id.unwrap_or(request.trace.trace_id),
                 cause,
             },
         });

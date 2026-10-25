@@ -381,10 +381,10 @@ mod tests {
             ("skipped", Some("no_consent"))
         );
 
-        // Criterion 9, API: the trace of the track call, and the trace of the enrollment it
-        // started (each enrollment starts a trace of its own with the cause of its trigger,
-        // architecture 9.2), read as one tree.
-        let first = world
+        // Criterion 9, API: one trace, the track call's, holds the event, the segment entry, the
+        // enrollment, the steps, the messages, the unsubscribe, the delivery feedback and the
+        // later skipped send. The enrollment continues the trace of the segment entry.
+        let tree = world
             .api_ok(
                 "GET",
                 &format!("/traces/{track_trace}"),
@@ -400,35 +400,15 @@ mod tests {
                 StatusCode::OK,
             )
             .await;
-        let enrollment_trace = enrollments["enrollments"][0]["trace_id"]
-            .as_str()
-            .expect("the enrollment's trace id")
-            .to_owned();
-        let second = world
-            .api_ok(
-                "GET",
-                &format!("/traces/{enrollment_trace}"),
-                None,
-                StatusCode::OK,
-            )
-            .await;
-        assert_eq!(first["truncated"], false);
-        assert_eq!(second["truncated"], false);
-        let mut records = trace::records_of(&first);
-        records.extend(trace::records_of(&second));
+        assert_eq!(
+            enrollments["enrollments"][0]["trace_id"], track_trace,
+            "the enrollment continues the trace of the track call"
+        );
+        assert_eq!(tree["truncated"], false);
+        let records = trace::records_of(&tree);
         if let Err(gap) = trace::complete(&records) {
             panic!("{gap}");
         }
-        // The track call's own trace stops at the segment entry. The criterion asks for the
-        // enrollment, steps, message and feedback in the trace of the track call; they are in
-        // the trace of the enrollment, which shares the cause but not the id. This pins that
-        // finding: when the enrollment continues the track call's trace, this fails, and the
-        // tree above is the track call's alone.
-        assert_eq!(
-            trace::complete(&trace::records_of(&first)),
-            Err("the trace has no `flow.enroll` decision with outcome `enrolled`".to_owned()),
-            "the trace of the track call alone is expected to stop at the segment entry"
-        );
 
         // No address value in the trace or in any stored decision.
         let shown = serde_json::to_string(&records).expect("text");

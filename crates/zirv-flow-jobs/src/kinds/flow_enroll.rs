@@ -128,6 +128,7 @@ async fn run_people(
             occurrence: *occurrence,
             // An event starts a flow on its own cause; the other triggers share the job's.
             cause: (job.trigger == TriggerKind::Event).then(|| Cause::event(*occurrence)),
+            trace_id: None,
         })
         .collect();
     if job.trigger == TriggerKind::Event {
@@ -194,11 +195,20 @@ async fn matching_events(
             (person.unwrap_or(event.person_id), event.id)
         })
         .collect();
+    // An enrollment continues the trace its event arrived on.
+    let traces: hashbrown::HashMap<Uuid, zirv_flow_core::TraceId> = events
+        .iter()
+        .map(|event| (event.id, event.trace_id))
+        .collect();
     Ok(entries
         .into_iter()
         .filter(|entry| {
             let person = survivors.get(&entry.person).copied();
             passing.contains(&(person.unwrap_or(entry.person), entry.occurrence))
+        })
+        .map(|entry| EnrollEntry {
+            trace_id: traces.get(&entry.occurrence).copied(),
+            ..entry
         })
         .collect())
 }
@@ -244,6 +254,7 @@ async fn run_audience(
             person: *person,
             occurrence,
             cause: None,
+            trace_id: None,
         })
         .collect();
     enroll(ctx, job, version, &entries, now).await?;
