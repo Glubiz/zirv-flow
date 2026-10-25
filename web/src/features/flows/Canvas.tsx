@@ -104,15 +104,13 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
           <span className="fl-count">{data.counts.entered.toLocaleString("en")} entered</span>
           {data.counts.waiting > 0 ? <span className="fl-count fl-count-lite">{data.counts.waiting.toLocaleString("en")} waiting</span> : null}
           {data.counts.failed > 0 ? <span className="fl-count fl-count-bad">{data.counts.failed.toLocaleString("en")} failed</span> : null}
-          {(data.counts.sent ?? 0) > 0 ? <span className="fl-count">{(data.counts.sent ?? 0).toLocaleString("en")} sent</span> : null}
+          {data.counts.sent ? <span className="fl-count">{data.counts.sent.toLocaleString("en")} sent</span> : null}
           {(data.counts.skipped ?? []).map((skip) => (
             <span key={skip.reason} className="fl-count fl-count-lite">
               {skip.count.toLocaleString("en")} skipped: {reasonLabel(skip.reason)}
             </span>
           ))}
-          {(data.counts.send_failed ?? 0) > 0 ? (
-            <span className="fl-count fl-count-bad">{(data.counts.send_failed ?? 0).toLocaleString("en")} send failed</span>
-          ) : null}
+          {data.counts.send_failed ? <span className="fl-count fl-count-bad">{data.counts.send_failed.toLocaleString("en")} send failed</span> : null}
         </div>
       ) : null}
       {many ? (

@@ -164,20 +164,18 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
                   : null}
               </SelectField>
             ) : (
-              <>
-                <TextField
-                  label="Address"
-                  type="email"
-                  value={address}
-                  onChange={(event) => setAddress(event.target.value)}
-                  autoComplete="off"
-                  hint={
-                    allowlist.status === "ready" && allowlist.data.entries.length > 0
-                      ? `On the allowlist: ${allowlist.data.entries.map((entry) => entry.display_hint).join(", ")}`
-                      : "The allowlist is empty. An admin adds addresses to it."
-                  }
-                />
-              </>
+              <TextField
+                label="Address"
+                type="email"
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                autoComplete="off"
+                hint={
+                  allowlist.status === "ready" && allowlist.data.entries.length > 0
+                    ? `On the allowlist: ${allowlist.data.entries.map((entry) => entry.display_hint).join(", ")}`
+                    : "The allowlist is empty. An admin adds addresses to it."
+                }
+              />
             )}
             {personId ? <p className="faint">The test renders with the person you are previewing as.</p> : null}
             {failure ? <InlineError {...failure} /> : null}
@@ -222,16 +220,19 @@ function TestSendLog({ log }: { log: Resource<components["schemas"]["TestSendsBo
               </tr>
             </thead>
             <tbody>
-              {log.data.test_sends.map((row) => (
-                <tr key={row.id}>
-                  <td>{formatDateTime(row.created_at)}</td>
-                  <td>{row.template_version ? `Version ${row.template_version}` : "Draft"}</td>
-                  <td>
-                    <Pill tone={outcome(row).tone}>{outcome(row).label}</Pill>
-                    {row.reason ? <span className="faint mono"> {row.reason}</span> : null}
-                  </td>
-                </tr>
-              ))}
+              {log.data.test_sends.map((row) => {
+                const result = outcome(row);
+                return (
+                  <tr key={row.id}>
+                    <td>{formatDateTime(row.created_at)}</td>
+                    <td>{row.template_version ? `Version ${row.template_version}` : "Draft"}</td>
+                    <td>
+                      <Pill tone={result.tone}>{result.label}</Pill>
+                      {row.reason ? <span className="faint mono"> {row.reason}</span> : null}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
