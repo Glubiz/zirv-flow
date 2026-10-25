@@ -514,9 +514,7 @@ mod tests {
     /// The blocks step of the scenario: a flow sends a block document built from the v1 set, and
     /// the HTML the sink captures is the preview, apart from the tracking tokens.
     #[sqlx::test]
-    #[ignore = "blocked by the sender of a block document: the store reads a template's sender \
-                from /email/sender only, so a published block template sends skipped: \
-                sender_unverified"]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_block_document_email_is_the_preview_render_apart_from_tracking(pool: PgPool) {
         let world = World::start(pool).await;
         let (sender, _) = world
