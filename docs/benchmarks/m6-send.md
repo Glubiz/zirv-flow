@@ -235,6 +235,11 @@ here.
   1..N after a scale down).
 - `VACUUM` and `COUNT` of the events used parallel workers and exhausted the 1 GB `/dev/shm`; they now run
   without parallel workers.
+- The product has no workspace delete, and a cascading `DELETE FROM workspaces` of the 70,000-person
+  workspace ran for 21 minutes (a foreign key check per deleted row) before it was cancelled. `clean.sh`
+  now deletes every row of that one workspace table by table with the foreign key triggers off for the
+  session, then the workspace (20 s). The 10 M people of the other workspace, the 11 enrollments and the
+  3 jobs of the M5 workspace are untouched (checked by count).
 - The report generator was extended while proving: per-container CPU over the steady window, the
   scheduler queue samples with a count of missed scrapes, and the clock bracket; a run that matches no
   enrollment is reported invalid.
