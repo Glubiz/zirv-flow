@@ -1365,8 +1365,11 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `failed: delivery_unconfirmed`, because the first call may have been accepted; what really went
   wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
-  is no longer `ready` or `running` (it went dead): `pending` as `failed: internal_error`,
-  `sending` as `failed: delivery_unconfirmed`.
+  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now.
+  The ending follows the row's marks: `delivery_unconfirmed` when the in-flight or unconfirmed mark
+  says a call may have been accepted, `internal_error` for a `pending` message or a `sending` one
+  with neither mark (every attempt was refused for good or never left; a timeout or reset after an HTTP request was written latches the unconfirmed mark, so it is not this). The sweep appends its `job` gate, noted
+  `job_dead`, to the gates the row holds.
 - **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
   enrollment ended or the flow is paused or archived: a decision, no row), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared
@@ -1425,8 +1428,13 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   The same state is written ahead of the call for every destination type: the write that marks
   the row `sending` also notes a call in flight, committed before the destination is called. It is
   cleared, before the attempt is settled, only when the outcome proves the call was not accepted (a
-  `4xx` or `5xx` reply, an auth, config or egress error, or a transport failure before the end
-  marker). A reply lost after the end marker latches the unconfirmed mark instead, and a success
+  `4xx` or `5xx` reply, an auth or config error, or a failure before anything was sent: a refused
+  destination, a refused or timed-out connect, a name that did not resolve, a TLS failure before the
+  request was written, or a transport failure before the end marker). A reply lost after the end
+  marker latches the unconfirmed mark instead, and so does an HTTP call that timed out or was reset
+  after the request was written, or whose answer went over the size cap (`HttpError::may_have_arrived`,
+  set where the guarded client maps its errors; the reason codes stay `timeout` and `transport`),
+  so such a message is carried and a retry to a changed address is refused. A success
   ends the message. A worker that crashes, or whose lease is lost, between the call and the clear
   leaves the note, and the next attempt counts it like the unconfirmed mark (the earlier call's
   outcome is unknown); a crash after a definitive reply but before the clear is counted the same
