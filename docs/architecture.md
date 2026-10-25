@@ -1338,8 +1338,11 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `failed: delivery_unconfirmed`, because the first call may have been accepted; what really went
   wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
-  is no longer `ready` or `running` (it went dead): `pending` as `failed: internal_error`,
-  `sending` as `failed: delivery_unconfirmed`.
+  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now.
+  The ending follows the row's marks: `delivery_unconfirmed` when the in-flight or unconfirmed mark
+  says a call may have been accepted, `internal_error` for a `pending` message or a `sending` one
+  with neither mark (every attempt was refused for good). The sweep appends its `job` gate, noted
+  `job_dead`, to the gates the row holds.
 - **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
   enrollment ended or the flow is paused or archived: a decision, no row), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared

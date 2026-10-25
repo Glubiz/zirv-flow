@@ -785,6 +785,7 @@ async fn write_end(
                 message,
                 trace,
                 job: Some(job_ref),
+                keep_gates: false,
             },
         )
         .await?;
@@ -2415,7 +2416,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ended, [queued.message]);
+        assert_eq!(
+            ended.iter().map(|e| e.message).collect::<Vec<_>>(),
+            [queued.message]
+        );
         let message = env.message(queued.message).await;
         assert_eq!(
             (message.status.as_str(), message.reason.as_deref()),
@@ -2442,23 +2446,68 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_sweep_ends_a_sending_message_whose_job_is_dead_as_delivery_unconfirmed(
+    async fn the_sweep_ends_a_message_whose_last_attempt_was_refused_for_good_as_an_internal_error(
         pool: PgPool,
     ) {
-        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
-        env.render = Some(start_pool("serve", "").await);
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
         let template = env.plain_template("transactional").await;
         let person = env.person("ada@example.com").await;
         let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
         env.attempt().await.unwrap_err();
         assert_eq!(env.message(queued.message).await.status, "sending");
+        assert!(
+            !message_in_flight(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "a definitive refusal clears the in-flight mark"
+        );
         bury_the_jobs(&env).await;
 
         let ended = end_orphaned_messages(&env.pool, env.clock.now())
             .await
             .unwrap();
 
-        assert_eq!(ended, [queued.message]);
+        assert_eq!(ended.len(), 1);
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("internal_error")),
+            "no attempt was possibly accepted"
+        );
+        assert!(message.gate_results.to_string().contains("job_dead"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_sending_message_whose_job_is_dead_as_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_at(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        assert!(
+            message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "the lost reply left the unconfirmed mark"
+        );
+        bury_the_jobs(&env).await;
+
+        let ended = end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ended.iter().map(|e| e.message).collect::<Vec<_>>(),
+            [queued.message]
+        );
         let message = env.message(queued.message).await;
         assert_eq!(
             (message.status.as_str(), message.reason.as_deref()),

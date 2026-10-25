@@ -209,11 +209,30 @@ pub async fn insert_message<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewMessage<'_>,
 ) -> Result<bool, StoreError> {
+    write_message(executor, new, false).await
+}
+
+/// Like [`insert_message`], but the gates of `new` are appended to the gate results the row
+/// already holds instead of replacing them. Only the in-flight and unconfirmed marks (transient
+/// notes on a `sending` row) are dropped. The leader's orphan sweep ends a message this way, so
+/// the record of the gates it passed survives next to its own `job` gate.
+pub(crate) async fn insert_message_keeping_gates<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewMessage<'_>,
+) -> Result<bool, StoreError> {
+    write_message(executor, new, true).await
+}
+
+async fn write_message<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewMessage<'_>,
+    keep_gates: bool,
+) -> Result<bool, StoreError> {
     let gates: Vec<Value> = new.gates.iter().map(|gate| gate.to_value()).collect();
     let dimensions = json!(new.dimensions);
     let completed = new.status.has_ended().then_some(new.now);
     let written = sqlx::query(
-        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule,             gate_results = COALESCE((SELECT jsonb_agg(entry) FROM jsonb_array_elements(messages.gate_results) AS entry                                      WHERE entry ->> 'result' = 'deferred'), '[]'::jsonb)                            || EXCLUDED.gate_results,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status IN ('pending', 'sending') \n            AND EXCLUDED.status NOT IN ('pending', 'sending')",
+        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule,             gate_results = CASE WHEN $22 THEN COALESCE((SELECT jsonb_agg(entry) FROM jsonb_array_elements(messages.gate_results) AS entry WHERE NOT (entry ->> 'gate' = 'delivery' AND entry ->> 'result' IN ('in_flight', 'unconfirmed'))), '[]'::jsonb) || EXCLUDED.gate_results ELSE COALESCE((SELECT jsonb_agg(entry) FROM jsonb_array_elements(messages.gate_results) AS entry                                      WHERE entry ->> 'result' = 'deferred'), '[]'::jsonb)                            || EXCLUDED.gate_results END,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status IN ('pending', 'sending') \n            AND EXCLUDED.status NOT IN ('pending', 'sending')",
     )
     .bind(new.id)
     .bind(new.workspace.as_uuid())
@@ -236,6 +255,7 @@ pub async fn insert_message<'e>(
     .bind(new.attempts)
     .bind(new.now)
     .bind(completed)
+    .bind(keep_gates)
     .execute(executor)
     .await
     .map_err(StoreError::query)?

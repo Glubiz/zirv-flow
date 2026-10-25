@@ -11,7 +11,7 @@ mod log;
 mod person_log;
 
 pub use address::read_send_address;
-pub(crate) use log::COLUMNS;
+pub(crate) use log::{COLUMNS, insert_message_keeping_gates};
 pub use log::{
     GateRecord, Message, MessageStatus, NewMessage, clear_message_in_flight, find_message,
     insert_message, list_person_messages, mark_message_sending, mark_message_unconfirmed,
