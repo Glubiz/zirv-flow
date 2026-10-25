@@ -9,6 +9,7 @@ import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
 import { TestSendDialog } from "./TestSendDialog";
+import { UtmOverride } from "./UtmOverride";
 import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
 import {
@@ -235,6 +236,9 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
         </p>
       ) : null}
 
+      {tab === "editor" && template.channel === "email" ? (
+        <UtmOverride workspaceId={workspaceId} template={template} editable={editable} onSaved={setTemplate} />
+      ) : null}
       {tab === "editor" ? (
         <div className="tp-split">
           <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} issues={issues} checked={preview.status === "ready"} />

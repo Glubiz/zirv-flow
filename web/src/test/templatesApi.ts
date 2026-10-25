@@ -34,6 +34,7 @@ export function templateBody(overrides: Doc = {}) {
     updated_at: "2026-10-10T09:00:00Z",
     created_by: null,
     sender_identity_id: SENDER_ID,
+    utm: "inherit",
     ...overrides,
   };
 }
@@ -132,6 +133,11 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     ...catalogRoutes(),
     [`GET ${WS}/templates`]: () => json([current]),
     [`GET ${base}`]: () => json(current),
+    [`PUT ${base}`]: async (request) => {
+      const body = (await request.json()) as Doc;
+      current = { ...current, ...body };
+      return json(current);
+    },
     [`PUT ${base}/draft`]: async (request) => {
       const body = (await request.json()) as { document: Doc };
       current = { ...current, draft: { ...(current["draft"] as Doc), document: body.document } };

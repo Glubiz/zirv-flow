@@ -19,6 +19,7 @@ import {
   type SendSettings,
   type SettingsDraft,
 } from "./model";
+import { UtmSection } from "./UtmSection";
 
 export function SendingSettingsPage() {
   const { ws = "" } = useParams();
@@ -49,6 +50,18 @@ export function SendingSettingsPage() {
           notice={notice}
           onNotice={setNotice}
           onReload={settings.reload}
+        />
+      ) : null}
+      {workspace.status === "loading" ? <LoadingState label="Loading the UTM parameters" /> : null}
+      {workspace.status === "error" ? <ErrorState {...describeError(workspace.error)} onRetry={workspace.reload} /> : null}
+      {workspace.status === "ready" ? (
+        <UtmSection
+          key={ws}
+          workspaceId={ws}
+          workspaceSlug={workspace.data.slug}
+          stored={workspace.data.utm}
+          canManage={canManage}
+          onSaved={workspace.reload}
         />
       ) : null}
     </div>

@@ -9,6 +9,8 @@ import { SendingSettingsPage } from "./SendingSettingsPage";
 
 const WS = "/api/v1/workspaces/ws1";
 
+const UTM_OFF = { enabled: false, source: "{workspace}", medium: "email", campaign: "{flow}", content: "{template}", domains: [] as string[] };
+
 const STORED = {
   frequency_caps: [{ channel: "email", window: "P1D", limit: 3, mode: "skip" }],
   quiet_hours: { start: "21:00", end: "08:00", days: ["mon", "tue", "wed", "thu", "fri"] },
@@ -20,7 +22,7 @@ function access(role: "admin" | "member"): Record<string, Handler> {
   return {
     "GET /api/v1/session": () => json(session(who)),
     "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: who.id, email: who.email, role, added_at: "2026-10-01T09:00:00Z" }]),
-    [`GET ${WS}`]: () => json({ id: "ws1", name: "Spring campaigns", slug: "spring", timezone: "Europe/Copenhagen", created_at: "2026-10-01T09:00:00Z" }),
+    [`GET ${WS}`]: () => json({ id: "ws1", name: "Spring campaigns", slug: "spring", timezone: "Europe/Copenhagen", utm: UTM_OFF, created_at: "2026-10-01T09:00:00Z" }),
   };
 }
 
