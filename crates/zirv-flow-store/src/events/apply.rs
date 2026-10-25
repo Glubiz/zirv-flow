@@ -116,6 +116,8 @@ pub(crate) struct EventBatch {
     fed: bool,
     /// The accepted events that may wake a waiting enrollment, matched once in `finish`.
     arrivals: Vec<Arrival>,
+    /// The stored events the forwarding outbox is told about in `finish`.
+    forwards: Vec<crate::ForwardRef>,
 }
 
 impl EventBatch {
@@ -129,6 +131,8 @@ impl EventBatch {
     ) -> Result<(), StoreError> {
         let arrivals = std::mem::take(&mut self.arrivals);
         enqueue_arrivals(connection, workspace, &arrivals).await?;
+        let forwards = std::mem::take(&mut self.forwards);
+        crate::enqueue_forwarding(connection, workspace, &forwards).await?;
         if std::mem::take(&mut self.fed) {
             notify_feed(connection, workspace).await?;
         }
@@ -447,6 +451,10 @@ async fn judge_event_record(
         },
     )
     .await?;
+    batch.forwards.push(crate::ForwardRef {
+        id: event_id,
+        occurred_at: timing.occurred_at,
+    });
     decide(
         connection,
         workspace,

@@ -387,6 +387,39 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     .await
     .unwrap();
 
+    // Forwarding outbox rows (a pending, a dead and a delivered one) of the survivor, the merged
+    // person and the bystander. Their payloads hold what a mapping took from an event.
+    let destination = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO destinations (id, workspace_id, kind, name, config) \
+         VALUES ($1, $2, 'fake', 'seeded sink', '{}')",
+    )
+    .bind(destination)
+    .bind(ws.as_uuid())
+    .execute(pool)
+    .await
+    .unwrap();
+    for (holder, state) in [
+        (person, "pending"),
+        (person, "dead"),
+        (merged, "pending"),
+        (bystander, "delivered"),
+    ] {
+        sqlx::query(
+            "INSERT INTO forwarding_outbox (id, workspace_id, destination_id, rule_id, event_id, \
+                person_id, idempotency_key, payload, state) \
+             VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), $3, \
+                     'k', '{\"who\": \"seeded\"}', $4)",
+        )
+        .bind(ws.as_uuid())
+        .bind(destination)
+        .bind(holder)
+        .bind(state)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     // Undrained inbox rows: the person's, spelled differently, and the bystander's.
     let item = |email: &str, message_id: &str| IngestItem {
         identifiers: vec![("email".into(), email.into())],

@@ -12,6 +12,7 @@ use crate::events::{
 };
 use crate::feedback;
 use crate::flows::{self, FlowSchemas};
+use crate::forwarding;
 use crate::health::{self, StatusBody};
 use crate::imports;
 use crate::ingest::{
@@ -188,6 +189,14 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         destinations::crud::remove,
         destinations::actions::check,
         destinations::domain_status::get,
+        forwarding::rules::list,
+        forwarding::rules::create,
+        forwarding::rules::get,
+        forwarding::rules::update,
+        forwarding::rules::remove,
+        forwarding::queue::dead_letters,
+        forwarding::queue::status,
+        forwarding::queue::redrive,
         feedback::receive::receive,
         workspace_credentials::schema::list_kinds,
         workspace_credentials::crud::list,
@@ -520,6 +529,15 @@ use crate::workspaces::{self, CreateWorkspaceRequest, UpdateWorkspaceRequest, Wo
         lists::person::PersonListBody,
         lists::person::MembershipHistoryBody,
         lists::person::MembershipChangeBody,
+        forwarding::rules::RuleBody,
+        forwarding::rules::CreateRuleRequest,
+        forwarding::rules::UpdateRuleRequest,
+        forwarding::queue::DeadLetterBody,
+        forwarding::queue::DeadLettersBody,
+        forwarding::queue::QueueStatusBody,
+        forwarding::queue::ForwardingStatusBody,
+        forwarding::queue::RedriveRequest,
+        forwarding::queue::RedriveBody,
         destinations::crud::DestinationBody,
         destinations::crud::CreateDestinationRequest,
         destinations::crud::UpdateDestinationRequest,
