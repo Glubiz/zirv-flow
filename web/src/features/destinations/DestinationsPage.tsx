@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router";
 import { client, unwrap, useResource } from "../../api";
 import { EmptyState, formatDateTime, PageHeader, Panel, Pill, plural, ResourceView } from "../../ui";
 import { RequireAdmin } from "../members";
+import { loadedKinds, useDestinationKinds } from "./kinds";
 import { kindLabel } from "./labels";
 import { SigningSecretPanel } from "./SigningSecretPanel";
 
@@ -28,6 +29,8 @@ function Destinations({ workspaceId }: { workspaceId: string }) {
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/destinations", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
+
+  const kinds = loadedKinds(useDestinationKinds());
 
   return (
     <div className="page">
@@ -68,7 +71,7 @@ function Destinations({ workspaceId }: { workspaceId: string }) {
                         <td className="strong">
                           <Link to={`/w/${workspaceId}/destinations/${destination.id}`}>{destination.name}</Link>
                         </td>
-                        <td>{kindLabel(destination.kind)}</td>
+                        <td>{kindLabel(kinds, destination.kind)}</td>
                         <td>
                           <Pill tone={destination.credential_id ? "neutral" : "attention"}>
                             {destination.credential_id ? "Credential set" : "No credential"}

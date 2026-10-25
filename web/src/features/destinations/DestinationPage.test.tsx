@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { credential, CRED_ID, destination, DEST_ID, domain, DOMAIN_ID, queue, WS } from "../../test/destinationsApi";
+import { credential, CRED_ID, destination, destinationKinds, DEST_ID, domain, DOMAIN_ID, queue, statsBody, WS } from "../../test/destinationsApi";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { actor } from "../../test/segmentsApi";
@@ -17,6 +17,8 @@ type Route = () => Response | Promise<Response>;
 function base(extra: Record<string, Route> = {}) {
   return {
     ...actor("writer"),
+    "GET /api/v1/destination-kinds": () => json(destinationKinds()),
+    [`GET ${WS}/destinations/${DEST_ID}/stats`]: () => json(statsBody()),
     [`GET ${WS}/destinations/${DEST_ID}`]: () => json(destination()),
     [`GET ${WS}/forwarding/status`]: () => json({ destinations: [queue()] }),
     [`GET ${WS}/credentials`]: () => json([credential(CRED_ID, "Hook secret", ["signing_secret"])]),
@@ -37,6 +39,46 @@ describe("one destination", () => {
     expect(within(panel).getByText("2")).toBeInTheDocument();
     expect(within(panel).getByText("10 per second, up to 20 at once")).toBeInTheDocument();
     expect(within(panel).getByRole("link", { name: "Open the dead letters" })).toHaveAttribute("href", "/w/ws1/forwarding");
+  });
+
+  it("shows the attempts of the last 24 hours by outcome and status class", async () => {
+    const calls = mockApi(base());
+    mount();
+
+    const panel = await screen.findByRole("region", { name: "Delivery attempts, last 24 hours" });
+    expect(await within(panel).findByText("Delivered")).toBeInTheDocument();
+    const fact = (name: string) => within(panel).getByText(name).parentElement as HTMLElement;
+    expect(fact("Attempts")).toHaveTextContent("10");
+    expect(fact("Delivered")).toHaveTextContent("6");
+    expect(fact("Retryable")).toHaveTextContent("2");
+    expect(fact("Answered 5xx")).toHaveTextContent("2");
+    expect(fact("No answer")).toHaveTextContent("1");
+    expect(calls.find((call) => call.path.endsWith("/stats"))?.search).toBe("?hours=24");
+  });
+
+  it("says so when there were no attempts, and shows an error with a retry for the counts", async () => {
+    let attempts = 0;
+    mockApi(
+      base({
+        [`GET ${WS}/destinations/${DEST_ID}/stats`]: () => {
+          attempts += 1;
+          return attempts === 1 ? problem(500, "Internal Server Error", "internal error") : json(statsBody({ attempts: 0 }));
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const panel = await screen.findByRole("region", { name: "Delivery attempts, last 24 hours" });
+    await user.click(await within(panel).findByRole("button", { name: "Try again" }));
+    expect(await within(panel).findByText("No attempts in the last 24 hours.")).toBeInTheDocument();
+  });
+
+  it("shows a loading state while the counts load", async () => {
+    mockApi(base({ [`GET ${WS}/destinations/${DEST_ID}/stats`]: () => new Promise<Response>(() => undefined) }));
+    mount();
+
+    expect(await screen.findByText("Loading the attempts")).toBeInTheDocument();
   });
 
   it("saves a new rate and burst and shows the saved values after the reload", async () => {

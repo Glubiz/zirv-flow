@@ -5,6 +5,7 @@ import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type
 import { Button, Dialog, formatDateTime, InlineError, LoadingState, PageHeader, Panel, Pill, ResourceView, SelectField } from "../../ui";
 import { RequireAdmin } from "../members";
 import { DestinationForm } from "./DestinationForm";
+import { loadedKinds, useDestinationKinds } from "./kinds";
 import {
   checkCodeText,
   kindLabel,
@@ -12,6 +13,7 @@ import {
   providerStatusText,
   type CheckResult,
   type Destination,
+  type DestinationStats,
   type DomainStatus,
 } from "./labels";
 
@@ -51,11 +53,12 @@ function DestinationDetail({
   onChanged: () => void;
 }) {
   const [saved, setSaved] = useState(false);
+  const kinds = loadedKinds(useDestinationKinds());
   return (
     <>
       <PageHeader
         title={destination.name}
-        lede={`${kindLabel(destination.kind)}. ${destination.archived ? "Archived: read-only history." : "Change its settings, check it, and watch its queue."}`}
+        lede={`${kindLabel(kinds, destination.kind)}. ${destination.archived ? "Archived: read-only history." : "Change its settings, check it, and watch its queue."}`}
         actions={destination.archived ? <Pill tone="attention">Archived</Pill> : null}
       />
       {destination.archived ? null : (
@@ -168,16 +171,61 @@ function DeliveryPanel({ workspaceId, destination }: { workspaceId: string; dest
                   </dd>
                 </div>
               </dl>
-              <p className="faint">
-                Attempts and outcomes are counted by the metrics <span className="mono">zirv_flow_destination_attempts_total</span>{" "}
-                and <span className="mono">zirv_flow_destination_outcomes_total</span>; the API does not return them yet.
-              </p>
+              <AttemptsStats workspaceId={workspaceId} destinationId={destination.id} />
               {mine && mine.dead > 0 ? <Link to={`/w/${workspaceId}/forwarding`}>Open the dead letters</Link> : null}
             </div>
           );
         }}
       </ResourceView>
     </Panel>
+  );
+}
+
+const OUTCOMES = ["delivered", "retryable", "terminal", "throttled"] as const;
+const STATUS_CLASSES = ["none", "2xx", "3xx", "4xx", "5xx"] as const;
+const STATS_HOURS = 24;
+
+function AttemptsStats({ workspaceId, destinationId }: { workspaceId: string; destinationId: string }) {
+  const stats = useResource<DestinationStats>(
+    () =>
+      unwrap(
+        client.GET("/api/v1/workspaces/{ws}/destinations/{id}/stats", {
+          params: { path: { ws: workspaceId, id: destinationId }, query: { hours: STATS_HOURS } },
+        }),
+      ),
+    [workspaceId, destinationId],
+  );
+  return (
+    <section className="stack" aria-label="Delivery attempts, last 24 hours">
+      <h3 className="strong">Attempts in the last 24 hours</h3>
+      <ResourceView
+        resource={stats}
+        loadingLabel="Loading the attempts"
+        isEmpty={(data) => data.attempts === 0}
+        empty={<p className="muted">No attempts in the last 24 hours.</p>}
+      >
+        {(data) => (
+          <dl className="facts">
+            <div className="fact">
+              <dt>Attempts</dt>
+              <dd>{data.attempts}</dd>
+            </div>
+            {OUTCOMES.map((outcome) => (
+              <div className="fact" key={outcome}>
+                <dt>{outcome[0]?.toUpperCase()}{outcome.slice(1)}</dt>
+                <dd>{data.outcomes[outcome]}</dd>
+              </div>
+            ))}
+            {STATUS_CLASSES.map((statusClass) => (
+              <div className="fact" key={statusClass}>
+                <dt>{statusClass === "none" ? "No answer" : `Answered ${statusClass}`}</dt>
+                <dd>{data.status_classes[statusClass]}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </ResourceView>
+    </section>
   );
 }
 

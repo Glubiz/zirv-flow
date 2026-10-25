@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   destination,
+  destinationKinds,
   DEST_ID,
   letter,
   LETTER_ID,
@@ -28,6 +29,7 @@ function base(extra: Record<string, Route> = {}) {
   return {
     ...actor("writer"),
     ...catalogRoutes(),
+    "GET /api/v1/destination-kinds": () => json(destinationKinds()),
     [`GET ${WS}/destinations`]: () =>
       json([destination(), destination({ id: OTHER_DEST_ID, name: "Mail relay", kind: "smtp", config: {} })]),
     [`GET ${WS}/forwarding/status`]: () => json({ destinations: [queue()] }),

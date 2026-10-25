@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { destination, DEST_ID, WS } from "../../test/destinationsApi";
+import { destination, destinationKinds, DEST_ID, WS } from "../../test/destinationsApi";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { actor } from "../../test/segmentsApi";
@@ -20,6 +20,7 @@ const SET = { configured: true, created_at: "2026-10-02T09:00:00Z", grace_second
 function base(extra: Record<string, () => Response | Promise<Response>> = {}) {
   return {
     ...actor("writer"),
+    "GET /api/v1/destination-kinds": () => json(destinationKinds()),
     [`GET ${WS}/destinations`]: () => json([destination()]),
     [`GET ${WS}/webhook-signing-secret`]: () => json(SET),
     ...extra,

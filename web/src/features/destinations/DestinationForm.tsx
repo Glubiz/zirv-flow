@@ -2,11 +2,11 @@ import { useState, type SyntheticEvent } from "react";
 import { Link } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
-import { Button, InlineError, SelectField, TextAreaField, TextField } from "../../ui";
+import { Button, InlineError, ResourceView, SelectField, TextAreaField, TextField } from "../../ui";
 import { CredentialPicker } from "../credentials";
+import { useDestinationKinds } from "./kinds";
 import {
   configFrom,
-  DESTINATION_KINDS,
   kindOf,
   valuesFrom,
   type Destination,
@@ -30,8 +30,17 @@ function wholeInRange(text: string): boolean {
 }
 
 /** Creates or changes a destination: settings by type, the shared credential, the rate and the burst. */
-export function DestinationForm({ workspaceId, existing, onSaved }: DestinationFormProps) {
-  const initialKind = existing ? kindOf(existing.kind) : (DESTINATION_KINDS[0] ?? null);
+export function DestinationForm(props: DestinationFormProps) {
+  const kinds = useDestinationKinds();
+  return (
+    <ResourceView resource={kinds} loadingLabel="Loading the destination types">
+      {(known) => <Fields {...props} kinds={known} />}
+    </ResourceView>
+  );
+}
+
+function Fields({ workspaceId, existing, onSaved, kinds }: DestinationFormProps & { kinds: DestinationKind[] }) {
+  const initialKind = existing ? kindOf(kinds, existing.kind) : (kinds[0] ?? null);
   const [kind, setKind] = useState<DestinationKind | null>(initialKind);
   const [name, setName] = useState(existing?.name ?? "");
   const [values, setValues] = useState<Values>(initialKind && existing ? valuesFrom(initialKind, existing.config) : {});
@@ -43,7 +52,7 @@ export function DestinationForm({ workspaceId, existing, onSaved }: DestinationF
   const [busy, setBusy] = useState(false);
 
   function choose(next: string) {
-    const chosen = kindOf(next);
+    const chosen = kindOf(kinds, next);
     setKind(chosen);
     setValues({});
     setCredentialId("");
@@ -109,7 +118,7 @@ export function DestinationForm({ workspaceId, existing, onSaved }: DestinationF
           onChange={(event) => choose(event.target.value)}
           hint={kind?.description}
         >
-          {DESTINATION_KINDS.map((entry) => (
+          {kinds.map((entry) => (
             <option key={entry.kind} value={entry.kind}>
               {entry.label}
             </option>

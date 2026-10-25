@@ -7,6 +7,7 @@ export type QueueStatus = components["schemas"]["QueueStatusBody"];
 export type DomainStatus = components["schemas"]["DomainStatusBody"];
 export type Rule = components["schemas"]["RuleBody"];
 export type DeadLetter = components["schemas"]["DeadLetterBody"];
+export type DestinationStats = components["schemas"]["DestinationStatsBody"];
 
 /** A field of a destination type's settings, as the API's field specs describe them. */
 export interface ConfigField {
@@ -25,6 +26,7 @@ export interface CredentialHint {
   secret: boolean;
 }
 
+/** One destination type, from the registry through the API. */
 export interface DestinationKind {
   kind: string;
   label: string;
@@ -37,76 +39,43 @@ export interface DestinationKind {
   rateLimited: boolean;
 }
 
-/**
- * The destination types this build ships. The API has no listing of them yet (sources have
- * `/source-kinds`), so the fields mirror each type's spec and the server still validates them.
- */
-export const DESTINATION_KINDS: readonly DestinationKind[] = [
-  {
-    kind: "webhook",
-    label: "Webhook",
-    description: "A signed HTTP POST to a URL.",
-    config: [{ key: "url", label: "URL", help: "The address that receives the call.", type: "url", required: true }],
-    credential: [
-      { key: "signing_secret", label: "Signing secret", required: true, secret: true },
-      { key: "previous_signing_secret", label: "Previous signing secret", required: false, secret: true },
-    ],
-    forwards: true,
-    rateLimited: false,
-  },
-  {
-    kind: "smtp",
-    label: "SMTP",
-    description: "Email through a mail server or relay, signed with the sending domain's DKIM key.",
-    config: [
-      {
-        key: "ca_certificate",
-        label: "CA certificate",
-        help: "Trust only this certificate authority (PEM) for the server. Empty trusts the public roots.",
-        type: "long-text",
-        required: false,
-      },
-    ],
-    credential: [
-      { key: "host", label: "Host", required: true, secret: false },
-      { key: "port", label: "Port", required: true, secret: false },
-      { key: "tls", label: "TLS mode", required: true, secret: false },
-      { key: "username", label: "Username", required: true, secret: false },
-      { key: "password", label: "Password", required: true, secret: true },
-    ],
-    forwards: false,
-    rateLimited: true,
-  },
-  {
-    kind: "provider",
-    label: "Email provider (manifest)",
-    description: "An email provider's HTTP API, described by a manifest.",
-    config: [
-      {
-        key: "manifest",
-        label: "Manifest",
-        help: "A JSON description of the provider. It holds no secret: the credential holds those.",
-        type: "json",
-        required: true,
-      },
-    ],
-    credential: [
-      { key: "api_key", label: "API key", required: false, secret: true },
-      { key: "token", label: "Bearer token", required: false, secret: true },
-      { key: "username", label: "User name", required: false, secret: true },
-      { key: "password", label: "Password", required: false, secret: true },
-    ],
-    forwards: false,
-    rateLimited: true,
-  },
-];
+type KindBody = components["schemas"]["DestinationKindBody"];
+type FieldBody = KindBody["config_fields"][number];
 
-export function kindOf(kind: string): DestinationKind | null {
-  return DESTINATION_KINDS.find((entry) => entry.kind === kind) ?? null;
+const FIELD_TYPES: Record<string, ConfigField["type"]> = { url: "url", long_text: "long-text", json: "json" };
+
+/** A destination type as the form uses it, from the spec the API lists in `/destination-kinds`. */
+export function kindFromSpec(spec: KindBody): DestinationKind {
+  const config = (field: FieldBody): ConfigField => ({
+    key: field.key,
+    label: field.label,
+    help: field.help,
+    type: FIELD_TYPES[field.kind] ?? "text",
+    required: field.required,
+  });
+  return {
+    kind: spec.kind,
+    label: spec.label,
+    description: spec.description,
+    config: spec.config_fields.map(config),
+    credential: spec.credential_fields.map((field) => ({
+      key: field.key,
+      label: field.label,
+      required: field.required,
+      secret: field.secret,
+    })),
+    forwards: spec.capabilities.channels.includes("event"),
+    rateLimited: spec.capabilities.rate_limit,
+  };
 }
 
-export function kindLabel(kind: string): string {
-  return kindOf(kind)?.label ?? kind;
+export function kindOf(kinds: readonly DestinationKind[], kind: string): DestinationKind | null {
+  return kinds.find((entry) => entry.kind === kind) ?? null;
+}
+
+/** The type's own label; the raw id while the kinds load or for a type this build lacks. */
+export function kindLabel(kinds: readonly DestinationKind[], kind: string): string {
+  return kindOf(kinds, kind)?.label ?? kind;
 }
 
 /** What the person typed, by config field key. */

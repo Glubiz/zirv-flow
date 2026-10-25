@@ -125,3 +125,51 @@ export function credential(id: string, name: string, fields: string[]) {
     updated_at: "2026-10-01T09:00:00Z",
   };
 }
+
+/** The destination types the API lists, as the registry declares them. */
+export function destinationKinds() {
+  const field = (key: string, label: string, kind: string, required: boolean, secret: boolean) => ({
+    key,
+    label,
+    help: "",
+    kind,
+    options: [],
+    required,
+    secret,
+  });
+  const capabilities = (channels: string[], rateLimit: boolean) => ({
+    channels,
+    idempotency_key: true,
+    batching: false,
+    rate_limit: rateLimit,
+    erase: false,
+  });
+  return [
+    {
+      kind: "webhook",
+      label: "Webhook",
+      description: "A signed HTTP POST to a URL.",
+      config_fields: [field("url", "URL", "url", true, false)],
+      credential_fields: [field("signing_secret", "Signing secret", "text", true, true)],
+      capabilities: capabilities(["webhook", "event"], false),
+    },
+    {
+      kind: "smtp",
+      label: "SMTP",
+      description: "Email through a mail server or relay.",
+      config_fields: [field("ca_certificate", "CA certificate", "long_text", false, false)],
+      credential_fields: [field("host", "Host", "text", true, false), field("password", "Password", "text", true, true)],
+      capabilities: capabilities(["email"], true),
+    },
+  ];
+}
+
+export function statsBody(overrides: Record<string, unknown> = {}) {
+  return {
+    window_hours: 24,
+    attempts: 10,
+    outcomes: { delivered: 6, retryable: 2, terminal: 1, throttled: 1 },
+    status_classes: { none: 1, "2xx": 6, "3xx": 0, "4xx": 1, "5xx": 2 },
+    ...overrides,
+  };
+}

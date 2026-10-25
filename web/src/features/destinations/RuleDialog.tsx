@@ -3,7 +3,7 @@ import { useState } from "react";
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
 import { PropertyFilterEditor, type PropertyFilter } from "../segments";
-import { kindOf, type Destination, type Rule } from "./labels";
+import { kindOf, type Destination, type DestinationKind, type Rule } from "./labels";
 import { mappingFromRows, newRow, rowsFromMapping, SOURCES, type MappingRow, type SourceId, type ValueType } from "./mapping";
 
 const MAX_NAME_CHARS = 128;
@@ -209,6 +209,6 @@ export function RuleDialog({ workspaceId, destinations, existing, onClose, onSav
 }
 
 /** The destinations a forwarding rule may name. */
-export function forwardingTargets(destinations: Destination[]): Destination[] {
-  return destinations.filter((destination) => kindOf(destination.kind)?.forwards === true);
+export function forwardingTargets(destinations: Destination[], kinds: readonly DestinationKind[]): Destination[] {
+  return destinations.filter((destination) => kindOf(kinds, destination.kind)?.forwards === true);
 }

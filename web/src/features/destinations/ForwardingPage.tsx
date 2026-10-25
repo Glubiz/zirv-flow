@@ -18,6 +18,7 @@ import {
 } from "../../ui";
 import { RequireAdmin } from "../members";
 import { lagText, type DeadLetter, type Destination, type QueueStatus, type Rule } from "./labels";
+import { loadedKinds, useDestinationKinds } from "./kinds";
 import { forwardingTargets, RuleDialog } from "./RuleDialog";
 
 export function ForwardingPage() {
@@ -109,7 +110,7 @@ function RulesPanel({ workspaceId, known }: { workspaceId: string; known: Destin
   );
   const [editing, setEditing] = useState<Rule | "new" | null>(null);
   const [deleting, setDeleting] = useState<Rule | null>(null);
-  const targets = forwardingTargets(known);
+  const targets = forwardingTargets(known, loadedKinds(useDestinationKinds()));
 
   const add = (
     <Button variant="primary" onClick={() => setEditing("new")} disabled={targets.length === 0}>
