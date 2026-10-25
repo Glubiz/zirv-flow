@@ -11,17 +11,12 @@
 -- The person key cascades, so a marker can never outlive its person. The destination key cascades
 -- like every other table that names a destination.
 
--- The composite key the marker's person reference needs; `id` alone is already unique.
-ALTER TABLE people ADD CONSTRAINT people_workspace_id_id_key UNIQUE (workspace_id, id);
-
 CREATE TABLE erasure_handled_markers (
     workspace_id     uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
-    person_id        uuid NOT NULL,
+    person_id        uuid NOT NULL REFERENCES people (id) ON DELETE CASCADE,
     destination_id   uuid NOT NULL,
     first_handled_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (workspace_id, person_id, destination_id),
-    FOREIGN KEY (workspace_id, person_id) REFERENCES people (workspace_id, id)
-        ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, destination_id) REFERENCES destinations (workspace_id, id)
         ON DELETE CASCADE
 );

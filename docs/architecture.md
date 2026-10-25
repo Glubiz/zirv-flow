@@ -2750,7 +2750,7 @@ the result per destination.
   are not purged by retention (the 13-month message retention is not built), so they write none;
   when it is built it writes markers too. Nothing on a hot path (message insert, outbox insert, sync
   outcome) writes a marker. The marker insert joins `people`, so a purge writes nothing for a person
-  already gone, and the table's `(workspace_id, person_id)` key (`ON DELETE CASCADE`) means a
+  already gone, and the table's `person_id` key (`ON DELETE CASCADE`) means a
   marker never outlives its person: a purge that raced an erasure fails as a whole statement and
   runs again on its next pass, and an erasure waits for the person row a purge's marker key holds.
   Planning reads the markers with the other evidence in one statement, for every member of the merged
