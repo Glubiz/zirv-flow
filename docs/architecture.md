@@ -1497,6 +1497,51 @@ envelope stays. Raw-URL webhooks have no rate bucket.
 - **Machine rule.** `email.opened` carries `machine` and `machine_reason`. It is a machine open (`user_agent`) when a token of the lower-cased user agent (split on non-alphanumeric characters) ends with `proxy`, `prefetch`, `preview`, `scanner`, `crawler` or `bot`, so a fused fetcher name is caught and `bot` in the middle of a longer word is a person, or when the user agent contains a fragment from `tracking.prefetch_user_agents` (a case-insensitive substring match; default empty; operators add the exact fragments of the fetchers they see), and otherwise (`delivery_delay`) when it arrives less than 10 seconds after the message's `completed_at`.
 - **Never stored.** Neither the IP address nor the user agent is stored or logged, and no event, decision or log line holds a URL, an address or a token. `message_links.url` is the rendered link and goes with its message.
 
+**As built (profile sync, #226).** The guide is `docs/profile-sync.md`.
+
+- **Manifest.** The `destination` section gains `upsert_profile` and `remove_profile`
+  (`manifest/profile.rs`). `send` and `feedback` become optional as a pair, and a provider manifest
+  declares the pair, a profile operation, or both; each issue is named by pointer. An operation has a
+  `method`, a `path` with at most one `{key}` placeholder, an `idempotency_header`, `key_from`
+  (`{"identity": kind}` or `{"trait": key}`), a `body` placing the key, the listed traits (`traits`
+  as one object, or `fields` one by one; a remove has neither) and `static` values at JSON pointers,
+  an optional `rate_limit` and `errors` (checked before the destination's own; a `recipient_failure`
+  action is refused). The feedback secret and a declared credential schema are required only with
+  `feedback`. The destination's default rate is its own `rate_limit`, else the strictest an operation
+  declares.
+- **Runtime.** `Destination` gains `sync(ctx, config, credential, ProfileCall)`, `Unsupported` by
+  default; only `provider` implements it. The external key is percent-encoded as one path segment
+  (every byte but `A-Za-z0-9-._~`), and is at most 512 bytes. A key of `.` or `..` would still be a
+  path dot segment, so it is refused as a configuration error, with no call. A trait the
+  person has no value for is sent as `null`. Capabilities stay static per kind (`provider` lists the
+  `profile_sync` channel); which operations a destination supports is read from its manifest
+  (`provider_profile_support`), by publish and by the job. A provider manifest with no `send` is not
+  a destination `action.send` may name.
+- **Node.** `action.sync { destination, operation, trait_keys }`, port `next`, effect key
+  `{step_key}:sync`. Structural validation: at most 50 distinct trait keys, none for a remove
+  (`trait_keys_not_allowed`). Publish: the destination exists, is not archived and has the profile
+  channel (`sync_destination_unusable`), its manifest declares the operation (`operation_unsupported`),
+  and the traits are known (`unknown_trait`). Test mode captures the effect (destination, operation,
+  traits at the walk's values) and calls and writes nothing.
+- **Job.** `delivery.sync`, enqueued by `flow.step` under the effect key, with a `sync_id` minted in
+  the step's transaction as the subject of its `delivery_attempts` rows. It reads the destination, the
+  person, the key and the traits without a lock, takes a token from the destination's bucket, opens the
+  credential, calls through `delivery::sync` (the shared verdicts) and records the attempt, then locks
+  the person `FOR KEY SHARE` for the outcome write. A person gone, exited or merged away is a no-op. A
+  person without the key ends `sync.failed` with `missing_key`, with no call and no attempt row. An
+  empty bucket re-enqueues the job (unique key `{effect key}:wait:{n}`, six hours at the most, then
+  `rate_limited`) without spending an attempt; the copy is inserted under the person's `FOR KEY
+  SHARE` lock, so an erasure either finds and purges it or leaves nothing to insert. A 429 slows the bucket; the last attempt of a retried
+  failure is recorded as a failure.
+- **Outcome.** `sync.succeeded` and `sync.failed` are reserved names. They are written by the store
+  writer `webhook.call` uses (`record_webhook_outcome`, with a `SyncDetail`), so no second event
+  writer exists: properties `node_id`, `enrollment_id`, `status`, `attempts`, `destination_id` and
+  `operation`; the decision is `sync.upsert` or `sync.remove` under the enrollment's trace, with the
+  enrollment, person, event, flow and destination ids and a fixed reason. Never the key or a trait
+  value, in an event, a decision, a log line or a metric.
+- **Erasure.** No table. `delivery.sync` is in `names_erased_person!`. Calling the destination's erase
+  capability on person erasure is #227.
+
 ## 11. Templates and the builder
 
 A template is Zirv Flow's own channel-aware content document, stored as

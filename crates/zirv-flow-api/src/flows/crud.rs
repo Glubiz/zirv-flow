@@ -13,14 +13,14 @@ use utoipa::ToSchema;
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr, Schema};
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::Registry;
+use zirv_flow_connectors::destinations::{Registry, provider_profile_support};
 use zirv_flow_core::ValidationError;
 use zirv_flow_core::consent::Channel;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind};
 use zirv_flow_store::{Flow, FlowPatch, FlowState, FlowVersion, NewFlow};
 
 use super::schema::{GRAPH, ISSUE, SETTINGS};
-use super::validation::{Environment, SendFacts, check};
+use super::validation::{Environment, SendFacts, SyncFacts, check};
 use super::{
     default_settings, draft_of, empty_graph, flow_error, issue_problems, name_taken, parse_graph,
     parse_settings,
@@ -226,6 +226,7 @@ pub(crate) async fn check_document(
     let signing_secret = zirv_flow_store::has_webhook_signing_secret(connection, workspace).await?;
     let webhook_templates = usable_webhook_templates(connection, workspace, graph).await?;
     let send = send_facts(connection, workspace, graph).await?;
+    let sync = sync_facts(connection, workspace, graph).await?;
     let environment = Environment {
         catalog: &catalog,
         storage: &storage,
@@ -234,8 +235,45 @@ pub(crate) async fn check_document(
         signing_secret,
         webhook_templates: &webhook_templates,
         send: &send,
+        sync: &sync,
     };
     Ok((check(graph, settings, &environment), now))
+}
+
+/// The profile operations of the destinations the sync nodes of `graph` name: those of the
+/// workspace that are not archived, from the manifest of each.
+async fn sync_facts(
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: zirv_flow_core::WorkspaceId,
+    graph: &FlowGraph,
+) -> Result<SyncFacts, ApiError> {
+    let registry = Registry::built_in();
+    let mut facts = SyncFacts::default();
+    for node in &graph.nodes {
+        let NodeKind::ActionSync { destination, .. } = &node.kind else {
+            continue;
+        };
+        if facts.destinations.contains_key(destination) {
+            continue;
+        }
+        let found =
+            zirv_flow_store::find_destination(&mut *connection, workspace, *destination).await?;
+        if let Some(found) = found.filter(|found| {
+            found.archived_at.is_none()
+                && registry.get(&found.kind).is_some_and(|driver| {
+                    driver
+                        .spec()
+                        .capabilities
+                        .channels
+                        .contains(&"profile_sync")
+                })
+        }) {
+            facts
+                .destinations
+                .insert(*destination, provider_profile_support(&found.config));
+        }
+    }
+    Ok(facts)
 }
 
 /// The templates `graph` names that a webhook node may send: of the workspace, not archived, of the
@@ -303,6 +341,9 @@ async fn send_facts(
                 && registry
                     .get(&destination.kind)
                     .is_some_and(|driver| driver.spec().capabilities.channels.contains(&"email"))
+                // A provider manifest of profile operations only has no email to send.
+                && (destination.kind != "provider"
+                    || provider_profile_support(&destination.config).email)
         }) {
             facts.destinations.insert(*destination);
         }

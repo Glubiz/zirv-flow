@@ -12,8 +12,8 @@ use utoipa::openapi::schema::{
 };
 use utoipa::openapi::{KnownFormat, Ref, RefOr, Schema, SchemaFormat};
 use zirv_flow_core::flow::{
-    MAX_ARMS, MAX_CONDITIONS, MAX_DURATION_SECONDS, MAX_ID_CHARS, MAX_NODES, MAX_TRAIT_KEYS,
-    MIN_ARMS, NODE_TYPES, TRIGGER_TYPES, code,
+    MAX_ARMS, MAX_CONDITIONS, MAX_DURATION_SECONDS, MAX_ID_CHARS, MAX_NODES, MAX_SYNC_TRAIT_KEYS,
+    MAX_TRAIT_KEYS, MIN_ARMS, NODE_TYPES, TRIGGER_TYPES, code,
 };
 
 use super::validation;
@@ -223,6 +223,31 @@ fn node_builders() -> Vec<(&'static str, ObjectBuilder)> {
                     .max_items(Some(MAX_TRAIT_KEYS)),
             )
             .property("template", uuid()),
+        ),
+        (
+            "action.sync",
+            node(
+                "action.sync",
+                "Keeps the person's profile in an external system through a provider destination: \
+                 `upsert` sends the listed traits under the person's external key, `remove` \
+                 deletes the profile. Port `next`.",
+            )
+            .property(
+                "destination",
+                uuid().description(Some(
+                    "A live destination whose manifest declares the operation.",
+                )),
+            )
+            .required("destination")
+            .property("operation", string_enum(["upsert", "remove"]))
+            .required("operation")
+            .property(
+                "trait_keys",
+                ArrayBuilder::new()
+                    .items(string())
+                    .max_items(Some(MAX_SYNC_TRAIT_KEYS))
+                    .description(Some("The traits an upsert sends; a remove lists none.")),
+            ),
         ),
         (
             "action.send",

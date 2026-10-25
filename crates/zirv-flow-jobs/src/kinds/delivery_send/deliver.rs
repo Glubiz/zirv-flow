@@ -134,13 +134,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unopenable_credential_is_retried_under_a_fixed_reason() {
+    fn a_key_or_credential_that_cannot_be_opened_is_the_shared_retryable_verdict() {
         assert!(matches!(
             credential_unavailable(),
             Verdict::Retry {
                 status: None,
                 reason: "credential_unavailable",
-                retry_after: None,
                 ..
             }
         ));

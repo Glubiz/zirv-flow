@@ -9,11 +9,12 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use url::{Host, Url};
 use uuid::Uuid;
+use zirv_flow_connectors::destinations::ProfileSupport;
 use zirv_flow_core::egress::{Decision, EgressPolicy};
 use zirv_flow_core::flow::{
     Audience, EventMatch, ExitCriterion, FlowGraph, FlowSettings, GRAPH_VERSION, Goal, Issue,
-    MAX_CONDITIONS, MAX_EXIT_CRITERIA, MAX_ISSUES, MAX_NODES, MAX_TRAIT_KEYS, NodeKind, Trigger,
-    code as core_code, validate,
+    MAX_CONDITIONS, MAX_EXIT_CRITERIA, MAX_ISSUES, MAX_NODES, MAX_SYNC_TRAIT_KEYS, MAX_TRAIT_KEYS,
+    NodeKind, SyncOperation, Trigger, code as core_code, validate,
 };
 use zirv_flow_core::segment::{self, code as segment_code};
 use zirv_flow_segments::{Catalog, TraitStorage, compile};
@@ -32,9 +33,11 @@ pub(crate) mod code {
     pub(crate) const SEND_TEMPLATE_UNUSABLE: &str = "send_template_unusable";
     pub(crate) const SEND_DESTINATION_UNUSABLE: &str = "send_destination_unusable";
     pub(crate) const UNKNOWN_DIMENSION: &str = "unknown_dimension";
+    pub(crate) const SYNC_DESTINATION_UNUSABLE: &str = "sync_destination_unusable";
+    pub(crate) const OPERATION_UNSUPPORTED: &str = "operation_unsupported";
 
     /// Every code added here.
-    pub(crate) const ALL: [&str; 12] = [
+    pub(crate) const ALL: [&str; 14] = [
         UNKNOWN_SEGMENT,
         UNKNOWN_LIST,
         UNKNOWN_TRAIT,
@@ -47,6 +50,8 @@ pub(crate) mod code {
         SEND_TEMPLATE_UNUSABLE,
         SEND_DESTINATION_UNUSABLE,
         UNKNOWN_DIMENSION,
+        SYNC_DESTINATION_UNUSABLE,
+        OPERATION_UNSUPPORTED,
     ];
 }
 
@@ -66,6 +71,14 @@ pub(crate) struct SendFacts {
     pub(crate) unknown_dimensions: BTreeSet<String>,
 }
 
+/// What the workspace holds of the destinations the `action.sync` nodes of a flow name.
+#[derive(Default)]
+pub(crate) struct SyncFacts {
+    /// The destinations a sync node may name: of the workspace and not archived, with the profile
+    /// operations their manifest declares. A destination of a type with none declares none.
+    pub(crate) destinations: BTreeMap<Uuid, ProfileSupport>,
+}
+
 /// What the checks read from the workspace, all taken in one transaction.
 pub(crate) struct Environment<'a> {
     pub(crate) catalog: &'a Catalog,
@@ -80,6 +93,8 @@ pub(crate) struct Environment<'a> {
     pub(crate) webhook_templates: &'a BTreeSet<Uuid>,
     /// What the send nodes of the flow name.
     pub(crate) send: &'a SendFacts,
+    /// What the sync nodes of the flow name.
+    pub(crate) sync: &'a SyncFacts,
 }
 
 /// The issues of a flow and what it reads, for the impact preview.
@@ -208,6 +223,11 @@ impl Checker<'_> {
                 } => {
                     self.webhook(url, trait_keys, *template, &node.id);
                 }
+                NodeKind::ActionSync {
+                    destination,
+                    operation,
+                    trait_keys,
+                } => self.sync(*destination, *operation, trait_keys, &node.id),
                 NodeKind::ActionSend {
                     template,
                     destination,
@@ -360,6 +380,44 @@ impl Checker<'_> {
         }
     }
 
+    /// A sync node names a live destination whose manifest declares the operation, and traits the
+    /// workspace has.
+    fn sync(
+        &mut self,
+        destination: Uuid,
+        operation: SyncOperation,
+        trait_keys: &[String],
+        node: &str,
+    ) {
+        let id = Some(node);
+        match self.environment.sync.destinations.get(&destination) {
+            None => self.issue(
+                code::SYNC_DESTINATION_UNUSABLE,
+                id,
+                Some("/destination".to_owned()),
+            ),
+            Some(support) if !support.supports(operation) => {
+                self.issue(
+                    code::OPERATION_UNSUPPORTED,
+                    id,
+                    Some("/operation".to_owned()),
+                );
+            }
+            Some(_) => {}
+        }
+        for (index, key) in trait_keys.iter().enumerate().take(MAX_SYNC_TRAIT_KEYS) {
+            if self.environment.catalog.traits.contains_key(key) {
+                self.reads.add("traits", key.clone());
+            } else {
+                self.issue(
+                    code::UNKNOWN_TRAIT,
+                    id,
+                    Some(format!("/trait_keys/{index}")),
+                );
+            }
+        }
+    }
+
     fn webhook(&mut self, url: &str, trait_keys: &[String], template: Option<Uuid>, node: &str) {
         let id = Some(node);
         if template.is_some_and(|template| !self.environment.webhook_templates.contains(&template))
@@ -435,6 +493,7 @@ mod tests {
         signing_secret: bool,
         webhook_templates: BTreeSet<Uuid>,
         send: SendFacts,
+        sync: SyncFacts,
     }
 
     impl Default for Setup {
@@ -445,6 +504,7 @@ mod tests {
                 signing_secret: true,
                 webhook_templates: BTreeSet::new(),
                 send: SendFacts::default(),
+                sync: SyncFacts::default(),
             }
         }
     }
@@ -460,6 +520,7 @@ mod tests {
                 signing_secret: self.signing_secret,
                 webhook_templates: &self.webhook_templates,
                 send: &self.send,
+                sync: &self.sync,
             };
             check(
                 &serde_json::from_value(graph).unwrap(),
@@ -757,6 +818,81 @@ mod tests {
         assert!(
             codes(&dimensions.check(graph(template, destination, None), manual()))
                 .contains(&"unknown_dimension n /dimensions".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_sync_node_names_a_live_destination_that_declares_its_operation_and_known_traits() {
+        let destination = Uuid::from_u128(40);
+        let upsert_only = Uuid::from_u128(41);
+        let stranger = Uuid::from_u128(42);
+        let node = |destination: Uuid, operation: &str, keys: Value| {
+            json!({"v": 1, "nodes": [
+                {"id": "s", "type": "action.sync", "destination": destination,
+                    "operation": operation, "trait_keys": keys},
+                {"id": "end", "type": "exit"}
+            ], "edges": [{"id": "e", "from": "s", "port": "next", "to": "end"}]})
+        };
+        let setup = Setup {
+            sync: SyncFacts {
+                destinations: BTreeMap::from([
+                    (
+                        destination,
+                        ProfileSupport {
+                            upsert: true,
+                            remove: true,
+                            email: false,
+                        },
+                    ),
+                    (
+                        upsert_only,
+                        ProfileSupport {
+                            upsert: true,
+                            remove: false,
+                            email: false,
+                        },
+                    ),
+                ]),
+            },
+            ..Setup::default()
+        };
+
+        let good = setup.check(node(destination, "upsert", json!(["plan"])), manual());
+        assert_eq!(codes(&good), Vec::<String>::new());
+        assert!(
+            good.reads["traits"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("plan"))
+        );
+        assert_eq!(
+            codes(&setup.check(node(destination, "remove", json!([])), manual())),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            codes(&setup.check(node(stranger, "upsert", json!([])), manual())),
+            ["sync_destination_unusable s /destination"]
+        );
+        assert_eq!(
+            codes(&setup.check(node(upsert_only, "remove", json!([])), manual())),
+            ["operation_unsupported s /operation"]
+        );
+        assert_eq!(
+            codes(&setup.check(
+                node(destination, "upsert", json!(["plan", "ghost"])),
+                manual()
+            )),
+            ["unknown_trait s /trait_keys/1"]
+        );
+        // Structural: traits on a remove, and more than fifty.
+        assert_eq!(
+            codes(&setup.check(node(destination, "remove", json!(["plan"])), manual())),
+            ["trait_keys_not_allowed s /trait_keys"]
+        );
+        let many: Vec<String> = (0..=MAX_SYNC_TRAIT_KEYS).map(|n| format!("t{n}")).collect();
+        assert!(
+            codes(&setup.check(node(destination, "upsert", json!(many)), manual()))
+                .contains(&"too_many_trait_keys s /trait_keys".to_owned())
         );
     }
 

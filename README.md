@@ -2271,7 +2271,8 @@ with any other sender is a 422 `sender_unverified`). Workspace admins manage bot
 ## Email provider destinations
 
 An email provider with an HTTP API is a destination of type `provider`, described by a manifest
-instead of code. Its `config` is `{"manifest": {...}}`: the manifest format of the HTTP source
+instead of code. The same destination type can also keep people's profiles in an external system
+(see Profile sync below). Its `config` is `{"manifest": {...}}`: the manifest format of the HTTP source
 (`version`, `base_url`, `auth`, `headers`) with a `destination` section, and no `streams`. Auth is
 `none`, `api_key`, `basic` or `bearer`; the manifest's `auth.credential` declares the credential
 fields, including the secret that signs the provider's feedback, and the destination links a
@@ -2309,6 +2310,19 @@ counted in `zirv_flow_provider_feedback_total{outcome}`.
 
 `GET /api/v1/workspaces/{ws}/destinations/{id}/domain-status?domain_id=` (admins only) shows the
 provider's status of each DNS record next to ours. It only reads: it never marks a domain verified.
+
+**Profile sync.** The `destination` section may also declare `upsert_profile` and `remove_profile`:
+one request each, with a `path` that may hold the placeholder `{key}` once (the external key,
+percent-encoded as one path segment), an `idempotency_header`, `key_from` (`{"identity": kind}` or
+`{"trait": key}`), a `body` that places the key, the listed traits (`traits` as one object, or
+`fields` one by one) and `static` values at JSON pointers, and the same `rate_limit` and `errors` as
+`send`. `send` and `feedback` are then optional, as a pair: a manifest declares the email pair, a
+profile operation, or both. The `action.sync` flow node (`destination`, `operation` of `upsert` or
+`remove`, `trait_keys`, at most 50 and none for a remove) runs the operation through the
+`delivery.sync` job, with the rate bucket, retries and verdicts of the other deliveries, and ends in
+a `sync.succeeded` or `sync.failed` person event and a decision that hold no key and no trait value.
+Keeping a segment in an external system is two flows, entry and exit: `docs/profile-sync.md` has the
+manifest, the worked flows and the details.
 
 ## Event forwarding
 
