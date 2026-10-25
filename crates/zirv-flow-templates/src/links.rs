@@ -141,10 +141,19 @@ fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>) {
             && bytes
                 .get(start + 2)
                 .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0));
-        if !is_anchor {
+        if is_anchor {
+            at = scan_tag(html, start + 2, &mut found, &mut opted_out);
             continue;
         }
-        at = scan_tag(html, start + 2, &mut found, &mut opted_out);
+        // Any other tag is walked over with the same quote-aware attribute scan, so markup inside
+        // a quoted value (`title='<a href=...>'`) is not read as a tag of its own.
+        let name_start = start + 1 + usize::from(bytes.get(start + 1) == Some(&b'/'));
+        if bytes.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            let name_end = html[name_start..]
+                .find(|c: char| c.is_ascii_whitespace() || matches!(c, '/' | '>' | '\0'))
+                .map_or(html.len(), |n| name_start + n);
+            at = scan_tag(html, name_end, &mut Vec::new(), &mut Vec::new());
+        }
     }
     (found, opted_out)
 }
@@ -566,5 +575,22 @@ mod tests {
                 "{url:?}"
             );
         }
+    }
+
+    #[test]
+    fn markup_inside_a_quoted_attribute_value_is_not_a_link() {
+        let html = concat!(
+            r#"<div title='<a data-zf-utm=off href=https://example.com/a>'>x</div>"#,
+            r#"<img alt="<a href='https://example.com/b'>"></p>"#,
+            r#"<a href="https://example.com/real">r</a>"#,
+        );
+        let found: Vec<&str> = hrefs(html)
+            .into_iter()
+            .map(|href| &html[href.value])
+            .collect();
+        assert_eq!(found, ["https://example.com/real"]);
+        assert!(opt_outs(html).is_empty());
+        let kept = rewrite_links(html, &Tracking::Off, &[]);
+        assert_eq!(kept, html);
     }
 }

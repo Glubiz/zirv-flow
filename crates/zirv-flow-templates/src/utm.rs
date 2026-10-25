@@ -454,15 +454,15 @@ pub(crate) fn tag_text(text: &str, utm: &UtmTags<'_>, keep: &[&str], skip: &[Str
 fn next_url(text: &str, from: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     (from..bytes.len()).find(|&i| {
-        let at_boundary = i == 0
-            || bytes[i - 1].is_ascii_whitespace()
-            || matches!(bytes[i - 1], b'(' | b'<' | b'[' | b'"' | b'\'');
-        at_boundary
-            && [&b"http://"[..], &b"https://"[..]].iter().any(|prefix| {
-                bytes
-                    .get(i..i + prefix.len())
-                    .is_some_and(|b| b.eq_ignore_ascii_case(prefix))
-            })
+        // A match starts with an ASCII byte, so `i` is a character boundary for the look-behind.
+        [&b"http://"[..], &b"https://"[..]].iter().any(|prefix| {
+            bytes
+                .get(i..i + prefix.len())
+                .is_some_and(|b| b.eq_ignore_ascii_case(prefix))
+        }) && text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| c.is_whitespace() || matches!(c, '(' | '<' | '[' | '"' | '\''))
     })
 }
 
@@ -756,5 +756,30 @@ mod tests {
         assert_eq!(tag_url(r"https://evil.test\@example.com/", &t), None);
         assert_eq!(tag_url(r"https://example.com\.evil.test/", &t), None);
         assert!(tag_url(r"https://example.com/ab", &t).is_some());
+    }
+
+    #[test]
+    fn html_with_quoted_markup_comes_back_byte_identical_with_and_without_a_plan() {
+        let d = domains();
+        let t = tags(&d);
+        let html = r#"<div title='<a data-zf-utm=off href=https://example.com/a>'>x</div><a href="https://other.test/b">b</a>"#;
+        assert_eq!(process_html(html, None, &[]).0, html);
+        assert_eq!(process_html(html, Some(&t), &[]).0, html);
+    }
+
+    #[test]
+    fn a_text_url_after_unicode_whitespace_is_tagged() {
+        let d = domains();
+        let t = tags(&d);
+        let out = tag_text(
+            "see\u{00A0}https://example.com/a\u{3000}https://example.com/b",
+            &t,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            out,
+            format!("see\u{00A0}https://example.com/a?{Q}\u{3000}https://example.com/b?{Q}")
+        );
     }
 }

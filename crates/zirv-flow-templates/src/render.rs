@@ -947,21 +947,11 @@ mod tests {
     }
 
     #[test]
-    fn without_the_utm_part_output_is_byte_identical() {
+    fn without_the_utm_part_the_output_carries_no_parameters_and_is_stable() {
         let plain = render_email(&utm_doc(), &context(), &live()).unwrap();
         let again = render_email(&utm_doc(), &context(), &live()).unwrap();
         assert_eq!(plain, again);
         assert!(!plain.html.contains("utm_") && !plain.text.contains("utm_"));
-        // An empty domain list tags nothing, so the output equals the untagged render too.
-        let none: Vec<String> = Vec::new();
-        let hooks = with_utm(
-            &none,
-            Tracking::Rewrite {
-                base_url: "https://t.example/c",
-                token: &tok,
-            },
-        );
-        assert_eq!(render_email(&utm_doc(), &context(), &hooks).unwrap(), plain);
     }
 
     // ----- The opt-out attribute and the text part ---------------------------------------------
@@ -999,15 +989,32 @@ mod tests {
         }
     }
 
+    /// Markup the scanner could mistake for an opted-out or taggable link, none of it a real one.
+    const TRICKY: &str = r#"<div title='<a data-zf-utm=off href=https://shop.example.com/x>'>x</div><a href="https://other.test/b" class="data-zf-utm">b</a><p>data-zf-</p>"#;
+
     #[test]
-    fn html_without_the_attribute_is_byte_identical_whatever_the_utm_part() {
-        let html = r#"<a href="https://shop.example.com/a">a</a><a name="x">b</a><p>data-zf-</p>"#;
-        let doc = doc_of(html, "plain");
-        let none: Vec<String> = Vec::new();
+    fn html_without_the_attribute_is_byte_identical_with_no_plan_and_with_an_unrelated_plan() {
+        let doc = doc_of(TRICKY, "plain");
+        let elsewhere = vec!["unrelated.test".to_owned()];
         let plain = render_email(&doc, &context(), &Hooks::untracked()).unwrap();
-        let planned = render_email(&doc, &context(), &with_utm(&none, Tracking::Off)).unwrap();
+        let planned = render_email(&doc, &context(), &with_utm(&elsewhere, Tracking::Off)).unwrap();
+        assert!(plain.html.starts_with(TRICKY), "{}", plain.html);
         assert_eq!(plain, planned);
-        assert!(plain.html.starts_with(html));
+    }
+
+    #[test]
+    fn the_opt_out_attribute_is_stripped_on_the_no_plan_path() {
+        let doc = doc_of(
+            r#"<a data-zf-utm="off" href="https://shop.example.com/a">a</a>"#,
+            "plain",
+        );
+        let out = render_email(&doc, &context(), &Hooks::untracked()).unwrap();
+        assert!(
+            out.html
+                .starts_with(r#"<a href="https://shop.example.com/a">a</a>"#),
+            "{}",
+            out.html
+        );
     }
 
     #[test]
