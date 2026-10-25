@@ -626,6 +626,11 @@ select {
   box-shadow: var(--shadow-popover);
 }
 
+.menu-start {
+  right: auto;
+  left: 0;
+}
+
 .menu-beside {
   right: auto;
   left: calc(100% + 12px);

@@ -170,6 +170,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
       <div className="be-head">
         <MenuButton
           label="Template mode"
+          placement="below-start"
           buttonClassName="btn"
           buttonContent="Mode: Blocks"
           entries={onConvert ? [{ key: "convert", label: "Convert to MJML…", onSelect: onConvert }] : []}

@@ -440,3 +440,35 @@ describe("review fixes", () => {
     expect(screen.queryByRole("menuitem", { name: /Convert to MJML/ })).toBeNull();
   });
 });
+
+describe("browser-check fixes", () => {
+  it("enables Down on the last block when an empty column follows, and moves it there", async () => {
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[heading("a", "A"), divider("b")], []] }])) }));
+    const user = userEvent.setup();
+    mount();
+
+    const down = await screen.findByRole("button", { name: "Move Divider block 2 down" });
+    expect(down).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Move Heading block 1 up" })).toBeDisabled();
+    await user.click(down);
+
+    await waitFor(() => expect(lastDraft(calls).blocks.sections[0]?.columns.map((column) => column.map((block) => block.id))).toEqual([["a"], ["b"]]), WAIT);
+  });
+
+  it("enables Up on the first block when the column before it is empty", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[], [heading("a", "A")]] }])) }));
+    mount();
+
+    expect(await screen.findByRole("button", { name: "Move Heading block 1 up" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Move Heading block 1 down" })).toBeDisabled();
+  });
+
+  it("opens the Template mode menu from its left edge", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument()) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Template mode" }));
+    expect(screen.getByRole("menu", { name: "Template mode" })).toHaveClass("menu-start");
+  });
+});

@@ -3,7 +3,7 @@ import type { DragEvent } from "react";
 import { Button, EmptyState } from "../../../ui";
 import { FieldIssues } from "../IssueList";
 import { issuesAt, type TemplateIssue } from "../model";
-import { blockLabel, canDrop, type Block, type BlocksContent, type Drag, type Drop, type Section } from "./document";
+import { blockLabel, canDrop, moveBlock, type Block, type BlocksContent, type Drag, type Drop, type Section } from "./document";
 
 interface Props {
   content: BlocksContent;
@@ -124,10 +124,10 @@ export function BlockCanvas(props: Props) {
           {chosen ? <span className="faint">selected</span> : null}
           {readOnly ? null : (
             <span className="be-actions">
-              <Button data-move="up" aria-label={`Move ${name} up`} onClick={() => props.onMove("block", block.id, "up")} disabled={number === 1}>
+              <Button data-move="up" aria-label={`Move ${name} up`} onClick={() => props.onMove("block", block.id, "up")} disabled={moveBlock(content, block.id, "up") === null}>
                 Up
               </Button>
-              <Button data-move="down" aria-label={`Move ${name} down`} onClick={() => props.onMove("block", block.id, "down")} disabled={number === count}>
+              <Button data-move="down" aria-label={`Move ${name} down`} onClick={() => props.onMove("block", block.id, "down")} disabled={moveBlock(content, block.id, "down") === null}>
                 Down
               </Button>
               <Button aria-label={`Remove ${name}`} onClick={() => props.onRemove("block", block.id)}>
