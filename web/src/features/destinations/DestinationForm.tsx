@@ -164,6 +164,8 @@ function Fields({ workspaceId, existing, onSaved, kinds }: DestinationFormProps 
           key={kind.kind}
           workspaceId={workspaceId}
           fields={kind.credential}
+          // The API replaces a credential but cannot clear one, so a set one is not offered as "none".
+          allowNone={!existing?.credential_id}
           value={credentialId}
           onChange={setCredentialId}
           purpose={kind.label}

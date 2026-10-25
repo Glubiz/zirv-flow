@@ -113,6 +113,22 @@ describe("one destination", () => {
     expect(await screen.findByText("25 per second, up to 60 at once")).toBeInTheDocument();
   });
 
+  it("does not offer to clear the credential of a destination that has one, as the API cannot clear it", async () => {
+    mockApi(base());
+    mount();
+
+    const select = await screen.findByLabelText("Credential");
+    await within(select.closest("div") as HTMLElement).findByRole("option", { name: /Hook secret/ });
+    expect(screen.queryByRole("option", { name: "Choose a credential" })).not.toBeInTheDocument();
+  });
+
+  it("offers no choice yet for a destination without a credential", async () => {
+    mockApi(base({ [`GET ${WS}/destinations/${DEST_ID}`]: () => json(destination({ credential_id: null })) }));
+    mount();
+
+    expect(await screen.findByRole("option", { name: "Choose a credential" })).toBeInTheDocument();
+  });
+
   it("refuses a rate outside the allowed range before it asks the server", async () => {
     const calls = mockApi(base());
     const user = userEvent.setup();
