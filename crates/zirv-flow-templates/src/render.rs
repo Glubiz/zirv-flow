@@ -15,7 +15,7 @@ use crate::sandbox::{
     MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment, is_header_name,
     map_error, render_string,
 };
-use crate::utm::{tag_html, tag_text};
+use crate::utm::{process_html, tag_text};
 
 /// A rendered email.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -192,9 +192,12 @@ pub fn apply_tracking(
         system.unsubscribe_url.as_str(),
         system.preferences_url.as_str(),
     ];
+    // The opt-out attribute goes out of every message; the text part follows the HTML part's
+    // opted-out links.
+    let (html, opted_out) = process_html(&rendered.html, hooks.utm.as_ref(), &keep);
+    rendered.html = html;
     if let Some(utm) = &hooks.utm {
-        rendered.html = tag_html(&rendered.html, utm, &keep);
-        rendered.text = tag_text(&rendered.text, utm, &keep);
+        rendered.text = tag_text(&rendered.text, utm, &keep, &opted_out);
         if rendered.text.len() > MAX_TEXT_BYTES {
             return Err(RenderError::OutputTooLarge { field: "text" });
         }
@@ -959,5 +962,88 @@ mod tests {
             },
         );
         assert_eq!(render_email(&utm_doc(), &context(), &hooks).unwrap(), plain);
+    }
+
+    // ----- The opt-out attribute and the text part ---------------------------------------------
+
+    fn doc_of(html: &str, text: &str) -> TemplateDocument {
+        TemplateDocument::email_code(EmailContent {
+            subject: "Hi".into(),
+            sender: None,
+            lang: None,
+            category: Category::Marketing,
+            syntax: Default::default(),
+            html: format!("{html}{FOOTER}"),
+            text: format!("{text}\nStop {{{{ system.unsubscribe_url }}}}"),
+        })
+    }
+
+    const OPTED: &str = r#"<a data-zf-utm="off" href="https://shop.example.com/a">a</a><a class="x" data-zf-utm='off'>b</a>"#;
+
+    #[test]
+    fn the_opt_out_attribute_never_goes_out_with_utm_off_or_with_a_link_without_an_href() {
+        let domains = vec!["example.com".to_owned()];
+        let doc = doc_of(OPTED, "plain");
+        // No plan at all (the setting is off, or the template overrides it with `off`).
+        let off = render_email(&doc, &context(), &Hooks::untracked()).unwrap();
+        // A plan: the href-less link keeps no attribute either.
+        let planned = with_utm(&domains, Tracking::Off);
+        let on = render_email(&doc, &context(), &planned).unwrap();
+        for out in [off, on] {
+            assert!(!out.html.contains("data-zf-utm"), "{}", out.html);
+            assert!(
+                out.html
+                    .contains(r#"<a href="https://shop.example.com/a">a</a>"#)
+            );
+            assert!(out.html.contains(r#"<a class="x">b</a>"#));
+        }
+    }
+
+    #[test]
+    fn html_without_the_attribute_is_byte_identical_whatever_the_utm_part() {
+        let html = r#"<a href="https://shop.example.com/a">a</a><a name="x">b</a><p>data-zf-</p>"#;
+        let doc = doc_of(html, "plain");
+        let none: Vec<String> = Vec::new();
+        let plain = render_email(&doc, &context(), &Hooks::untracked()).unwrap();
+        let planned = render_email(&doc, &context(), &with_utm(&none, Tracking::Off)).unwrap();
+        assert_eq!(plain, planned);
+        assert!(plain.html.starts_with(html));
+    }
+
+    #[test]
+    fn a_text_url_equal_to_an_opted_out_html_link_is_not_tagged() {
+        let domains = vec!["example.com".to_owned()];
+        let doc = doc_of(
+            r#"<a data-zf-utm="off" href="https://example.com/p">p</a><a href="https://example.com/q">q</a>"#,
+            "See https://example.com/p and https://example.com/q",
+        );
+        let out = render_email(&doc, &context(), &with_utm(&domains, Tracking::Off)).unwrap();
+        assert!(
+            out.text
+                .contains("See https://example.com/p and https://example.com/q?utm_source=acme")
+        );
+        assert!(!out.text.contains("/p?utm"));
+        assert!(
+            out.html
+                .contains(r#"<a href="https://example.com/p">p</a>"#)
+        );
+        assert!(out.html.contains("example.com/q?utm_source=acme"));
+    }
+
+    #[test]
+    fn a_text_url_inside_another_uri_is_not_tagged_but_one_after_a_bracket_is() {
+        let domains = vec!["example.com".to_owned()];
+        let doc = doc_of(
+            "<p>x</p>",
+            "mailto:help@example.test?body=https://example.com/offer (https://example.com/a) [https://example.com/b]",
+        );
+        let out = render_email(&doc, &context(), &with_utm(&domains, Tracking::Off)).unwrap();
+        assert!(
+            out.text.contains("body=https://example.com/offer "),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("(https://example.com/a?utm_source=acme"));
+        assert!(out.text.contains("[https://example.com/b?utm_source=acme"));
     }
 }

@@ -2235,7 +2235,7 @@ every `http` or `https` link to a listed domain (or a subdomain of one) gets `ut
 `{template}`, `{template_version}` and `{category}`; values are lower-cased with hyphens and URL-encoded, and
 nothing about the person is used. Enabling needs at least one domain. Unsubscribe and preference links,
 `mailto:`, `tel:` and anchors are never tagged, a `utm_*` parameter already on a link is kept, and
-`data-zf-utm="off"` on a link skips it (the attribute is removed). A template can opt out in its editor. The
+`data-zf-utm="off"` on a link skips it (the attribute is removed from every message, tagged or not, and the same URL in the plain-text part is left alone too). A template can opt out in its editor. The
 tagging happens before click tracking, so the recorded link and the redirect carry the parameters, and the
 preview and test sends show them too (without a flow, `{flow}` is empty and that parameter is left out).
 

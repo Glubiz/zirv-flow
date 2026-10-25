@@ -58,16 +58,21 @@ pub(crate) struct Href {
     pub(crate) value: Range<usize>,
     /// The span to replace: the value with its quotes, if it had any.
     pub(crate) outer: Range<usize>,
-    /// The span of a `data-zf-utm="off"` attribute on the same tag, with the whitespace
-    /// before it.
-    pub(crate) utm_off: Option<Range<usize>>,
+}
+
+/// A `data-zf-utm="off"` attribute on an `<a>` tag, with or without an `href`.
+pub(crate) struct OptOut {
+    /// The span of the attribute, with the whitespace before it.
+    pub(crate) attribute: Range<usize>,
+    /// The value span of the first `href` of the same tag, if it has one.
+    pub(crate) href: Option<Range<usize>>,
 }
 
 /// The elements whose content is text, not markup: an `<a>` inside is not a link.
 const RAW_TEXT_ELEMENTS: [&str; 4] = ["script", "style", "textarea", "title"];
 
 /// The position of `needle` (lower-case ASCII) in `html` from `from`, ignoring ASCII case.
-fn find_ignore_case(html: &str, needle: &str, from: usize) -> Option<usize> {
+pub(crate) fn find_ignore_case(html: &str, needle: &str, from: usize) -> Option<usize> {
     let bytes = html.as_bytes();
     let needle = needle.as_bytes();
     (from..bytes.len().saturating_sub(needle.len().saturating_sub(1)))
@@ -109,8 +114,19 @@ fn skip_non_markup(html: &str, start: usize) -> Option<usize> {
 /// The first `href` of every `<a>` tag, in document order. Comments and the content of raw-text
 /// elements hold no links.
 pub(crate) fn hrefs(html: &str) -> Vec<Href> {
+    anchors(html).0
+}
+
+/// The `data-zf-utm="off"` attribute of every `<a>` tag, in document order.
+pub(crate) fn opt_outs(html: &str) -> Vec<OptOut> {
+    anchors(html).1
+}
+
+/// The links and the opt-out attributes of every `<a>` tag, from one scan.
+fn anchors(html: &str) -> (Vec<Href>, Vec<OptOut>) {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
+    let mut opted_out = Vec::new();
     let mut at = 0;
     while let Some(offset) = html[at..].find('<') {
         let start = at + offset;
@@ -128,20 +144,20 @@ pub(crate) fn hrefs(html: &str) -> Vec<Href> {
         if !is_anchor {
             continue;
         }
-        at = scan_tag(html, start + 2, &mut found);
+        at = scan_tag(html, start + 2, &mut found, &mut opted_out);
     }
-    found
+    (found, opted_out)
 }
 
 /// Scan the attributes of one tag from `from`; returns the position after the tag.
-fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
+fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>, opted_out: &mut Vec<OptOut>) -> usize {
     let bytes = html.as_bytes();
     let mut at = from;
     // Browsers use the first `href` of a tag and ignore the rest.
     let mut seen_href = false;
     let first_found = found.len();
-    let mut utm_off: Option<Range<usize>> = None;
-    loop {
+    let mut offs: Vec<Range<usize>> = Vec::new();
+    let end = loop {
         let gap_start = at;
         while bytes
             .get(at)
@@ -150,8 +166,8 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
             at += 1;
         }
         match bytes.get(at) {
-            None => return at,
-            Some(b'>') => return at + 1,
+            None => break at,
+            Some(b'>') => break at + 1,
             Some(_) => {}
         }
         let name_start = at;
@@ -192,25 +208,23 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
                 }
                 (value_start..at, value_start..at)
             }
-            None => return at,
+            None => break at,
         };
         if name.eq_ignore_ascii_case("href") && !seen_href {
             seen_href = true;
-            found.push(Href {
-                value,
-                outer,
-                utm_off: utm_off.clone(),
-            });
+            found.push(Href { value, outer });
         } else if name.eq_ignore_ascii_case("data-zf-utm")
             && html[value.clone()].trim().eq_ignore_ascii_case("off")
         {
-            let span = gap_start..at;
-            if let Some(first) = found.get_mut(first_found).filter(|_| seen_href) {
-                first.utm_off = Some(span.clone());
-            }
-            utm_off = Some(span);
+            offs.push(gap_start..at);
         }
-    }
+    };
+    let href = found.get(first_found).map(|href| href.value.clone());
+    opted_out.extend(offs.into_iter().map(|attribute| OptOut {
+        attribute,
+        href: href.clone(),
+    }));
+    end
 }
 
 /// Decode the entities an attribute value is escaped with: the named `amp`, `lt`, `gt`, `quot`

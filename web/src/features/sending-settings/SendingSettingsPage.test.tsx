@@ -23,6 +23,7 @@ function access(role: "admin" | "member"): Record<string, Handler> {
     "GET /api/v1/session": () => json(session(who)),
     "GET /api/v1/workspaces/ws1/members": () => json([{ user_id: who.id, email: who.email, role, added_at: "2026-10-01T09:00:00Z" }]),
     [`GET ${WS}`]: () => json({ id: "ws1", name: "Spring campaigns", slug: "spring", timezone: "Europe/Copenhagen", utm: UTM_OFF, created_at: "2026-10-01T09:00:00Z" }),
+    [`GET ${WS}/sending-domains`]: () => json([]),
   };
 }
 

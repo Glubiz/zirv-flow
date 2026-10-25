@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { json, MEMBER, mockApi, OWNER, problem, session, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { SendingSettingsPage } from "./SendingSettingsPage";
-import { checkPattern, exampleLink, parseDomains } from "./utm";
+import { checkPattern, checkUtm, exampleLink, parseDomains } from "./utm";
 
 const WS = "/api/v1/workspaces/ws1";
 
@@ -147,6 +147,30 @@ describe("UTM parameters section", () => {
     expect(within(form).getByText(/UTM parameters can be changed by/)).toBeInTheDocument();
   });
 
+  it("shows a refused pattern as soon as it is typed, before any save", async () => {
+    mockApi(routes("admin", UTM_OFF));
+    const user = userEvent.setup();
+    mount();
+
+    const form = await screen.findByRole("form", { name: "UTM parameters" });
+    const source = within(form).getByLabelText("Source pattern");
+    await user.clear(source);
+    await user.click(source);
+    await user.paste("{nope}");
+
+    expect(within(form).getByText(/Unknown placeholder {nope}/)).toBeInTheDocument();
+    expect(source).toBeInvalid();
+  });
+
+  it("shows an error state with a retry when the verified domains cannot be loaded", async () => {
+    mockApi(routes("admin", UTM_OFF, { [`GET ${WS}/sending-domains`]: () => problem(500, "Broken", "no domains") }));
+    mount();
+
+    const form = await screen.findByRole("form", { name: "UTM parameters" });
+    expect(await within(form).findByText("no domains")).toBeInTheDocument();
+    expect(within(form).getByRole("button", { name: "Try again" })).toBeInTheDocument();
+  });
+
   it("shows an error state with a retry when the workspace cannot be loaded", async () => {
     mockApi(routes("admin", UTM_OFF, { [`GET ${WS}`]: () => problem(500, "Broken", "no workspace") }));
     mount();
@@ -169,6 +193,21 @@ describe("UTM pattern helpers", () => {
       "Acme Corp",
     );
     expect(link).toBe("https://a.example.com/offer?utm_source=acme-corp&utm_medium=e%20mail&utm_campaign=send-welcome");
+  });
+
+  it("refuses the C1 control characters like the server", () => {
+    expect(checkPattern("ab")).toBeDefined();
+    expect(checkPattern("ab")).toBeDefined();
+    expect(checkPattern("a b")).toBeUndefined();
+  });
+
+  it("drops every trailing dot of a domain and refuses a host over 253 bytes", () => {
+    expect(parseDomains("example.com..")).toEqual(["example.com"]);
+    const long = `${["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(58)].join(".")}.com`;
+    expect(long.length).toBe(254);
+    const draft = { enabled: false, source: "", medium: "", campaign: "", content: "", domains: [long] };
+    expect(checkUtm(draft).domains).toBeDefined();
+    expect(checkUtm({ ...draft, domains: [long.slice(1)] }).domains).toBeUndefined();
   });
 
   it("reads domains one per line or comma separated", () => {

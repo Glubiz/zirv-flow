@@ -20,7 +20,7 @@ export const UTM_FIELDS: readonly { id: UtmField; param: string; label: string }
 function hasControlCharacter(text: string): boolean {
   for (const character of text) {
     const code = character.codePointAt(0) ?? 0;
-    if (code < 0x20 || code === 0x7f) return true;
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true;
   }
   return false;
 }
@@ -83,17 +83,18 @@ function expandPattern(pattern: string, values: ExampleValues): string {
 export function parseDomains(text: string): string[] {
   const seen = new Set<string>();
   for (const part of text.split(/[\s,;]+/)) {
-    const domain = part.trim().toLowerCase().replace(/^\*\./, "").replace(/^\./, "").replace(/\.$/, "");
+    const domain = part.trim().toLowerCase().replace(/^(\*)?\./, "").replace(/\.+$/, "");
     if (domain !== "") seen.add(domain);
   }
   return [...seen];
 }
 
+const MAX_HOST_BYTES = 253;
 const LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
 const DOMAIN = new RegExp(`^${LABEL}(\\.${LABEL})+$`);
 
 function badDomains(domains: readonly string[]): string[] {
-  return domains.filter((domain) => !DOMAIN.test(domain));
+  return domains.filter((domain) => domain.length > MAX_HOST_BYTES || !DOMAIN.test(domain));
 }
 
 export interface UtmProblems {

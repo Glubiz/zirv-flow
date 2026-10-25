@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
-import { Button, InlineError, Panel, TextAreaField, TextField } from "../../ui";
+import { Button, ErrorState, InlineError, LoadingState, Panel, TextAreaField, TextField } from "../../ui";
 import { checkUtm, exampleLink, hasUtmProblems, parseDomains, sameUtm, UTM_FIELDS, UTM_PLACEHOLDERS, type UtmSettings } from "./utm";
 
 interface Props {
@@ -20,13 +20,14 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [tried, setTried] = useState(false);
   const domains = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/sending-domains", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
   const problems = checkUtm(draft);
   const dirty = !sameUtm(draft, original);
+  // A refusal shows as soon as the draft differs from what is stored; the server says the same.
+  const showProblems = dirty;
   const readOnly = !canManage;
   const suggestions =
     domains.status === "ready" ? domains.data.filter((entry) => entry.status === "verified" && !draft.domains.includes(entry.domain)) : [];
@@ -43,7 +44,6 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
 
   async function submit(event: SyntheticEvent) {
     event.preventDefault();
-    setTried(true);
     setNotice(null);
     if (hasUtmProblems(problems)) return;
     setBusy(true);
@@ -53,7 +53,6 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
       setOriginal(saved.utm);
       setDraft(saved.utm);
       setDomainText(saved.utm.domains.join("\n"));
-      setTried(false);
       setNotice(saved.utm.enabled ? "Saved. Links to the listed domains are tagged from the next send." : "Saved. Links are not tagged.");
       onSaved();
     } catch (error) {
@@ -91,7 +90,7 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
               value={draft[id]}
               onChange={(event) => edit({ [id]: event.target.value })}
               disabled={readOnly}
-              error={tried ? problems.fields[id] : undefined}
+              error={showProblems ? problems.fields[id] : undefined}
             />
           ))}
           <TextAreaField
@@ -101,8 +100,10 @@ export function UtmSection({ workspaceId, workspaceSlug, stored, canManage, onSa
             value={domainText}
             onChange={(event) => setDomains(event.target.value)}
             disabled={readOnly}
-            error={tried ? problems.domains : undefined}
+            error={showProblems ? problems.domains : undefined}
           />
+          {readOnly ? null : domains.status === "loading" ? <LoadingState label="Loading the verified sending domains" /> : null}
+          {readOnly || domains.status !== "error" ? null : <ErrorState {...describeError(domains.error)} onRetry={domains.reload} />}
           {readOnly || suggestions.length === 0 ? null : (
             <div className="row" role="group" aria-label="Verified sending domains">
               {suggestions.map((entry) => (

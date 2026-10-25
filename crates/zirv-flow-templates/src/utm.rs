@@ -8,7 +8,7 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::links::{escape, hrefs, is_web_url, unescape};
+use crate::links::{escape, find_ignore_case, hrefs, is_web_url, opt_outs, unescape};
 
 /// The placeholders a pattern may use. Any other `{...}` is refused.
 pub const PLACEHOLDERS: [&str; 7] = [
@@ -280,13 +280,17 @@ impl UtmPlan {
     }
 }
 
-/// The host of an `http` or `https` URL.
+/// The host of an `http` or `https` URL. `None` for an authority with a backslash: browsers read
+/// a backslash as `/` in an http(s) URL, so the host is ambiguous and the URL is left alone.
 fn host_of(url: &str) -> Option<&str> {
     let after_scheme = &url[url.find("://")? + 3..];
     let authority = after_scheme
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default();
+    if authority.contains('\\') {
+        return None;
+    }
     let host_port = authority.rsplit('@').next().unwrap_or(authority);
     if host_port.starts_with('[') {
         return None;
@@ -310,12 +314,12 @@ pub fn tag_url(url: &str, utm: &UtmTags<'_>) -> Option<String> {
         Some(at) => (&before_fragment[..at], Some(&before_fragment[at + 1..])),
         None => (before_fragment, None),
     };
+    // A key counts whether or not it is percent-encoded (`%75tm_source`), in any case.
     let present = |key: &str| {
         query.is_some_and(|q| {
             q.split('&').any(|pair| {
-                pair.split('=')
-                    .next()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(key))
+                let name = pair.split('=').next().unwrap_or_default();
+                percent_decode(name).eq_ignore_ascii_case(key)
             })
         })
     };
@@ -342,21 +346,68 @@ pub fn tag_url(url: &str, utm: &UtmTags<'_>) -> Option<String> {
     Some(out)
 }
 
-/// Tag the links of the HTML part. Links in `keep` (the message's own unsubscribe and preference
-/// URLs) are never tagged. A `data-zf-utm="off"` attribute skips its link and is removed.
-pub(crate) fn tag_html(html: &str, utm: &UtmTags<'_>, keep: &[&str]) -> String {
+/// Decode the `%XX` escapes of a query key; a malformed escape stays as written.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let decoded = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|pair| std::str::from_utf8(pair).ok())
+            .and_then(|pair| u8::from_str_radix(pair, 16).ok());
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Tag the links of the HTML part with `utm` (when there is one) and remove the opt-out
+/// attribute `data-zf-utm="off"` from every `<a>` tag, whether it has an `href` or not and
+/// whether or not anything is tagged. Links in `keep` (the message's own unsubscribe and
+/// preference URLs) are never tagged, and neither is a link whose tag carries the opt-out.
+///
+/// Returns the HTML and the URLs of the opted-out links, which the text part must not tag either.
+/// HTML without the attribute and without `utm` comes back byte for byte.
+pub(crate) fn process_html(
+    html: &str,
+    utm: Option<&UtmTags<'_>>,
+    keep: &[&str],
+) -> (String, Vec<String>) {
+    if utm.is_none() && find_ignore_case(html, "data-zf-utm", 0).is_none() {
+        return (html.to_owned(), Vec::new());
+    }
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
-    for href in hrefs(html) {
-        if let Some(off) = &href.utm_off {
-            edits.push((off.clone(), String::new()));
-            continue;
+    let mut skipped = Vec::new();
+    let mut opted_out: Vec<Range<usize>> = Vec::new();
+    for off in opt_outs(html) {
+        edits.push((off.attribute, String::new()));
+        if let Some(value) = off.href {
+            skipped.push(unescape(html[value.clone()].trim()));
+            opted_out.push(value);
         }
-        let url = unescape(html[href.value.clone()].trim());
-        if keep.contains(&url.as_str()) {
-            continue;
-        }
-        if let Some(tagged) = tag_url(&url, utm) {
-            edits.push((href.outer.clone(), format!("\"{}\"", escape(&tagged))));
+    }
+    if let Some(utm) = utm {
+        for href in hrefs(html) {
+            if opted_out.contains(&href.value) {
+                continue;
+            }
+            let url = unescape(html[href.value.clone()].trim());
+            if keep.contains(&url.as_str()) {
+                continue;
+            }
+            if let Some(tagged) = tag_url(&url, utm) {
+                edits.push((href.outer.clone(), format!("\"{}\"", escape(&tagged))));
+            }
         }
     }
     edits.sort_by_key(|(span, _)| span.start);
@@ -371,11 +422,14 @@ pub(crate) fn tag_html(html: &str, utm: &UtmTags<'_>, keep: &[&str]) -> String {
         copied = span.end;
     }
     out.push_str(&html[copied..]);
-    out
+    (out, skipped)
 }
 
-/// Tag the URLs of the text part the same way as the HTML part.
-pub(crate) fn tag_text(text: &str, utm: &UtmTags<'_>, keep: &[&str]) -> String {
+/// Tag the URLs of the text part the same way as the HTML part. A URL that starts inside another
+/// one (`mailto:a@b?body=https://...`) is not a link of its own: it must start the text, follow
+/// whitespace or one of `( < [ " '`. A URL equal to one in `skip` (the links the HTML part opted
+/// out) is left alone.
+pub(crate) fn tag_text(text: &str, utm: &UtmTags<'_>, keep: &[&str], skip: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
     while let Some(start) = next_url(text, at) {
@@ -384,7 +438,7 @@ pub(crate) fn tag_text(text: &str, utm: &UtmTags<'_>, keep: &[&str]) -> String {
             .map_or(text.len(), |n| start + n);
         let url = text[start..stop].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']']);
         out.push_str(&text[at..start]);
-        if keep.contains(&url) {
+        if keep.contains(&url) || skip.iter().any(|skipped| skipped == url) {
             out.push_str(url);
         } else {
             out.push_str(&tag_url(url, utm).unwrap_or_else(|| url.to_owned()));
@@ -395,15 +449,20 @@ pub(crate) fn tag_text(text: &str, utm: &UtmTags<'_>, keep: &[&str]) -> String {
     out
 }
 
-/// The position of the next `http://` or `https://` in `text` from `from`, ignoring ASCII case.
+/// The position of the next `http://` or `https://` in `text` from `from`, ignoring ASCII case,
+/// at a boundary: the start of the text, whitespace, or one of `( < [ " '` before it.
 fn next_url(text: &str, from: usize) -> Option<usize> {
     let bytes = text.as_bytes();
     (from..bytes.len()).find(|&i| {
-        [&b"http://"[..], &b"https://"[..]].iter().any(|prefix| {
-            bytes
-                .get(i..i + prefix.len())
-                .is_some_and(|b| b.eq_ignore_ascii_case(prefix))
-        })
+        let at_boundary = i == 0
+            || bytes[i - 1].is_ascii_whitespace()
+            || matches!(bytes[i - 1], b'(' | b'<' | b'[' | b'"' | b'\'');
+        at_boundary
+            && [&b"http://"[..], &b"https://"[..]].iter().any(|prefix| {
+                bytes
+                    .get(i..i + prefix.len())
+                    .is_some_and(|b| b.eq_ignore_ascii_case(prefix))
+            })
     })
 }
 
@@ -598,7 +657,7 @@ mod tests {
             r#"<a href="https://example.com/unsub?s=1&amp;t=2">u</a>"#,
             r#"<a href=https://shop.example.com/c>c</a>"#,
         );
-        let out = tag_html(html, &t, &["https://example.com/unsub?s=1&t=2"]);
+        let out = process_html(html, Some(&t), &["https://example.com/unsub?s=1&t=2"]).0;
         let q = Q.replace('&', "&amp;");
         let expected = [
             format!(r#"<a href="https://example.com/a?x=1&amp;y=2&amp;{q}">a</a>"#),
@@ -623,7 +682,7 @@ mod tests {
             r#"<a href="https://example.com/3" data-zf-utm=off>3</a>"#,
             r#"<a href="https://example.com/4" data-zf-utm="on">4</a>"#,
         );
-        let out = tag_html(html, &t, &[]);
+        let out = process_html(html, Some(&t), &[]).0;
         assert!(out.starts_with(concat!(
             r#"<a href="https://example.com/1">1</a>"#,
             r#"<a class="x" href="https://example.com/2">2</a>"#,
@@ -658,7 +717,10 @@ mod tests {
         let d = domains();
         let t = tags(&d);
         let html = r#"<a href="https://example.com/a">a</a>"#;
-        assert_eq!(tag_html(html, &t, &[]), tag_html(html, &t, &[]));
+        assert_eq!(
+            process_html(html, Some(&t), &[]),
+            process_html(html, Some(&t), &[])
+        );
     }
 
     #[test]
@@ -666,13 +728,33 @@ mod tests {
         let d = domains();
         let t = tags(&d);
         let text = "See https://example.com/a. Or <https://shop.example.com/b?x=1#f>, not https://other.com/c or https://example.com/unsub.";
-        let out = tag_text(text, &t, &["https://example.com/unsub"]);
+        let out = tag_text(text, &t, &["https://example.com/unsub"], &[]);
         assert_eq!(
             out,
             format!(
                 "See https://example.com/a?{Q}. Or <https://shop.example.com/b?x=1&{Q}#f>, not https://other.com/c or https://example.com/unsub."
             )
         );
-        assert_eq!(tag_text("no links", &t, &[]), "no links");
+        assert_eq!(tag_text("no links", &t, &[], &[]), "no links");
+    }
+
+    #[test]
+    fn a_percent_encoded_existing_utm_key_is_recognised_and_kept_as_written() {
+        let d = domains();
+        let t = tags(&d);
+        let tagged = tag_url("https://example.com/?%75tm_source=old&%55TM_medium=m", &t).unwrap();
+        assert_eq!(
+            tagged,
+            "https://example.com/?%75tm_source=old&%55TM_medium=m&utm_campaign=spring&utm_content=hero"
+        );
+    }
+
+    #[test]
+    fn a_backslash_in_the_authority_leaves_the_url_untagged() {
+        let d = domains();
+        let t = tags(&d);
+        assert_eq!(tag_url(r"https://evil.test\@example.com/", &t), None);
+        assert_eq!(tag_url(r"https://example.com\.evil.test/", &t), None);
+        assert!(tag_url(r"https://example.com/ab", &t).is_some());
     }
 }
