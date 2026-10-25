@@ -645,7 +645,7 @@ mod tests {
         // The levels each credential holds: 1 read, 2 write, 3 admin. A key holds one scope; a
         // member reads and writes; a workspace admin does all three.
         let held = |code: u16, need: u16| code.to_string().contains(&need.to_string());
-        let requests: [(&str, &str, String, Option<Value>, u16); 12] = [
+        let requests: [(&str, &str, String, Option<Value>, u16); 13] = [
             ("list", "GET", String::new(), None, 1),
             ("get", "GET", id(""), None, 1),
             ("versions", "GET", id("/versions"), None, 1),
@@ -663,6 +663,13 @@ mod tests {
                 "PUT",
                 id("/draft"),
                 Some(json!({"document": email_doc("Hi", "y")})),
+                2,
+            ),
+            (
+                "convert to mjml",
+                "POST",
+                id("/draft/convert-to-mjml"),
+                None,
                 2,
             ),
             ("sample preview", "POST", id("/preview"), Some(json!({})), 2),
@@ -1256,6 +1263,150 @@ mod tests {
             );
             assert_eq!(refused.body["code"], "sender_unverified", "{name}");
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_block_draft_converts_to_mjml_code_and_published_versions_stay(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let document = blocks_doc("Welcome", footer);
+        let id = f.create("Newsletter", document.clone()).await;
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        let before = f.lead("GET", &format!("/{id}/versions/1"), None).await;
+
+        let converted = f
+            .lead("POST", &format!("/{id}/draft/convert-to-mjml"), None)
+            .await;
+
+        assert_eq!(converted.status, StatusCode::OK, "{:?}", converted.body);
+        let draft = &converted.body["draft"];
+        assert_eq!(draft["content_type"], "mjml");
+        assert_eq!(draft["revision"], 2);
+        assert_eq!(draft["document"]["mode"], "code");
+        assert!(draft["document"].get("blocks").is_none());
+        let email = &draft["document"]["email"];
+        assert_eq!(email["syntax"], "mjml");
+        assert_eq!(email["subject"], "Welcome");
+        assert_eq!(email["sender"], SENDER);
+        assert_eq!(email["category"], "marketing");
+        let mjml = email["html"].as_str().unwrap();
+        assert!(mjml.starts_with("<mjml"), "{mjml}");
+        // The merge tags stay as the marketer wrote them.
+        assert!(mjml.contains("Hello {{ person.plan }}"), "{mjml}");
+        assert!(mjml.contains("{{ system.unsubscribe_url }}"), "{mjml}");
+        // The published version is untouched; the audit records the conversion.
+        let after = f.lead("GET", &format!("/{id}/versions/1"), None).await;
+        assert_eq!(after.body, before.body);
+        assert_eq!(after.body["document"], document);
+        assert_eq!(f.versions_written().await, 1);
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action = 'template.draft_converted'")
+                .await,
+            1
+        );
+        // The converted draft previews through the MJML path.
+        let preview = f
+            .lead("POST", &format!("/{id}/preview"), Some(json!({})))
+            .await;
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["rendered"], true);
+
+        // It is one way: the draft is no longer in blocks mode.
+        let again = f
+            .lead("POST", &format!("/{id}/draft/convert-to-mjml"), None)
+            .await;
+        assert_eq!(again.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(again.body["code"], "template_malformed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_that_is_not_blocks_or_has_blocking_issues_is_not_converted(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let code = f.create("Code", email_doc("Hi", "x")).await;
+        let refused = f
+            .lead("POST", &format!("/{code}/draft/convert-to-mjml"), None)
+            .await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "template_malformed");
+
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let mut broken = blocks_doc("Welcome", footer);
+        broken["blocks"]["settings"] = json!({"content_width": 10});
+        let id = f.create("Broken", broken.clone()).await;
+        let refused = f
+            .lead("POST", &format!("/{id}/draft/convert-to-mjml"), None)
+            .await;
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "template_invalid");
+        assert!(
+            refused.body["template_issues"]
+                .as_array()
+                .is_some_and(|issues| issues
+                    .iter()
+                    .any(|issue| issue["at"] == "/blocks/settings/content_width")),
+            "{:?}",
+            refused.body
+        );
+        // The draft is unchanged and nothing was audited.
+        let draft = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(draft.body["draft"]["document"], broken);
+        assert_eq!(draft.body["draft"]["revision"], 1);
+        assert_eq!(
+            f.count("SELECT count(*) FROM audit_log WHERE action = 'template.draft_converted'")
+                .await,
+            0
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn convert_is_a_404_in_another_workspace_and_a_409_for_an_archived_template(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let id = f.create("Newsletter", blocks_doc("Welcome", footer)).await;
+        let uri = f.templates(&format!("/{id}/draft/convert-to-mjml"));
+
+        let stranger = f.call("POST", &uri, None, Auth::Key(&f.other_admin)).await;
+        assert_eq!(
+            stranger.status,
+            StatusCode::NOT_FOUND,
+            "{:?}",
+            stranger.body
+        );
+
+        let archived = f.lead("DELETE", &format!("/{id}"), None).await;
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        let refused = f
+            .lead("POST", &format!("/{id}/draft/convert-to-mjml"), None)
+            .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "template_archived");
+        let draft = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(draft.body["draft"]["document"]["mode"], "blocks");
+        assert_eq!(draft.body["draft"]["revision"], 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_read_key_cannot_convert_a_draft(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let id = f.create("Newsletter", blocks_doc("Welcome", footer)).await;
+        let uri = f.templates(&format!("/{id}/draft/convert-to-mjml"));
+        let refused = f.call("POST", &uri, None, Auth::Key(&f.read)).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let allowed = f.call("POST", &uri, None, Auth::Key(&f.write)).await;
+        assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
     }
 
     #[sqlx::test]

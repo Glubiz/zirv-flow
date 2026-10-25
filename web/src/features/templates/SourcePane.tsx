@@ -1,9 +1,10 @@
 import { useRef, useState } from "react";
 
-import { client, describeError, unwrap, useResource } from "../../api";
-import { Button, ErrorState, LoadingState, SelectField, TextAreaField, TextField } from "../../ui";
+import { Button, TextAreaField, TextField } from "../../ui";
 import { FieldIssues, IssueList } from "./IssueList";
+import { BlockEditor } from "./blocks/BlockEditor";
 import { MergeTagPicker } from "./MergeTagPicker";
+import { SenderPicker } from "./SenderPicker";
 import { TabBar } from "./TabBar";
 import { UtmOverride } from "./UtmOverride";
 import { issuesAt, type Editable, type Template, type TemplateIssue } from "./model";
@@ -17,6 +18,7 @@ interface Props {
   onChange: (next: Editable) => void;
   readOnly: boolean;
   canAdmin: boolean;
+  onConvert?: () => void;
   issues: readonly TemplateIssue[];
   checked: boolean;
   /** The template, for its UTM override in the settings tab. */
@@ -37,6 +39,9 @@ export function SourcePane(props: Props) {
         <IssueList issues={props.issues} checked={props.checked} />
       </section>
     );
+  }
+  if (doc.kind === "blocks") {
+    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} canAdmin={props.canAdmin} issues={props.issues} checked={props.checked} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
   }
   return doc.kind === "email" ? <EmailPane {...props} doc={doc} /> : <WebhookPane {...props} doc={doc} />;
 }
@@ -161,43 +166,6 @@ function Settings({
       <FieldIssues issues={issuesAt(issues, "/email/lang")} />
       <UtmOverride workspaceId={workspaceId} template={template} editable={!readOnly} onSaved={onTemplate} />
     </div>
-  );
-}
-
-function SenderPicker({
-  workspaceId,
-  value,
-  onChange,
-  disabled,
-}: {
-  workspaceId: string;
-  value: string;
-  onChange: (id: string) => void;
-  disabled: boolean;
-}) {
-  const senders = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/sender-identities", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
-  if (senders.status === "loading") return <LoadingState label="Loading sender identities" />;
-  if (senders.status === "error") return <ErrorState {...describeError(senders.error)} onRetry={senders.reload} />;
-  const known = senders.data.some((sender) => sender.id === value);
-  return (
-    <SelectField
-      label="Sender identity"
-      value={value}
-      onChange={(event) => onChange(event.target.value)}
-      disabled={disabled}
-      hint={senders.data.length === 0 ? "No sender identity yet. Add one under sending." : "A sender on a verified domain."}
-    >
-      <option value="">Choose a sender</option>
-      {value !== "" && !known ? <option value={value}>{value}</option> : null}
-      {senders.data.map((sender) => (
-        <option key={sender.id} value={sender.id}>
-          {sender.from_name} &lt;{sender.from_address}&gt;
-        </option>
-      ))}
-    </SelectField>
   );
 }
 

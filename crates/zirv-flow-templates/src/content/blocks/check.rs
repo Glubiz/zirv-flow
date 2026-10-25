@@ -1007,6 +1007,28 @@ mod tests {
     }
 
     #[test]
+    fn markup_inside_a_merge_tag_of_rich_text_is_a_blocking_syntax_error() {
+        for content in [
+            "<p>{{<img src=x onerror=alert(1)>}}</p>",
+            "<p>{% <script>x</script> %}</p>",
+        ] {
+            let issues = after(move |c| {
+                if let Block::Text(rich) = block(c, "intro_text") {
+                    rich.content = content.into();
+                }
+            });
+            assert_eq!(
+                issues,
+                [entry(
+                    code::SYNTAX_ERROR,
+                    "/blocks/block/intro_text/content"
+                )],
+                "{content}"
+            );
+        }
+    }
+
+    #[test]
     fn markup_in_a_plain_field_is_blocking_when_the_sample_shows_it() {
         for text in [
             r#"{{ "<b>x</b>" | safe }}"#,

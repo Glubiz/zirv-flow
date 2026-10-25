@@ -13,11 +13,14 @@ use zirv_flow_core::{UserId, ValidationError, WorkspaceId};
 use zirv_flow_store::{
     NewTemplate, PgPool, Template, TemplateDraft, TemplatePatch, create_template as store_create,
 };
-use zirv_flow_templates::{Category, Channel, content_type_of};
+use zirv_flow_templates::{
+    Category, Channel, EmailContent, Mode, Syntax, TemplateDocument, blocks_to_mjml,
+    content_type_of,
+};
 
 use super::{
-    category_name, channel_name, check_matches, name_taken, parse_document, skeleton,
-    stored_document, template_error,
+    category_name, channel_name, check_matches, issue_problems, name_taken, parse_document,
+    skeleton, stored_document, template_error,
 };
 use crate::AppState;
 use crate::admin::{self, Context};
@@ -378,6 +381,62 @@ pub(crate) async fn save_draft(
     Ok((template, draft))
 }
 
+/// Replaces a block-mode draft with an MJML code-mode draft holding the converted source, and
+/// audits it as `template.draft_converted`. One way: nothing turns MJML back into blocks. Only
+/// the draft changes; published versions stay as they were.
+pub(crate) async fn convert_draft_to_mjml(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    id: Uuid,
+    updated_by: Option<UserId>,
+) -> Result<(Template, TemplateDraft), ApiError> {
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
+        .await
+        .map_err(template_error)?;
+    let current = zirv_flow_store::find_template_draft(&mut *tx, workspace, id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    let doc = stored_document(&current.document)?;
+    let content = match (&doc.mode, &doc.blocks) {
+        (Mode::Blocks, Some(content)) if !doc.is_ambiguous() => content,
+        _ => {
+            return Err(ApiError::template_malformed(
+                "only a draft in blocks mode can be converted to MJML",
+            ));
+        }
+    };
+    let converted = blocks_to_mjml(content)
+        .map_err(|error| ApiError::template_invalid(issue_problems(&error.issues)))?;
+    let code = TemplateDocument::email_code(EmailContent {
+        subject: content.subject.clone(),
+        sender: content.sender.clone(),
+        lang: content.lang.clone(),
+        category: content.category,
+        syntax: Syntax::Mjml,
+        html: converted.mjml,
+        text: converted.text,
+    });
+    let document = serde_json::to_value(&code).map_err(|_| ApiError::internal())?;
+    check_draft(locked.template(), &document)?;
+    let draft = zirv_flow_store::save_template_draft(&mut tx, workspace, id, &document, updated_by)
+        .await
+        .map_err(template_error)?;
+    let template = locked.template().clone();
+    admin::audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "template.draft_converted",
+        Some(("template", id)),
+        json!({ "name": template.name, "revision": draft.revision, "to": "mjml" }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok((template, draft))
+}
+
 /// Archives a template and audits it as `template.archived`.
 pub(crate) async fn archive_template(
     pool: &PgPool,
@@ -622,6 +681,45 @@ pub(crate) async fn put_draft(
         path_id(&id)?,
         principal.user_id(),
         body,
+    )
+    .await?;
+    Ok(Json(TemplateDetailBody::new(&template, &draft)))
+}
+
+/// Converts a block-mode draft to MJML code: the draft becomes a code-mode MJML document holding
+/// the converted source, merge tags kept, and the new draft is returned. One way. Published
+/// versions are untouched. Audited as `template.draft_converted`.
+#[utoipa::path(
+    post,
+    operation_id = "convert_template_draft_to_mjml",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id")
+    ),
+    responses(
+        (status = 200, description = "The template with its converted draft", body = TemplateDetailBody),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The draft is not in blocks mode (`template_malformed`), or the block document has blocking issues (`template_invalid`, with the issues)", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn convert_draft(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id)): Path<(String, String)>,
+) -> Result<Json<TemplateDetailBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let (template, draft) = convert_draft_to_mjml(
+        &state.pool,
+        &principal.context(),
+        workspace.id,
+        path_id(&id)?,
+        principal.user_id(),
     )
     .await?;
     Ok(Json(TemplateDetailBody::new(&template, &draft)))

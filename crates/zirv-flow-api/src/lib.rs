@@ -308,6 +308,10 @@ fn routes() -> Router<AppState> {
             put(templates::crud::put_draft),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml",
+            post(templates::crud::convert_draft),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/templates/{id}/publish",
             post(templates::publish::publish),
         )

@@ -14,8 +14,8 @@ interface MenuButtonProps {
   heading?: string;
   entries: MenuEntry[];
   emptyText?: string;
-  /** Where the menu opens: under the button with its right edge on it (the default), or beside it, to its right. */
-  placement?: "below-end" | "beside";
+  /** Where the menu opens: under the button with its right edge on it (the default), or beside it, to its right, or under it with its left edge on it (`below-start`, for a trigger at the left edge). */
+  placement?: "below-end" | "below-start" | "beside";
 }
 
 export function MenuButton({
@@ -112,7 +112,7 @@ export function MenuButton({
         {buttonContent}
       </button>
       {open ? (
-        <div id={menuId} ref={menu} className={placement === "beside" ? "menu menu-beside" : "menu"} role="menu" aria-label={label} onKeyDown={onMenuKey}>
+        <div id={menuId} ref={menu} className={placement === "beside" ? "menu menu-beside" : placement === "below-start" ? "menu menu-start" : "menu"} role="menu" aria-label={label} onKeyDown={onMenuKey}>
           {heading ? (
             <div className="menu-heading" role="presentation">
               {heading}
