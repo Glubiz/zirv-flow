@@ -12,9 +12,9 @@ pub use property::{
     EMAIL_BOUNCED_EVENT, EMAIL_CLICKED_EVENT, EMAIL_COMPLAINED_EVENT, EMAIL_DELIVERED_EVENT,
     EMAIL_EVENT_PREFIX, EMAIL_FAILED_EVENT, EMAIL_OPENED_EVENT, EMAIL_SENT_EVENT,
     EMAIL_SKIPPED_EVENT, EMAIL_UNSUBSCRIBED_EVENT, EventMode, PropertyType, RESERVED_EVENT_CODE,
-    RESERVED_EVENT_PREFIX, SchemaProperty, UnplannedPolicy, WEBHOOK_FAILED_EVENT,
-    WEBHOOK_SUCCEEDED_EVENT, is_reserved_event_name, validate_client_event_name,
-    validate_event_name, validate_properties, validate_property_name,
+    RESERVED_EVENT_PREFIX, SYNC_FAILED_EVENT, SYNC_SUCCEEDED_EVENT, SchemaProperty,
+    UnplannedPolicy, WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT, is_reserved_event_name,
+    validate_client_event_name, validate_event_name, validate_properties, validate_property_name,
 };
 pub use redact::{RedactionRules, redact, validate_rules};
 pub use time_rules::{EventFlag, Timing, apply_time_rules};

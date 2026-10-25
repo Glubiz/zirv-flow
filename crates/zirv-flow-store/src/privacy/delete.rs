@@ -160,7 +160,8 @@ macro_rules! names_erased_person {
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'delivery.send' AND payload ->> 'person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
-            OR (kind = 'template.test_send' AND payload ->> 'person_id' IN \
+            OR (kind = 'delivery.sync' AND payload ->> 'person_id' IN \
+                (SELECT p::text FROM unnest($2::uuid[]) AS p)) \n            OR (kind = 'template.test_send' AND payload ->> 'person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)) \
             OR (kind = 'person.merge.rewrite' AND payload ->> 'merged_person_id' IN \
                 (SELECT p::text FROM unnest($2::uuid[]) AS p)))"
@@ -1084,7 +1085,7 @@ mod tests {
         let enrollment = enrollment_of(&pool, person).await;
         let payload = match kind {
             "flow.step" => serde_json::json!({ "enrollment_id": enrollment }),
-            "webhook.call" | "delivery.send" | "template.test_send" => {
+            "webhook.call" | "delivery.send" | "delivery.sync" | "template.test_send" => {
                 serde_json::json!({ "person_id": person })
             }
             "person.merge.rewrite" => {
@@ -1178,6 +1179,7 @@ mod tests {
         running_flow_step: "flow.step",
         running_webhook_call: "webhook.call",
         running_delivery_send: "delivery.send",
+        running_delivery_sync: "delivery.sync",
         running_template_test_send: "template.test_send",
         running_merge_rewrite: "person.merge.rewrite",
         running_flow_enroll: "flow.enroll",
@@ -1260,6 +1262,14 @@ mod tests {
                 .unwrap(),
             0,
             "the pending send is purged"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM jobs WHERE kind = 'delivery.sync'")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "the pending profile sync is purged"
         );
     }
 

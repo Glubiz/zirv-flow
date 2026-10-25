@@ -54,6 +54,9 @@ const MESSAGES: Record<FlowIssue["code"], string> = {
     "The template must be a published email template that is not archived. Choose one that is published.",
   send_destination_unusable: "The destination must be one that is live and delivers email. Choose another.",
   unknown_dimension: "This refers to a consent dimension or a value the workspace does not have.",
+  trait_keys_not_allowed: "A step that removes a profile sends no traits. Clear the list.",
+  sync_destination_unusable: "The destination must be one that is live and syncs profiles. Choose another.",
+  operation_unsupported: "The destination does not support this operation. Choose another destination or operation.",
 };
 
 /** The text for an issue, with the output it concerns named when it is about one. */

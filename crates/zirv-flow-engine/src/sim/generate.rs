@@ -8,8 +8,8 @@ use chrono::{Days, NaiveDate};
 use serde_json::json;
 use uuid::Uuid;
 use zirv_flow_core::flow::{
-    Arm, Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, ListChange, NodeKind, TraitChange,
-    UntilTime, Weekday, validate_graph,
+    Arm, Edge, EventMatch, FlowGraph, FlowNode, GRAPH_VERSION, ListChange, NodeKind, SyncOperation,
+    TraitChange, UntilTime, Weekday, validate_graph,
 };
 
 use super::rng::Rng;
@@ -28,6 +28,7 @@ enum Shape {
     Split,
     Webhook,
     Send,
+    Sync,
     SetTrait,
     IncrementTrait,
     UnsetTrait,
@@ -56,8 +57,9 @@ const OPEN: [Shape; 12] = [
 
 /// The shapes with output ports that only a covering graph holds. `action.send` is here, not in
 /// [`OPEN`], so the seeded populations of the other kinds draw the same graphs they did before
-/// the send node existed, and each covering graph still has one.
-const COVERED_ONLY: [Shape; 1] = [Shape::Send];
+/// the send node existed, and each covering graph still has one. `action.sync` is here for the
+/// same reason.
+const COVERED_ONLY: [Shape; 2] = [Shape::Send, Shape::Sync];
 
 /// The shapes that end an enrollment.
 const ENDS: [Shape; 2] = [Shape::GoalExit, Shape::Exit];
@@ -180,6 +182,24 @@ fn kind(rng: &mut Rng, shape: Shape) -> NodeKind {
                 BTreeMap::new()
             },
         },
+        Shape::Sync => {
+            let remove = rng.chance(40);
+            let keys = ["plan", "country", "age"];
+            let trait_keys = keys
+                .iter()
+                .filter(|_| !remove && rng.chance(50))
+                .map(|key| (*key).to_owned())
+                .collect();
+            NodeKind::ActionSync {
+                destination: send_id(30 + u128::from(rng.below(2))),
+                operation: if remove {
+                    SyncOperation::Remove
+                } else {
+                    SyncOperation::Upsert
+                },
+                trait_keys,
+            }
+        }
         Shape::SetTrait => NodeKind::ActionUpdateTrait {
             key: format!("t{}", rng.below(5)),
             change: TraitChange::Set {
