@@ -2485,3 +2485,193 @@ main:focus {
   border-radius: 12px;
   background: var(--paper-3);
 }
+
+.seg-tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+}
+
+.seg {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.seg:hover {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.seg-on,
+.seg-on:hover {
+  background: var(--night);
+  color: var(--night-ink);
+}
+
+.seg:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.message-filters {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+}
+
+.message-filters .panel-title {
+  margin: 0;
+}
+
+.field-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.message-note {
+  margin-left: auto;
+}
+
+.message-table td {
+  vertical-align: top;
+}
+
+.message-time {
+  white-space: nowrap;
+}
+
+.message-open td {
+  background: var(--paper);
+}
+
+.message-detail-cell {
+  padding-top: 2px;
+  padding-bottom: 16px;
+  border-top: 0;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--paper-3);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.st {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.st svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.st-ok {
+  color: #1f6a3c;
+}
+
+.st-skip {
+  color: var(--attention-text);
+}
+
+.st-defer {
+  color: #005a80;
+}
+
+.st-fail {
+  color: var(--error-text);
+}
+
+.message-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.message-gates {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.message-gate {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 14px;
+}
+
+.message-gate-stopped {
+  border: 2px solid var(--attention-dot);
+  box-shadow: 0 0 0 3px rgb(184 110 0 / 0.14);
+}
+
+.message-gate-held {
+  border: 2px solid var(--link);
+}
+
+.message-gate-not_reached {
+  border-style: dashed;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.message-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.message-card {
+  flex: 1 1 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  font-size: 14px;
+}
+
+.message-card p {
+  margin: 0;
+}

@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile and a person timeline, and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), segments (a builder compiled to SQL, full refresh, incremental re-evaluation and explain), the flow engine (versioned flows, a durable runtime with timers, event waits and re-entry rules, operator retry and skip, test mode and a trace inspector), and the AI provider layer and the mapping, manifest, segment and flow assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile, a person timeline and a per-person message log (why each message was or was not sent), and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), segments (a builder compiled to SQL, full refresh, incremental re-evaluation and explain), the flow engine (versioned flows, a durable runtime with timers, event waits and re-entry rules, operator retry and skip, test mode and a trace inspector), and the AI provider layer and the mapping, manifest, segment and flow assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -2217,6 +2217,32 @@ prefetch_user_agents = ["my-gateway-fetcher"]
 
 or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
+## Template test sends
+
+A test send sends one template through a real destination to one person who agreed to receive it: a
+member of the workspace, at the address on their account, or an address an admin put on the allowlist.
+The subject starts with `[TEST] `, links are not rewritten, there is no open pixel, and nothing is
+written to the message log, the events or the caps. `{{ system.unsubscribe_url }}` and the
+`List-Unsubscribe` header point to a `/u/{token}` link that answers "This was a test send. Nothing was
+changed." and does nothing.
+
+| Route | Needs | |
+|-------|-------|-|
+| `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
+| `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
+| `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; the list shows only a masked hint (`q***@example.com`) |
+
+Any other recipient is a 422 `recipient_not_allowed`. At most 10 test sends per member and 100 per
+workspace start in any rolling hour; past that the answer is 429 with `Retry-After`. A suppressed
+recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The job
+checks the recipient again when it runs: a member must still be a member (and the account's current
+address is used) and an allowlist entry must still exist, or the row ends `failed` with
+`recipient_unavailable` and nothing is sent. The log keeps 13 months. The log stores no address; an
+allowlist entry holds the hash, the masked hint and the normalised address sealed with the master key
+like a credential, and no job payload ever holds an address. Erasing a person deletes the log rows and
+the allowlist entries sent to or holding their addresses, and purges their queued test-send jobs. The
+leader ends a `queued` row whose job is dead or gone as `failed: abandoned`.
+
 ## Sending domains
 
 An email template publishes only with a sender identity on a verified sending domain (a publish
@@ -2297,6 +2323,54 @@ profile operation, or both. The `action.sync` flow node (`destination`, `operati
 a `sync.succeeded` or `sync.failed` person event and a decision that hold no key and no trait value.
 Keeping a segment in an external system is two flows, entry and exit: `docs/profile-sync.md` has the
 manifest, the worked flows and the details.
+
+## Event forwarding
+
+A forwarding rule sends the events of one name to a destination, mapped to the payload you choose.
+Only a destination type that carries events accepts a rule (`webhook` does; an email provider does
+not: `422 destination_unsupported`). A workspace has at most 20 active rules (`422 too_many_rules`).
+
+A rule has an exact `event_name`, an optional `filter` and a `mapping`:
+
+- `filter` is the segment `where` list (`[{"prop": "total", "op": "gt", "value": 10}]`), all of which
+  must hold. It supports `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`, `exists`,
+  `not_exists`, `gt`, `gte`, `lt`, `lte` and `between`, and is checked by the segment validator, so
+  a property needs a published event schema. A comparison needs the property to be present and of
+  the value's type.
+- `mapping` is an object of output key to source: `{"from": "event.id"}`, `event.name`,
+  `event.time`, `event.received_at`, `person.id`, `{"from": "event.properties", "pointer":
+  "/order/total"}` (a missing property is `null`), or `{"value": "shop"}` (a string, number or
+  boolean). There are no expressions and no person traits.
+
+The matching events are copied into an outbox in the transaction that stores them, so a rolled-back
+write forwards nothing and a late-committing one is never skipped. This covers client events, synced
+events, `webhook.*` and `email.*` events and `segment.entered` and `segment.exited`; a replay adds
+none. With no active rule the cost is one indexed lookup per batch. An `event.forward` job per
+destination delivers the rows with the webhook's signing, the guarded client and the destination's
+rate limit, under the idempotency key `sha256(event id:destination id)`, which every retry and
+re-drive reuses (the webhook sends it as `X-Zirv-Idempotency-Key`), so delivery is at least once.
+A retryable answer backs off (5 s doubling to an hour, or the `Retry-After`); a terminal answer, or
+the eighth attempt, makes the row a dead letter. Each retry and each dead letter appends a decision
+(`event.forward`) with ids and a fixed code. Delivered rows lose their payload at once and are
+removed after seven days.
+
+All of these are for workspace admins and are audited:
+
+- `GET`, `POST /api/v1/workspaces/{ws}/forwarding/rules` and `GET`, `PATCH`, `DELETE
+  /api/v1/workspaces/{ws}/forwarding/rules/{id}`.
+- `GET /api/v1/workspaces/{ws}/forwarding/dead-letters?destination_id=&limit=&before=` lists dead
+  rows newest first with the error code, attempts and times; never the payload.
+- `GET /api/v1/workspaces/{ws}/forwarding/status` gives each destination's queue `depth`, the
+  `oldest_lag_seconds` of its oldest waiting row and its `dead` count.
+- `POST /api/v1/workspaces/{ws}/forwarding/re-drive` with `{"id": ...}` (one row), `{"destination_id":
+  ...}` or `{}` (every dead row) puts rows back in the queue with fresh attempts. It writes no
+  event and starts no flow.
+
+The metrics `zirv_flow_destination_forwarding_depth` and
+`zirv_flow_destination_forwarding_lag_seconds` carry the same numbers, labelled by workspace and
+destination id; attempts and outcomes are in `zirv_flow_destination_attempts_total` and
+`zirv_flow_destination_outcomes_total`. Erasing a person deletes their outbox rows (the call that
+erases them at the destination is separate), and a merge moves them to the survivor.
 
 ## Render host
 

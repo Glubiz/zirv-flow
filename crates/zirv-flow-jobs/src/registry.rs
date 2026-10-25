@@ -131,7 +131,9 @@ mod tests {
                 "webhook.call",
                 "delivery.send",
                 "delivery.sync",
-                "sending_domain.verify"
+                "event.forward",
+                "sending_domain.verify",
+                "template.test_send"
             ]
         );
         assert!(registry.get("maintenance.noop").is_some());
@@ -182,7 +184,9 @@ mod tests {
                 "webhook.call",
                 "delivery.send",
                 "delivery.sync",
+                "event.forward",
                 "sending_domain.verify",
+                "template.test_send",
                 "test.first",
                 "test.second"
             ]

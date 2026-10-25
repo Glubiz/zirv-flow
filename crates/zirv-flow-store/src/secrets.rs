@@ -541,6 +541,7 @@ mod tests {
             SecretPurpose::DestinationCredential,
             SecretPurpose::DkimKey,
             SecretPurpose::WorkspaceCredential,
+            SecretPurpose::TestSendAddress,
         ] {
             let id = SecretId::new();
             let sealed = seal(&keys, b"{}", &secret_aad(ws, id, purpose));

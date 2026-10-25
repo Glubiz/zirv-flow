@@ -1,9 +1,8 @@
-//! A destination's credential, opened for one call: the code every outbound job that delivers
-//! through a destination row shares.
+//! Opening a destination's workspace credential, written once for every outbound job.
 
-use uuid::Uuid;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_store::Destination;
 use zirv_flow_store::secrets::OpenError;
 
 use super::Verdict;
@@ -11,31 +10,30 @@ use crate::{JobContext, JobError};
 
 /// The destination's workspace credential, opened from its sealed secret and merged with its
 /// non-secret fields; an empty one for a destination with none. A credential that cannot be
-/// opened (the worker has no master key, a wrong one, or the credential is gone) is retried like
-/// a transport error and, on the last attempt, recorded as the delivery's failure.
-pub(crate) async fn open(
+/// opened (the worker has no master key, a wrong one, or the credential is gone) is a retryable
+/// [`Verdict`], like a transport error.
+pub(crate) async fn open_credential(
     ctx: &mut JobContext<'_>,
     workspace: WorkspaceId,
-    credential: Option<Uuid>,
+    destination: &Destination,
 ) -> Result<Result<Credential, Verdict>, JobError> {
-    let Some(id) = credential else {
+    let Some(id) = destination.credential_id else {
         return Ok(Ok(Credential::new()));
     };
     let Some(keyring) = ctx.keyring().cloned() else {
-        return Ok(Err(unavailable()));
+        return Ok(Err(credential_unavailable()));
     };
     match zirv_flow_store::open_credential(ctx.conn(), &keyring, workspace, id).await {
         Ok(opened) => match Credential::from_parts(&opened.secret, &opened.fields) {
             Ok(credential) => Ok(Ok(credential)),
-            Err(_) => Ok(Err(unavailable())),
+            Err(_) => Ok(Err(credential_unavailable())),
         },
         Err(OpenError::Store(error)) => Err(error.into()),
-        Err(OpenError::NotFound | OpenError::Unopenable) => Ok(Err(unavailable())),
+        Err(OpenError::NotFound | OpenError::Unopenable) => Ok(Err(credential_unavailable())),
     }
 }
 
-/// The verdict of a credential that cannot be opened.
-pub(crate) fn unavailable() -> Verdict {
+pub(crate) fn credential_unavailable() -> Verdict {
     Verdict::Retry {
         status: None,
         reason: "credential_unavailable",
@@ -49,13 +47,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_unopenable_credential_is_retried_under_a_fixed_reason() {
+    fn an_unopenable_credential_is_a_retryable_verdict_with_a_fixed_reason() {
         assert!(matches!(
-            unavailable(),
+            credential_unavailable(),
             Verdict::Retry {
-                status: None,
                 reason: "credential_unavailable",
-                retry_after: None,
                 ..
             }
         ));

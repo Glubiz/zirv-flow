@@ -239,6 +239,8 @@ pub async fn record_webhook_outcome(
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
+    crate::forwarding::enqueue_forwarding_of(connection, outcome.workspace, event, outcome.now)
+        .await?;
     // The flow and version the call belongs to, for the trace to link from; an erased enrollment has
     // none.
     let pinned: Option<(Uuid, i32)> = sqlx::query_as(
@@ -648,5 +650,57 @@ mod tests {
         assert_eq!(exited, None, "an exited enrollment is not called about");
         assert_eq!(merged, None, "a merged-away person is not called about");
         assert_eq!(locked, WebhookPerson::Moved);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_outcome_event_reaches_the_forwarding_outbox_in_its_transaction(pool: PgPool) {
+        use crate::forwarding::support::{add_rule, forward_jobs, outbox_rows, payloads};
+
+        let (ws, destination) = crate::forwarding::support::fixture(&pool, "fwd").await;
+        add_rule(
+            &pool,
+            ws,
+            destination,
+            WEBHOOK_SUCCEEDED_EVENT,
+            json!([]),
+            json!({"status": {"from": "event.properties", "pointer": "/status"},
+                   "name": {"from": "event.name"}}),
+        )
+        .await;
+        let id = person(&pool, ws, json!({})).await;
+        let enrollment = enrolled(&pool, ws, id, "never").await;
+        let trace = trace();
+        let outcome = WebhookOutcome {
+            workspace: ws,
+            enrollment,
+            person: id,
+            node: "hook",
+            result: WebhookResult::Succeeded,
+            status: Some(204),
+            attempts: 1,
+            reason: None,
+            trace: &trace,
+            now: OffsetDateTime::now_utc(),
+            job: (Uuid::now_v7(), 1),
+            sync: None,
+        };
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        record_webhook_outcome(&mut tx, &outcome).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
+
+        let mut tx = crate::begin(&pool).await.unwrap();
+        record_webhook_outcome(&mut tx, &outcome).await.unwrap();
+        crate::commit(tx).await.unwrap();
+        assert_eq!(
+            payloads(&pool, ws).await,
+            [json!({"status": 204, "name": "webhook.succeeded"})]
+        );
+        assert_eq!(forward_jobs(&pool).await, 1);
     }
 }

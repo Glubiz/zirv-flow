@@ -1614,6 +1614,61 @@ preview-equals-send test rely on this.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
 - **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
 
+**As built (test sends, #224).**
+
+- **No message row (ruling 1d3048b4).** A test send writes only its `test_sends` row, whose id is the
+  idempotency key at the destination. There is no `messages` row (`messages.test` stays false, and the
+  applied migrations are never edited, because sqlx checks their checksums; migration
+  `0053_test_sends.sql` adds tables and a secret purpose), no `email.*` event, no rewritten link and no open pixel.
+  Caps, policy cooldowns, engagement events and stats read `messages` and events, so they exclude test
+  sends structurally: a spent cap does not stop a test and a test spends none.
+- **Request.** `POST /templates/{id}/test-send` (write; admin when `person_id` renders a real person's
+  values, as a preview does until `view_pii`) names an optional `version` (absent: the draft), a
+  `destination_id` and `sender_identity_id` as a send node does, `to` and an optional `person_id`. It
+  answers 202 with the log row; `GET /test-sends` lists the log (read, newest first, paged, filterable
+  by `template_id`). The audit entry `template.test_sent` holds ids only.
+- **Recipients.** `to` is `{"member": <user id>}`, a member of the workspace, whose `users.email` is the
+  verified address (an admin or a verified sign-in sets it, and no member can change it), or
+  `{"address"}`, which must hash (the keyed identifier hash the suppressions use) to an entry of the
+  workspace allowlist. Anything else is 422 `recipient_not_allowed`, whichever way it is reached. The
+  allowlist (`GET`, `POST`, `DELETE /test-send-allowlist`, admin, add and delete audited with no
+  address or hash) stores the hash and a masked hint (`q***@example.com`).
+- **Rate limit.** At most 10 tests per member and 100 per workspace in any rolling hour. The API counts
+  the log rows in the window and inserts the `queued` row, which is the reservation, in one transaction
+  under an advisory lock keyed by the workspace, so two requests for the last slot cannot both win. A
+  refusal is 429 `test_send_rate_limited` with `Retry-After`, the seconds until the oldest counted row
+  leaves the window. The job does not count again (this refines the issue's "again in the job": the
+  row already holds the slot).
+- **The job** (`template.test_send`) checks the template and version, the sender (`sender_unverified`),
+  and the recipient again, now: a member must still be a member and the current `users.email` is used,
+  an allowlisted address must still have its entry, and its sealed address is opened with the keyring
+  and delivered in its normalised form (a request spelled `a\u{212A}@x.test` reaches `ak@x.test`);
+  otherwise no call is made and the row ends `failed: recipient_unavailable`. A missing or wrong
+  keyring fails like a credential that cannot be opened (a retry, then `failed:
+  credential_unavailable`). Then the suppression (workspace or organization scope, never skipped:
+  `suppressed`, no call), the render through the render host (`render_failed`), the `[TEST] ` subject
+  prefix, the destination (exists, not archived, does email), a rate token (waiting re-runs the job
+  later, as the send job does) and the call. Consent, policy, quiet hours and the frequency cap are
+  skipped. A lost reply (`delivery_unconfirmed`) ends the row `unconfirmed` with no retry; other
+  retryable answers retry under the same key and the last attempt ends the row `failed` with the
+  verdict's fixed reason. A job that finds its row no longer `queued`, or gone, sends nothing and ends
+  quietly. No `delivery_attempts` row is written. The leader's upkeep that ends open messages whose job
+  is gone also ends a `queued` test-send row whose `template.test_send` job is dead or missing as
+  `failed: abandoned`; a ready or running job is left alone.
+- **Inert unsubscribe.** `system.unsubscribe_url`, `system.preferences_url` and the `List-Unsubscribe`
+  header are `/u/{token}` URLs minted with the existing codec (kind `u`) for the test send's id. A
+  token with no message but a `test_sends` row is answered by every `/u` route (GET, the form POST, the
+  one-click POST, the preference center) with the page "This was a test send. Nothing was changed.",
+  and nothing is changed or written.
+- **Retention and erasure.** `events.retention` also deletes `test_sends` rows older than 13 months
+  (the proposed message retention, 16.3) and reports the count. The log names no person (the rendered
+  person's id is not stored), so erasing a person deletes the rows whose `recipient_hash` is one of the
+  person's erased identifier hashes, folded from the ledger, and the allowlist entries with such an
+  `address_hash` together with their sealed addresses, because an entry now holds the address. The
+  `template.test_send` jobs whose payload names the person as the render person are purged like any
+  other job that names them (`names_erased_person!`). The replay after a restore does the same by the
+  ledger hashes. The erasure tests assert each rule.
+
 ### 11.8 Document schema migrations
 
 A migration is a pure function from schema `N` to `N + 1`, and reads chain them.
@@ -1930,6 +1985,27 @@ As built (M1 skeleton):
   A malformed id is 400 and a trace with no records in the workspace is 404,
   never saying whether it exists elsewhere.
 
+As built (message log, #231): `GET /api/v1/workspaces/{ws}/people/{id}/messages` (`read`) pages
+a person's `messages` newest first by `(created_at, id)` (`limit`, `before`, and the filters
+`result` = `sent`, `skipped`, `deferred` (pending with a rate-limit wait or a gate hold in force), `in_progress` (sending, or pending and not waiting) or `failed`, and `template_id`). It
+reads through `people.merged_into` and `person_merges`, so a merged-away id reads as its
+survivor; an unknown or erased person is 404. Each message carries the template (name, version,
+category), the flow and step (the step name only when the published graph gives its node one),
+the destination name, `status`, `reason`, `deciding_rule`, `gate_results` in stored order, and
+the trace id found through the `send` decisions' `enrollment` and `message` subjects (none when
+no decision was written). No address and no identifier hash is selected. A pending message says
+when it runs again and why: the waiting `delivery.send` job's `run_at` (a wait for a rate-limit
+token when its payload has a `first_wait`, else the latest `deferred` gate entry's gate), or,
+with no job left, that gate entry while it is still in the future. The consent rule is named by
+its id when the gate result has one; the stored gate results carry no policy version, so the
+API gives the workspace's policy id and no version. The web person page has a Profile and a
+Messages tab (`?tab=messages`); a row expands to the checks in the send job's run order
+(enrollment, template, sender, address, consent, suppression, quiet hours, frequency cap,
+render, rate limit, deliver), each passed, stopped here, held or not reached, from one label
+map in `web/src/ui/sendLabels.ts`. The trace tree words the `send.gate`, `message.send`,
+`message.feedback` and `job.attempt` decisions and links a message to its person's log; the
+destination has no page yet and stays text.
+
 ### 12.5 Event forwarding
 
 M6 adds event-forwarding destinations after core tracking and causality are in
@@ -1953,6 +2029,76 @@ an event whose transaction commits late.
 outbox step is set-based per batch. With no active forwarding destination in the
 workspace, it costs at most one cached or indexed lookup. Ingest is measured
 before and after on the same input.
+
+**As built (forwarding, #225).**
+
+- **Tables (migration 0054).** `forwarding_rules` holds the workspace, the destination, a name (unique
+  ignoring case), the exact `event_name`, the `filter` (the segment `where` list) and the `mapping`
+  (output key to source), an `active` flag and the times. A workspace has at most 20 active rules
+  (422 `too_many_rules`, counted under an advisory lock). `forwarding_outbox` holds the workspace,
+  destination, rule and event ids, `person_id`, the idempotency key (`sha256` of `event id:destination
+  id`), the mapped `payload`, `state` (`pending`, `delivered`, `dead`), `attempts` of the current
+  cycle, `attempt_offset` (the attempts of earlier cycles, so the numbers in `delivery_attempts`, which
+  names the row as a `forwarding` subject, never repeat), a fixed `last_error` code, `next_attempt_at`
+  and the times, with `UNIQUE (destination_id, event_id)`. Partial indexes serve the due-row claim and
+  the depth and lag reads, the dead-letter list, the purge of delivered rows, and the job lookup.
+- **The mapping and the filter** are typed in `zirv-flow-core::forwarding` and evaluated in SQL by the
+  outbox insert: sources are `event.id`, `event.name`, `event.time`, `event.received_at`, `person.id`,
+  `event.properties` at a JSON pointer (at most eight tokens; a missing value is `null`) and static
+  strings, numbers and booleans. Keys, pointers and values are bound, never spliced. A filter uses the
+  segment AST `where` form with the operators `eq`, `neq`, `in`, `not_in`, `contains`, `starts_with`,
+  `exists`, `not_exists`, `gt`, `gte`, `lt`, `lte` and `between`; the API validates it with the segment
+  validator against the published schema of the event name. Comparisons need the property present and
+  of the value's type. The rule's destination must declare the `event` channel
+  (`webhook` does, the email destinations do not: 422 `destination_unsupported`).
+- **The enqueue.** `enqueue_forwarding(connection, workspace, refs)` runs in the writer's transaction
+  after its inserts. It is called by `EventBatch::finish` (ingest, sync, inbound webhooks and the
+  apply-batch path), the `webhook.*` writer, the `email.*` send, feedback and engagement writers, and
+  after a segment pass for its `segment.entered` and `segment.exited` events (which are written by SQL
+  and read back by name, time and segment). With no active rule in the workspace it costs one indexed
+  `EXISTS`; otherwise it runs one `INSERT ... SELECT ... ON CONFLICT (destination_id, event_id) DO
+  NOTHING` per active rule over the whole batch, joined to `events` by its primary key. Replay writes
+  no outbox row. A source scan test fails when a file that inserts events is not on the list of
+  writers that call the enqueue.
+- **The job.** `event.forward` (one registry line) delivers one destination. At most one is ready per
+  destination: the enqueue and a re-drive pull a ready job forward or insert one, and two alternating
+  unique keys let a running job leave its successor. The job claims up to 25 due rows
+  (`FOR UPDATE SKIP LOCKED`), counting the attempt, setting a fresh `claim_token` and moving
+  `next_attempt_at` a five-minute lease ahead so no lock is held across the call. Each row's lease is
+  renewed, fenced on its token, right before its call, and a row whose claim was taken over or
+  re-driven is skipped. It delivers through the shared delivery code (`webhook` signing, the guarded
+  client with no redirects, the destination's rate bucket, the attempt row and metrics). Outcomes
+  are written fenced on the claim token, so an older claim's outcome never lands: a delivered row
+  loses its payload; a retryable verdict sets `next_attempt_at` with the worker backoff (5 s doubling
+  to an hour, or a longer `Retry-After`); a terminal verdict, or the eighth attempt, makes the row
+  `dead`. Each retry and dead letter appends an `event.forward` decision in the same transaction
+  (destination, rule, event and outbox ids and the reason code). A rate-limit wait gives the row
+  back without spending an attempt. When rows remain, the job leaves its successor, due at the
+  earliest `next_attempt_at`. It never calls `enqueue_arrivals` and never writes an event. The
+  leader gives a destination with waiting rows and no job a new one. Delivered rows are purged
+  after seven days.
+- **Re-drive.** `POST .../forwarding/re-drive` sets one row (dead or pending), a destination's dead
+  rows or every dead row of the workspace to `pending`, due now, with the cycle's attempts moved
+  into `attempt_offset`, and ensures a job. It starts no flow.
+- **API and metrics.** Rule CRUD, the dead-letter list (ids, code, attempts and times; no payload),
+  the status (per destination `depth`, `oldest_lag_seconds`, `dead`) and re-drive are Admin,
+  workspace-level and audited (`forwarding.rule_created`, `rule_updated`, `rule_deleted`,
+  `redriven`). The leader publishes `zirv_flow_destination_forwarding_depth` and
+  `zirv_flow_destination_forwarding_lag_seconds`, and the attempts and outcomes are the
+  `zirv_flow_destination_attempts_total` and `zirv_flow_destination_outcomes_total` of the shared
+  delivery code; labels are ids only.
+- **Erasure and merge.** `delete_person` deletes the person's outbox rows and the erasure scan test
+  covers the table; the job payload names only the destination, so `names_erased_person!` has
+  nothing to purge. A merge re-points `forwarding_outbox.person_id` through `REWRITE_TARGETS`. The
+  destination's own erase call is #227.
+- **Ingest cost (#209).** `apply_event_batch` over 200 batches of 500 events after 20 warm-up
+  batches, local PostgreSQL, release build without LTO, each case alone on a fresh database
+  (`ZIRV_MEASURE_CASE`, an ignored test in `forwarding/outbox.rs`): enqueue switched off
+  (the cost before the outbox) p50 1991 ms, p99 2179 ms; no active rule p50 1971 ms, p99 2351 ms; one
+  active rule matching 10% of the events p50 1915 ms, p99 2215 ms. The no-rule case is within the
+  run-to-run noise of about 5% (its p50 is 1% lower and its p99 8% higher than switched off, and the
+  rule case is lower than both, so the order is noise): the one `EXISTS` is below what the
+  500 events of the batch cost.
 
 ## 13. LLM assistance
 

@@ -20,10 +20,12 @@ mod tests {
     use zirv_flow_core::{Role, Scope, WorkspaceId};
     use zirv_flow_render::{ChildCommand, PoolConfig, RenderPool};
     use zirv_flow_store::{NewEventSchema, NewTraitDefinition};
-    use zirv_flow_templates::{Hooks, TemplateDocument, Tracking, render_email, render_webhook};
+    use zirv_flow_templates::{
+        Hooks, RenderContext, TemplateDocument, Tracking, render_email, render_webhook,
+    };
 
     use crate::admin::{self, Context};
-    use crate::templates::{field_catalog, preview};
+    use crate::templates::field_catalog;
     use crate::{AppState, router};
 
     const PASSWORD: &str = "correct horse battery";
@@ -1029,7 +1031,7 @@ mod tests {
                 .unwrap(),
         );
         drop(connection);
-        let context = preview::sample_context(&catalog);
+        let context = RenderContext::sample_person(&catalog);
 
         let email = f
             .lead("POST", &format!("/{id}/preview"), Some(json!({})))
@@ -1135,7 +1137,7 @@ mod tests {
                 .unwrap(),
         );
         drop(connection);
-        let context = preview::sample_context(&catalog);
+        let context = RenderContext::sample_person(&catalog);
         let preview = f
             .lead("POST", &format!("/{id}/preview"), Some(json!({})))
             .await;
@@ -1219,7 +1221,7 @@ mod tests {
                 .unwrap(),
         );
         drop(connection);
-        let context = preview::sample_context(&catalog);
+        let context = RenderContext::sample_person(&catalog);
         let preview = f
             .lead("POST", &format!("/{id}/preview"), Some(json!({})))
             .await;

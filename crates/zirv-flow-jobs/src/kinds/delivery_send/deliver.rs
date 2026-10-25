@@ -17,40 +17,40 @@ use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{Destination, VerifiedSender, find_sending_domain};
 
-use crate::delivery::{self, Attempt, Verdict, credential};
+use crate::delivery::credential::{credential_unavailable, open_credential};
+use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError};
 
 /// One email to hand to a destination.
-pub(super) struct Call<'a> {
-    pub(super) workspace: WorkspaceId,
-    pub(super) destination: &'a Destination,
-    pub(super) driver: &'static dyn ErasedDestination,
+pub(crate) struct Call<'a> {
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) destination: &'a Destination,
+    pub(crate) driver: &'static dyn ErasedDestination,
     /// The sender identity on its verified domain: whose DKIM key signs the message.
-    pub(super) sender: &'a VerifiedSender,
+    pub(crate) sender: &'a VerifiedSender,
     /// The message id: the idempotency key at the destination.
-    pub(super) message: Uuid,
-    pub(super) address: &'a str,
-    pub(super) payload: &'a Value,
+    pub(crate) message: Uuid,
+    pub(crate) address: &'a str,
+    pub(crate) payload: &'a Value,
 }
 
 /// Delivers one email and judges the destination's answer. An error is a failure of this worker or
 /// of the database; the destination's answer, and a credential that cannot be opened, are a
 /// [`Verdict`].
-pub(super) async fn deliver(
+pub(crate) async fn deliver(
     ctx: &mut JobContext<'_>,
     call: &Call<'_>,
     now: OffsetDateTime,
 ) -> Result<Attempt, JobError> {
-    let credential =
-        match credential::open(ctx, call.workspace, call.destination.credential_id).await? {
-            Ok(credential) => credential,
-            Err(verdict) => {
-                return Ok(Attempt {
-                    verdict,
-                    elapsed: Duration::ZERO,
-                });
-            }
-        };
+    let credential = match open_credential(ctx, call.workspace, call.destination).await? {
+        Ok(credential) => credential,
+        Err(verdict) => {
+            return Ok(Attempt {
+                verdict,
+                elapsed: Duration::ZERO,
+            });
+        }
+    };
     // The sender domain's key is opened only for a destination type that signs.
     let signer = if call.driver.spec().capabilities.signs_dkim {
         match open_signer(ctx, call.workspace, call.sender).await? {
@@ -105,10 +105,10 @@ async fn open_signer(
     sender: &VerifiedSender,
 ) -> Result<Result<DkimSigner, Verdict>, JobError> {
     let Some(domain) = find_sending_domain(ctx.conn(), workspace, sender.domain_id).await? else {
-        return Ok(Err(credential::unavailable()));
+        return Ok(Err(credential_unavailable()));
     };
     let Some(keyring) = ctx.keyring().cloned() else {
-        return Ok(Err(credential::unavailable()));
+        return Ok(Err(credential_unavailable()));
     };
     let secret = SecretId::from_uuid(domain.dkim_secret_id);
     match zirv_flow_store::secrets::open_json(
@@ -122,10 +122,10 @@ async fn open_signer(
     {
         Ok(key) => Ok(
             DkimSigner::from_pkcs8(&domain.domain, &domain.selector, key.expose())
-                .map_err(|_| credential::unavailable()),
+                .map_err(|_| credential_unavailable()),
         ),
         Err(OpenError::Store(error)) => Err(error.into()),
-        Err(OpenError::NotFound | OpenError::Unopenable) => Ok(Err(credential::unavailable())),
+        Err(OpenError::NotFound | OpenError::Unopenable) => Ok(Err(credential_unavailable())),
     }
 }
 
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn a_key_or_credential_that_cannot_be_opened_is_the_shared_retryable_verdict() {
         assert!(matches!(
-            credential::unavailable(),
+            credential_unavailable(),
             Verdict::Retry {
                 status: None,
                 reason: "credential_unavailable",

@@ -1637,6 +1637,101 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/forwarding/dead-letters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's dead letters, newest first, without their payloads. */
+        get: operations["list_forwarding_dead_letters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/forwarding/re-drive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Puts dead rows back in the queue: one row (`id`), every dead row of a destination
+         *     (`destination_id`), or every dead row of the workspace (an empty body). Attempts start again.
+         *     A re-drive writes no event and starts no flow. Audited as `forwarding.redriven`.
+         */
+        post: operations["redrive_forwarding"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/forwarding/rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's rules, ordered by name. */
+        get: operations["list_forwarding_rules"];
+        put?: never;
+        /** Creates a rule. Audited as `forwarding.rule_created`. */
+        post: operations["create_forwarding_rule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/forwarding/rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One rule. */
+        get: operations["get_forwarding_rule"];
+        put?: never;
+        post?: never;
+        /**
+         * Deletes a rule. Rows it already queued are still delivered. Audited as
+         *     `forwarding.rule_deleted`.
+         */
+        delete: operations["delete_forwarding_rule"];
+        options?: never;
+        head?: never;
+        /** Changes a rule. Audited as `forwarding.rule_updated`. */
+        patch: operations["update_forwarding_rule"];
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/forwarding/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The queue depth and the oldest pending lag of each destination that forwards events. */
+        get: operations["get_forwarding_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/identity-conflicts": {
         parameters: {
             query?: never;
@@ -2218,6 +2313,31 @@ export interface paths {
          *     history of both people under the survivor.
          */
         get: operations["list_person_list_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/people/{id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A person's message log, newest first, in pages. Each message names its template, flow step and
+         *     destination, the gates it went through in order, the exact reason it was skipped or failed, the
+         *     consent rule that decided, and, for a message that waits, when it runs again. A person that was
+         *     merged into another reads as the survivor, with the merged people's messages included. No
+         *     address and no identifier hash is returned. Filter by `result` (`sent`, `skipped`, `deferred`
+         *     (waiting for a known time), `in_progress` (not yet sent and not waiting, or being sent) or
+         *     `failed`) and by `template_id`.
+         */
+        get: operations["list_person_messages"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3169,6 +3289,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/templates/{id}/test-send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sends a template to one workspace member or allowlisted address through a real destination,
+         *     marked `[TEST]`, with no tracking and no trace in the message log. The reply is the log row,
+         *     `queued`; poll the log for the outcome. At most 10 tests per member and 100 per workspace start in
+         *     any rolling hour. Needs the write role, or the admin role with `person_id`, and the CSRF token.
+         *     Audited as `template.test_sent`, with ids only.
+         */
+        post: operations["test_send_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/templates/{id}/versions": {
         parameters: {
             query?: never;
@@ -3215,6 +3358,65 @@ export interface paths {
          *     per flow however many versions name it. The draft of a flow is not a version and is not listed.
          */
         get: operations["template_where_used"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-send-allowlist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's test-send allowlist, oldest first. */
+        get: operations["list_test_send_allowlist"];
+        put?: never;
+        /**
+         * Allows test sends to an address. The address is normalised, hashed here and stored as the hash,
+         *     a masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as
+         *     `test_send.allowlist_added`, with the entry id and nothing else.
+         */
+        post: operations["add_test_send_allowlist_entry"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-send-allowlist/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Removes an entry from the allowlist. Needs the workspace admin role and the CSRF token. Audited
+         *     as `test_send.allowlist_removed`, with the entry id and nothing else.
+         */
+        delete: operations["delete_test_send_allowlist_entry"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-sends": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's test-send log, newest first, optionally of one template (`template_id`). */
+        get: operations["list_test_sends"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3737,6 +3939,27 @@ export interface components {
              * @description Spent so far this month (UTC), in micro-units.
              */
             spent_micros: number;
+        };
+        AllowlistAddRequest: {
+            /**
+             * @description The email address a test send may go to.
+             * @example qa@example.com
+             */
+            address: string;
+        };
+        AllowlistBody: {
+            entries: components["schemas"]["AllowlistEntryBody"][];
+        };
+        AllowlistEntryBody: {
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description The first character, `***`, then `@domain`. The address itself is stored only sealed and never returned.
+             * @example q***@example.com
+             */
+            display_hint: string;
+            /** Format: uuid */
+            id: string;
         };
         ApiKeyBody: {
             /** Format: date-time */
@@ -4273,6 +4496,20 @@ export interface components {
              */
             name: string;
         };
+        CreateRuleRequest: {
+            /** @description Default true. At most 20 rules are active in a workspace. */
+            active?: boolean | null;
+            /** Format: uuid */
+            destination_id: string;
+            event_name: string;
+            /** @description Default: no predicate. */
+            filter?: unknown[] | null;
+            mapping: {
+                [key: string]: unknown;
+            };
+            /** @description 1 to 128 characters; unique in the workspace, ignoring case. */
+            name: string;
+        };
         CreateSegmentRequest: {
             /**
              * @description How often a time-sensitive segment is recomputed in full, in minutes; default 60.
@@ -4659,6 +4896,39 @@ export interface components {
         DeadJobsBody: {
             /** @description Newest first. */
             jobs: components["schemas"]["JobBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+        };
+        DeadLetterBody: {
+            /**
+             * Format: int32
+             * @description Attempts in all, re-drives included.
+             */
+            attempts: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            destination_id: string;
+            /** Format: date-time */
+            died_at: string;
+            /**
+             * @description A fixed code, such as `http_4xx` or `egress_denied`.
+             * @example http_4xx
+             */
+            error?: string | null;
+            /** Format: uuid */
+            event_id: string;
+            /**
+             * Format: uuid
+             * @description The outbox row; the id to re-drive it by.
+             */
+            id: string;
+            /** Format: uuid */
+            rule_id: string;
+        };
+        DeadLettersBody: {
+            /** @description Newest first. */
+            letters: components["schemas"]["DeadLetterBody"][];
             /** @description Pass as `before` for the next page; null when there is none. */
             next_before?: string | null;
         };
@@ -5989,6 +6259,9 @@ export interface components {
             type: "wait.until_time";
             when: components["schemas"]["FlowUntilTime"];
         };
+        ForwardingStatusBody: {
+            destinations: components["schemas"]["QueueStatusBody"][];
+        };
         /** @description One frequency cap. */
         FrequencyCapBody: {
             /**
@@ -6045,6 +6318,31 @@ export interface components {
              *     stale (no explicit threshold and no schedule).
              */
             threshold_seconds?: number | null;
+        };
+        /** @description What one gate of the send found. Codes and ids only. */
+        GateResultBody: {
+            /**
+             * @description `enrollment`, `template`, `sender`, `address`, `consent`, `suppression`, `quiet_hours`,
+             *     `frequency_cap`, `render`, `rate_limit` or `delivery`.
+             * @example consent
+             */
+            gate: string;
+            /** @description A code that adds to the reason. */
+            note?: string | null;
+            /** @description The code that stopped the message. */
+            reason?: string | null;
+            /**
+             * @description `passed`, `blocked`, `deferred`, `in_flight` or `unconfirmed`.
+             * @example blocked
+             */
+            result: string;
+            /**
+             * Format: uuid
+             * @description The consent policy rule that decided, by id.
+             */
+            rule_id?: string | null;
+            /** @description For a deferral, when the message runs again. */
+            run_at?: string | null;
         };
         /** @description Why the walk stopped before the graph or the script ended. */
         HaltBody: {
@@ -6505,6 +6803,93 @@ export interface components {
             merged_at: string;
             /** Format: uuid */
             merged_person_id: string;
+        };
+        MessageBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /**
+             * Format: uuid
+             * @description The workspace's consent policy, when a rule of it denied the send.
+             */
+            consent_policy_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The consent policy rule that denied the send, by id.
+             */
+            consent_rule_id?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * @description What decided the consent gate: `recorded_consent`, `topic_default`, `transactional`, a
+             *     suppression's scope, or the name of the consent policy rule that denied the send.
+             */
+            deciding_rule?: string | null;
+            /**
+             * Format: date-time
+             * @description For a pending message that waits: when it runs again.
+             */
+            deferred_until?: string | null;
+            /** @description For a pending message that waits: `quiet_hours`, `frequency_cap` or `rate_limit`. */
+            deferred_why?: string | null;
+            destination: components["schemas"]["MessageDestinationBody"];
+            flow?: null | components["schemas"]["MessageFlowBody"];
+            /** @description In the order the send ran them. */
+            gate_results: components["schemas"]["GateResultBody"][];
+            /** Format: uuid */
+            id: string;
+            node: components["schemas"]["MessageNodeBody"];
+            /**
+             * @description The code a skipped or failed message ended with, such as `no_consent`.
+             * @example no_consent
+             */
+            reason?: string | null;
+            /**
+             * @description `pending`, `sending`, `sent`, `skipped` or `failed`.
+             * @example skipped
+             */
+            status: string;
+            template: components["schemas"]["MessageTemplateBody"];
+            /**
+             * @description Look it up with `GET /api/v1/workspaces/{ws}/traces/{trace_id}`; none when the message has
+             *     no recorded decisions.
+             */
+            trace_id?: string | null;
+        };
+        MessageDestinationBody: {
+            /** Format: uuid */
+            id: string;
+            name?: string | null;
+        };
+        MessageFlowBody: {
+            /** Format: uuid */
+            id: string;
+            name?: string | null;
+            /** Format: int32 */
+            version?: number | null;
+        };
+        MessageNodeBody: {
+            id: string;
+            /** @description The step's name, when the flow version gives it one. */
+            name?: string | null;
+        };
+        MessageTemplateBody: {
+            /** @description `marketing` or `transactional`. */
+            category?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** @description None when the template no longer exists. */
+            name?: string | null;
+            /**
+             * Format: int32
+             * @description The version that was sent; none when the message ended before one was read.
+             */
+            version?: number | null;
+        };
+        MessagesBody: {
+            /** @description Newest first. */
+            messages: components["schemas"]["MessageBody"][];
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
         };
         MethodsBody: {
             /** @description True when e-mail and password sign-in is accepted. */
@@ -7006,6 +7391,25 @@ export interface components {
             /** @description At most 100 fields, each registry key once, each identifier kind once. */
             fields: components["schemas"]["ContactFieldBody"][];
         };
+        QueueStatusBody: {
+            /**
+             * Format: int64
+             * @description Dead letters waiting for a re-drive.
+             */
+            dead: number;
+            /**
+             * Format: int64
+             * @description Rows waiting for delivery, a row backed off for a retry included.
+             */
+            depth: number;
+            /** Format: uuid */
+            destination_id: string;
+            /**
+             * Format: int64
+             * @description Seconds the oldest waiting row has been past its due time; 0 when none is.
+             */
+            oldest_lag_seconds: number;
+        };
         /** @description A request that was queued. */
         QueuedBody: {
             /**
@@ -7077,6 +7481,25 @@ export interface components {
              *     48 bits of an IPv6 address. A value that is not an address is removed.
              */
             truncate_ip?: string[];
+        };
+        RedriveBody: {
+            /**
+             * Format: int64
+             * @description Rows put back to pending.
+             */
+            redriven: number;
+        };
+        RedriveRequest: {
+            /**
+             * Format: uuid
+             * @description Re-drives every dead row of this destination.
+             */
+            destination_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Re-drives this one row, dead or pending.
+             */
+            id?: string | null;
         };
         RefreshQueuedBody: {
             /** @description True when a refresh was queued; false when a manual refresh was already waiting. */
@@ -7176,6 +7599,39 @@ export interface components {
         RotatedSecretBody: {
             /** @description The new shared secret. The old one stopped working when this was issued. */
             secret: string;
+        };
+        RuleBody: {
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            created_by?: string | null;
+            /**
+             * Format: uuid
+             * @description The destination the selected events are delivered to.
+             */
+            destination_id: string;
+            /**
+             * @description The exact name of the events the rule selects.
+             * @example order.completed
+             */
+            event_name: string;
+            /** @description Property predicates that must all hold, in the segment `where` form. */
+            filter: unknown[];
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description Output key to source. A source is `{"from": "event.id"}`, `event.name`, `event.time`,
+             *     `event.received_at`, `person.id`, `{"from": "event.properties", "pointer": "/a/b"}`, or
+             *     `{"value": <string|number|boolean>}`.
+             */
+            mapping: {
+                [key: string]: unknown;
+            };
+            /** @example Paid orders */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         /** @description One sync run: a read of one stream. */
         RunBody: {
@@ -8370,6 +8826,96 @@ export interface components {
              */
             source_id?: string | null;
         };
+        /** @description A test send as the log shows it. It holds no address, no hash and no person. */
+        TestSendBody: {
+            /** Format: date-time */
+            completed_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            destination_id: string;
+            /**
+             * Format: uuid
+             * @description Also the idempotency key at the destination.
+             */
+            id: string;
+            /**
+             * Format: uuid
+             * @description The user who asked; null for an API key.
+             */
+            member_id?: string | null;
+            /**
+             * @description `queued`, `sent`, `suppressed`, `sender_unverified`, `render_failed`, `unconfirmed` or
+             *     `failed`.
+             * @example queued
+             */
+            outcome: string;
+            /** @description A fixed code that says why a test did not go out. */
+            reason?: string | null;
+            /**
+             * Format: uuid
+             * @description The workspace member the test went to; null for an allowlisted address.
+             */
+            recipient_member_id?: string | null;
+            /**
+             * @description `person` when a person's values rendered the template, else `sample`.
+             * @example sample
+             */
+            render_context: string;
+            /** Format: uuid */
+            sender_identity_id: string;
+            /** Format: uuid */
+            template_id: string;
+            /**
+             * Format: int32
+             * @description The published version sent; null for the draft.
+             */
+            template_version?: number | null;
+        };
+        /** @description Who a test goes to. Exactly one of the two fields is given. */
+        TestSendRecipient: {
+            /**
+             * @description An address on the workspace's test-send allowlist.
+             * @example qa@example.com
+             */
+            address?: string | null;
+            /**
+             * Format: uuid
+             * @description A member of this workspace; the test goes to the address on their account.
+             */
+            member?: string | null;
+        };
+        TestSendRequest: {
+            /**
+             * Format: uuid
+             * @description The destination to send through, as a send node names it.
+             */
+            destination_id: string;
+            /**
+             * Format: uuid
+             * @description Render with this person's values; needs the workspace admin role, as a preview does.
+             *     Absent: the sample person. The person is not recorded in the log.
+             */
+            person_id?: string | null;
+            /**
+             * Format: uuid
+             * @description The sender identity, as a send node names it. It must be live on a verified domain, or the
+             *     test ends `sender_unverified`.
+             */
+            sender_identity_id: string;
+            to: components["schemas"]["TestSendRecipient"];
+            /**
+             * Format: int32
+             * @description The published version to send. Absent: the current draft.
+             */
+            version?: number | null;
+        };
+        TestSendsBody: {
+            /** @description Pass as `before` for the next page; null when there is none. */
+            next_before?: string | null;
+            /** @description Newest first. */
+            test_sends: components["schemas"]["TestSendBody"][];
+        };
         TimelineBody: {
             /** @description Newest first. */
             entries: components["schemas"]["TimelineEntryBody"][];
@@ -8606,6 +9152,15 @@ export interface components {
         };
         UpdateListRequest: {
             description?: string | null;
+            name?: string | null;
+        };
+        UpdateRuleRequest: {
+            active?: boolean | null;
+            event_name?: string | null;
+            filter?: unknown[] | null;
+            mapping?: {
+                [key: string]: unknown;
+            } | null;
             name?: string | null;
         };
         UpdateSegmentRequest: {
@@ -15451,6 +16006,483 @@ export interface operations {
             };
         };
     };
+    list_forwarding_dead_letters: {
+        parameters: {
+            query?: {
+                /** @description Letters per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description Only this destination's letters */
+                destination_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of dead letters */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeadLettersBody"];
+                };
+            };
+            /** @description A malformed limit, cursor or destination id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    redrive_forwarding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RedriveRequest"];
+            };
+        };
+        responses: {
+            /** @description How many rows were put back */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedriveBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Both `id` and `destination_id` were given */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_forwarding_rules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rules */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_forwarding_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The new rule */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A rule with that name exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_forwarding_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Rule id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rule */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or rule, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_forwarding_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Rule id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or rule, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_forwarding_rule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Rule id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateRuleRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated rule */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RuleBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or rule, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another rule has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid field, no field at all, or `too_many_rules` when turning a rule on */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_forwarding_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per destination status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForwardingStatusBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_identity_conflicts: {
         parameters: {
             query?: {
@@ -17779,6 +18811,85 @@ export interface operations {
             };
             /** @description No such workspace or person, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_person_messages: {
+        parameters: {
+            query?: {
+                /** @description Messages per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+                /** @description `sent`, `skipped`, `deferred`, `in_progress` or `failed` */
+                result?: string;
+                /** @description Only messages of this template */
+                template_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Person id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of messages */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessagesBody"];
+                };
+            };
+            /** @description A parameter is out of range or malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or person (an erased person included), or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The read ran past its time limit (`code` is `search_timeout`) */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22067,6 +23178,98 @@ export interface operations {
             };
         };
     };
+    test_send_template: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestSendRequest"];
+            };
+        };
+        responses: {
+            /** @description The log row, queued */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, a missing CSRF token, or a person asked for without the admin role (`code` is `template_preview_values_forbidden`) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template, version, destination or person, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The template is archived (`template_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The recipient is neither a member nor allowlisted (`recipient_not_allowed`), the template or destination does not do email, or the body is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The member or the workspace reached its hourly limit; `Retry-After` is the seconds until a slot frees (`test_send_rate_limited`) */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_template_versions: {
         parameters: {
             query?: never;
@@ -22215,6 +23418,253 @@ export interface operations {
                 };
             };
             /** @description No such workspace or template, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_send_allowlist: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    add_test_send_allowlist_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AllowlistAddRequest"];
+            };
+        };
+        responses: {
+            /** @description The entry */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllowlistEntryBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is on the list already */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The address is malformed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server has no master key */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_test_send_allowlist_entry: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Entry id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or entry, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_test_sends: {
+        parameters: {
+            query?: {
+                /** @description Only the tests of this template */
+                template_id?: string;
+                /** @description Rows per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of the log */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestSendsBody"];
+                };
+            };
+            /** @description limit or template_id is out of range or malformed, or before is not a cursor */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
             404: {
                 headers: {
                     [name: string]: unknown;
