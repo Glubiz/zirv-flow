@@ -36,14 +36,23 @@ impl Default for EventRetention {
 }
 
 /// Deletes events past the retention of their own name, read from the schema row by every
-/// statement, so a batch always uses the override as it is now.
-const OVERRIDDEN_DELETE: &str = "DELETE FROM events e USING ( \
-    SELECT x.occurred_at, x.id FROM events x \
-    JOIN event_schemas s ON s.workspace_id = x.workspace_id AND s.name = x.name \
-    WHERE s.retention_days IS NOT NULL \
-      AND x.occurred_at < $1::timestamptz - make_interval(days => s.retention_days) \
-    LIMIT $2) d \
- WHERE e.occurred_at = d.occurred_at AND e.id = d.id";
+/// statement, so a batch always uses the override as it is now. Both event deletes also write the
+/// handled markers of the `sync.*` events they remove (`privacy::handled_markers`), in the same
+/// statement.
+fn overridden_delete() -> String {
+    crate::privacy::delete_and_mark(&format!(
+        "DELETE FROM events e USING (             SELECT x.occurred_at, x.id FROM events x             JOIN event_schemas s ON s.workspace_id = x.workspace_id AND s.name = x.name             WHERE s.retention_days IS NOT NULL               AND x.occurred_at < $1::timestamptz - make_interval(days => s.retention_days)             LIMIT $2) d          WHERE e.occurred_at = d.occurred_at AND e.id = d.id RETURNING {}",
+        crate::privacy::event_columns("e")
+    ))
+}
+
+/// Deletes the events past the deployment default that have no override, the same way.
+fn default_delete() -> String {
+    crate::privacy::delete_and_mark(&format!(
+        "DELETE FROM events e USING (             SELECT occurred_at, id FROM events x WHERE occurred_at < $1               AND NOT EXISTS (SELECT 1 FROM event_schemas s                               WHERE s.workspace_id = x.workspace_id AND s.name = x.name                                 AND s.retention_days IS NOT NULL)             LIMIT $2) d          WHERE e.occurred_at = d.occurred_at AND e.id = d.id RETURNING {}",
+        crate::privacy::event_columns("e")
+    ))
+}
 
 /// What one run removed.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -66,23 +75,15 @@ pub async fn apply_event_retention(
     let default_days = i32::try_from(settings.default_days).unwrap_or(i32::MAX);
     let mut report = RetentionReport::default();
 
-    report.events_deleted += delete_in_batches(connection, OVERRIDDEN_DELETE, |query| {
+    report.events_deleted += delete_events_in_batches(connection, &overridden_delete(), |query| {
         query.bind(now).bind(RETENTION_BATCH)
     })
     .await?;
 
     let default_cutoff = now - Duration::days(i64::from(settings.default_days));
-    report.events_deleted += delete_in_batches(
-        connection,
-        "DELETE FROM events e USING ( \
-            SELECT occurred_at, id FROM events x WHERE occurred_at < $1 \
-              AND NOT EXISTS (SELECT 1 FROM event_schemas s \
-                              WHERE s.workspace_id = x.workspace_id AND s.name = x.name \
-                                AND s.retention_days IS NOT NULL) \
-            LIMIT $2) d \
-         WHERE e.occurred_at = d.occurred_at AND e.id = d.id",
-        |query| query.bind(default_cutoff).bind(RETENTION_BATCH),
-    )
+    report.events_deleted += delete_events_in_batches(connection, &default_delete(), |query| {
+        query.bind(default_cutoff).bind(RETENTION_BATCH)
+    })
     .await?;
 
     report.rejects_deleted = delete_in_batches(
@@ -114,6 +115,30 @@ pub async fn apply_event_retention(
     // Last, so the lock a drop takes is held briefly.
     report.partitions_dropped = drop_old_partitions(connection, default_days, now).await?;
     Ok(report)
+}
+
+/// [`delete_in_batches`] for a statement built at run time that returns the number of rows it
+/// deleted as one `bigint` (the event deletes, which write markers).
+async fn delete_events_in_batches<'q>(
+    connection: &mut PgConnection,
+    statement: &str,
+    bind: impl Fn(
+        sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
+    ) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
+) -> Result<u64, StoreError> {
+    let mut total = 0;
+    loop {
+        let deleted: i64 = bind(sqlx::query_scalar(sqlx::AssertSqlSafe(
+            statement.to_owned(),
+        )))
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        total += u64::try_from(deleted).unwrap_or(0);
+        if deleted < RETENTION_BATCH {
+            return Ok(total);
+        }
+    }
 }
 
 async fn delete_in_batches<'q>(
@@ -191,7 +216,12 @@ async fn drop_old_partitions(
             continue;
         };
         if next_month(first).midnight().assume_utc() <= cutoff {
-            // The name was parsed from digits only.
+            // The name was parsed from digits only. The sync events of the partition leave their
+            // markers first, in the same transaction as the drop.
+            sqlx::query(sqlx::AssertSqlSafe(crate::privacy::mark_partition(&name)))
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
             sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
                 .execute(&mut *connection)
                 .await
@@ -423,18 +453,18 @@ mod tests {
             }
         };
         let batch = |size: i64| {
-            sqlx::query(OVERRIDDEN_DELETE)
+            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(overridden_delete()))
                 .bind(NOW)
                 .bind(size)
-                .execute(&pool)
+                .fetch_one(&pool)
         };
         set(Some(30)).await.unwrap();
 
-        let first = batch(1).await.unwrap().rows_affected();
+        let first = batch(1).await.unwrap();
         set(Some(90)).await.unwrap();
-        let after_raise = batch(5000).await.unwrap().rows_affected();
+        let after_raise = batch(5000).await.unwrap();
         set(Some(30)).await.unwrap();
-        let after_lowering = batch(5000).await.unwrap().rows_affected();
+        let after_lowering = batch(5000).await.unwrap();
 
         assert_eq!((first, after_raise, after_lowering), (1, 0, 2));
         assert_eq!(remaining(&pool, "tuned").await, 0);

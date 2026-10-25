@@ -434,28 +434,26 @@ pub async fn forwarding_report(
     .map_err(StoreError::query)
 }
 
-/// Deletes up to `limit` delivered rows of `destination` older than `retention`. Returns the
-/// number deleted.
+/// Deletes up to `limit` delivered rows of `destination` older than `retention`, and writes the
+/// handled marker of each (person, destination) pair they leave (`privacy::handled_markers`), in
+/// the same statement. Returns the number deleted.
 pub async fn purge_delivered(
     connection: &mut PgConnection,
     destination: Uuid,
     retention: Duration,
     limit: i64,
 ) -> Result<u64, StoreError> {
-    Ok(sqlx::query(
-        "DELETE FROM forwarding_outbox WHERE id IN ( \
-             SELECT id FROM forwarding_outbox \
-             WHERE destination_id = $1 AND state = 'delivered' \
-               AND updated_at < now() - make_interval(secs => $2) \
-             LIMIT $3)",
-    )
-    .bind(destination)
-    .bind(retention.as_secs_f64())
-    .bind(limit)
-    .execute(connection)
-    .await
-    .map_err(StoreError::query)?
-    .rows_affected())
+    let statement = crate::privacy::delete_and_mark(
+        "DELETE FROM forwarding_outbox WHERE id IN (              SELECT id FROM forwarding_outbox              WHERE destination_id = $1 AND state = 'delivered'                AND updated_at < now() - make_interval(secs => $2)              LIMIT $3)          RETURNING workspace_id, person_id, destination_id::text AS destination,                    updated_at AS handled_at",
+    );
+    let deleted: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+        .bind(destination)
+        .bind(retention.as_secs_f64())
+        .bind(limit)
+        .fetch_one(connection)
+        .await
+        .map_err(StoreError::query)?;
+    Ok(u64::try_from(deleted).unwrap_or(0))
 }
 
 /// The earliest time a pending row of `destination` is due, if any.
