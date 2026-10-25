@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { client, describeError, unwrap, useDestinationOptions, useResource, type components } from "../../api";
+import { client, describeError, offeredDestinations, unwrap, useDestinationOptions, useResource, type components } from "../../api";
 import {
   Button,
   ENGAGEMENT_PROPERTIES,
@@ -386,7 +386,7 @@ export function DestinationSelect({ workspaceId, label, value, capability, onCha
     );
   }
   const ready = destinations.status === "ready";
-  const list = ready ? destinations.data.filter((entry) => !entry.archived && entry.capabilities[capability]) : [];
+  const list = ready ? offeredDestinations(destinations.data, capability) : [];
   const offered = list.some((entry) => entry.id === chosen);
   const named = ready ? destinations.data.find((entry) => entry.id === chosen) : undefined;
   const notes = hint ? [hint] : [];

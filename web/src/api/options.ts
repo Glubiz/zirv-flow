@@ -1,4 +1,5 @@
 import { client, unwrap } from "./client";
+import type { components } from "./schema";
 import { useResource } from "./useResource";
 
 /*
@@ -11,6 +12,13 @@ export function useDestinationOptions(workspaceId: string) {
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/destinations/options", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
+}
+
+type DestinationOption = components["schemas"]["DestinationOptionBody"];
+
+/** The destinations a step can name: not archived and able to do what it needs. */
+export function offeredDestinations(options: readonly DestinationOption[], capability: "send" | "sync"): DestinationOption[] {
+  return options.filter((entry) => !entry.archived && entry.capabilities[capability]);
 }
 
 export function useSenderOptions(workspaceId: string) {

@@ -3,6 +3,7 @@ import { useState, type SyntheticEvent } from "react";
 import {
   client,
   describeError,
+  offeredDestinations,
   unwrap,
   useAllowlistOptions,
   useDestinationOptions,
@@ -69,7 +70,7 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
   const loading = [destinations, senders, members, allowlist].some((entry) => entry.status === "loading");
   const loadFailed = [destinations, senders, members, allowlist].find((entry) => entry.status === "error");
   const ready = !loading && !loadFailed;
-  const sendable = destinations.status === "ready" ? destinations.data.filter((entry) => !entry.archived && entry.capabilities.send) : [];
+  const sendable = destinations.status === "ready" ? offeredDestinations(destinations.data, "send") : [];
   const incomplete = destination === "" || sender === "" || (toKind === "member" ? member === "" : address.trim() === "");
 
   async function submit(event: SyntheticEvent) {
