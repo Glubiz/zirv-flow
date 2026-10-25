@@ -17,6 +17,7 @@ use zirv_flow_core::people::{Identifier, identifier_hash};
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
 use super::delete::{DeleteReason, delete_person, purge_jobs};
+use super::erasure_calls::{self, EraseTarget};
 use crate::{
     Actor, NewAuditEntry, NewJob, NewSuppression, PgPool, StoreError, add_suppression,
     append_audit, begin, commit, enqueue,
@@ -239,6 +240,12 @@ pub enum EraseOutcome {
 ///    workspace's test-send log rows whose recipient hash is one of the ledger's;
 /// 5. completes the ledger row and audits `privacy.erased` with the request id only.
 ///
+/// Before the delete it plans the erase calls ([`erasure_calls`]): for each of `targets` that
+/// handled the group (a message, a forwarding item or a sync outcome) it resolves the external
+/// key from the group's rows, writes a pending `erasure_destination_calls` row and enqueues one
+/// `destination.erase` job. The caller decides which destinations declare erase; the store reads
+/// no manifest.
+///
 /// When the person is already gone, steps 2 and 3 still run from the ledger's hashes. Inbox
 /// rows are matched by hash, so the identifiers are parsed and hashed exactly as the
 /// suppressions are. A failure rolls everything back, so the request stays pending for the
@@ -248,6 +255,7 @@ pub async fn erase_person(
     workspace: WorkspaceId,
     request: Uuid,
     key: &HmacKey,
+    targets: &[EraseTarget],
     trace: &TraceContext,
 ) -> Result<EraseOutcome, StoreError> {
     let row: Option<LedgerRow> = sqlx::query_as(
@@ -271,8 +279,23 @@ pub async fn erase_person(
     // after this commits the drain finds its locked person gone, which is a retryable race, and the
     // batch retries into a new person.
     let mut values: Vec<String> = Vec::new();
+    // The call lock comes before every row lock: a sync that holds it shared across its call, and
+    // then waits for the person row, must never meet an erasure that holds the row and waits for
+    // the lock. Once the erasure has it, no sync is between its call and its outcome for these
+    // people, so the evidence `erasure_calls::plan` reads is complete.
+    let mut known = people.clone();
+    known.push(person);
+    if let Some(current) = crate::current_person(&mut *connection, workspace, person).await? {
+        known.extend(group_ids(connection, workspace, current).await?);
+    }
+    erasure_calls::lock_person_calls_exclusive(connection, workspace, &known).await?;
     let inbox = lock_inbox(connection, workspace, key).await?;
+    let mut survivor: Option<Uuid> = None;
     if let Some(group) = lock_group(connection, workspace, person).await? {
+        survivor = Some(group.current);
+        // A merge that committed meanwhile may have added members; a bucket for one is tried, never
+        // waited for, now that row locks are held.
+        erasure_calls::lock_person_calls_late(connection, workspace, &group.ids).await?;
         for &id in &group.ids {
             if !people.contains(&id) {
                 people.push(id);
@@ -304,6 +327,19 @@ pub async fn erase_person(
     }
 
     suppress(connection, workspace, &hashes, &kinds).await?;
+    // The erase calls are planned while the person's rows are still there: which destinations
+    // handled them, and the key each was given, are read from those rows.
+    if let Some(current) = survivor {
+        erasure_calls::plan(
+            connection,
+            workspace,
+            request,
+            (current, &people),
+            targets,
+            trace,
+        )
+        .await?;
+    }
     // The test-send log names no person: it is found by the recipient hash, like a suppression.
     // So is an allowlist entry, which holds the address itself, sealed.
     crate::delete_test_sends_by_hash(connection, workspace, &hashes).await?;
@@ -662,7 +698,7 @@ mod tests {
 
     async fn erase(pool: &PgPool, ws: WorkspaceId, request: Uuid) -> EraseOutcome {
         let mut tx = begin(pool).await.unwrap();
-        let outcome = erase_person(&mut tx, ws, request, &identifier_key(), &trace())
+        let outcome = erase_person(&mut tx, ws, request, &identifier_key(), &[], &trace())
             .await
             .unwrap();
         commit(tx).await.unwrap();
@@ -1238,7 +1274,7 @@ mod tests {
         .unwrap();
 
         let mut tx = begin(&pool).await.unwrap();
-        let result = erase_person(&mut tx, ws, request.id, &identifier_key(), &trace()).await;
+        let result = erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace()).await;
         drop(tx);
 
         assert!(result.is_err());
@@ -1548,7 +1584,7 @@ mod tests {
             let pool = pool.clone();
             async move {
                 let mut tx = begin(&pool).await.unwrap();
-                erase_person(&mut tx, ws, request.id, &identifier_key(), &trace())
+                erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
                     .await
                     .unwrap();
                 commit(tx).await.unwrap();
@@ -1592,7 +1628,7 @@ mod tests {
             let pool = pool.clone();
             async move {
                 let mut tx = begin(&pool).await.unwrap();
-                erase_person(&mut tx, ws, request.id, &identifier_key(), &trace())
+                erase_person(&mut tx, ws, request.id, &identifier_key(), &[], &trace())
                     .await
                     .unwrap();
                 commit(tx).await.unwrap();
@@ -1621,9 +1657,16 @@ mod tests {
         let request = request(&pool, ws, person).await;
         // The erasure has run but not committed; a drain has found the owner and waits for it.
         let mut eraser = begin(&pool).await.unwrap();
-        erase_person(&mut eraser, ws, request.id, &identifier_key(), &trace())
-            .await
-            .unwrap();
+        erase_person(
+            &mut eraser,
+            ws,
+            request.id,
+            &identifier_key(),
+            &[],
+            &trace(),
+        )
+        .await
+        .unwrap();
         let drain = tokio::spawn({
             let pool = pool.clone();
             async move {

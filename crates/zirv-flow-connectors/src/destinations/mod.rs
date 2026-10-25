@@ -36,9 +36,9 @@ pub use provider::{
     Feedback as ProviderFeedback, FeedbackKind as ProviderFeedbackKind,
     FeedbackRead as ProviderFeedbackRead, ProfileSupport, ProviderRecord, ProviderRecordStatus,
     default_rate as provider_default_rate, domain_status as provider_domain_status,
-    feedback_of as provider_feedback_of, feedback_scheme as provider_feedback_scheme,
-    profile_key_source as provider_profile_key_source, profile_support as provider_profile_support,
-    read_feedback as provider_read_feedback,
+    erase_key_source as provider_erase_key_source, feedback_of as provider_feedback_of,
+    feedback_scheme as provider_feedback_scheme, profile_key_source as provider_profile_key_source,
+    profile_support as provider_profile_support, read_feedback as provider_read_feedback,
 };
 pub use registry::Registry;
 pub use retry_after::parse_retry_after;
@@ -59,7 +59,10 @@ pub use validate::{
 pub use fake::GOOD_TOKEN as FAKE_GOOD_TOKEN;
 /// The calls and the accepted messages the fake destination keeps under a ledger name.
 #[cfg(feature = "test-support")]
-pub use fake::{FakeSent, ledger_calls as fake_ledger_calls, ledger_sent as fake_ledger_sent};
+pub use fake::{
+    FakeErased, FakeSent, ledger_calls as fake_ledger_calls, ledger_erased as fake_ledger_erased,
+    ledger_sent as fake_ledger_sent,
+};
 
 pub(crate) static ALL: &[&dyn ErasedDestination] = &[
     &webhook::Webhook,

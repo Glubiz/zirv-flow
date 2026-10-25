@@ -6887,6 +6887,7 @@ email,b@example.com,
                 &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
             )
             .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
+            &[],
             &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
         )
         .await
@@ -6916,6 +6917,114 @@ email,b@example.com,
             .unwrap();
         assert_eq!(entry.object_id.map(|id| id.to_string()), Some(request));
         assert_eq!(entry.summary, json!({}));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_erasure_listing_shows_each_destinations_erase_call_to_admins_only(pool: PgPool) {
+        let router = keyed_app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (member_id, member) = user(&pool, &router, "member@example.com").await;
+        let person = seed_person(&pool, &ws, "ada@example.com").await;
+        let workspace_id: zirv_flow_core::WorkspaceId = ws.parse().unwrap();
+        let destination = Uuid::now_v7();
+        zirv_flow_store::create_destination(
+            &pool,
+            workspace_id,
+            &zirv_flow_store::NewDestination {
+                id: destination,
+                kind: "fake",
+                name: "crm",
+                config: &json!({}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, reason, completed_at) \
+             VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), 'n', gen_random_uuid(), $3, \
+                'skipped', 'no_consent', now())",
+        )
+        .bind(workspace_id.as_uuid())
+        .bind(Uuid::parse_str(&person).unwrap())
+        .bind(destination)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let uri = privacy_uri(&ws, "/erasures");
+        let created = call(
+            &router,
+            "POST",
+            &uri,
+            Some(json!({"person_id": person})),
+            Auth::Session(&owner),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::ACCEPTED, "{:?}", created.body);
+        assert_eq!(created.body["destination_calls"], json!([]));
+        let request: Uuid = created.body["id"].as_str().unwrap().parse().unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::erase_person(
+            &mut tx,
+            workspace_id,
+            request,
+            &zirv_flow_core::HmacRoot::bootstrap_from(
+                &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
+            )
+            .hmac_key(zirv_flow_core::HmacPurpose::Identifier),
+            &[zirv_flow_store::EraseTarget {
+                destination,
+                key: zirv_flow_store::ExternalKey::Identity("email".into()),
+            }],
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        let pending = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+
+        let calls = &pending.body["erasures"][0]["destination_calls"];
+        assert_eq!(calls.as_array().unwrap().len(), 1, "{calls}");
+        assert_eq!(calls[0]["destination_id"], destination.to_string());
+        assert_eq!(calls[0]["outcome"], "pending");
+        assert_eq!(calls[0]["attempts"], 0);
+        assert!(calls[0]["error_code"].is_null());
+
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::finish_erasure_call(
+            &mut connection,
+            workspace_id,
+            (request, destination),
+            Err("http_4xx"),
+            3,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let failed = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
+
+        let calls = &failed.body["erasures"][0]["destination_calls"];
+        assert_eq!(calls[0]["outcome"], "failed");
+        assert_eq!(calls[0]["error_code"], "http_4xx");
+        assert_eq!(calls[0]["attempts"], 3);
+        let text = failed.body.to_string();
+        assert!(!text.contains("ada@example.com") && !text.contains("external_key"));
+
+        let _ = member_id;
+        let denied = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
+        assert!(
+            denied.status == StatusCode::FORBIDDEN || denied.status == StatusCode::NOT_FOUND,
+            "{:?}",
+            denied.status
+        );
+        assert!(!denied.body.to_string().contains("destination_calls"));
     }
 
     #[sqlx::test]

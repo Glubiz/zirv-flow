@@ -3,11 +3,20 @@
 //! The payload is `{workspace_id, request_id}`. The whole erasure runs in the job's own
 //! transaction, so a failure leaves nothing done and the request pending for the retry; once
 //! the attempts run out the request reads as failed. It needs the identifier key of the worker's master key and fails without one.
+//!
+//! **Erase calls (#227).** The job lists the workspace's destinations and decides, with the
+//! destination registry, which declare erase: a built-in type through `Capabilities.erase`, keyed
+//! on the person id; a provider destination when its manifest has `erase_profile`, keyed on the
+//! identity or trait the manifest names. The store reads no manifest, so it gets these as
+//! targets, keeps the ones that handled the person and enqueues one `destination.erase` job each,
+//! inside the erasure transaction.
 
 use serde_json::Value;
 use uuid::Uuid;
+use zirv_flow_connectors::destinations::{DestinationSpec, Registry, provider_erase_key_source};
+use zirv_flow_connectors::manifest::KeySource;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_store::EraseOutcome;
+use zirv_flow_store::{Destination, EraseOutcome, EraseTarget, ExternalKey, list_destinations};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -27,11 +36,50 @@ impl JobKind for PrivacyErase {
             .identifier_key()
             .ok_or(JobError::new("the worker has no master key"))?;
         let trace = ctx.trace().clone();
-        match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &key, &trace).await? {
+        let destinations = list_destinations(ctx.conn(), workspace, true).await?;
+        let targets = erase_targets(&destinations);
+        match zirv_flow_store::erase_person(ctx.conn(), workspace, request, &key, &targets, &trace)
+            .await?
+        {
             EraseOutcome::Completed { .. } | EraseOutcome::AlreadyCompleted => Ok(()),
             EraseOutcome::NoSuchRequest => Err(JobError::new("the erasure request does not exist")),
         }
     }
+}
+
+/// Where a destination of this type and configuration takes its external key from, when it
+/// declares erase. A built-in type declares it through `Capabilities.erase` and keys on the person
+/// id; a provider destination declares it when its manifest has `erase_profile`, and the manifest
+/// names the identity or trait the key is.
+fn erase_key(spec: &DestinationSpec, config: &Value) -> Option<ExternalKey> {
+    if spec.capabilities.channels.contains(&"profile_sync") {
+        return provider_erase_key_source(config).map(|source| match source {
+            KeySource::Identity(kind) => ExternalKey::Identity(kind),
+            KeySource::Trait(key) => ExternalKey::Trait(key),
+        });
+    }
+    spec.capabilities.erase.then_some(ExternalKey::PersonId)
+}
+
+/// Whether a destination of this type and configuration declares the erase capability.
+pub(super) fn declares_erase(spec: &DestinationSpec, config: &Value) -> bool {
+    erase_key(spec, config).is_some()
+}
+
+/// The destinations that declare erase, with where each one's key comes from. The store keeps the
+/// ones that handled the person.
+fn erase_targets(destinations: &[Destination]) -> Vec<EraseTarget> {
+    let registry = Registry::built_in();
+    destinations
+        .iter()
+        .filter_map(|destination| {
+            let driver = registry.get(&destination.kind)?;
+            Some(EraseTarget {
+                destination: destination.id,
+                key: erase_key(driver.spec(), &destination.config)?,
+            })
+        })
+        .collect()
 }
 
 fn parse(payload: &Value) -> Result<(WorkspaceId, Uuid), JobError> {

@@ -90,16 +90,20 @@ pub trait Destination: Send + Sync + 'static {
     }
 
     /// Erases the data held about `subject` (the type's own key for the person) at the remote
-    /// system. Only a type with [`Capabilities::erase`](super::Capabilities::erase) overrides it.
+    /// system. Only a type with [`Capabilities::erase`](super::Capabilities::erase), or a
+    /// provider whose manifest declares `erase_profile`, overrides it. `idempotency_key` is stable
+    /// for one erasure and destination across every retry, and is passed on where the type
+    /// supports it, so a retried call cannot duplicate.
     fn erase(
         &self,
         ctx: &DestinationContext,
         config: &Value,
         credential: &Credential,
         subject: &str,
+        idempotency_key: &str,
     ) -> impl Future<Output = Result<(), DestinationError>> + Send {
         async move {
-            let _ = (ctx, config, credential, subject);
+            let _ = (ctx, config, credential, subject, idempotency_key);
             Err(DestinationError::Unsupported)
         }
     }
@@ -142,6 +146,7 @@ pub trait ErasedDestination: Send + Sync {
         config: &'a Value,
         credential: &'a Credential,
         subject: &'a str,
+        idempotency_key: &'a str,
     ) -> BoxFuture<'a, Result<(), DestinationError>>;
 }
 
@@ -185,8 +190,16 @@ impl<D: Destination> ErasedDestination for D {
         config: &'a Value,
         credential: &'a Credential,
         subject: &'a str,
+        idempotency_key: &'a str,
     ) -> BoxFuture<'a, Result<(), DestinationError>> {
-        Box::pin(Destination::erase(self, ctx, config, credential, subject))
+        Box::pin(Destination::erase(
+            self,
+            ctx,
+            config,
+            credential,
+            subject,
+            idempotency_key,
+        ))
     }
 }
 
@@ -277,7 +290,9 @@ mod tests {
             })
         );
         assert_eq!(
-            destination.erase(&ctx, &config, &credential, "p-1").await,
+            destination
+                .erase(&ctx, &config, &credential, "p-1", "erase-1")
+                .await,
             Err(DestinationError::Unsupported)
         );
         let traits = Map::new();

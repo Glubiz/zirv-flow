@@ -29,7 +29,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue, RETRY_AFTER};
 use reqwest::{Method, Request};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use url::Url;
 
 pub use self::domain::{ProviderRecord, ProviderRecordStatus};
@@ -40,7 +40,7 @@ use super::error::DestinationError;
 use super::spec::{Capabilities, DestinationSpec};
 use crate::manifest::{
     Auth, ErrorAction, ErrorRule, FeedbackSpec, KeyLocation, KeySource, Manifest, ProfileMethod,
-    Provider, SendMethod, VerificationSpec, validate,
+    ProfileSpec, Provider, SendMethod, VerificationSpec, validate,
 };
 use crate::sources::{Credential, FieldError, FieldKind, FieldSpec};
 use zirv_flow_core::flow::SyncOperation;
@@ -162,59 +162,102 @@ impl Destination for ProviderDestination {
             SyncOperation::Remove => provider.remove_profile.as_ref(),
         }
         .ok_or(DestinationError::Unsupported)?;
-        if call.key.is_empty() || call.key.len() > profile::MAX_KEY_BYTES {
-            return Err(DestinationError::Config {
-                field: "key".to_owned(),
-                reason: "is not usable".to_owned(),
-            });
-        }
-        // The URL parser reads `.` and `..` (also as `%2e`) as dot segments and would move the
-        // request off the mapped path. The encoder percent-encodes `%`, so no other spelling of a
-        // key reaches the path as a dot segment: matching the raw key is enough.
-        if profile::is_dot_segment(call.key) {
-            return Err(DestinationError::Config {
-                field: "key".to_owned(),
-                reason: "is a path dot segment".to_owned(),
-            });
-        }
-        let body = profile::build_body(spec, call.key, call.traits)?;
-        let url = joined(&manifest.base_url, &profile::path_for(spec, call.key))?;
-        let method = match spec.method {
-            ProfileMethod::Post => Method::POST,
-            ProfileMethod::Put => Method::PUT,
-            ProfileMethod::Patch => Method::PATCH,
-            ProfileMethod::Delete => Method::DELETE,
-        };
-        let mut request = prepared(
-            method,
-            url,
-            &manifest,
-            (&spec.idempotency_header, call.idempotency_key),
+        run_profile(
+            ctx,
+            (&manifest, &provider, spec),
             credential,
-        )?;
-        if let Some(body) = body {
-            request
-                .headers_mut()
-                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            *request.body_mut() = Some(body.to_string().into_bytes().into());
-        }
-
-        // The operation's own rules come first, then the destination's. A profile has no
-        // recipient address: a rule that says so ends the operation, as any terminal answer does.
-        let rules: Vec<ErrorRule> = spec
-            .errors
-            .iter()
-            .chain(&provider.errors)
-            .map(|rule| ErrorRule {
-                action: match rule.action {
-                    ErrorAction::RecipientFailure => ErrorAction::Terminal,
-                    other => other,
-                },
-                ..rule.clone()
-            })
-            .collect();
-        respond(ctx, request, &rules).await
+            (call.key, call.traits),
+            call.idempotency_key,
+        )
+        .await
     }
+
+    async fn erase(
+        &self,
+        ctx: &DestinationContext,
+        config: &Value,
+        credential: &Credential,
+        subject: &str,
+        idempotency_key: &str,
+    ) -> Result<(), DestinationError> {
+        let (manifest, provider) = provider_of(config)?;
+        let spec = provider
+            .erase_profile
+            .as_ref()
+            .ok_or(DestinationError::Unsupported)?;
+        run_profile(
+            ctx,
+            (&manifest, &provider, spec),
+            credential,
+            (subject, &Map::new()),
+            idempotency_key,
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+/// Runs one profile operation of the manifest: the request of `spec` with `key` and `traits`
+/// placed, sent once. Shared by `sync` and `erase`.
+async fn run_profile(
+    ctx: &DestinationContext,
+    (manifest, provider, spec): (&Manifest, &Provider, &ProfileSpec),
+    credential: &Credential,
+    (key, traits): (&str, &Map<String, Value>),
+    idempotency_key: &str,
+) -> Result<Delivered, DestinationError> {
+    if key.is_empty() || key.len() > profile::MAX_KEY_BYTES {
+        return Err(DestinationError::Config {
+            field: "key".to_owned(),
+            reason: "is not usable".to_owned(),
+        });
+    }
+    // The URL parser reads `.` and `..` (also as `%2e`) as dot segments and would move the
+    // request off the mapped path. The encoder percent-encodes `%`, so no other spelling of a
+    // key reaches the path as a dot segment: matching the raw key is enough.
+    if profile::is_dot_segment(key) {
+        return Err(DestinationError::Config {
+            field: "key".to_owned(),
+            reason: "is a path dot segment".to_owned(),
+        });
+    }
+    let body = profile::build_body(spec, key, traits)?;
+    let url = joined(&manifest.base_url, &profile::path_for(spec, key))?;
+    let method = match spec.method {
+        ProfileMethod::Post => Method::POST,
+        ProfileMethod::Put => Method::PUT,
+        ProfileMethod::Patch => Method::PATCH,
+        ProfileMethod::Delete => Method::DELETE,
+    };
+    let mut request = prepared(
+        method,
+        url,
+        manifest,
+        (&spec.idempotency_header, idempotency_key),
+        credential,
+    )?;
+    if let Some(body) = body {
+        request
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        *request.body_mut() = Some(body.to_string().into_bytes().into());
+    }
+
+    // The operation's own rules come first, then the destination's. A profile has no
+    // recipient address: a rule that says so ends the operation, as any terminal answer does.
+    let rules: Vec<ErrorRule> = spec
+        .errors
+        .iter()
+        .chain(&provider.errors)
+        .map(|rule| ErrorRule {
+            action: match rule.action {
+                ErrorAction::RecipientFailure => ErrorAction::Terminal,
+                other => other,
+            },
+            ..rule.clone()
+        })
+        .collect();
+    respond(ctx, request, &rules).await
 }
 
 /// The settings problems of `config`: the manifest's issues, and a manifest without a
@@ -314,6 +357,14 @@ pub fn profile_key_source(config: &Value, operation: SyncOperation) -> Option<Ke
     .map(|spec| spec.key_from)
 }
 
+/// Where the external key of the erase call comes from, per the manifest of `config`. `None` when
+/// the manifest declares no `erase_profile`, which is how a provider destination declares the
+/// erase capability.
+pub fn erase_key_source(config: &Value) -> Option<KeySource> {
+    let (_, provider) = provider_of(config).ok()?;
+    provider.erase_profile.map(|spec| spec.key_from)
+}
+
 /// The signature scheme of a verification section, as `zirv_flow_core::signature` takes it.
 pub fn feedback_scheme(verification: &VerificationSpec) -> zirv_flow_core::signature::Scheme<'_> {
     feedback::scheme(verification)
@@ -331,14 +382,18 @@ pub fn default_rate(config: &Value) -> Option<(i32, i32)> {
     let (_, provider) = provider_of(config).ok()?;
     // The destination's own limit, else the strictest an operation declares.
     let limit = provider.rate_limit.or_else(|| {
-        [&provider.upsert_profile, &provider.remove_profile]
-            .into_iter()
-            .flatten()
-            .filter_map(|spec| spec.rate_limit)
-            .min_by(|a, b| {
-                (u64::from(a.requests) * u64::from(b.per_seconds))
-                    .cmp(&(u64::from(b.requests) * u64::from(a.per_seconds)))
-            })
+        [
+            &provider.upsert_profile,
+            &provider.remove_profile,
+            &provider.erase_profile,
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|spec| spec.rate_limit)
+        .min_by(|a, b| {
+            (u64::from(a.requests) * u64::from(b.per_seconds))
+                .cmp(&(u64::from(b.requests) * u64::from(a.per_seconds)))
+        })
     })?;
     let per_second = limit.requests.div_ceil(limit.per_seconds).clamp(1, 100_000);
     let burst = limit.requests.clamp(per_second, 100_000);
@@ -1109,6 +1164,112 @@ mod tests {
         assert_eq!(fake.requests(), 0);
     }
 
+    /// The profile fixture with an `erase_profile` that places the key and a literal.
+    fn config_with_erase(fake: &FakeProvider) -> Value {
+        let mut config = config_for(PROFILES, fake);
+        config["manifest"]["destination"]["erase_profile"] = json!({
+            "method": "POST",
+            "path": "/v1/erasures",
+            "idempotency_header": "Idempotency-Key",
+            "key_from": {"identity": "email"},
+            "body": {"key": "/subject", "static": {"/reason": "erasure"}}
+        });
+        config
+    }
+
+    async fn erase(
+        config: &Value,
+        subject: &str,
+        idempotency_key: &str,
+    ) -> Result<(), DestinationError> {
+        ProviderDestination
+            .erase(
+                &ctx(Duration::from_secs(5)),
+                config,
+                &credential(&[("token", "tok-1")]),
+                subject,
+                idempotency_key,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn an_erase_calls_the_mapped_request_with_the_key_and_statics_and_no_traits() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_with_erase(&fake);
+
+        erase(&config, "ada@x.test", "erase:1").await.unwrap();
+
+        let accepted = fake.accepted();
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(
+            (accepted[0].method.as_str(), accepted[0].path.as_str()),
+            ("POST", "/v1/erasures")
+        );
+        assert_eq!(accepted[0].key, "erase:1");
+        assert_eq!(
+            accepted[0].body,
+            json!({"subject": "ada@x.test", "reason": "erasure"})
+        );
+        assert_eq!(accepted[0].authorization.as_deref(), Some("Bearer tok-1"));
+    }
+
+    #[tokio::test]
+    async fn a_retried_erase_under_the_same_key_is_one_change_at_a_key_honouring_provider() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_with_erase(&fake);
+
+        for _ in 0..3 {
+            erase(&config, "k", "erase:1").await.unwrap();
+        }
+
+        assert_eq!(fake.accepted().len(), 1);
+        assert_eq!(fake.requests(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_manifest_without_an_erase_profile_does_not_erase_and_a_bad_key_makes_no_request() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let plain = config_for(PROFILES, &fake);
+        let config = config_with_erase(&fake);
+
+        let none = erase(&plain, "k", "erase:1").await;
+        let empty = erase(&config, "", "erase:2").await;
+        let dot = erase(&config, "..", "erase:3").await;
+
+        assert_eq!(none, Err(DestinationError::Unsupported));
+        assert!(matches!(empty, Err(DestinationError::Config { .. })));
+        assert!(matches!(dot, Err(DestinationError::Config { .. })));
+        assert_eq!(fake.requests(), 0);
+        assert!(erase_key_source(&plain).is_none());
+        assert_eq!(
+            erase_key_source(&config),
+            Some(KeySource::Identity("email".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_erase_failure_is_classified_like_a_sync_failure() {
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let config = config_with_erase(&fake);
+        fake.script(Script::Status {
+            status: 503,
+            body: json!({}),
+            retry_after: None,
+        });
+        fake.script(Script::Status {
+            status: 422,
+            body: json!({}),
+            retry_after: None,
+        });
+
+        let retry = erase(&config, "k", "erase:1").await.unwrap_err();
+        let terminal = erase(&config, "k", "erase:2").await.unwrap_err();
+
+        assert_eq!(retry.disposition(), Disposition::Retryable);
+        assert_eq!(terminal.disposition(), Disposition::Terminal);
+    }
+
     #[tokio::test]
     async fn a_dot_segment_key_is_refused_without_a_call() {
         let fake = FakeProvider::start(FakeProviderOptions::default()).await;
@@ -1178,6 +1339,41 @@ mod tests {
         );
         assert_eq!(profile_key_source(&email, SyncOperation::Upsert), None);
         assert_eq!(default_rate(&profiles), Some((10, 10)));
+    }
+
+    #[test]
+    fn the_default_rate_counts_an_erase_profiles_limit_and_an_erase_only_manifest_has_one() {
+        let erase = |limit: Option<Value>| {
+            let mut manifest = serde_json::from_str::<Value>(PROFILES).unwrap();
+            manifest["destination"] = json!({"erase_profile": {
+                "path": "/erasures/{key}",
+                "idempotency_header": "Idempotency-Key",
+                "key_from": {"identity": "email"}
+            }});
+            if let Some(limit) = limit {
+                manifest["destination"]["erase_profile"]["rate_limit"] = limit;
+            }
+            json!({"manifest": manifest})
+        };
+        let strictest = serde_json::from_str::<Value>(PROFILES).unwrap();
+        let mut both = strictest;
+        both["destination"]["erase_profile"] = json!({
+            "path": "/erasures/{key}",
+            "idempotency_header": "Idempotency-Key",
+            "key_from": {"identity": "email"},
+            "rate_limit": {"requests": 2, "per_seconds": 1}
+        });
+
+        assert_eq!(
+            default_rate(&erase(Some(json!({"requests": 4, "per_seconds": 2})))),
+            Some((2, 4))
+        );
+        assert_eq!(default_rate(&erase(None)), None);
+        assert_eq!(
+            default_rate(&json!({"manifest": both})),
+            Some((2, 2)),
+            "the erase limit is stricter than the upsert's 10 per second"
+        );
     }
 
     #[test]
