@@ -48,6 +48,9 @@ pub struct Provider {
     pub upsert_profile: Option<ProfileSpec>,
     /// Removes a person's profile at the provider (`action.sync` remove).
     pub remove_profile: Option<ProfileSpec>,
+    /// Erases a person at the provider when the person is erased here (`destination.erase`, #227).
+    /// The same shape as `remove_profile`.
+    pub erase_profile: Option<ProfileSpec>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -348,8 +351,9 @@ pub(super) fn provider(walk: &mut Walk, value: &Value, path: String) -> Option<P
     let feedback_value = obj.take("feedback");
     let upsert_value = obj.take("upsert_profile");
     let remove_value = obj.take("remove_profile");
+    let erase_value = obj.take("erase_profile");
     // The email half is a pair, and a provider declares the pair, a profile operation or both.
-    let profiles = upsert_value.is_some() || remove_value.is_some();
+    let profiles = upsert_value.is_some() || remove_value.is_some() || erase_value.is_some();
     if send_value.is_none() && (feedback_value.is_some() || !profiles) {
         walk.missing(&obj, "send");
     }
@@ -372,6 +376,8 @@ pub(super) fn provider(walk: &mut Walk, value: &Value, path: String) -> Option<P
         upsert_value.map(|value| profile::profile(walk, value, obj.at("upsert_profile"), false));
     let remove_profile =
         remove_value.map(|value| profile::profile(walk, value, obj.at("remove_profile"), true));
+    let erase_profile =
+        erase_value.map(|value| profile::profile(walk, value, obj.at("erase_profile"), true));
     walk.finish(obj);
     // A section that failed reported its own issues.
     Some(Provider {
@@ -382,6 +388,7 @@ pub(super) fn provider(walk: &mut Walk, value: &Value, path: String) -> Option<P
         feedback: settled(feedback)?,
         upsert_profile: settled(upsert_profile)?,
         remove_profile: settled(remove_profile)?,
+        erase_profile: settled(erase_profile)?,
     })
 }
 
@@ -833,10 +840,14 @@ pub(super) fn cross_check(
         .iter()
         .map(|send| send.idempotency_header.as_str())
         .chain(
-            [&provider.upsert_profile, &provider.remove_profile]
-                .into_iter()
-                .flatten()
-                .map(|spec| spec.idempotency_header.as_str()),
+            [
+                &provider.upsert_profile,
+                &provider.remove_profile,
+                &provider.erase_profile,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|spec| spec.idempotency_header.as_str()),
         )
         .collect();
     // A static header of an idempotency header's name would give the request two values or a

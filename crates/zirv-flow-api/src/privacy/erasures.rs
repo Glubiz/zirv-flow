@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{HmacKey, TraceId, WorkspaceId};
-use zirv_flow_store::{ErasureRequest, PgPool};
+use zirv_flow_store::{ErasureCall, ErasureRequest, PgPool};
 
 use super::{PersonTarget, requested_by, resolve};
 use crate::AppState;
@@ -39,6 +39,41 @@ pub(crate) struct ErasureBody {
     completed_at: Option<OffsetDateTime>,
     /// The trace of the request and of its job: 32 lowercase hex characters.
     trace_id: String,
+    /// The erase call made to each destination that declares erase and handled the person, with
+    /// how it went. Empty until the erasure has run, and when no destination applies.
+    destination_calls: Vec<ErasureCallBody>,
+}
+
+/// One destination's erase call for an erasure request. It names no person and no key.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ErasureCallBody {
+    destination_id: Uuid,
+    /// `pending`, `done` or `failed`.
+    #[schema(example = "done")]
+    outcome: String,
+    /// Calls made so far; zero while pending.
+    attempts: i32,
+    /// A fixed code, such as `http_4xx`; set exactly when the call failed.
+    error_code: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    updated_at: OffsetDateTime,
+}
+
+impl From<ErasureCall> for ErasureCallBody {
+    fn from(call: ErasureCall) -> Self {
+        Self {
+            destination_id: call.destination_id,
+            outcome: call.outcome.as_str().to_owned(),
+            attempts: call.attempts,
+            error_code: call.error_code,
+            created_at: call.created_at,
+            updated_at: call.updated_at,
+        }
+    }
 }
 
 impl From<ErasureRequest> for ErasureBody {
@@ -51,6 +86,7 @@ impl From<ErasureRequest> for ErasureBody {
             requested_at: request.requested_at,
             completed_at: request.completed_at,
             trace_id: TraceId::from_uuid(request.trace_id).to_string(),
+            destination_calls: Vec::new(),
         }
     }
 }
@@ -178,8 +214,22 @@ pub(crate) async fn list(
         Some(last) if more => Some(encode_cursor((last.requested_at, last.id))),
         _ => None,
     };
+    let ids: Vec<Uuid> = requests.iter().map(|request| request.id).collect();
+    let mut calls = zirv_flow_store::list_erasure_calls(&state.pool, workspace.id, &ids).await?;
+    let erasures = requests
+        .into_iter()
+        .map(|request| {
+            let id = request.id;
+            let mut body = ErasureBody::from(request);
+            let (mine, rest): (Vec<_>, Vec<_>) =
+                calls.drain(..).partition(|call| call.erasure_id == id);
+            calls = rest;
+            body.destination_calls = mine.into_iter().map(ErasureCallBody::from).collect();
+            body
+        })
+        .collect();
     Ok(Json(ErasuresBody {
-        erasures: requests.into_iter().map(ErasureBody::from).collect(),
+        erasures,
         next_before,
     }))
 }

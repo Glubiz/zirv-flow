@@ -16,6 +16,10 @@
 //!   upsert has one of the two, a remove neither); `static` places literals beside them.
 //! - `rate_limit` and `errors`, in the format of the email send (#223).
 //!
+//! `erase_profile` (#227) is a third operation of the same shape as `remove_profile`: it is not
+//! a node's operation but the call made when a person is erased (`destination.erase`), keyed by
+//! the same `key_from`. Its body places `key` and `static` only, never traits.
+//!
 //! This module is the model and the validator. The runtime is `destinations::provider`.
 
 use serde_json::Value;
@@ -813,5 +817,130 @@ mod tests {
         let rendered = format!("{:?}", issues(&value));
 
         assert!(!rendered.contains("SENTINEL"), "{rendered}");
+    }
+
+    fn erase_manifest() -> Value {
+        let mut value = manifest();
+        value["destination"] = json!({
+            "erase_profile": {
+                "path": "/profiles/{key}/erase",
+                "idempotency_header": "Idempotency-Key",
+                "key_from": {"trait": "crm_id"},
+                "body": {"static": {"/reason": "erasure"}},
+                "rate_limit": {"requests": 2, "per_seconds": 1},
+                "errors": [{"status": 409, "action": "retry"}]
+            }
+        });
+        value
+    }
+
+    #[test]
+    fn an_erase_profile_alone_is_valid_and_reads_back_like_a_remove() {
+        let provider = validate(&erase_manifest()).unwrap().provider.unwrap();
+
+        assert!(provider.send.is_none() && provider.upsert_profile.is_none());
+        assert!(provider.remove_profile.is_none());
+        let erase = provider.erase_profile.unwrap();
+        assert_eq!(erase.method, ProfileMethod::Delete, "the default");
+        assert_eq!(erase.path, "/profiles/{key}/erase");
+        assert_eq!(erase.key_from, KeySource::Trait("crm_id".to_owned()));
+        assert!(erase.traits.is_none() && erase.has_body());
+        assert_eq!(erase.rate_limit.unwrap().requests, 2);
+        assert_eq!(erase.errors.len(), 1);
+    }
+
+    #[test]
+    fn a_manifest_without_an_erase_profile_has_none() {
+        let provider = validate(&manifest()).unwrap().provider.unwrap();
+
+        assert!(provider.erase_profile.is_none());
+    }
+
+    #[test]
+    fn an_erase_profile_names_no_trait_and_no_unknown_key() {
+        let mut value = erase_manifest();
+        value["destination"]["erase_profile"]["body"]["traits"] = json!("/t");
+        value["destination"]["erase_profile"]["body"]["fields"] = json!({"plan": "/p"});
+        value["destination"]["erase_profile"]["zzz"] = json!(1);
+
+        for at in ["body/traits", "body/fields", "zzz"] {
+            assert!(
+                has(
+                    &value,
+                    code::UNKNOWN_FIELD,
+                    &format!("/destination/erase_profile/{at}")
+                ),
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_erase_profiles_method_path_key_and_errors_are_checked_like_a_removes() {
+        let mut value = erase_manifest();
+        let erase = &mut value["destination"]["erase_profile"];
+        erase["method"] = json!("GET");
+        erase["path"] = json!("/p/{id}");
+        erase["errors"] = json!([{"status": 422, "action": "recipient_failure"}]);
+        erase.as_object_mut().unwrap().remove("key_from");
+
+        for (code, at) in [
+            (code::INVALID_VALUE, "method"),
+            (code::PATH_INVALID, "path"),
+            (code::INVALID_VALUE, "errors/0/action"),
+            (code::REQUIRED, "key_from"),
+        ] {
+            assert!(
+                has(&value, code, &format!("/destination/erase_profile/{at}")),
+                "{at}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_erase_profiles_key_goes_in_the_path_or_the_body() {
+        let mut value = erase_manifest();
+        value["destination"]["erase_profile"]["path"] = json!("/erase");
+
+        assert!(has(
+            &value,
+            code::REQUIRED,
+            "/destination/erase_profile/body/key"
+        ));
+        value["destination"]["erase_profile"]["body"]["key"] = json!("/id");
+        assert!(validate(&value).is_ok());
+    }
+
+    #[test]
+    fn an_erase_profiles_idempotency_header_is_checked_and_reserved_against_static_headers() {
+        let mut value = erase_manifest();
+        value["destination"]["erase_profile"]["idempotency_header"] = json!("Authorization");
+        assert!(has(
+            &value,
+            code::FORBIDDEN_HEADER,
+            "/destination/erase_profile/idempotency_header"
+        ));
+
+        let mut headers = erase_manifest();
+        headers["headers"] = json!({"idempotency-key": "constant"});
+        assert!(has(
+            &headers,
+            code::FORBIDDEN_HEADER,
+            "/headers/idempotency-key"
+        ));
+    }
+
+    #[test]
+    fn an_erase_profile_may_sit_beside_the_email_pair() {
+        let mut value = serde_json::from_str::<Value>(include_str!(
+            "../../tests/fixtures/providers/bearer_timestamped.json"
+        ))
+        .unwrap();
+        value["destination"]["erase_profile"] =
+            erase_manifest()["destination"]["erase_profile"].clone();
+
+        let provider = validate(&value).unwrap().provider.unwrap();
+
+        assert!(provider.send.is_some() && provider.erase_profile.is_some());
     }
 }

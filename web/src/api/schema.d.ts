@@ -5496,6 +5496,11 @@ export interface components {
         ErasureBody: {
             /** Format: date-time */
             completed_at?: string | null;
+            /**
+             * @description The erase call made to each destination that declares erase and handled the person, with
+             *     how it went. Empty until the erasure has run, and when no destination applies.
+             */
+            destination_calls: components["schemas"]["ErasureCallBody"][];
             /** Format: uuid */
             id: string;
             /**
@@ -5517,6 +5522,27 @@ export interface components {
             status: string;
             /** @description The trace of the request and of its job: 32 lowercase hex characters. */
             trace_id: string;
+        };
+        /** @description One destination's erase call for an erasure request. It names no person and no key. */
+        ErasureCallBody: {
+            /**
+             * Format: int32
+             * @description Calls made so far; zero while pending.
+             */
+            attempts: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            destination_id: string;
+            /** @description A fixed code, such as `http_4xx`; set exactly when the call failed. */
+            error_code?: string | null;
+            /**
+             * @description `pending`, `done` or `failed`.
+             * @example done
+             */
+            outcome: string;
+            /** Format: date-time */
+            updated_at: string;
         };
         ErasuresBody: {
             /** @description Newest first. */

@@ -630,9 +630,10 @@ mod tests {
         .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
         let mut tx = zirv_flow_store::begin(&fixture.pool).await.unwrap();
-        let outcome = zirv_flow_store::erase_person(&mut tx, fixture.ws, request.id, &key, &trace)
-            .await
-            .unwrap();
+        let outcome =
+            zirv_flow_store::erase_person(&mut tx, fixture.ws, request.id, &key, &[], &trace)
+                .await
+                .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
         assert!(matches!(
             outcome,
