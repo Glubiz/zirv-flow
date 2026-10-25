@@ -1,41 +1,49 @@
 //! The send-throughput report: the rate at the sink over a steady window, the delay from
 //! enrollment to the sink as percentiles, and one line each for target, result and verdict.
 //! Percentiles are exact (nearest rank over every sample).
+//!
+//! Only real, unique deliveries count: an arrival for an address that is not in this run's
+//! enrollment export, or a second arrival for an address, is counted apart and fails the run.
 
-use hashbrown::HashMap;
+use hashbrown::{HashMap, HashSet};
 use serde::Serialize;
 
 use crate::sink::Arrival;
 
 /// Nearest-rank percentile of an ascending slice.
-pub fn percentile(sorted: &[u64], p: f64) -> u64 {
+pub fn percentile<T: Copy + Default>(sorted: &[T], p: f64) -> T {
     if sorted.is_empty() {
-        return 0;
+        return T::default();
     }
     let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
     sorted[rank.clamp(1, sorted.len()) - 1]
 }
 
+/// Seconds at the percentiles; `None` when there are no samples (never 0, which would read as a
+/// real result).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Percentiles {
     pub count: u64,
-    pub p50_s: f64,
-    pub p95_s: f64,
-    pub p99_s: f64,
-    pub max_s: f64,
+    pub p50_s: Option<f64>,
+    pub p95_s: Option<f64>,
+    pub p99_s: Option<f64>,
+    pub max_s: Option<f64>,
 }
 
 impl Percentiles {
-    /// From microseconds, in any order.
-    pub fn from_micros(mut micros: Vec<u64>) -> Self {
+    /// From signed microseconds, in any order.
+    pub fn from_micros(mut micros: Vec<i64>) -> Self {
+        if micros.is_empty() {
+            return Self::default();
+        }
         micros.sort_unstable();
-        let s = |value: u64| value as f64 / 1e6;
+        let s = |p: f64| Some(percentile(&micros, p) as f64 / 1e6);
         Self {
             count: micros.len() as u64,
-            p50_s: s(percentile(&micros, 50.0)),
-            p95_s: s(percentile(&micros, 95.0)),
-            p99_s: s(percentile(&micros, 99.0)),
-            max_s: s(micros.last().copied().unwrap_or(0)),
+            p50_s: s(50.0),
+            p95_s: s(95.0),
+            p99_s: s(99.0),
+            max_s: micros.last().map(|v| *v as f64 / 1e6),
         }
     }
 }
@@ -92,109 +100,334 @@ pub fn peak_per_second(at_us: &[u64]) -> u64 {
     best as u64
 }
 
+/// The database clock against the host clock, measured right before and right after the run:
+/// `offset = database - host`, each from the midpoint of a host-time bracket around the query.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Clocks {
+    pub offset_before_us: i64,
+    pub offset_after_us: i64,
+    /// The wider of the two brackets: how far a midpoint can be from the truth.
+    pub uncertainty_us: u64,
+}
+
+impl Clocks {
+    fn offset_us(&self) -> i64 {
+        (self.offset_before_us + self.offset_after_us) / 2
+    }
+}
+
+/// The destination's own token bucket, when it is what holds the run to the target.
+#[derive(Clone, Debug, Serialize)]
+pub struct Bucket {
+    pub rate: f64,
+    pub burst: f64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Inputs {
     pub label: String,
     pub target_rate: f64,
-    /// Fraction under the target that still counts as met, such as 0.03 for a run limited to
-    /// the target by the destination's own bucket.
+    /// Fraction under the target that still counts as met and, with a bucket, over the bucket's
+    /// rate that is still believable.
     pub tolerance: f64,
     pub expected: u64,
     pub trim_percent: f64,
+    pub clocks: Clocks,
+    pub bucket: Option<Bucket>,
+}
+
+/// The upper bound of a bucket-limited run: the window rate may not exceed
+/// `rate * (1 + tolerance) + burst / window seconds` (the burst's tokens spent in the window), nor
+/// the busiest second `rate * (1 + tolerance) + burst`.
+#[derive(Clone, Debug, Serialize)]
+pub struct BucketCheck {
+    pub rate: f64,
+    pub burst_slack_messages: f64,
+    pub tolerance: f64,
+    pub window_rate_limit: f64,
+    pub peak_limit: f64,
+    pub within: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct QueueStats {
+    pub samples: u64,
+    pub max_depth: f64,
+    pub max_oldest_s: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct CpuStats {
+    pub samples: u64,
+    pub mean_pct: Option<f64>,
+    pub max_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Verdict {
     pub met: bool,
+    /// Every enrolled person has exactly one delivery, and nothing else arrived.
     pub complete: bool,
+    /// False when the run proves nothing: no matched delivery, or clocks that contradict.
+    pub valid: bool,
+    pub problems: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
     pub inputs: Inputs,
-    pub accepted: u64,
+    /// Every arrival in the log.
+    pub arrivals: u64,
+    /// Distinct addresses of this run's enrollments that got a message: what the rate counts.
+    pub unique_delivered: u64,
+    pub duplicates: u64,
+    pub unmatched_arrivals: u64,
     pub overall_rate: f64,
     pub peak_per_second: u64,
     pub window: Window,
     pub delay: Percentiles,
-    /// Arrivals with no enrollment row, left out of `delay`.
-    pub unmatched_arrivals: u64,
+    pub negative_delays: u64,
+    /// Delays below minus the clock uncertainty: impossible, so the clocks or the join are wrong.
+    pub clock_violations: u64,
+    pub bucket_check: Option<BucketCheck>,
+    pub queue: Option<QueueStats>,
+    pub db_cpu: Option<CpuStats>,
     pub verdict: Verdict,
 }
 
-/// `enrolled`: recipient (lower case) to enrollment time in unix microseconds.
+/// `enrolled`: address (lower case) to enrollment time in unix microseconds of the DATABASE
+/// clock.
 pub fn build(inputs: Inputs, arrivals: &[Arrival], enrolled: &HashMap<String, u64>) -> Report {
-    let mut at: Vec<u64> = arrivals.iter().map(|a| a.at_us).collect();
-    at.sort_unstable();
+    let mut sorted: Vec<&Arrival> = arrivals.iter().collect();
+    sorted.sort_by_key(|a| a.at_us);
+    let offset = inputs.clocks.offset_us();
+    let uncertainty = inputs.clocks.uncertainty_us as i64;
+    let mut seen: HashSet<String> = HashSet::new();
+    let (mut duplicates, mut unmatched) = (0u64, 0u64);
+    let mut at: Vec<u64> = Vec::new();
+    let mut delays: Vec<i64> = Vec::new();
+    for arrival in sorted {
+        let rcpt = arrival.rcpt.to_ascii_lowercase();
+        let Some(enrolled_db) = enrolled.get(&rcpt) else {
+            unmatched += 1;
+            continue;
+        };
+        if !seen.insert(rcpt) {
+            duplicates += 1;
+            continue;
+        }
+        at.push(arrival.at_us);
+        delays.push(arrival.at_us as i64 - (*enrolled_db as i64 - offset));
+    }
+    let unique = at.len() as u64;
     let window = steady_window(&at, inputs.trim_percent);
     let total_s = match (at.first(), at.last()) {
         (Some(first), Some(last)) if last > first => (last - first) as f64 / 1e6,
         _ => 0.0,
     };
-    let accepted = at.len() as u64;
-    let mut delays = Vec::with_capacity(arrivals.len());
-    let mut unmatched = 0;
-    for arrival in arrivals {
-        match enrolled.get(&arrival.rcpt.to_ascii_lowercase()) {
-            Some(start) => delays.push(arrival.at_us.saturating_sub(*start)),
-            None => unmatched += 1,
-        }
+    let negative = delays.iter().filter(|d| **d < 0).count() as u64;
+    let violations = delays.iter().filter(|d| **d < -uncertainty).count() as u64;
+    let peak = peak_per_second(&at);
+
+    let mut problems = Vec::new();
+    if unique == 0 {
+        problems.push("no delivery matches an enrollment of this run".to_owned());
     }
-    let met = window.rate >= inputs.target_rate * (1.0 - inputs.tolerance) && window.messages > 0;
-    let complete = accepted >= inputs.expected;
+    if violations > 0 {
+        problems.push(format!(
+            "{violations} deliveries precede their enrollment by more than the clock uncertainty"
+        ));
+    }
+    if duplicates > 0 {
+        problems.push(format!("{duplicates} duplicate deliveries"));
+    }
+    if unmatched > 0 {
+        problems.push(format!(
+            "{unmatched} arrivals match no enrollment of this run"
+        ));
+    }
+    let bucket_check = inputs.bucket.as_ref().map(|bucket| {
+        let ceiling = bucket.rate * (1.0 + inputs.tolerance);
+        let window_rate_limit = ceiling
+            + if window.seconds > 0.0 {
+                bucket.burst / window.seconds
+            } else {
+                bucket.burst
+            };
+        let peak_limit = ceiling + bucket.burst;
+        let within = window.rate <= window_rate_limit && peak as f64 <= peak_limit;
+        if !within {
+            problems.push(format!(
+                "the rate exceeds the destination bucket ({:.1}/s window limit {:.1}, busiest second {} limit {:.1}): the run is not what it says",
+                window.rate, window_rate_limit, peak, peak_limit
+            ));
+        }
+        BucketCheck {
+            rate: bucket.rate,
+            burst_slack_messages: bucket.burst,
+            tolerance: inputs.tolerance,
+            window_rate_limit,
+            peak_limit,
+            within,
+        }
+    });
+    let valid = unique > 0 && violations == 0;
+    let complete = unique >= inputs.expected && duplicates == 0 && unmatched == 0;
+    let lower_ok = window.rate >= inputs.target_rate * (1.0 - inputs.tolerance);
+    let met = valid
+        && duplicates == 0
+        && unmatched == 0
+        && window.messages > 0
+        && lower_ok
+        && bucket_check.as_ref().is_none_or(|check| check.within);
     Report {
+        arrivals: arrivals.len() as u64,
+        unique_delivered: unique,
+        duplicates,
+        unmatched_arrivals: unmatched,
         overall_rate: if total_s > 0.0 {
-            accepted as f64 / total_s
+            unique as f64 / total_s
         } else {
             0.0
         },
-        peak_per_second: peak_per_second(&at),
-        accepted,
+        peak_per_second: peak,
         window,
         delay: Percentiles::from_micros(delays),
-        unmatched_arrivals: unmatched,
-        verdict: Verdict { met, complete },
+        negative_delays: negative,
+        clock_violations: violations,
+        bucket_check,
+        queue: None,
+        db_cpu: None,
+        verdict: Verdict {
+            met,
+            complete,
+            valid,
+            problems,
+        },
         inputs,
     }
 }
 
 impl Report {
+    /// Adds the destination queue samples (`t_us,depth,oldest_s`) that fall in the steady window.
+    pub fn with_queue(mut self, samples: &[(u64, f64, f64)]) -> Self {
+        let inside = samples
+            .iter()
+            .filter(|(t, _, _)| *t >= self.window.start_us && *t <= self.window.end_us);
+        let mut stats = QueueStats::default();
+        for (_, depth, oldest) in inside {
+            stats.samples += 1;
+            stats.max_depth = stats.max_depth.max(*depth);
+            stats.max_oldest_s = stats.max_oldest_s.max(*oldest);
+        }
+        self.queue = Some(stats);
+        self
+    }
+
+    /// Adds the database CPU samples (`t_us`, percent of one core) inside the steady window.
+    pub fn with_db_cpu(mut self, samples: &[(u64, f64)]) -> Self {
+        let values: Vec<f64> = samples
+            .iter()
+            .filter(|(t, _)| *t >= self.window.start_us && *t <= self.window.end_us)
+            .map(|(_, v)| *v)
+            .collect();
+        self.db_cpu = Some(CpuStats {
+            samples: values.len() as u64,
+            mean_pct: (!values.is_empty())
+                .then(|| values.iter().sum::<f64>() / values.len() as f64),
+            max_pct: values.iter().copied().reduce(f64::max),
+        });
+        self
+    }
+
     /// The text form: target, result and verdict, one line each, then the detail.
     pub fn text(&self) -> String {
         let i = &self.inputs;
         let w = &self.window;
+        let secs =
+            |value: Option<f64>| value.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.2} s"));
         let mut out = String::new();
         out.push_str(&format!(
             "Target: {:.0} messages/s per deployment (architecture 19), the sink standing in for provider limits\n",
             i.target_rate
         ));
         out.push_str(&format!(
-            "Result: {:.1} messages/s over the steady window ({} messages in {:.1} s)\n",
+            "Result: {:.1} messages/s over the steady window ({} unique deliveries in {:.1} s)\n",
             w.rate, w.messages, w.seconds
         ));
         out.push_str(&format!(
-            "Verdict: {}{}\n",
+            "Verdict: {}{}{}\n",
             if self.verdict.met { "met" } else { "missed" },
             if self.verdict.complete {
                 ""
             } else {
-                " (incomplete: fewer messages than enrolled people)"
+                " (incomplete: not exactly one delivery per enrolled person)"
+            },
+            if self.verdict.valid {
+                ""
+            } else {
+                " (INVALID: nothing can be concluded)"
             }
         ));
         out.push_str(&format!(
-            "Detail [{}]: {} of {} expected accepted; overall {:.1}/s; busiest second {}; delay enrollment to sink p50 {:.2} s, p95 {:.2} s, p99 {:.2} s, max {:.2} s ({} matched, {} unmatched)\n",
+            "Detail [{}]: {} unique of {} expected ({} arrivals, {} duplicates, {} unmatched); overall {:.1}/s; busiest second {}; delay enrollment to sink p50 {}, p95 {}, p99 {}, max {} ({} matched)\n",
             i.label,
-            self.accepted,
+            self.unique_delivered,
             i.expected,
+            self.arrivals,
+            self.duplicates,
+            self.unmatched_arrivals,
             self.overall_rate,
             self.peak_per_second,
-            self.delay.p50_s,
-            self.delay.p95_s,
-            self.delay.p99_s,
-            self.delay.max_s,
+            secs(self.delay.p50_s),
+            secs(self.delay.p95_s),
+            secs(self.delay.p99_s),
+            secs(self.delay.max_s),
             self.delay.count,
-            self.unmatched_arrivals
         ));
+        out.push_str(&format!(
+            "Clocks: database minus host {:+.3} s before, {:+.3} s after the run; delay uncertainty {:.3} s; {} negative delays, {} beyond the uncertainty\n",
+            i.clocks.offset_before_us as f64 / 1e6,
+            i.clocks.offset_after_us as f64 / 1e6,
+            i.clocks.uncertainty_us as f64 / 1e6,
+            self.negative_delays,
+            self.clock_violations
+        ));
+        if let Some(check) = &self.bucket_check {
+            out.push_str(&format!(
+                "Bucket: held to {:.0}/s; upper bound = rate x (1 + tolerance {:.0}%) + burst slack ({:.0} messages): window rate at most {:.1}/s, busiest second at most {:.1}: {}\n",
+                check.rate,
+                check.tolerance * 100.0,
+                check.burst_slack_messages,
+                check.window_rate_limit,
+                check.peak_limit,
+                if check.within { "within" } else { "EXCEEDED" }
+            ));
+        }
+        if let Some(queue) = &self.queue {
+            out.push_str(&format!(
+                "Queue (scheduler gauges, steady window, {} samples): max depth {:.0}, max oldest age {:.1} s{}\n",
+                queue.samples,
+                queue.max_depth,
+                queue.max_oldest_s,
+                if queue.max_depth > 0.0 {
+                    ": a queue stood in the window, so the destination or the workers were the limit"
+                } else {
+                    ""
+                }
+            ));
+        }
+        if let Some(cpu) = &self.db_cpu {
+            out.push_str(&format!(
+                "Database CPU (steady window, {} samples): mean {}, max {} percent of one core\n",
+                cpu.samples,
+                cpu.mean_pct.map_or("n/a".to_owned(), |v| format!("{v:.0}")),
+                cpu.max_pct.map_or("n/a".to_owned(), |v| format!("{v:.0}"))
+            ));
+        }
+        for problem in &self.verdict.problems {
+            out.push_str(&format!("Problem: {problem}\n"));
+        }
         out
     }
 }
@@ -220,7 +453,7 @@ pub fn parse_arrivals(text: &str) -> (Vec<Arrival>, u64) {
     (arrivals, bad)
 }
 
-/// Reads `address,epoch_microseconds` lines (the enrollment export).
+/// Reads `address,epoch_microseconds` lines (the enrollment export, database clock).
 pub fn parse_enrollments(text: &str) -> HashMap<String, u64> {
     let mut map = HashMap::new();
     for line in text.lines() {
@@ -231,6 +464,71 @@ pub fn parse_enrollments(text: &str) -> HashMap<String, u64> {
         }
     }
     map
+}
+
+/// Reads `t_us,depth,oldest_s` lines (the scheduler's destination queue gauges).
+pub fn parse_queue(text: &str) -> Vec<(u64, f64, f64)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().split(',');
+            Some((
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+            ))
+        })
+        .collect()
+}
+
+/// Unix microseconds of `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`.
+pub fn parse_iso_us(text: &str) -> Option<u64> {
+    let text = text.strip_suffix('Z')?;
+    let (date, time) = text.split_once('T')?;
+    let mut d = date.split('-');
+    let (y, m, day): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, ""));
+    let mut t = clock.split(':');
+    let (h, mi, s): (i64, i64, i64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+    );
+    let mut micros: i64 = 0;
+    for (n, c) in fraction.chars().take(6).enumerate() {
+        micros += i64::from(c.to_digit(10)?) * 10_i64.pow(5 - n as u32);
+    }
+    // Days from the civil date (proleptic Gregorian).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(((days * 86_400 + h * 3600 + mi * 60 + s) * 1_000_000) + micros).ok()
+}
+
+/// The `docker stats` samples of one container: `(t_us, cpu percent)`. Lines are the JSON objects
+/// the run script writes (`Name`, `CPUPerc` like `123.45%`, and `t`).
+pub fn parse_docker_cpu(text: &str, container: &str) -> Vec<(u64, f64)> {
+    text.lines()
+        .filter_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            if v.get("Name")?.as_str()? != container {
+                return None;
+            }
+            let pct = v
+                .get("CPUPerc")?
+                .as_str()?
+                .trim_end_matches('%')
+                .parse()
+                .ok()?;
+            Some((parse_iso_us(v.get("t")?.as_str()?)?, pct))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -262,6 +560,8 @@ mod tests {
             tolerance: 0.0,
             expected: 1000,
             trim_percent: 10.0,
+            clocks: Clocks::default(),
+            bucket: None,
         }
     }
 
@@ -271,9 +571,9 @@ mod tests {
         assert_eq!(percentile(&sorted, 50.0), 50);
         assert_eq!(percentile(&sorted, 95.0), 95);
         assert_eq!(percentile(&sorted, 99.0), 99);
-        assert_eq!(percentile(&[1, 2, 3, 4], 50.0), 2);
-        assert_eq!(percentile(&[1, 2, 3, 4], 99.0), 4);
-        assert_eq!(percentile(&[], 50.0), 0);
+        assert_eq!(percentile(&[1u64, 2, 3, 4], 50.0), 2);
+        assert_eq!(percentile(&[1u64, 2, 3, 4], 99.0), 4);
+        assert_eq!(percentile::<u64>(&[], 50.0), 0);
     }
 
     #[test]
@@ -302,31 +602,19 @@ mod tests {
         let (arrivals, enrolled) = fixed();
 
         let met = build(inputs(300.0), &arrivals, &enrolled);
-        assert!(met.verdict.met && met.verdict.complete);
+        assert!(met.verdict.met && met.verdict.complete && met.verdict.valid);
         // The delay is 1.000 s plus 0 to 1.998 s in 2 ms steps: nearest ranks of 1000 samples.
         assert_eq!(met.delay.count, 1000);
-        assert!(
-            (met.delay.p50_s - 1.998).abs() < 1e-9,
-            "{}",
-            met.delay.p50_s
-        );
-        assert!(
-            (met.delay.p95_s - 2.898).abs() < 1e-9,
-            "{}",
-            met.delay.p95_s
-        );
-        assert!(
-            (met.delay.p99_s - 2.978).abs() < 1e-9,
-            "{}",
-            met.delay.p99_s
-        );
-        assert!((met.delay.max_s - 2.998).abs() < 1e-9);
+        assert!((met.delay.p50_s.unwrap_or(-1.0) - 1.998).abs() < 1e-9);
+        assert!((met.delay.p95_s.unwrap_or(-1.0) - 2.898).abs() < 1e-9);
+        assert!((met.delay.p99_s.unwrap_or(-1.0) - 2.978).abs() < 1e-9);
+        assert!((met.delay.max_s.unwrap_or(-1.0) - 2.998).abs() < 1e-9);
         let text = met.text();
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("Target: 300 messages/s"));
         assert_eq!(
             lines[1],
-            "Result: 500.0 messages/s over the steady window (799 messages in 1.6 s)"
+            "Result: 500.0 messages/s over the steady window (799 unique deliveries in 1.6 s)"
         );
         assert_eq!(lines[2], "Verdict: met");
 
@@ -351,19 +639,143 @@ mod tests {
     }
 
     #[test]
-    fn arrivals_without_an_enrollment_are_left_out_of_the_delay() {
-        let (arrivals, mut enrolled) = fixed();
-        enrolled.remove("p0@x.test");
+    fn duplicates_and_arrivals_of_other_runs_are_not_counted_and_fail_the_run() {
+        let (mut arrivals, enrolled) = fixed();
+        // A second delivery to p5, and a late message of an earlier run.
+        arrivals.push(arrival(13_000_000, "p5@x.test"));
+        arrivals.push(arrival(13_000_100, "old-run@x.test"));
         let report = build(inputs(300.0), &arrivals, &enrolled);
+        assert_eq!(report.arrivals, 1002);
+        assert_eq!(report.unique_delivered, 1000);
+        assert_eq!(report.duplicates, 1);
         assert_eq!(report.unmatched_arrivals, 1);
-        assert_eq!(report.delay.count, 999);
+        assert_eq!(report.delay.count, 1000);
+        assert!(!report.verdict.met && !report.verdict.complete);
+        assert!(report.text().contains("1 duplicate deliveries"));
     }
 
     #[test]
-    fn too_few_messages_have_no_window() {
-        assert_eq!(steady_window(&[1, 2], 10.0), Window::default());
-        let report = build(inputs(300.0), &[], &HashMap::new());
+    fn the_clock_offset_moves_the_enrollment_and_a_delivery_before_it_is_flagged() {
+        let (arrivals, enrolled) = fixed();
+        // The database clock runs 5 s ahead of the host: enrollment at db 9 s is host 4 s, so the
+        // delay of the first message grows from 1 s to 6 s.
+        let mut ahead = inputs(300.0);
+        ahead.clocks = Clocks {
+            offset_before_us: 5_000_000,
+            offset_after_us: 5_000_000,
+            uncertainty_us: 100_000,
+        };
+        let report = build(ahead, &arrivals, &enrolled);
+        assert!((report.delay.p50_s.unwrap_or(0.0) - 6.998).abs() < 1e-9);
+        assert_eq!(report.clock_violations, 0);
+
+        // Database 3 s behind the host: enrollment at db 9 s is host 12 s, after the first
+        // deliveries at 10 s. Those are impossible beyond a 0.1 s uncertainty.
+        let mut behind = inputs(300.0);
+        behind.clocks = Clocks {
+            offset_before_us: -3_000_000,
+            offset_after_us: -3_000_000,
+            uncertainty_us: 100_000,
+        };
+        let report = build(behind, &arrivals, &enrolled);
+        assert!(report.negative_delays > 0);
+        assert!(report.clock_violations > 0);
+        assert!(!report.verdict.valid && !report.verdict.met);
+        // Inside the uncertainty it is only counted.
+        let mut close = inputs(300.0);
+        close.clocks = Clocks {
+            offset_before_us: -1_050_000,
+            offset_after_us: -1_050_000,
+            uncertainty_us: 100_000,
+        };
+        let report = build(close, &arrivals, &enrolled);
+        assert!(report.negative_delays > 0);
+        assert_eq!(report.clock_violations, 0);
+    }
+
+    #[test]
+    fn queue_gauges_count_only_samples_inside_the_steady_window() {
+        let (arrivals, enrolled) = fixed();
+        let report = build(inputs(300.0), &arrivals, &enrolled);
+        let samples = parse_queue(
+            "9000000,900,30\n10300000,12,0.5\n11000000,7,0.9\n12500000,500,20\nbroken\n",
+        );
+        assert_eq!(samples.len(), 4);
+        let queue = report.with_queue(&samples).queue.unwrap_or_default();
+        assert_eq!(queue.samples, 2);
+        assert_eq!(queue.max_depth, 12.0);
+        assert_eq!(queue.max_oldest_s, 0.9);
+    }
+
+    #[test]
+    fn a_bucket_limited_run_that_beats_its_bucket_is_not_met() {
+        let (arrivals, enrolled) = fixed();
+        // 500 messages/s through a 300/s bucket with a burst of 100 cannot be.
+        let mut held = inputs(300.0);
+        held.tolerance = 0.03;
+        held.bucket = Some(Bucket {
+            rate: 300.0,
+            burst: 100.0,
+        });
+        let report = build(held.clone(), &arrivals, &enrolled);
+        let check = report
+            .bucket_check
+            .clone()
+            .map(|c| (c.within, c.window_rate_limit));
+        assert_eq!(check.map(|c| c.0), Some(false));
         assert!(!report.verdict.met);
+        assert!(report.text().contains("EXCEEDED"));
+
+        // The same rate through a 1000/s bucket is inside it.
+        held.bucket = Some(Bucket {
+            rate: 1000.0,
+            burst: 100.0,
+        });
+        assert!(build(held, &arrivals, &enrolled).verdict.met);
+    }
+
+    #[test]
+    fn no_matched_delivery_is_not_a_result() {
+        let (arrivals, _) = fixed();
+        let report = build(inputs(300.0), &arrivals, &HashMap::new());
+        assert_eq!(report.delay, Percentiles::default());
+        assert!(report.delay.p50_s.is_none());
+        assert!(!report.verdict.valid && !report.verdict.met);
+        let text = report.text();
+        assert!(text.contains("p50 n/a"));
+        assert!(!text.contains("0.00 s"));
+        assert!(text.contains("INVALID"));
+        let empty = build(inputs(300.0), &[], &HashMap::new());
+        assert!(!empty.verdict.valid);
+    }
+
+    #[test]
+    fn database_cpu_is_taken_over_the_steady_window_only() {
+        let (arrivals, enrolled) = fixed();
+        let report = build(inputs(300.0), &arrivals, &enrolled);
+        let stats = "\
+{\"Name\":\"pg\",\"CPUPerc\":\"400.00%\",\"t\":\"1970-01-01T00:00:09.500000Z\"}
+{\"Name\":\"pg\",\"CPUPerc\":\"100.00%\",\"t\":\"1970-01-01T00:00:10.500000Z\"}
+{\"Name\":\"pg\",\"CPUPerc\":\"200.00%\",\"t\":\"1970-01-01T00:00:11.500000Z\"}
+{\"Name\":\"other\",\"CPUPerc\":\"900.00%\",\"t\":\"1970-01-01T00:00:11.000000Z\"}
+{\"Name\":\"pg\",\"CPUPerc\":\"50.00%\",\"t\":\"1970-01-01T00:00:13.000000Z\"}
+";
+        let cpu = parse_docker_cpu(stats, "pg");
+        assert_eq!(cpu.len(), 4);
+        let cpu = report.with_db_cpu(&cpu).db_cpu.unwrap_or_default();
+        assert_eq!(cpu.samples, 2);
+        assert_eq!(cpu.mean_pct, Some(150.0));
+        assert_eq!(cpu.max_pct, Some(200.0));
+    }
+
+    #[test]
+    fn iso_times_parse_to_unix_microseconds() {
+        assert_eq!(parse_iso_us("1970-01-01T00:00:09.500000Z"), Some(9_500_000));
+        assert_eq!(
+            parse_iso_us("2026-10-25T12:00:00.123456Z"),
+            Some(1_792_929_600_123_456)
+        );
+        assert_eq!(parse_iso_us("nonsense"), None);
     }
 
     #[test]

@@ -157,7 +157,8 @@ pub fn total(samples: &[Sample], name: &str, filter: &[(&str, &str)]) -> f64 {
 }
 
 /// What the send benchmark reads from the workers: claim lag of `delivery.send`, the render
-/// pool's wait and restarts, and the destination counters and gauges. There is no dedicated
+/// pool's wait and restarts, and the destination counters (the queue gauges are the scheduler's,
+/// sampled by the run script). There is no dedicated
 /// rate-bucket wait metric in the product; the bucket shows as the destination queue and, in the
 /// duration of `delivery.send`, as deferrals.
 pub fn summarize(samples: &[Sample]) -> Value {
@@ -186,12 +187,6 @@ pub fn summarize(samples: &[Sample]) -> Value {
         "render_failures_total": total(samples, "zirv_flow_render_failures_total", &[]),
         "destination_attempts_total": total(samples, "zirv_flow_destination_attempts_total", &[]),
         "destination_outcomes_total": outcomes,
-        "destination_queue_depth": total(samples, "zirv_flow_destination_queue_depth", &[]),
-        "destination_queue_oldest_seconds": samples
-            .iter()
-            .filter(|s| s.name == "zirv_flow_destination_queue_oldest_seconds")
-            .map(|s| s.value)
-            .fold(0.0, f64::max),
         "attempt_record_failures_total": total(samples, "zirv_flow_delivery_attempt_record_failures_total", &[]),
     })
 }
@@ -262,7 +257,6 @@ zirv_flow_destination_queue_depth{workspace=\"w\",destination=\"d\"} 12
         assert!((hist.quantile(0.25).unwrap_or(-1.0) - 0.05).abs() < 1e-9);
         let summary = summarize(&samples);
         assert_eq!(summary["render_restarts_total"], 4.0);
-        assert_eq!(summary["destination_queue_depth"], 24.0);
         assert_eq!(summary["delivery_send_claim_lag"]["count"], 200.0);
     }
 }

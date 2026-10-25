@@ -341,21 +341,38 @@ cover that run only:
 | block or HTML template | `TEMPLATE=blocks` or `html` | `BENCH_RENDER_POOL` sets `render.pool_size` (default 2) in the workers |
 
 **Measures.** `sendbench report` joins the sink log with the enrollment times (`enrollments.created_at`
-by address) and prints, one line each, `Target`, `Result` and `Verdict`, then a detail line.
+by address) and prints, one line each, `Target`, `Result` and `Verdict`, then detail lines.
+- Only real, unique deliveries count: the rate and "complete" use distinct addresses that appear in
+  this run's `enrollments.csv`. Duplicates and arrivals with no enrollment (a previous run's
+  stragglers) are counted apart and make `met` and "complete" false. `run.sh` refuses to start while
+  a `delivery.send` job is `ready` or `running`, so a run never drains the previous one.
 - Rate: messages per second at the sink over the steady window, from the arrival at rank 10% to the
   arrival at rank 90% (`--trim`), plus the overall rate and the busiest second.
-- Delay: enrollment to the sink, nearest-rank p50, p95, p99 and max.
+- Delay: enrollment to the sink, nearest-rank p50, p95, p99 and max, printed `n/a` when there is
+  nothing to measure. The database and host clocks are compared right before and right after the
+  run (host time before, `clock_timestamp()`, host time after; the midpoint). The offset moves the
+  enrollment instants onto the host clock, both offsets and the bracket width (the delay's
+  uncertainty) are printed, negative delays are counted, and a delay below minus the uncertainty
+  makes the run invalid. A run with 0 matched deliveries is invalid too, and `sendbench report`
+  exits non-zero for an invalid run.
+- Bucket-limited runs (`DEST_RATE` at most 300): `met` also needs the window rate at most
+  `rate x (1 + tolerance 3%) + burst / window seconds` and the busiest second at most
+  `rate x 1.03 + burst`; the report names the tolerance and the burst slack and says EXCEEDED
+  otherwise.
 - From each worker's `/metrics` (summed over processes; quantiles are estimated from the buckets):
   `zirv_flow_job_claim_lag_seconds{kind="delivery.send"}`, the render pool's
   `zirv_flow_render_wait_seconds`, `zirv_flow_render_duration_seconds` and
-  `zirv_flow_render_restarts_total`, and the destination counters and gauges. **There is no
-  dedicated rate-bucket wait metric in the product**; the bucket shows as `delivery.send` job
-  duration and claim lag, the `zirv_flow_destination_queue_*` gauges and `messages.txt`, and the
-  report says so rather than inventing a number.
-- Database CPU: `docker stats` of the PostgreSQL container every 3 s, mean and peak percent of
-  one core in `db-cpu.json`.
-- `messages.txt` holds the outcome counts of the flow's messages and any dead jobs. A run with
-  fewer messages than people is marked incomplete and cannot count as a clean result.
+  `zirv_flow_render_restarts_total`, and the destination counters. **There is no dedicated
+  rate-bucket wait metric in the product**; the bucket shows as `delivery.send` job duration and
+  claim lag, the queue gauges and `messages.txt`, and the report says so rather than inventing a
+  number.
+- Queue gauges: `zirv_flow_destination_queue_depth` and `_oldest_seconds` are published by the
+  scheduler leader, not the workers, so `run.sh` samples the scheduler (`:9101`) every second into
+  `queue.csv`; the report gives the max depth and max oldest age inside the steady window (a queue
+  standing there means the destination or the workers were the limit; `variant.txt` records it).
+- Database CPU: `docker stats` of the PostgreSQL container every 3 s, cut to the steady window by
+  the report (mean and max percent of one core, with the sample count).
+- `messages.txt` holds the outcome counts of the flow's messages and any dead jobs.
 
 Results are in `$M6_OUT/<label>/`. Run the light variants first (a few thousand people), then the
 full set, and report them in `docs/benchmarks/m6-send.md` with the hardware and PostgreSQL settings

@@ -24,7 +24,7 @@
 #   RUN_TIMEOUT_S 3600
 #
 # Results: $M6_OUT/<LABEL>/ (report.json, report.txt, arrivals.ndjson, enrollments.csv,
-# metrics-w*.txt, docker-stats.ndjson, db-cpu.json, messages.txt, variant.txt).
+# metrics-w*.txt, docker-stats.ndjson, queue.csv, messages.txt, variant.txt).
 #
 # Usage: PEOPLE=20000 WORKERS=3 TEMPLATE=html scripts/bench/m6/run.sh LABEL
 
@@ -59,6 +59,18 @@ tpl="$(state_get "$tpl_key")"
 [ -n "$dest" ] && [ -n "$tpl" ] || die "run setup.sh first"
 login || die "cannot sign in; run stack.sh up"
 [ -f "$M6_SINK_DIR/sink.pid" ] && kill -0 "$(cat "$M6_SINK_DIR/sink.pid")" 2>/dev/null || die "the sink is not running; sink.sh start"
+busy="$(pgc -At -c "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND state IN ('ready', 'running')")"
+[ "$busy" = 0 ] || die "$busy delivery.send jobs are still ready or running: let the previous run drain first"
+
+# clock_offset: the database clock minus the host clock, microseconds, from the midpoint of a host
+# time bracket around SELECT clock_timestamp(); prints "offset bracket_width".
+clock_offset() {
+  local h1 db h2
+  h1="$(date +%s%6N)"
+  db="$(pgc -At -c "SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint")"
+  h2="$(date +%s%6N)"
+  echo "$((db - (h1 + h2) / 2)) $((h2 - h1))"
+}
 
 # 1. Workers: fresh processes, so the metrics cover this run only.
 log "starting $workers worker process(es), concurrency $BENCH_WORKER_CONCURRENCY"
@@ -124,10 +136,24 @@ sampler() {
     sleep 3
   done
 }
+# The destination queue gauges are the scheduler leader's (the workers do not publish them):
+# one line `t_us,depth,oldest_s` per second.
+queue_sampler() {
+  while [ ! -e "$out/stop" ]; do
+    curl -fsS --max-time 2 "http://127.0.0.1:9101/metrics" 2>/dev/null \
+      | awk -v t="$(date +%s%6N)" '/^zirv_flow_destination_queue_depth/ {d += $NF}
+          /^zirv_flow_destination_queue_oldest_seconds/ {if ($NF > o) o = $NF}
+          END {printf "%s,%d,%s\n", t, d, o + 0}' >>"$out/queue.csv" || true
+    sleep 1
+  done
+}
 sampler &
 sampler_pid=$!
+queue_sampler &
+queue_pid=$!
 count_since() { awk -F'[:,]' -v t="$1" '$2 + 0 >= t' "$M6_SINK_DIR/arrivals.ndjson" | wc -l; }
 
+read -r offset_before width_before < <(clock_offset)
 t0="$(date +%s%6N)"
 api_json POST "/workspaces/$ws/flows/$flow/start" "$(jq -nc --arg l "$list" '{list_id: $l}')" >/dev/null
 log "run $label started: $people people, flow $flow"
@@ -145,7 +171,9 @@ while :; do
 done
 sleep 2
 touch "$out/stop"
-wait "$sampler_pid" 2>/dev/null || true
+wait "$sampler_pid" "$queue_pid" 2>/dev/null || true
+read -r offset_after width_after < <(clock_offset)
+uncertainty=$(( width_before > width_after ? width_before : width_after ))
 
 # 5. Collect.
 awk -F'[:,]' -v t="$t0" '$2 + 0 >= t' "$M6_SINK_DIR/arrivals.ndjson" >"$out/arrivals.ndjson"
@@ -159,22 +187,29 @@ pgc -At -v flow="$flow" -c \
 pgc -At -v flow="$flow" -c \
   "SELECT 'messages.' || status || coalesce('/' || reason, '') || ' ' || n FROM (SELECT status, reason, count(*) AS n FROM messages WHERE flow_id = :'flow' GROUP BY status, reason) t ORDER BY 1" >"$out/messages.txt"
 pgc -At -c "SELECT 'jobs.' || kind || '.' || state || ' ' || n FROM (SELECT kind, state, count(*) AS n FROM jobs WHERE state IN ('dead', 'ready', 'running') GROUP BY kind, state) t ORDER BY 1" >>"$out/messages.txt"
-# Database CPU: the postgres container's samples, percent of one core.
 pgname="$(docker inspect --format '{{.Name}}' "$(pg_container)" | sed 's|^/||')"
-jq -sc --arg n "$pgname" '[.[] | select(.Name == $n) | (.CPUPerc | rtrimstr("%") | tonumber)]
-  | {samples: length, mean_pct: (if length > 0 then add / length else null end), max_pct: (max // null)}' \
-  "$out/docker-stats.ndjson" >"$out/db-cpu.json"
 {
+  echo "clock_offset_before_us=$offset_before bracket_before_us=$width_before"
+  echo "clock_offset_after_us=$offset_after bracket_after_us=$width_after"
   echo "finished=$(date -u +%FT%TZ)"
-  echo "db_cpu=$(cat "$out/db-cpu.json")"
 } >>"$out/variant.txt"
 
-# 6. Report. A run held to the target by the bucket (DEST_RATE at most 300) gets a 3% tolerance.
+# 6. Report. Database CPU and the queue gauges are cut to the steady window by the report. A run
+# held to the target by the bucket (DEST_RATE at most 300) gets a 3% tolerance and an upper bound
+# at the bucket's rate and burst. The report exits non-zero for an invalid run.
 tol=0
-[ "$dest_rate" -gt 300 ] || tol=0.03
+bucket_args=()
+if [ "$dest_rate" -le 300 ]; then
+  tol=0.03
+  bucket_args=(--bucket-rate "$dest_rate" --bucket-burst "$dest_rate")
+fi
 metrics_args=()
 for f in "$out"/metrics-w*.txt; do metrics_args+=(--metrics "$f"); done
 "$SENDBENCH" report --arrivals "$out/arrivals.ndjson" --enrollments "$out/enrollments.csv" \
   "${metrics_args[@]}" --label "$label" --target 300 --tolerance "$tol" --expected "$people" \
-  --out "$out/report.json" | tee "$out/report.txt"
-jq -c --slurpfile c "$out/db-cpu.json" '.metrics + {db_cpu: $c[0]}' "$out/report.json" >&2
+  --offset-before-us "$offset_before" --offset-after-us "$offset_after" --uncertainty-us "$uncertainty" \
+  "${bucket_args[@]}" --queue "$out/queue.csv" --docker-stats "$out/docker-stats.ndjson" \
+  --db-container "$pgname" --out "$out/report.json" | tee "$out/report.txt"
+# Whether the bucket (or the workers) was the limit: a queue stood in the steady window.
+echo "queue_in_window=$(jq -c .queue "$out/report.json") db_cpu_in_window=$(jq -c .db_cpu "$out/report.json")" >>"$out/variant.txt"
+jq -c .metrics "$out/report.json" >&2

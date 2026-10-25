@@ -100,6 +100,30 @@ enum Command {
         /// Percent of messages left out at each end of the steady window.
         #[arg(long, default_value_t = 10.0)]
         trim: f64,
+        /// Database clock minus host clock before the run, microseconds.
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        offset_before_us: i64,
+        /// The same after the run.
+        #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
+        offset_after_us: i64,
+        /// The wider of the two host-time brackets around the clock queries, microseconds.
+        #[arg(long, default_value_t = 0)]
+        uncertainty_us: u64,
+        /// The destination's rate when its bucket is what holds the run to the target.
+        #[arg(long)]
+        bucket_rate: Option<f64>,
+        /// The destination's burst (used with --bucket-rate).
+        #[arg(long, default_value_t = 0.0)]
+        bucket_burst: f64,
+        /// The scheduler queue samples: lines of `t_us,depth,oldest_s`.
+        #[arg(long)]
+        queue: Option<PathBuf>,
+        /// The `docker stats` samples (JSON lines with `Name`, `CPUPerc` and `t`).
+        #[arg(long)]
+        docker_stats: Option<PathBuf>,
+        /// The container name whose CPU is the database's.
+        #[arg(long, default_value = "")]
+        db_container: String,
         /// Write the JSON report here.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -192,6 +216,14 @@ fn run_report(command: Command) -> Result<(), String> {
         tolerance,
         expected,
         trim,
+        offset_before_us,
+        offset_after_us,
+        uncertainty_us,
+        bucket_rate,
+        bucket_burst,
+        queue,
+        docker_stats,
+        db_container,
         out,
     } = command
     else {
@@ -206,10 +238,29 @@ fn run_report(command: Command) -> Result<(), String> {
             tolerance,
             expected,
             trim_percent: trim,
+            clocks: report::Clocks {
+                offset_before_us,
+                offset_after_us,
+                uncertainty_us,
+            },
+            bucket: bucket_rate.map(|rate| report::Bucket {
+                rate,
+                burst: bucket_burst,
+            }),
         },
         &arrivals,
         &enrolled,
     );
+    let mut built = built;
+    if let Some(path) = &queue {
+        built = built.with_queue(&report::parse_queue(&read(path, "--queue")?));
+    }
+    if let Some(path) = &docker_stats {
+        built = built.with_db_cpu(&report::parse_docker_cpu(
+            &read(path, "--docker-stats")?,
+            &db_container,
+        ));
+    }
     let mut samples = Vec::new();
     for path in &metrics {
         samples.extend(prom::parse(&read(path, "--metrics")?));
@@ -225,6 +276,12 @@ fn run_report(command: Command) -> Result<(), String> {
         let text = serde_json::to_string_pretty(&json).map_err(|error| error.to_string())?;
         std::fs::write(path, text + "\n")
             .map_err(|error| format!("cannot write --out: {error}"))?;
+    }
+    if !built.verdict.valid {
+        return Err(format!(
+            "the run is invalid: {}",
+            built.verdict.problems.join("; ")
+        ));
     }
     Ok(())
 }
@@ -280,11 +337,13 @@ mod tests {
                 tolerance: 0.0,
                 expected: 200,
                 trim_percent: 10.0,
+                clocks: report::Clocks::default(),
+                bucket: None,
             },
             &sink.arrivals(),
             &enrolled,
         );
-        assert_eq!(report.accepted, 200);
+        assert_eq!(report.unique_delivered, 200);
         assert!(report.verdict.complete);
         assert_eq!(report.delay.count, 200);
         assert_eq!(report.unmatched_arrivals, 0);
