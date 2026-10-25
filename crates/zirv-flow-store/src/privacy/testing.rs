@@ -268,6 +268,7 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'flow.step', \n            jsonb_build_object('enrollment_id', $3::text), 'seed:step', 'api', 't', \n            gen_random_uuid())",
         "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'webhook.call', \n            jsonb_build_object('person_id', $4::text, 'enrollment_id', $3::text), \n            'seed:hook', 'api', 't', gen_random_uuid())",
         "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'delivery.send', \n            jsonb_build_object('person_id', $4::text, 'enrollment_id', $3::text), \n            'seed:send', 'api', 't', gen_random_uuid())",
+        "INSERT INTO jobs (id, workspace_id, kind, payload, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'delivery.sync', \n            jsonb_build_object('person_id', $4::text, 'enrollment_id', $3::text), \n            'seed:sync', 'api', 't', gen_random_uuid())",
         "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, template_id, \n            destination_id, status, reason, completed_at) \n         VALUES (gen_random_uuid(), $2, $4, $3, 'n', gen_random_uuid(), gen_random_uuid(), \n            'skipped', 'no_consent', now())",
         "INSERT INTO jobs (id, workspace_id, kind, payload, state, lease_token, lease_expires_at, \n            attempts, unique_key, cause_kind, cause_id, trace_id) \n         VALUES (gen_random_uuid(), $2, 'flow.step', \n            jsonb_build_object('enrollment_id', $3::text), 'running', gen_random_uuid(), \n            now() + interval '1 hour', 1, 'seed:running', 'api', 't', gen_random_uuid())",
     ] {
@@ -386,6 +387,39 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     .execute(pool)
     .await
     .unwrap();
+
+    // Forwarding outbox rows (a pending, a dead and a delivered one) of the survivor, the merged
+    // person and the bystander. Their payloads hold what a mapping took from an event.
+    let destination = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO destinations (id, workspace_id, kind, name, config) \
+         VALUES ($1, $2, 'fake', 'seeded sink', '{}')",
+    )
+    .bind(destination)
+    .bind(ws.as_uuid())
+    .execute(pool)
+    .await
+    .unwrap();
+    for (holder, state) in [
+        (person, "pending"),
+        (person, "dead"),
+        (merged, "pending"),
+        (bystander, "delivered"),
+    ] {
+        sqlx::query(
+            "INSERT INTO forwarding_outbox (id, workspace_id, destination_id, rule_id, event_id, \
+                person_id, idempotency_key, payload, state) \
+             VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), $3, \
+                     'k', '{\"who\": \"seeded\"}', $4)",
+        )
+        .bind(ws.as_uuid())
+        .bind(destination)
+        .bind(holder)
+        .bind(state)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
 
     // Undrained inbox rows: the person's, spelled differently, and the bystander's.
     let item = |email: &str, message_id: &str| IngestItem {

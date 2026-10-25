@@ -553,6 +553,10 @@ pub async fn apply_refresh(
             .map_err(StoreError::query)?;
     }
     let outcome = captured.outcome();
+    if outcome.entered + outcome.exited > 0 {
+        crate::enqueue_segment_forwarding(connection, apply.workspace, apply.segment, apply.now)
+            .await?;
+    }
     if capture {
         let changes = captured.changes();
         if !triggered.is_empty() {
@@ -1172,5 +1176,73 @@ mod tests {
         commit(first).await.unwrap();
 
         assert_eq!(second.await.unwrap(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_segment_events_reach_the_forwarding_outbox_in_the_passes_transaction(
+        pool: PgPool,
+    ) {
+        use crate::forwarding::support::{
+            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+        };
+
+        let ws = workspace(&pool, "one").await;
+        let seg = segment(&pool, ws, "Pros", 60).await;
+        person(&pool, ws, "ada@example.com", "pro").await;
+        person(&pool, ws, "bob@example.com", "pro").await;
+        person(&pool, ws, "cy@example.com", "free").await;
+        let sink = destination_in(&pool, ws).await;
+        add_rule(
+            &pool,
+            ws,
+            sink,
+            "segment.entered",
+            serde_json::json!([]),
+            serde_json::json!({"segment": {"from": "event.properties", "pointer": "/segment_id"}}),
+        )
+        .await;
+        let job = job_trace();
+        let cause = MembershipCause::Initial;
+        let trace = membership_trace(cause, &job, seg.id, Uuid::new_v4());
+
+        let mut tx = begin(&pool).await.unwrap();
+        lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+        let apply = RefreshApply {
+            workspace: ws,
+            segment: seg.id,
+            version: 1,
+            members: &plan_query("pro"),
+            now: NOW,
+            cause,
+            trace: &trace,
+            job: (Uuid::new_v4(), 1),
+            job_trace: &job,
+        };
+        apply_refresh(&mut tx, &apply).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+            (0, 0)
+        );
+
+        refresh(&pool, ws, seg.id, "pro", cause, NOW).await;
+        assert_eq!(
+            payloads(&pool, ws).await,
+            vec![serde_json::json!({"segment": seg.id.to_string()}); 2]
+        );
+        assert_eq!(forward_jobs(&pool).await, 1);
+
+        // The exits of the next pass have no rule: nothing more is copied.
+        refresh(
+            &pool,
+            ws,
+            seg.id,
+            "nobody",
+            MembershipCause::Time,
+            NOW + time::Duration::hours(1),
+        )
+        .await;
+        assert_eq!(outbox_rows(&pool, ws).await, 2);
     }
 }

@@ -130,6 +130,8 @@ mod tests {
                 "flow.lifecycle",
                 "webhook.call",
                 "delivery.send",
+                "delivery.sync",
+                "event.forward",
                 "sending_domain.verify",
                 "template.test_send"
             ]
@@ -181,6 +183,8 @@ mod tests {
                 "flow.lifecycle",
                 "webhook.call",
                 "delivery.send",
+                "delivery.sync",
+                "event.forward",
                 "sending_domain.verify",
                 "template.test_send",
                 "test.first",

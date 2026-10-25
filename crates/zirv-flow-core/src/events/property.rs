@@ -65,14 +65,24 @@ pub const WEBHOOK_SUCCEEDED_EVENT: &str = "webhook.succeeded";
 /// The event a flow writes when a webhook action's call failed for good (architecture 9.1).
 pub const WEBHOOK_FAILED_EVENT: &str = "webhook.failed";
 
+/// The event a flow writes when a profile sync action's call succeeded (architecture 10.2).
+pub const SYNC_SUCCEEDED_EVENT: &str = "sync.succeeded";
+/// The event a flow writes when a profile sync action's call failed for good (architecture 10.2).
+pub const SYNC_FAILED_EVENT: &str = "sync.failed";
+
 /// The reserved prefixes: names under them are the system's.
 const RESERVED_EVENT_PREFIXES: [&str; 2] = [RESERVED_EVENT_PREFIX, EMAIL_EVENT_PREFIX];
 
 /// The reserved names that are not under a reserved prefix.
-const RESERVED_EVENT_NAMES: [&str; 2] = [WEBHOOK_SUCCEEDED_EVENT, WEBHOOK_FAILED_EVENT];
+const RESERVED_EVENT_NAMES: [&str; 4] = [
+    WEBHOOK_SUCCEEDED_EVENT,
+    WEBHOOK_FAILED_EVENT,
+    SYNC_SUCCEEDED_EVENT,
+    SYNC_FAILED_EVENT,
+];
 
 /// Whether `name` is reserved for the system, ignoring case so a variant cannot slip past: the
-/// `segment.` and `email.` prefixes, and the two webhook outcome names.
+/// `segment.` and `email.` prefixes, and the webhook and sync outcome names.
 pub fn is_reserved_event_name(name: &str) -> bool {
     RESERVED_EVENT_PREFIXES.iter().any(|reserved| {
         name.get(..reserved.len())
@@ -91,7 +101,7 @@ pub fn validate_client_event_name(name: &str) -> Result<(), ValidationError> {
     if is_reserved_event_name(name) {
         Err(ValidationError::new(
             "name",
-            "must not start with segment. or email. or be a webhook outcome name, which the system reserves",
+            "must not start with segment. or email. or be a webhook or sync outcome name, which the system reserves",
         ))
     } else {
         Ok(())
@@ -314,6 +324,8 @@ mod tests {
             "SEGMENT.",
             "webhook.succeeded",
             "Webhook.Failed",
+            "sync.succeeded",
+            "Sync.Failed",
             "email.sent",
             "email.skipped",
             "email.opened",
@@ -331,6 +343,8 @@ mod tests {
             "segments.entered",
             "webhook.succeeded.x",
             "webhook.called",
+            "sync.succeeded.x",
+            "sync.started",
             "my.segment.entered",
             "emails.sent",
             "email",

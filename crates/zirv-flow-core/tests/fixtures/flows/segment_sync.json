@@ -1,0 +1,50 @@
+{
+  "enter": {
+    "graph": {
+      "v": 1,
+      "nodes": [
+        {
+          "id": "push",
+          "type": "action.sync",
+          "destination": "0190f5a0-0000-7000-8000-000000000001",
+          "operation": "upsert",
+          "trait_keys": ["plan", "country"]
+        },
+        { "id": "end", "type": "exit" }
+      ],
+      "edges": [{ "id": "e1", "from": "push", "port": "next", "to": "end" }]
+    },
+    "settings": {
+      "trigger": {
+        "type": "segment",
+        "segment_id": "0190f5a0-0000-7000-8000-000000000002",
+        "on": "entered",
+        "enroll_current": true
+      },
+      "reentry": { "mode": "always", "min_interval_seconds": 0 }
+    }
+  },
+  "exit": {
+    "graph": {
+      "v": 1,
+      "nodes": [
+        {
+          "id": "drop",
+          "type": "action.sync",
+          "destination": "0190f5a0-0000-7000-8000-000000000001",
+          "operation": "remove"
+        },
+        { "id": "end", "type": "exit" }
+      ],
+      "edges": [{ "id": "e1", "from": "drop", "port": "next", "to": "end" }]
+    },
+    "settings": {
+      "trigger": {
+        "type": "segment",
+        "segment_id": "0190f5a0-0000-7000-8000-000000000002",
+        "on": "exited"
+      },
+      "reentry": { "mode": "always", "min_interval_seconds": 0 }
+    }
+  }
+}

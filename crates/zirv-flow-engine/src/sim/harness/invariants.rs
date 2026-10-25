@@ -133,6 +133,7 @@ pub(super) fn external_effects_once(world: &World<'_>, out: &mut Vec<Violation>)
                 url, trait_keys, ..
             } => ("webhook", url.as_str(), trait_keys.as_slice()),
             NodeKind::ActionSend { .. } => ("send", "", [].as_slice()),
+            NodeKind::ActionSync { trait_keys, .. } => ("sync", "", trait_keys.as_slice()),
             _ => continue,
         };
         let stable = effect_key(id, node_id, kind);

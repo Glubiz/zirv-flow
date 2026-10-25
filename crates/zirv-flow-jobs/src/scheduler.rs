@@ -14,8 +14,8 @@ use zirv_flow_store::{
     abandon_orphaned_test_sends, advance_schedule, begin, database_now, delete_expired_import_data,
     destination_report, dirty_backlog, dirty_heads, disable_schedule, due_schedules,
     due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify, enqueue_drain,
-    enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
-    expire_contact_idempotency, expire_exports, fail_orphaned_runs, inbox_heads,
+    enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions, ensure_forward_job,
+    expire_contact_idempotency, expire_exports, fail_orphaned_runs, forwarding_report, inbox_heads,
     prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
     reconcile_segment_schedules, stream_freshness, try_lead,
 };
@@ -387,6 +387,36 @@ impl Scheduler {
         match destination_report(&self.pool).await {
             Ok(report) => self.destinations.update(&report),
             Err(error) => warn!("could not refresh the destination gauges: {error}"),
+        }
+        self.keep_forwarding().await;
+    }
+
+    /// Publishes the forwarding queue gauges and gives every destination whose outbox has rows
+    /// but no ready or running `event.forward` job a job again: a job that died on a database
+    /// outage must not strand its rows. A failure is logged and retried at the next check.
+    async fn keep_forwarding(&mut self) {
+        let mut connection = match self.pool.acquire().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                warn!("could not read the forwarding queues: {error}");
+                return;
+            }
+        };
+        let report = match forwarding_report(&mut connection).await {
+            Ok(report) => report,
+            Err(error) => {
+                warn!("could not read the forwarding queues: {error}");
+                return;
+            }
+        };
+        self.destinations.update_forwarding(&report);
+        for stat in report.iter().filter(|stat| !stat.has_job) {
+            let workspace = WorkspaceId::from_uuid(stat.workspace_id);
+            if let Err(error) =
+                ensure_forward_job(&mut connection, workspace, stat.destination_id, None).await
+            {
+                warn!("could not queue a forwarding job: {error}");
+            }
         }
     }
 
@@ -1875,6 +1905,100 @@ mod tests {
         }
         assert!(!output.contains("secret-crm-name"));
         assert!(!output.contains("0 * * * *"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_publishes_the_forwarding_gauges_and_gives_stranded_rows_a_job(
+        pool: PgPool,
+    ) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        use zirv_flow_store::{NewDestination, create_destination, create_workspace};
+
+        migrated(&pool).await;
+        let ws = create_workspace(
+            &pool,
+            &WorkspaceName::parse("ours").unwrap(),
+            &Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let destination = create_destination(
+            &pool,
+            ws,
+            &NewDestination {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "sink",
+                config: &json!({}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Two rows are waiting and no job exists for them, as after a job died.
+        for _ in 0..2 {
+            sqlx::query(
+                "INSERT INTO forwarding_outbox (id, workspace_id, destination_id, rule_id, \
+                    event_id, person_id, idempotency_key, payload, next_attempt_at) \
+                 VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), $3, \
+                    'k', '{}', now() - interval '30 seconds')",
+            )
+            .bind(ws.as_uuid())
+            .bind(destination.id)
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _installed = ::metrics::set_default_local_recorder(&recorder);
+        let mut leader = scheduler(&pool);
+        let now = database_now(&pool).await.unwrap();
+
+        leader.tick_at(now).await.unwrap();
+        leader.destinations_checked = None;
+        leader.tick_at(now).await.unwrap();
+
+        let output = handle.render();
+        let labels = format!(
+            "workspace=\"{}\",destination=\"{}\"",
+            ws.as_uuid(),
+            destination.id
+        );
+        assert!(
+            output.contains(&format!(
+                "zirv_flow_destination_forwarding_depth{{{labels}}} 2"
+            )),
+            "{output}"
+        );
+        let lag = output
+            .lines()
+            .find(|line| line.starts_with("zirv_flow_destination_forwarding_lag_seconds"))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or_default();
+        assert!(lag >= 29.0, "{output}");
+        let jobs: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(jobs, 1, "one job for the stranded rows, not one per tick");
+        assert!(!output.contains("sink"), "no name reaches a label");
     }
 
     #[sqlx::test]
