@@ -2,7 +2,7 @@ import { useState, type ChangeEvent, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, type components, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, TextAreaField } from "../../ui";
-import { rowProblemLabel } from "./labels";
+import { plural, rowProblemLabel } from "./labels";
 
 type Outcome = components["schemas"]["SuppressionImportBody"];
 
@@ -13,10 +13,6 @@ interface ImportDialogProps {
 }
 
 const SAMPLE = "kind,value,note\nemail,person@example.com,Asked to stop by phone\n";
-
-function plural(count: number, one: string, many: string): string {
-  return `${count} ${count === 1 ? one : many}`;
-}
 
 export function ImportDialog({ workspaceId, onClose, onImported }: ImportDialogProps) {
   const [text, setText] = useState("");

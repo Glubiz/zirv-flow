@@ -2012,6 +2012,58 @@ mod tests {
     }
 
     #[test]
+    fn the_new_built_in_kinds_fit_the_auth_that_reads_them() {
+        use zirv_flow_core::credentials::CredentialKind;
+
+        let bearer = validate(&with(|v| {
+            v["auth"] = json!({"type": "bearer", "credential": {"kind": "bearer_token"}});
+        }))
+        .unwrap();
+        assert_eq!(
+            bearer.credential,
+            Some(CredentialSpec::Kind(CredentialKind::BearerToken))
+        );
+
+        let oauth = validate(&with(|v| {
+            v["auth"] = json!({"type": "oauth2_client_credentials",
+                "token_url": "https://a.test/t", "credential": {"kind": "oauth2_client"}});
+        }))
+        .unwrap();
+        assert!(matches!(
+            oauth.auth,
+            Auth::OAuth2ClientCredentials { ref token_url, .. } if token_url.as_str() == "https://a.test/t"
+        ));
+        let schema = oauth.credential.unwrap().schema();
+        assert!(!schema.field("token_url").unwrap().required);
+
+        let mismatch = validate(&with(|v| {
+            v["auth"] = json!({"type": "bearer", "credential": {"kind": "oauth2_client"}});
+        }))
+        .unwrap_err();
+        assert!(
+            mismatch
+                .iter()
+                .any(|found| found.code == code::CREDENTIAL_FIELD_MISSING)
+        );
+    }
+
+    #[test]
+    fn an_oauth2_manifest_without_a_token_url_is_refused_whatever_the_credential_holds() {
+        let issues = validate(&with(|v| {
+            v["auth"] = json!({"type": "oauth2_client_credentials",
+                "credential": {"kind": "oauth2_client"}});
+        }))
+        .unwrap_err();
+
+        assert!(
+            issues
+                .iter()
+                .any(|found| found.code == code::REQUIRED && found.path == "/auth/token_url"),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
     fn a_declared_credential_schema_survives_a_round_trip_through_json() {
         let spec = json!({"fields": [
             {"key": "token", "label": "Token", "type": "string", "required": true, "secret": true}

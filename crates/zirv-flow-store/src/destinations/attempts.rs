@@ -206,6 +206,53 @@ pub async fn list_delivery_attempts<'e>(
     .map_err(StoreError::query)
 }
 
+/// How many attempts of one destination ended each way, and with which status class, over a
+/// window. Counts only: no item id, no person.
+#[derive(Clone, Copy, Debug, Default, Eq, FromRow, PartialEq)]
+pub struct AttemptStats {
+    pub attempts: i64,
+    pub delivered: i64,
+    pub retryable: i64,
+    pub terminal: i64,
+    pub throttled: i64,
+    pub class_none: i64,
+    pub class_2xx: i64,
+    pub class_3xx: i64,
+    pub class_4xx: i64,
+    pub class_5xx: i64,
+}
+
+/// The attempts of a destination made in the last `hours` hours, counted by outcome and by status
+/// class. Reads through `delivery_attempts_destination_idx`.
+pub async fn destination_attempt_stats<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    destination: Uuid,
+    hours: i32,
+) -> Result<AttemptStats, StoreError> {
+    sqlx::query_as(
+        "SELECT count(*) AS attempts, \
+            count(*) FILTER (WHERE outcome = 'delivered') AS delivered, \
+            count(*) FILTER (WHERE outcome = 'retryable') AS retryable, \
+            count(*) FILTER (WHERE outcome = 'terminal') AS terminal, \
+            count(*) FILTER (WHERE outcome = 'throttled') AS throttled, \
+            count(*) FILTER (WHERE status_class = 'none') AS class_none, \
+            count(*) FILTER (WHERE status_class = '2xx') AS class_2xx, \
+            count(*) FILTER (WHERE status_class = '3xx') AS class_3xx, \
+            count(*) FILTER (WHERE status_class = '4xx') AS class_4xx, \
+            count(*) FILTER (WHERE status_class = '5xx') AS class_5xx \
+         FROM delivery_attempts \
+         WHERE workspace_id = $1 AND destination_id = $2 \
+            AND attempted_at >= now() - make_interval(hours => $3)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(destination)
+    .bind(hours)
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// What the leader publishes for one live destination: its queue gauges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DestinationStat {

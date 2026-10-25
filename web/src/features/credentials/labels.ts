@@ -86,10 +86,22 @@ export function fieldNames(credential: Credential): string[] {
   return [...new Set([...Object.keys(credential.fields), ...Object.keys(credential.hints)])];
 }
 
-/** Whether the credential holds every field in `required`. */
-export function covers(credential: Credential, required: string[]): boolean {
+/**
+ * Whether the credential fits an owner that declares `fields`: it holds every required field and
+ * at least one declared field. An owner that declares no field fits no credential. An owner with a
+ * `manifest` may declare more fields there, which the page cannot see, so for it only the required
+ * fields count and the API checks the rest.
+ */
+export function covers(
+  credential: Credential,
+  fields: Pick<FieldHint, "key" | "required">[],
+  manifest = false,
+): boolean {
   const names = fieldNames(credential);
-  return required.every((key) => names.includes(key));
+  return (
+    fields.filter((field) => field.required).every((field) => names.includes(field.key)) &&
+    (manifest || fields.some((field) => names.includes(field.key)))
+  );
 }
 
 /** A secret as the list shows it: masked, with its last four characters when the server sent them. */
@@ -103,6 +115,8 @@ const BUILT_IN_KINDS: Record<string, string> = {
   smtp: "SMTP server",
   oauth2_client: "OAuth2 client",
   signing_secret: "Signing secret",
+  bearer_token: "Bearer token",
+  tls_client: "TLS client certificate",
 };
 
 /** The label of a kind: the server's list when given, else the built-in names. */

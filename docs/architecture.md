@@ -1191,6 +1191,33 @@ it further, for example by product vertical. Zirv Flow therefore separates:
   channel and dimension values) and a `messages` leaf (count, or the last send,
   on a channel within a window, filterable by dimension values).
 
+**As built (consent UI, #230).**
+
+- **Pages.** `features/consent` gains Dimensions (`w/:ws/consent/dimensions`) and Policy (`w/:ws/consent/policy`),
+  next to Topics and Suppressions under one **Consent** entry with a menu of its own. `features/sending-settings` is new
+  and holds caps and quiet hours (`w/:ws/settings/sending`, **Sending** in the main menu).
+- **Dimensions.** A catalog editor over `/consent/dimensions`: `topic` first and read-only (its values are the topics),
+  declared dimensions with renameable, archivable values, all admin-only. The consent panel on a profile records a choice
+  scoped to dimension values and shows the values each state is scoped to. The consent import dialog (admin, from the
+  Dimensions page) previews with `dry_run` first and names the `dimension:<key>` column of each declared dimension. The
+  suppression import has no dimension values, because suppressions are not scoped by them.
+- **Policy builder.** Ordered rule cards, each with a name and a condition from the segments builder, which takes a
+  `mode`: in `policy` mode its type list also offers the `messages` leaf and the channel-less `consent` leaf
+  (`granted`, `denied`, `none`), and a segment never offers them. Rules reorder with up and down buttons that announce
+  the move in a live region; the built-in `recorded consent` rule moves but has no delete. Save sends the draft
+  `revision` (a 409 offers the latest draft), the issues of a refused draft land on the card that has them, and publish
+  is admin-only and works on the saved revision. The check panel calls `evaluate`, which runs the **published** version,
+  so it names the deciding rule of that version and marks the card in the draft with the same rule id, if there is one.
+  A shared fixture (`web/src/features/consent/__fixtures__/launch-policy.json`) is the body the builder sends for an
+  account-state rule, recorded consent and a cooldown; an API acceptance test publishes it and checks `evaluate`.
+- **OQ-10 default.** Choosing `email.opened` in the segment builder or in a flow's wait, trigger, goal or exit event adds
+  `machine = false` as an ordinary property filter, with the hint "not detected as machine-generated"; removing it counts
+  every open. The AST is unchanged. The builder also knows the `machine` and `machine_reason` properties of the built-in
+  event, which event schemas do not list.
+- **Sending limits.** `GET` and `PUT .../sending/settings`: the form holds the whole document and the `PUT` replaces it.
+  Windows are typed in hours (1 to 744) and sent as ISO 8601 (`P1D` when they divide into days, `PT12H` otherwise). The
+  zone note reads: the person's `timezone` field, then the workspace zone.
+
 **Suppression scope (OQ-19, decided)**. Suppression rows carry
 the scope `workspace` or `organization`. A hard bounce suppresses
 organization-wide, because the address does not exist. Complaints and
@@ -1338,8 +1365,11 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   `failed: delivery_unconfirmed`, because the first call may have been accepted; what really went
   wrong is a code in the gate record's `note`, never an address. The scheduler
   leader ends, at most once a minute, a `pending` or `sending` message whose `delivery.send` job
-  is no longer `ready` or `running` (it went dead): `pending` as `failed: internal_error`,
-  `sending` as `failed: delivery_unconfirmed`.
+  is no longer `ready` or `running` (it went dead), whoever holds the person or the enrollment now.
+  The ending follows the row's marks: `delivery_unconfirmed` when the in-flight or unconfirmed mark
+  says a call may have been accepted, `internal_error` for a `pending` message or a `sending` one
+  with neither mark (every attempt was refused for good or never left; a timeout or reset after an HTTP request was written latches the unconfirmed mark, so it is not this). The sweep appends its `job` gate, noted
+  `job_dead`, to the gates the row holds.
 - **Order of the gates**, as recorded in `messages.gate_results`: `enrollment` (dropped when the
   enrollment ended or the flow is paused or archived: a decision, no row), `template`
   (`failed: template_unavailable`), `sender` (`skipped: sender_unverified`, through the shared
@@ -1398,8 +1428,13 @@ envelope stays. Raw-URL webhooks have no rate bucket.
   The same state is written ahead of the call for every destination type: the write that marks
   the row `sending` also notes a call in flight, committed before the destination is called. It is
   cleared, before the attempt is settled, only when the outcome proves the call was not accepted (a
-  `4xx` or `5xx` reply, an auth, config or egress error, or a transport failure before the end
-  marker). A reply lost after the end marker latches the unconfirmed mark instead, and a success
+  `4xx` or `5xx` reply, an auth or config error, or a failure before anything was sent: a refused
+  destination, a refused or timed-out connect, a name that did not resolve, a TLS failure before the
+  request was written, or a transport failure before the end marker). A reply lost after the end
+  marker latches the unconfirmed mark instead, and so does an HTTP call that timed out or was reset
+  after the request was written, or whose answer went over the size cap (`HttpError::may_have_arrived`,
+  set where the guarded client maps its errors; the reason codes stay `timeout` and `transport`),
+  so such a message is carried and a retry to a changed address is refused. A success
   ends the message. A worker that crashes, or whose lease is lost, between the call and the clear
   leaves the note, and the next attempt counts it like the unconfirmed mark (the earlier call's
   outcome is unknown); a crash after a definitive reply but before the clear is counted the same
@@ -2519,7 +2554,8 @@ credentials must be re-entered (documented).
 **Workspace credentials (M6, ruling 20303fa3).** A source or destination does not seal a
 credential of its own: it references a named workspace credential by `credential_id`. A
 credential has a `kind` (the schema id: a fixed built-in `CredentialKind` of `api_key`, `basic`,
-`smtp`, `oauth2_client` or `signing_secret`, data in `core` and not a registry, or `custom` with a
+`smtp`, `oauth2_client`, `signing_secret`, `bearer_token` or `tls_client`, data in `core` and not a
+registry, or `custom` with a
 schema carried in the row, which is how a manifest `auth.credential` schema is stored), its non-secret
 `fields` as JSON, and one `secret_id` that holds every secret field as a single sealed JSON object
 (purpose `workspace_credential`, same associated data rule as every secret). It also keeps a hint per
@@ -2538,7 +2574,11 @@ old `credential_secret_id` and `credential_fields` columns of `sources` and `des
 dropped after the backfill; the secret id and the field names are derived from the credential. OAuth
 access and refresh tokens stay per source (`oauth_token`), because they are runtime state. Archiving
 is refused while a live source or destination references the credential, and an archived credential
-cannot be referenced.
+cannot be referenced. As built (issue 261): `bearer_token` (secret `token`) and `tls_client`
+(`tls_client_cert`, secret `tls_client_key`) are built-in kinds so the file, HTTP and Kafka sources
+can share them, `signing_secret` gains an optional secret `previous_signing_secret` for the webhook
+destination's rollover, and `oauth2_client.token_url` is optional because the manifest's token URL is
+the only one the runtime uses (it wins over the credential's, which is unused).
 
 As built (M2): the master key arrives in M2 as `secrets.master_key_file` or `secrets.master_key`, with per-purpose HMAC keys derived by HKDF-SHA256 (identifier and redaction hashes); M3 reuses it for the envelope encryption above.
 

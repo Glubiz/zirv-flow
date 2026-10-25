@@ -20,7 +20,7 @@ Pre-alpha. The project is at the architecture and roadmap stage; configuration,
 database bootstrap, the HTTP server skeleton, local accounts with workspaces,
 sessions and API keys, OIDC sign-in (Keycloak is the reference provider), the
 durable job queue and scheduler, and structured logs with a trace id that follows
-a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile, a person timeline and a per-person message log (why each message was or was not sent), and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), segments (a builder compiled to SQL, full refresh, incremental re-evaluation and explain), the flow engine (versioned flows, a durable runtime with timers, event waits and re-entry rules, operator retry and skip, test mode and a trace inspector), and the AI provider layer and the mapping, manifest, segment and flow assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
+a request into its jobs and a per-workspace decision log are implemented, as are the profile store's people, identifiers, field registry and merges, static lists, consent, topics and suppressions, people search with a profile, a person timeline and a per-person message log (why each message was or was not sent), consent dimensions, a consent policy builder with ordered rules, a person check and version history, sending limits (frequency caps and quiet hours), and the governed event store's schemas, rejects and retention, ingestion over HTTP with a durable inbox, person deletion, erasure and export, CSV imports with mapping, a dry run and checkpointed runs, the live event debugger, explorer and reject replay, native contacts, sources with their streams, a file source, inbound webhooks, sync runs with events and lists (including PostgreSQL, MySQL and Kafka sources), a mapping editor with preview, an HTTP manifest source, a connector runtime (auth, retries, rate limits and pagination), segments (a builder compiled to SQL, full refresh, incremental re-evaluation and explain), the flow engine (versioned flows, a durable runtime with timers, event waits and re-entry rules, operator retry and skip, test mode and a trace inspector), and the AI provider layer and the mapping, manifest, segment and flow assistant (provider settings and encrypted keys, a budget, a rate limit and a content-free call log), but nothing is ready to use yet.
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
@@ -171,7 +171,10 @@ and shows where it is used. Under `/api/v1/workspaces/{ws}`, all for workspace a
 A schema is a list of fields; each has a `key`, a `label`, a `type` (`string`, `integer`, `enum` or
 `url`), `required` and `secret`. The built-in kinds are `api_key` (a key sent as a named header or as
 a bearer token), `basic` (username and password), `smtp` (host, port, TLS mode, username and
-password), `oauth2_client` (client id, client secret and token URL) and `signing_secret`. A
+password), `oauth2_client` (client id, client secret and an optional token URL: a manifest carries
+the URL it uses and wins over the credential's), `signing_secret` (the current secret and an
+optional `previous_signing_secret` for a rollover), `bearer_token` (a secret `token`) and
+`tls_client` (a client certificate and its secret private key, for mutual TLS). A
 credential of kind `custom` carries its own schema in the create request, which is how an
 implementation described by a manifest gets the same form (see The HTTP manifest source). Create
 with `{"kind", "name", "fields", "secret"}`: the non-secret values go in `fields`, every secret value
@@ -1745,8 +1748,8 @@ connected earlier, because a refresh token belongs to one client and scope set.
 
 **Credential schema.** `auth.credential` is optional and declares the shape of the credential the API
 needs, so a manifest source gets the same form, storage and rotation as a built-in one. It holds
-either `{"kind": "<built-in kind>"}` (`api_key`, `basic`, `smtp`, `oauth2_client` or
-`signing_secret`) or `{"fields": [{"key", "label", "type", "required", "secret", "options"}]}` with
+either `{"kind": "<built-in kind>"}` (`api_key`, `basic`, `smtp`, `oauth2_client`,
+`signing_secret`, `bearer_token` or `tls_client`) or `{"fields": [{"key", "label", "type", "required", "secret", "options"}]}` with
 the field rules of Workspace credentials (1 to 32 fields, unique lowercase keys, `options` only on an
 `enum`, and only a `string` can be `secret`), never both. The schema must contain every credential
 field the auth type reads (above; `client_secret` of the authorization-code grant is optional), or

@@ -23,6 +23,11 @@ export function kindName(kinds: SourceKind[] | null, kind: string): string {
   return kinds?.find((entry) => entry.kind === kind)?.label ?? kind;
 }
 
+/** Whether the type's settings hold a manifest, which may declare credential fields of its own. */
+export function hasManifest(kind: Pick<SourceKind, "config_fields">): boolean {
+  return kind.config_fields.some((field) => field.key === "manifest");
+}
+
 /** What the person typed into the form, by field key. A checkbox is "true" or "false". */
 export type Values = Record<string, string>;
 

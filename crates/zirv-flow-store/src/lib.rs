@@ -91,13 +91,13 @@ pub use decisions::{
     ensure_decision_partitions, list_trace,
 };
 pub use destinations::{
-    Admission, AttemptOutcome, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt, Destination,
-    DestinationStat, DestinationUpdate, LEASE, MAX_BLOCK, MAX_RETRY_AFTER, NewDeliveryAttempt,
-    NewDestination, RateGate, StatusClass, SubjectKind, archive_destination, bucket_state,
-    count_delivery_attempt, count_delivery_attempt_record_failure, create_destination,
-    destination_report, find_destination, find_destination_for_update, find_destination_workspace,
-    list_delivery_attempts, list_destinations, record_delivery_attempt, throttle_bucket,
-    update_destination,
+    Admission, AttemptOutcome, AttemptStats, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt,
+    Destination, DestinationStat, DestinationUpdate, LEASE, MAX_BLOCK, MAX_RETRY_AFTER,
+    NewDeliveryAttempt, NewDestination, RateGate, StatusClass, SubjectKind, archive_destination,
+    bucket_state, count_delivery_attempt, count_delivery_attempt_record_failure,
+    create_destination, destination_attempt_stats, destination_report, find_destination,
+    find_destination_for_update, find_destination_workspace, list_delivery_attempts,
+    list_destinations, record_delivery_attempt, throttle_bucket, update_destination,
 };
 pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
@@ -118,12 +118,12 @@ pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
 };
 pub use flows::{
-    AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError,
+    AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError, EndedOrphan,
     EnrollEntries, EnrollEntry, EnrollError, EnrollJobPayload, EnrollOutcome, EnrollRequest,
     EnrollWork, Enrolled, Enrollment, EnrollmentCursor, EnrollmentFilter, EnrollmentPage,
     EnrollmentPath, EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate, ExitBatch, Flow,
     FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion, HARD_BOUNCE,
-    INTERNAL_ERROR, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
+    INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
     LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow, NewStepExecution,
     NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND,
     SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome,

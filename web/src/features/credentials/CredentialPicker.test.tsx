@@ -70,6 +70,26 @@ describe("the credential picker", () => {
     expect(screen.getByText("Chosen: c1")).toBeInTheDocument();
   });
 
+  it("offers a bearer token credential to an owner that reads a token", async () => {
+    const bearer = {
+      ...aCredential("b1", "Feed token", ["token"]),
+      kind: "bearer_token",
+      schema: { fields: [{ key: "token", label: "Token", type: "string", required: true, secret: true, options: [] }] },
+    };
+    mockApi({
+      ...BASE,
+      "GET /api/v1/workspaces/ws1/credentials": () => json([bearer, aCredential("c2", "Login", ["username", "password"])]),
+    });
+    render(<Harness />);
+
+    const select = await screen.findByLabelText("Credential");
+
+    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Choose a credential",
+      "Feed token (Bearer token)",
+    ]);
+  });
+
   it("creates a credential inline from the type's own fields, then chooses it", async () => {
     let made = false;
     const calls = mockApi({

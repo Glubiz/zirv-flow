@@ -5,6 +5,7 @@ import { describeError } from "../../api";
 import { Button, EmptyState, formatDateTime, InlineError, PageHeader, Panel, Pill, ResourceView, SelectField } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import { AddSuppressionDialog } from "./AddSuppressionDialog";
+import { ConsentNav } from "./ConsentNav";
 import { CheckPanel } from "./CheckPanel";
 import { ImportDialog } from "./ImportDialog";
 import { kindLabel, reasonLabel, REASONS } from "./labels";
@@ -17,6 +18,7 @@ export function SuppressionsPage() {
 
   return (
     <div className="page">
+      <ConsentNav workspaceId={ws} />
       <PageHeader
         title="Suppressions"
         lede="Addresses and numbers that never receive a message, whatever a person has chosen: bounces, complaints, manual blocks and erased people. Only a one-way hash of each is kept."

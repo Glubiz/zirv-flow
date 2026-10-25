@@ -7,6 +7,7 @@ import { FieldInputs } from "./FieldInputs";
 import {
   configFrom,
   filled,
+  hasManifest,
   initialValues,
   shapesValid,
   type Source,
@@ -104,6 +105,7 @@ export function EditSourceDialog({ workspaceId, source, kind, onClose, onSaved }
             <CredentialPicker
               workspaceId={workspaceId}
               fields={kind.credential_fields}
+              manifest={hasManifest(kind)}
               value={credentialId}
               onChange={setCredentialId}
               purpose={kind.label}

@@ -320,6 +320,7 @@ fn ended(reason: &'static str) -> Attempt {
             reason,
         },
         elapsed: Duration::ZERO,
+        may_have_arrived: false,
     }
 }
 
@@ -368,6 +369,7 @@ async fn call(
             return Ok(Called::Done(Attempt {
                 verdict,
                 elapsed: Duration::ZERO,
+                may_have_arrived: false,
             }));
         }
     };

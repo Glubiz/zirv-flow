@@ -48,6 +48,7 @@ pub(crate) async fn deliver(
             return Ok(Attempt {
                 verdict,
                 elapsed: Duration::ZERO,
+                may_have_arrived: false,
             });
         }
     };
@@ -59,6 +60,7 @@ pub(crate) async fn deliver(
                 return Ok(Attempt {
                     verdict,
                     elapsed: Duration::ZERO,
+                    may_have_arrived: false,
                 });
             }
         }
