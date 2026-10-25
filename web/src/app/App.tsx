@@ -16,6 +16,7 @@ import { MembersPage } from "../features/members";
 import { SuppressionsPage, TopicsPage } from "../features/consent";
 import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
 import { PrivacyPage } from "../features/privacy";
+import { TemplatePage, TemplatesPage } from "../features/templates";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
@@ -127,6 +128,8 @@ export function AppRoutes() {
           <Route path="w/:ws/flows" element={<FlowsPage />} />
           <Route path="w/:ws/flows/new" element={<NewFlowPage />} />
           <Route path="w/:ws/flows/:id" element={<FlowPage />} />
+          <Route path="w/:ws/templates" element={<TemplatesPage />} />
+          <Route path="w/:ws/templates/:id" element={<TemplatePage />} />
           <Route path="w/:ws/contacts" element={<ContactsPage />} />
           <Route path="w/:ws/contacts/:key" element={<ContactPage />} />
           <Route path="w/:ws/contact-definition" element={<ContactDefinitionPage />} />

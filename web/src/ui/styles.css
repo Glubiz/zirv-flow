@@ -2675,3 +2675,116 @@ main:focus {
 .message-card p {
   margin: 0;
 }
+
+/* Templates: the split view of the template editor */
+.tp-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 24px 32px;
+  max-width: 1600px;
+  margin: 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tp-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.tp-why {
+  margin: 0;
+}
+
+.tp-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.tp-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.tp-pane,
+.tp-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tp-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.tp-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tp-issue {
+  padding: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.tp-frame {
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.tp-frame-mobile {
+  width: 375px;
+}
+
+.tp-iframe {
+  display: block;
+  width: 100%;
+  height: 560px;
+  border: 0;
+}
+
+.tp-text {
+  margin: 0;
+  padding: 12px;
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--paper);
+  border-radius: 8px;
+}
+
+@media (max-width: 900px) {
+  .tp-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tp-page {
+    padding: 12px;
+  }
+
+  .tp-frame-mobile {
+    max-width: 100%;
+  }
+}
