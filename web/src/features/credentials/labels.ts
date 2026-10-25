@@ -88,13 +88,19 @@ export function fieldNames(credential: Credential): string[] {
 
 /**
  * Whether the credential fits an owner that declares `fields`: it holds every required field and
- * at least one declared field. An owner that declares no field fits no credential.
+ * at least one declared field. An owner that declares no field fits no credential. An owner with a
+ * `manifest` may declare more fields there, which the page cannot see, so for it only the required
+ * fields count and the API checks the rest.
  */
-export function covers(credential: Credential, fields: Pick<FieldHint, "key" | "required">[]): boolean {
+export function covers(
+  credential: Credential,
+  fields: Pick<FieldHint, "key" | "required">[],
+  manifest = false,
+): boolean {
   const names = fieldNames(credential);
   return (
     fields.filter((field) => field.required).every((field) => names.includes(field.key)) &&
-    fields.some((field) => names.includes(field.key))
+    (manifest || fields.some((field) => names.includes(field.key)))
   );
 }
 

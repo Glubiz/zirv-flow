@@ -99,6 +99,14 @@ describe("credential labels", () => {
     expect(covers(bearer, fileSource)).toBe(true);
   });
 
+  it("asks only for the required fields of an owner whose manifest may declare more", () => {
+    const custom = stored({ kind: "custom", fields: {}, hints: { account_secret: "wxyz" } });
+
+    expect(covers(custom, [{ key: "token", required: false }])).toBe(false);
+    expect(covers(custom, [{ key: "token", required: false }], true)).toBe(true);
+    expect(covers(custom, [{ key: "token", required: true }], true)).toBe(false);
+  });
+
   it("masks a hint and names kinds and outcomes", () => {
     expect(maskedHint("wxyz")).toBe("••••wxyz");
     expect(maskedHint("")).toBe("••••••••");

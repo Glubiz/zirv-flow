@@ -9,6 +9,7 @@ import { FieldInputs } from "./FieldInputs";
 import {
   configFrom,
   filled,
+  hasManifest,
   initialValues,
   isPush,
   shapesValid,
@@ -224,6 +225,7 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
                     <CredentialPicker
                       workspaceId={workspaceId}
                       fields={kind.credential_fields}
+                      manifest={hasManifest(kind)}
                       value={credentialId}
                       onChange={setCredentialId}
                       purpose={kind.label}
