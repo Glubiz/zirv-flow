@@ -59,6 +59,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/destination-kinds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The destination types this build ships, with their field specs. Any signed-in user or API key. */
+        get: operations["list_destination_kinds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/destinations/{id}/feedback": {
         parameters: {
             query?: never;
@@ -1070,6 +1087,26 @@ export interface paths {
          *     declares no domain-status request is a 404 with code `domain_status_unsupported`.
          */
         get: operations["get_destination_domain_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/destinations/{id}/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The delivery attempts of a destination over the last `hours` hours, counted by outcome and by
+         *     status class. Workspace admins only.
+         */
+        get: operations["get_destination_stats"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2793,7 +2830,8 @@ export interface paths {
         get: operations["get_send_settings"];
         /**
          * Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or
-         *     quiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.
+         *     quiet hours left out are removed. The body names the revision that was read; settings replaced
+         *     since are refused with a 409. Workspace admins only. Audited as `send_settings.updated`.
          */
         put: operations["put_send_settings"];
         post?: never;
@@ -5086,6 +5124,18 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        DestinationCapabilitiesBody: {
+            batching: boolean;
+            /**
+             * @description The channels it carries, such as `email`, `webhook` or `event`. A forwarding rule may name
+             *     a destination whose type carries `event`.
+             */
+            channels: string[];
+            erase: boolean;
+            idempotency_key: boolean;
+            /** @description Whether its destinations are rate limited by the shared bucket. */
+            rate_limit: boolean;
+        };
         DestinationCheckBody: {
             /**
              * @description A stable code for the failure: `config_invalid`, `credential_refused`, `unreachable`,
@@ -5100,6 +5150,34 @@ export interface components {
             error?: string | null;
             /** @description Whether the settings and the credential work. */
             ok: boolean;
+        };
+        DestinationKindBody: {
+            capabilities: components["schemas"]["DestinationCapabilitiesBody"];
+            /** @description Plain settings, stored as the destination's configuration. */
+            config_fields: components["schemas"]["FieldSpecBody"][];
+            /** @description Settings held only in the workspace credential the destination uses. */
+            credential_fields: components["schemas"]["FieldSpecBody"][];
+            description: string;
+            /**
+             * @description The stable id to send as `kind` when creating a destination.
+             * @example webhook
+             */
+            kind: string;
+            label: string;
+        };
+        DestinationStatsBody: {
+            /**
+             * Format: int64
+             * @description Every attempt in the window.
+             */
+            attempts: number;
+            outcomes: components["schemas"]["OutcomeCountsBody"];
+            status_classes: components["schemas"]["StatusClassCountsBody"];
+            /**
+             * Format: int32
+             * @description The length of the window, ending now.
+             */
+            window_hours: number;
         };
         DimensionBody: {
             archived: boolean;
@@ -7012,6 +7090,16 @@ export interface components {
          * @enum {string}
          */
         OutcomeBody: "pass" | "fail" | "unknown";
+        OutcomeCountsBody: {
+            /** Format: int64 */
+            delivered: number;
+            /** Format: int64 */
+            retryable: number;
+            /** Format: int64 */
+            terminal: number;
+            /** Format: int64 */
+            throttled: number;
+        };
         PartitionLagBody: {
             /** Format: int64 */
             lag: number;
@@ -8170,6 +8258,14 @@ export interface components {
             /** @description The frequency caps; all must pass. */
             frequency_caps?: components["schemas"]["FrequencyCapBody"][];
             quiet_hours?: null | components["schemas"]["QuietHoursBody"];
+            /**
+             * Format: int32
+             * @description The revision of the settings: counts the replaces, 0 when they were never replaced. A
+             *     replace names the revision it read; settings replaced since are a 409
+             *     `send_settings_revision_mismatch` and nothing is written. The response carries the new
+             *     revision.
+             */
+            revision: number;
         };
         /** @description A sender identity. */
         SenderIdentityBody: {
@@ -8483,6 +8579,21 @@ export interface components {
         StatusBody: {
             /** @example ok */
             status: string;
+        };
+        StatusClassCountsBody: {
+            /** Format: int64 */
+            "2xx": number;
+            /** Format: int64 */
+            "3xx": number;
+            /** Format: int64 */
+            "4xx": number;
+            /** Format: int64 */
+            "5xx": number;
+            /**
+             * Format: int64
+             * @description The call produced no answer.
+             */
+            none: number;
         };
         StepBody: {
             /** Format: int32 */
@@ -9528,6 +9639,35 @@ export interface operations {
             };
             /** @description An equivalent job is already queued */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_destination_kinds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The destination types */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationKindBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -13802,6 +13942,70 @@ export interface operations {
             };
             /** @description The provider did not answer in time */
             504: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_destination_stats: {
+        parameters: {
+            query?: {
+                /** @description The window in hours, 1 to 168; default 24 */
+                hours?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Destination id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The counts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DestinationStatsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or destination, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description hours is outside 1 to 168 */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -20954,6 +21158,15 @@ export interface operations {
             };
             /** @description No such workspace, or no access to it */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The settings are not at the revision named (`send_settings_revision_mismatch`) */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

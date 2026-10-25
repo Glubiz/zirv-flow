@@ -10,7 +10,7 @@ use tracing::{info, warn};
 use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
-    Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError,
+    JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError,
     abandon_orphaned_test_sends, advance_schedule, begin, database_now, delete_expired_import_data,
     destination_report, dirty_backlog, dirty_heads, disable_schedule, due_schedules,
     due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify, enqueue_drain,
@@ -337,6 +337,15 @@ impl Scheduler {
                     "ended {} message(s) whose send job is dead or gone",
                     ended.len()
                 );
+                for orphan in &ended {
+                    warn!(
+                        message = %orphan.message,
+                        workspace = %orphan.workspace,
+                        reason = orphan.reason,
+                        note = JOB_DEAD,
+                        "ended a message whose send job is dead or gone"
+                    );
+                }
             }
             Ok(_) => {}
             Err(error) => warn!("could not end the messages whose send job is gone: {error}"),

@@ -1,0 +1,17 @@
+{
+  "revision": 0,
+  "rules": [
+    {
+      "name": "Account closed",
+      "condition": { "v": 1, "trait": "account_state", "op": "eq", "value": "closed" }
+    },
+    { "id": "recorded_consent", "name": "Recorded consent" },
+    {
+      "name": "Cooldown since the last message",
+      "condition": {
+        "v": 1,
+        "messages": { "channel": "email", "agg": { "fn": "last_time", "op": "within_last", "value": "P1D" } }
+      }
+    }
+  ]
+}

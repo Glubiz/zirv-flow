@@ -570,6 +570,10 @@ fn routes() -> Router<AppState> {
             get(destinations::domain_status::get),
         )
         .route(
+            "/api/v1/workspaces/{ws}/destinations/{id}/stats",
+            get(destinations::stats::get),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/forwarding/rules",
             get(forwarding::rules::list).post(forwarding::rules::create),
         )
@@ -640,6 +644,7 @@ fn routes() -> Router<AppState> {
             get(sending::settings::get).put(sending::settings::put),
         )
         .route("/api/v1/source-kinds", get(sources::kinds::list))
+        .route("/api/v1/destination-kinds", get(destinations::kinds::list))
         .route(
             "/api/v1/workspaces/{ws}/sources",
             get(sources::crud::list).post(sources::crud::create),

@@ -13,6 +13,14 @@ interface ConsentPanelProps {
 
 const CHANNEL_WIDE = "";
 
+function scopeKey(state: { topic_key?: string | null; dimensions: Record<string, string> }): string {
+  const scope = Object.entries(state.dimensions)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
+  return `${state.topic_key ?? CHANNEL_WIDE}|${scope}`;
+}
+
 /** A person's consent for email, channel-wide and per topic, with a form to record a choice. */
 export function ConsentPanel({ workspaceId, personId, canWrite }: ConsentPanelProps) {
   const consent = useResource(
@@ -40,8 +48,13 @@ export function ConsentPanel({ workspaceId, personId, canWrite }: ConsentPanelPr
         {(data) => (
           <ul className="list-plain stack-tight">
             {data.states.map((state) => (
-              <li className="row" key={state.topic_key ?? CHANNEL_WIDE}>
+              <li className="row" key={scopeKey(state)}>
                 <span className="strong">{state.topic_name ?? "All email"}</span>
+                {Object.entries(state.dimensions).map(([dimension, value]) => (
+                  <span className="pill-text" key={dimension}>
+                    {dimension}: {value}
+                  </span>
+                ))}
                 <Pill tone={state.status === "subscribed" ? "neutral" : "attention"}>{statusLabel(state.status)}</Pill>
                 <span className="faint">
                   {state.explicit ? "Chosen by the person" : "Default"} · {formatDateTime(state.changed_at)}
@@ -67,6 +80,11 @@ function RecordChoice({ workspaceId, personId, onRecorded }: RecordChoiceProps) 
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/topics", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
   );
+  const dimensions = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/consent/dimensions", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+  const [scope, setScope] = useState<Record<string, string>>({});
   const [topic, setTopic] = useState(CHANNEL_WIDE);
   const [status, setStatus] = useState("unsubscribed");
   const [busy, setBusy] = useState(false);
@@ -82,7 +100,12 @@ function RecordChoice({ workspaceId, personId, onRecorded }: RecordChoiceProps) 
       await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/people/{id}/consent", {
           params: { path: { ws: workspaceId, id: personId } },
-          body: { channel: "email", status, topic_key: topic === CHANNEL_WIDE ? null : topic },
+          body: {
+            channel: "email",
+            status,
+            topic_key: topic === CHANNEL_WIDE ? null : topic,
+            ...(Object.keys(chosen).length > 0 ? { dimensions: chosen } : {}),
+          },
         }),
       );
       setNotice(`Recorded: ${statusLabel(status).toLowerCase()}.`);
@@ -94,6 +117,9 @@ function RecordChoice({ workspaceId, personId, onRecorded }: RecordChoiceProps) 
     }
   }
 
+  // A dimension left on "All values" is left out, which covers every value.
+  const declared = dimensions.status === "ready" ? dimensions.data.filter((dimension) => !dimension.builtin && !dimension.archived) : [];
+  const chosen = Object.fromEntries(Object.entries(scope).filter(([key, value]) => value !== "" && declared.some((dimension) => dimension.key === key)));
   const choices = topics.status === "ready" ? topics.data.filter((candidate) => !candidate.archived) : [];
 
   return (
@@ -107,6 +133,23 @@ function RecordChoice({ workspaceId, personId, onRecorded }: RecordChoiceProps) 
             </option>
           ))}
         </SelectField>
+        {declared.map((dimension) => (
+          <SelectField
+            key={dimension.key}
+            label={dimension.name}
+            value={scope[dimension.key] ?? ""}
+            onChange={(event) => setScope((current) => ({ ...current, [dimension.key]: event.target.value }))}
+          >
+            <option value="">All values</option>
+            {dimension.values
+              .filter((value) => !value.archived)
+              .map((value) => (
+                <option key={value.key} value={value.key}>
+                  {value.name}
+                </option>
+              ))}
+          </SelectField>
+        ))}
         <SelectField label="Choice" value={status} onChange={(event) => setStatus(event.target.value)}>
           {STATUSES.map((option) => (
             <option key={option.value} value={option.value}>

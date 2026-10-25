@@ -4,6 +4,7 @@ import { AiSettingsPage } from "../features/assistant";
 import { ApiKeysPage } from "../features/api-keys";
 import { CredentialsPage } from "../features/credentials";
 import { ContactDefinitionPage, ContactPage, ContactsPage } from "../features/contacts";
+import { DestinationPage, DestinationsPage, ForwardingPage, NewDestinationPage } from "../features/destinations";
 import { DebuggerPage, EventSchemaPage, EventSettingsPage, EventsPage, ExplorerPage, RejectsPage } from "../features/events";
 import { HealthPage } from "../features/health";
 import { ImportPage, ImportsPage, NewImportPage } from "../features/imports";
@@ -11,9 +12,11 @@ import { JobsPage } from "../features/jobs";
 import { ListDetailPage, ListsPage } from "../features/lists";
 import { FlowPage, FlowsPage, NewFlowPage } from "../features/flows";
 import { NewSegmentPage, SegmentPage, SegmentsPage } from "../features/segments";
+import { SendingDomainPage, SendingDomainsPage } from "../features/sending";
 import { NewSourcePage, SourcePage, SourcesPage } from "../features/sources";
 import { MembersPage } from "../features/members";
-import { SuppressionsPage, TopicsPage } from "../features/consent";
+import { DimensionsPage, PolicyPage, SuppressionsPage, TopicsPage } from "../features/consent";
+import { SendingSettingsPage } from "../features/sending-settings";
 import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
 import { PrivacyPage } from "../features/privacy";
 import { TracesPage } from "../features/traces";
@@ -147,10 +150,19 @@ export function AppRoutes() {
           <Route path="w/:ws/events/schemas/:name" element={<EventSchemaPage />} />
           <Route path="w/:ws/topics" element={<TopicsPage />} />
           <Route path="w/:ws/suppressions" element={<SuppressionsPage />} />
+          <Route path="w/:ws/consent/dimensions" element={<DimensionsPage />} />
+          <Route path="w/:ws/consent/policy" element={<PolicyPage />} />
+          <Route path="w/:ws/settings/sending" element={<SendingSettingsPage />} />
           <Route path="w/:ws/privacy" element={<PrivacyPage />} />
           <Route path="w/:ws/ai" element={<AiSettingsPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
           <Route path="w/:ws/credentials" element={<CredentialsPage />} />
+          <Route path="w/:ws/destinations" element={<DestinationsPage />} />
+          <Route path="w/:ws/destinations/new" element={<NewDestinationPage />} />
+          <Route path="w/:ws/destinations/:id" element={<DestinationPage />} />
+          <Route path="w/:ws/sending-domains" element={<SendingDomainsPage />} />
+          <Route path="w/:ws/sending-domains/:id" element={<SendingDomainPage />} />
+          <Route path="w/:ws/forwarding" element={<ForwardingPage />} />
           <Route path="w/:ws/traces" element={<TracesPage />} />
           <Route path="w/:ws/traces/:traceId" element={<TracesPage />} />
           <Route path="jobs" element={<JobsPage />} />

@@ -17,6 +17,8 @@ interface CredentialPickerProps {
   /** What the credential is for, such as the source type's name. */
   purpose?: string;
   disabled?: boolean;
+  /** Whether to offer no credential. Off when the credential cannot be cleared later. Default on. */
+  allowNone?: boolean;
 }
 
 /**
@@ -32,6 +34,7 @@ export function CredentialPicker({
   onChange,
   purpose,
   disabled = false,
+  allowNone = true,
 }: CredentialPickerProps) {
   const credentials = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/credentials", { params: { path: { ws: workspaceId } } })),
@@ -68,7 +71,7 @@ export function CredentialPicker({
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
         >
-          <option value="">Choose a credential</option>
+          {allowNone || value === "" ? <option value="">Choose a credential</option> : null}
           {credentials.data
             .filter((credential) => credential.id === value || covers(credential, fields, manifest))
             .map((credential) => (

@@ -217,6 +217,48 @@
         ]
       }
     },
+    "/api/v1/destination-kinds": {
+      "get": {
+        "tags": [
+          "destinations"
+        ],
+        "summary": "The destination types this build ships, with their field specs. Any signed-in user or API key.",
+        "operationId": "list_destination_kinds",
+        "responses": {
+          "200": {
+            "description": "The destination types",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DestinationKindBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/destinations/{id}/feedback": {
       "post": {
         "tags": [
@@ -6255,6 +6297,108 @@
           },
           "504": {
             "description": "The provider did not answer in time",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/destinations/{id}/stats": {
+      "get": {
+        "tags": [
+          "destinations"
+        ],
+        "summary": "The delivery attempts of a destination over the last `hours` hours, counted by outcome and by\nstatus class. Workspace admins only.",
+        "operationId": "get_destination_stats",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Destination id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "hours",
+            "in": "query",
+            "description": "The window in hours, 1 to 168; default 24",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationStatsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or destination, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "hours is outside 1 to 168",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -17035,7 +17179,7 @@
         "tags": [
           "sending"
         ],
-        "summary": "Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or\nquiet hours left out are removed. Workspace admins only. Audited as `send_settings.updated`.",
+        "summary": "Replaces the workspace's frequency caps and quiet hours. Both are replaced together: a cap or\nquiet hours left out are removed. The body names the revision that was read; settings replaced\nsince are refused with a 409. Workspace admins only. Audited as `send_settings.updated`.",
         "operationId": "put_send_settings",
         "parameters": [
           {
@@ -17092,6 +17236,16 @@
           },
           "404": {
             "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The settings are not at the revision named (`send_settings_revision_mismatch`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -26195,6 +26349,38 @@
           }
         }
       },
+      "DestinationCapabilitiesBody": {
+        "type": "object",
+        "required": [
+          "channels",
+          "idempotency_key",
+          "batching",
+          "rate_limit",
+          "erase"
+        ],
+        "properties": {
+          "batching": {
+            "type": "boolean"
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The channels it carries, such as `email`, `webhook` or `event`. A forwarding rule may name\na destination whose type carries `event`."
+          },
+          "erase": {
+            "type": "boolean"
+          },
+          "idempotency_key": {
+            "type": "boolean"
+          },
+          "rate_limit": {
+            "type": "boolean",
+            "description": "Whether its destinations are rate limited by the shared bucket."
+          }
+        }
+      },
       "DestinationCheckBody": {
         "type": "object",
         "required": [
@@ -26218,6 +26404,74 @@
           "ok": {
             "type": "boolean",
             "description": "Whether the settings and the credential work."
+          }
+        }
+      },
+      "DestinationKindBody": {
+        "type": "object",
+        "required": [
+          "kind",
+          "label",
+          "description",
+          "config_fields",
+          "credential_fields",
+          "capabilities"
+        ],
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/DestinationCapabilitiesBody"
+          },
+          "config_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSpecBody"
+            },
+            "description": "Plain settings, stored as the destination's configuration."
+          },
+          "credential_fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FieldSpecBody"
+            },
+            "description": "Settings held only in the workspace credential the destination uses."
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "The stable id to send as `kind` when creating a destination.",
+            "example": "webhook"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "DestinationStatsBody": {
+        "type": "object",
+        "required": [
+          "window_hours",
+          "attempts",
+          "outcomes",
+          "status_classes"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Every attempt in the window."
+          },
+          "outcomes": {
+            "$ref": "#/components/schemas/OutcomeCountsBody"
+          },
+          "status_classes": {
+            "$ref": "#/components/schemas/StatusClassCountsBody"
+          },
+          "window_hours": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The length of the window, ending now."
           }
         }
       },
@@ -31153,6 +31407,33 @@
           "unknown"
         ]
       },
+      "OutcomeCountsBody": {
+        "type": "object",
+        "required": [
+          "delivered",
+          "retryable",
+          "terminal",
+          "throttled"
+        ],
+        "properties": {
+          "delivered": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "retryable": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "terminal": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "throttled": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "PartitionLagBody": {
         "type": "object",
         "required": [
@@ -34239,6 +34520,9 @@
       "SendSettingsBody": {
         "type": "object",
         "description": "The send limits of a workspace.",
+        "required": [
+          "revision"
+        ],
         "properties": {
           "frequency_caps": {
             "type": "array",
@@ -34257,6 +34541,11 @@
                 "description": "The quiet hours; null or absent for none."
               }
             ]
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The revision of the settings: counts the replaces, 0 when they were never replaced. A\nreplace names the revision it read; settings replaced since are a 409\n`send_settings_revision_mismatch` and nothing is written. The response carries the new\nrevision."
           }
         }
       },
@@ -34950,6 +35239,39 @@
           "status": {
             "type": "string",
             "example": "ok"
+          }
+        }
+      },
+      "StatusClassCountsBody": {
+        "type": "object",
+        "required": [
+          "none",
+          "2xx",
+          "3xx",
+          "4xx",
+          "5xx"
+        ],
+        "properties": {
+          "2xx": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "3xx": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "4xx": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "5xx": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "none": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The call produced no answer."
           }
         }
       },

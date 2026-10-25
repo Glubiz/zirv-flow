@@ -55,8 +55,8 @@ pub use runtime::{
     register_wait, save_enrollment, settle_wait_step, step_zones, wait_filters,
 };
 pub use send::{
-    DELIVERY_UNCONFIRMED, HARD_BOUNCE, INTERNAL_ERROR, SEND_JOB_KIND, SOFT_BOUNCE, SendOutcome,
-    end_orphaned_messages, record_send_outcome,
+    DELIVERY_UNCONFIRMED, EndedOrphan, HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD, SEND_JOB_KIND,
+    SOFT_BOUNCE, SendOutcome, end_orphaned_messages, record_send_outcome,
 };
 pub use signing::{
     Rotation, SigningKey, SigningKeys, create_signing_key, live_signing_keys, rotate_signing_key,

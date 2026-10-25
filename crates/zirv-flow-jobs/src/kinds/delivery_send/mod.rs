@@ -440,13 +440,15 @@ async fn decide(
             return Err(error);
         }
     };
-    // A reply lost after the final dot leaves the message possibly accepted. The mark is written
-    // before the attempt is settled, so a settle that fails or a lease that is lost cannot skip it.
+    // A reply lost after the final dot, or a timeout or reset after an HTTP request was written,
+    // leaves the message possibly accepted. The mark is written before the attempt is settled, so
+    // a settle that fails or a lease that is lost cannot skip it.
     let lost_reply = matches!(
         done.verdict,
         Verdict::Retry { reason, .. } if reason == DELIVERY_UNCONFIRMED
     );
-    if lost_reply {
+    let possibly_accepted = lost_reply || done.may_have_arrived;
+    if possibly_accepted {
         mark_message_unconfirmed(&pool, workspace, job.message).await?;
     } else if !matches!(done.verdict, Verdict::Succeeded { .. }) {
         // The outcome proves this call was not accepted: it no longer counts as in flight. A
@@ -462,7 +464,7 @@ async fn decide(
     trail.attempts = number;
     // Once an earlier call may have been accepted, nothing that goes wrong after it shows that it
     // was not: every ending but a sent message and a verdict about the address is unconfirmed.
-    let unconfirmed = carried || lost_reply;
+    let unconfirmed = carried || possibly_accepted;
     match done.verdict {
         Verdict::Succeeded { .. } => {
             trail.pass(GateRecord::passed("delivery"));
@@ -785,6 +787,7 @@ async fn write_end(
                 message,
                 trace,
                 job: Some(job_ref),
+                keep_gates: false,
             },
         )
         .await?;
@@ -2415,7 +2418,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(ended, [queued.message]);
+        assert_eq!(
+            ended.iter().map(|e| e.message).collect::<Vec<_>>(),
+            [queued.message]
+        );
         let message = env.message(queued.message).await;
         assert_eq!(
             (message.status.as_str(), message.reason.as_deref()),
@@ -2442,23 +2448,68 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_sweep_ends_a_sending_message_whose_job_is_dead_as_delivery_unconfirmed(
+    async fn the_sweep_ends_a_message_whose_last_attempt_was_refused_for_good_as_an_internal_error(
         pool: PgPool,
     ) {
-        let mut env = Env::with(pool, "one", json!({"mode": "lose_first_answer"}), 100, 100).await;
-        env.render = Some(start_pool("serve", "").await);
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
         let template = env.plain_template("transactional").await;
         let person = env.person("ada@example.com").await;
         let queued = env.queue(person, template, 5).await;
+        sink.reply_next(SmtpSinkStage::Rcpt, "451 4.7.1 greylisted, try later");
         env.attempt().await.unwrap_err();
         assert_eq!(env.message(queued.message).await.status, "sending");
+        assert!(
+            !message_in_flight(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "a definitive refusal clears the in-flight mark"
+        );
         bury_the_jobs(&env).await;
 
         let ended = end_orphaned_messages(&env.pool, env.clock.now())
             .await
             .unwrap();
 
-        assert_eq!(ended, [queued.message]);
+        assert_eq!(ended.len(), 1);
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("internal_error")),
+            "no attempt was possibly accepted"
+        );
+        assert!(message.gate_results.to_string().contains("job_dead"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_sending_message_whose_job_is_dead_as_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        sink.reply_at(SmtpSinkStage::DataEnd, SMTP_SINK_DROP);
+        env.attempt().await.unwrap_err();
+        assert_eq!(env.message(queued.message).await.status, "sending");
+        assert!(
+            message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "the lost reply left the unconfirmed mark"
+        );
+        bury_the_jobs(&env).await;
+
+        let ended = end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ended.iter().map(|e| e.message).collect::<Vec<_>>(),
+            [queued.message]
+        );
         let message = env.message(queued.message).await;
         assert_eq!(
             (message.status.as_str(), message.reason.as_deref()),
@@ -3829,9 +3880,20 @@ mod tests {
                 days: EVERY_DAY.iter().map(|day| (*day).to_owned()).collect(),
             });
             let mut connection = self.pool.acquire().await.unwrap();
-            zirv_flow_store::replace_send_limits(&mut connection, self.ws, &caps, quiet.as_ref())
+            let revision = zirv_flow_store::read_send_limits(&mut connection, self.ws)
                 .await
-                .unwrap();
+                .unwrap()
+                .revision;
+            zirv_flow_store::replace_send_limits(
+                &mut connection,
+                self.ws,
+                revision,
+                &caps,
+                quiet.as_ref(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
         }
 
         /// A subscribed person with an email address.
@@ -4520,6 +4582,122 @@ mod tests {
         assert_eq!(fake.accepted()[0].key, queued.message.to_string());
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_call_cut_off_after_the_write_ends_delivery_unconfirmed(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        // One attempt, so the retries are exhausted by the cut-off call.
+        let queued = env.queue(person, template, 1).await;
+        fake.script(FakeProviderScript::DropAfterAccept);
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed")),
+            "the provider holds the message, so it is not a definite failure"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_provider_call_refused_at_connect_still_ends_as_a_transport_failure(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 1).await;
+        // The provider goes away: nothing listens, so the request never leaves.
+        drop(fake);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        env.attempt().await.unwrap();
+
+        let ended = env.message(queued.message).await;
+        assert_eq!(
+            (ended.status.as_str(), ended.reason.as_deref()),
+            ("failed", Some("transport"))
+        );
+        assert!(
+            !message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_message_after_a_cut_off_provider_call_as_delivery_unconfirmed(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{
+            FakeProvider, FakeProviderOptions, FakeProviderScript,
+        };
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        fake.script(FakeProviderScript::DropAfterAccept);
+        env.attempt().await.unwrap_err();
+        assert!(
+            message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap(),
+            "a call cut off after the write leaves the unconfirmed mark"
+        );
+        bury_the_jobs(&env).await;
+
+        end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_ends_a_message_whose_provider_call_never_left_as_an_internal_error(
+        pool: PgPool,
+    ) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "one", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        drop(fake);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        env.attempt().await.unwrap_err();
+        bury_the_jobs(&env).await;
+
+        end_orphaned_messages(&env.pool, env.clock.now())
+            .await
+            .unwrap();
+
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("internal_error"))
+        );
+    }
+
     /// Gives the person a newer email identity, which the send address then follows.
     async fn move_address(env: &Env, person: Uuid, address: &str) {
         sqlx::query(
@@ -4565,11 +4743,12 @@ mod tests {
         let queued = env.queue(person, template, 5).await;
         fake.script(FakeProviderScript::DropAfterAccept);
         env.attempt().await.unwrap_err();
-        // A provider call cut off by a transport failure is judged not accepted; the carried state
-        // is what a crash after an accepted call leaves, so the test sets it.
-        mark_message_unconfirmed(&env.pool, env.ws, queued.message)
-            .await
-            .unwrap();
+        // The call was cut off after the write, so the first attempt left the message carried.
+        assert!(
+            message_unconfirmed(&env.pool, env.ws, queued.message)
+                .await
+                .unwrap()
+        );
         move_address(&env, person, "bob@example.com").await;
         // The first attempt spent the gate's only token; the bucket holds one for the next take.
         sqlx::query(

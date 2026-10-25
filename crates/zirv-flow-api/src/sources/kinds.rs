@@ -47,7 +47,7 @@ pub(crate) struct SourceKindBody {
     capabilities: CapabilitiesBody,
 }
 
-fn field(spec: &FieldSpec) -> FieldSpecBody {
+pub(crate) fn field(spec: &FieldSpec) -> FieldSpecBody {
     FieldSpecBody {
         key: spec.key.to_owned(),
         label: spec.label.to_owned(),

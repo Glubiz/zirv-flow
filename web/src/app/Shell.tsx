@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router";
 
 import { AccountMenu, useSignedInUser } from "../features/session";
+import { DestinationsNav } from "../features/destinations";
+import { SendingNav } from "../features/sending";
 import { PrivacyNav } from "../features/privacy";
 import { useCurrentWorkspace, WorkspaceSwitcher } from "../features/workspaces";
 import { Brand } from "../ui";
@@ -20,11 +22,16 @@ const TITLES: Record<string, string> = {
   segments: "Segments",
   flows: "Flows",
   topics: "Topics",
+  consent: "Consent",
+  settings: "Settings",
   suppressions: "Suppressions",
   privacy: "Privacy",
   ai: "AI assistant",
   "api-keys": "API keys",
   credentials: "Credentials",
+  destinations: "Destinations",
+  "sending-domains": "Sending domains",
+  forwarding: "Forwarding",
   traces: "Traces",
   jobs: "Jobs",
   health: "Health",
@@ -33,6 +40,9 @@ const TITLES: Record<string, string> = {
 function titleFor(pathname: string): string {
   const parts = pathname.split("/").filter(Boolean);
   if (parts[2] === "people" && parts[3] === "conflicts") return "Identity conflicts";
+  if (parts[2] === "consent" && parts[3] === "dimensions") return "Consent dimensions";
+  if (parts[2] === "consent" && parts[3] === "policy") return "Consent policy";
+  if (parts[2] === "settings" && parts[3] === "sending") return "Sending limits";
   const key = parts[0] === "w" && parts.length > 2 ? (parts[2] ?? "w") : (parts[0] ?? "w");
   return TITLES[key] ?? "zirv flow";
 }
@@ -63,6 +73,27 @@ function WorkspaceItem({
     return <Link to={to}>{children}</Link>;
   }
   return <NavLink to={to}>{children}</NavLink>;
+}
+
+const CONSENT_PAGES = ["topics", "consent", "suppressions"];
+
+/** One entry for the consent pages, which share a menu of their own; it stays current on any of them. */
+function ConsentItem({ base }: { base: string | null }) {
+  const location = useLocation();
+  if (base === null) {
+    return (
+      <span className="nav-disabled" aria-disabled="true" title="Pick a workspace first">
+        Consent
+        <span className="visually-hidden"> (pick a workspace first)</span>
+      </span>
+    );
+  }
+  const here = CONSENT_PAGES.some((page) => location.pathname.startsWith(`${base}/${page}`));
+  return (
+    <Link to={`${base}/topics`} aria-current={here ? "page" : undefined}>
+      Consent
+    </Link>
+  );
 }
 
 export function Shell() {
@@ -105,11 +136,13 @@ export function Shell() {
             <WorkspaceItem base={base} segment="sources">Sources</WorkspaceItem>
             <WorkspaceItem base={base} segment="imports">Imports</WorkspaceItem>
             <WorkspaceItem base={base} segment="events">Events</WorkspaceItem>
-            <WorkspaceItem base={base} segment="topics">Topics</WorkspaceItem>
-            <WorkspaceItem base={base} segment="suppressions">Suppressions</WorkspaceItem>
+            <ConsentItem base={base} />
+            <WorkspaceItem base={base} segment="settings/sending">Sending</WorkspaceItem>
             {current ? <PrivacyNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="ai">AI</WorkspaceItem>
             <WorkspaceItem base={base} segment="credentials">Credentials</WorkspaceItem>
+            {current ? <DestinationsNav workspaceId={current.id} /> : null}
+            {current ? <SendingNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
             <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}

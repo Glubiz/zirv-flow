@@ -20,7 +20,10 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 use super::arrivals::{Arrival, enqueue_arrivals};
 use super::delivery::{WebhookPerson, lock_webhook_person};
 use super::runtime::find_enrollment;
-use crate::messages::{COLUMNS, GateRecord, Message, MessageStatus, NewMessage, insert_message};
+use crate::messages::{
+    COLUMNS, GateRecord, Message, MessageStatus, NewMessage, insert_message,
+    insert_message_keeping_gates,
+};
 use crate::{GraphPoint, NewDecision, StoreError, append_decisions};
 use crate::{begin, commit};
 
@@ -78,6 +81,9 @@ pub struct SendOutcome<'a> {
     /// The job and attempt that decided it; none for a message the leader ended because its job
     /// was gone.
     pub job: Option<(Uuid, i32)>,
+    /// Whether the gates of `message` are appended to the gate results the row holds instead of
+    /// replacing them. Only the leader's orphan sweep sets it.
+    pub keep_gates: bool,
 }
 
 /// Ends the message: writes its outcome over the row the job started, and its event and its
@@ -100,7 +106,12 @@ pub async fn record_send_outcome(
     ) else {
         return Ok(None);
     };
-    if !insert_message(&mut *connection, message).await? {
+    let written = if outcome.keep_gates {
+        insert_message_keeping_gates(&mut *connection, message).await?
+    } else {
+        insert_message(&mut *connection, message).await?
+    };
+    if !written {
         return Ok(None);
     }
     let event = Uuid::now_v7();
@@ -189,10 +200,23 @@ pub async fn record_send_outcome(
     Ok(Some(event))
 }
 
-/// Why a message the leader ended had no job left to end it: it never reached the destination.
+/// Why a message the leader ended had no job left to end it: no attempt of it was possibly
+/// accepted by the destination.
 pub const INTERNAL_ERROR: &str = "internal_error";
 /// Why a `sending` message ended without its job: the first call may have been accepted.
 pub const DELIVERY_UNCONFIRMED: &str = "delivery_unconfirmed";
+
+/// The note on the `job` gate of a message the sweep ended: its job was dead or gone.
+pub const JOB_DEAD: &str = "job_dead";
+
+/// A message the sweep ended, for the caller to log: ids and codes only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EndedOrphan {
+    pub message: Uuid,
+    pub workspace: Uuid,
+    /// The failure code it ended with: [`INTERNAL_ERROR`] or [`DELIVERY_UNCONFIRMED`].
+    pub reason: &'static str,
+}
 
 /// How many open messages one sweep ends.
 const SWEEP_BATCH: i64 = 100;
@@ -213,9 +237,15 @@ const NO_LIVE_JOB: &str = "m.status IN ('pending', 'sending') AND NOT EXISTS ( \
     SELECT 1 FROM jobs j WHERE j.kind = 'delivery.send' AND j.state IN ('ready', 'running') \
     AND j.payload ->> 'message_id' = m.id::text)";
 
-/// Ends the open messages whose `delivery.send` job is dead or gone: a `pending` one `failed:
-/// internal_error`, a `sending` one `failed: delivery_unconfirmed`, each with its event and
-/// decisions through [`record_send_outcome`]. Returns the ids it ended, at most one batch.
+/// Ends the open messages whose `delivery.send` job is dead or gone, each with its event and
+/// decisions through [`record_send_outcome`]. The ending follows the row's marks
+/// ([`ending_of`]): `failed: delivery_unconfirmed` when an attempt may have been accepted,
+/// `failed: internal_error` when none was. The `job` gate, noted `job_dead`, is appended to the
+/// gates the row holds. Returns what it ended, at most one batch.
+///
+/// A selected row is ended unless it has meanwhile ended or got a live job: neither the person
+/// nor the enrollment being gone, merged or erased lets a row stay selected, so a batch of rows
+/// that could not be ended never starves newer orphans.
 ///
 /// Each message is ended in a transaction of its own: the person is locked first and then the
 /// message row, the order of the job's outcome write, and both the open status and the absence of
@@ -223,7 +253,7 @@ const NO_LIVE_JOB: &str = "m.status IN ('pending', 'sending') AND NOT EXISTS ( \
 pub async fn end_orphaned_messages(
     pool: &PgPool,
     now: OffsetDateTime,
-) -> Result<Vec<Uuid>, StoreError> {
+) -> Result<Vec<EndedOrphan>, StoreError> {
     let found: Vec<OpenMessage> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT m.id, m.workspace_id, m.person_id, m.enrollment_id FROM messages m \
          WHERE {NO_LIVE_JOB} ORDER BY m.created_at, m.id LIMIT $1"
@@ -234,26 +264,63 @@ pub async fn end_orphaned_messages(
     .map_err(StoreError::query)?;
     let mut ended = Vec::new();
     for open in found {
-        if end_orphan(pool, &open, now).await? {
-            ended.push(open.id);
+        if let Some(reason) = end_orphan(pool, &open, now).await? {
+            ended.push(EndedOrphan {
+                message: open.id,
+                workspace: open.workspace_id,
+                reason,
+            });
         }
     }
     Ok(ended)
 }
 
+/// Whether a stored `gate_results` carries a `delivery` mark of an attempt that may have been
+/// accepted: the in-flight mark (written before every call, cleared by a definitive refusal or a
+/// failure before the call) or the unconfirmed mark (a reply lost after the final dot).
+fn possibly_accepted(gate_results: &serde_json::Value) -> bool {
+    gate_results.as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["gate"] == "delivery"
+                && (entry["result"] == "in_flight" || entry["result"] == "unconfirmed")
+        })
+    })
+}
+
+/// The failure code the sweep ends an open message with. A `pending` message never reached the
+/// destination. A `sending` one ends `delivery_unconfirmed` while a mark says an attempt may have
+/// been accepted, and `internal_error` only when neither mark is left (every attempt was refused
+/// for good). Never "not delivered" when a call may have gone out.
+///
+/// | status    | in-flight | unconfirmed | ends                    |
+/// |-----------|-----------|-------------|-------------------------|
+/// | `pending` | n/a       | n/a         | `internal_error`        |
+/// | `sending` | set       | any         | `delivery_unconfirmed`  |
+/// | `sending` | clear     | set         | `delivery_unconfirmed`  |
+/// | `sending` | clear     | clear       | `internal_error`        |
+fn ending_of(status: &str, gate_results: &serde_json::Value) -> &'static str {
+    if status == "sending" && possibly_accepted(gate_results) {
+        DELIVERY_UNCONFIRMED
+    } else {
+        INTERNAL_ERROR
+    }
+}
+
+/// Ends one open message; the code it ended with, or none when it was not ended because it ended
+/// or got a live job since it was selected.
 async fn end_orphan(
     pool: &PgPool,
     open: &OpenMessage,
     now: OffsetDateTime,
-) -> Result<bool, StoreError> {
+) -> Result<Option<&'static str>, StoreError> {
     let workspace = WorkspaceId::from_uuid(open.workspace_id);
     let mut tx = begin(pool).await?;
-    let held =
-        match lock_webhook_person(&mut tx, workspace, open.enrollment_id, open.person_id).await? {
-            WebhookPerson::Held => true,
-            WebhookPerson::Moved => false,
-            WebhookPerson::Gone => return Ok(false),
-        };
+    // Only a person who still holds the enrollment gets the event and the decisions; for a person
+    // merged away or erased, or an enrollment that is gone, the row is ended all the same.
+    let held = matches!(
+        lock_webhook_person(&mut tx, workspace, open.enrollment_id, open.person_id).await?,
+        WebhookPerson::Held
+    );
     let locked: Option<Message> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {COLUMNS} FROM messages m WHERE m.workspace_id = $1 AND m.id = $2 AND {NO_LIVE_JOB} \
          FOR UPDATE OF m"
@@ -264,19 +331,12 @@ async fn end_orphan(
     .await
     .map_err(StoreError::query)?;
     let Some(stored) = locked else {
-        return Ok(false);
+        return Ok(None);
     };
-    let Some(enrollment) = find_enrollment(&mut tx, workspace, open.enrollment_id).await? else {
-        return Ok(false);
-    };
-    let reason = if stored.status == "sending" {
-        DELIVERY_UNCONFIRMED
-    } else {
-        INTERNAL_ERROR
-    };
+    let reason = ending_of(&stored.status, &stored.gate_results);
     let dimensions: Dimensions =
         serde_json::from_value(stored.dimensions.clone()).unwrap_or_default();
-    let gates = [GateRecord::blocked("job", reason)];
+    let gates = [GateRecord::blocked("job", reason).with_note(JOB_DEAD)];
     let message = NewMessage {
         id: stored.id,
         workspace,
@@ -299,21 +359,27 @@ async fn end_orphan(
         attempts: stored.attempts,
         now,
     };
-    if held {
+    let enrollment = if held {
+        find_enrollment(&mut tx, workspace, open.enrollment_id).await?
+    } else {
+        None
+    };
+    if let Some(enrollment) = enrollment {
         record_send_outcome(
             &mut tx,
             &SendOutcome {
                 message,
                 trace: &enrollment.trace,
                 job: None,
+                keep_gates: true,
             },
         )
         .await?;
     } else {
-        insert_message(&mut *tx, &message).await?;
+        insert_message_keeping_gates(&mut *tx, &message).await?;
     }
     commit(tx).await?;
-    Ok(true)
+    Ok(Some(reason))
 }
 #[cfg(test)]
 mod tests {
@@ -417,6 +483,7 @@ mod tests {
             message: new,
             trace: &trace,
             job: Some((Uuid::from_u128(9), 1)),
+            keep_gates: false,
         };
         let mut connection = pool.acquire().await.unwrap();
 
@@ -480,6 +547,228 @@ mod tests {
         assert!(!everything.contains('@'), "no address is written");
     }
 
+    /// Writes a `pending` message of the enrollment with the given gates, as the job does first.
+    async fn open_message(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        person: Uuid,
+        enrollment: Uuid,
+        gates: &[GateRecord],
+    ) -> Uuid {
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        let new = NewMessage {
+            id,
+            workspace: ws,
+            person,
+            enrollment,
+            flow: None,
+            flow_version: None,
+            node: "mail",
+            template: Uuid::from_u128(1),
+            template_version: Some(1),
+            destination: Uuid::from_u128(3),
+            sender_identity: None,
+            category: Some("marketing"),
+            topic: None,
+            dimensions: &dimensions,
+            status: MessageStatus::Pending,
+            reason: None,
+            deciding_rule: None,
+            gates,
+            attempts: 0,
+            now: OffsetDateTime::now_utc(),
+        };
+        assert!(insert_message(pool, &new).await.unwrap());
+        id
+    }
+
+    async fn stored(pool: &PgPool, ws: WorkspaceId, id: Uuid) -> crate::Message {
+        crate::find_message(pool, ws, id).await.unwrap().unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_moved_message_whose_enrollment_was_erased_is_ended_and_blocks_nothing(pool: PgPool) {
+        let (ws, person, enrollment) = seeded(&pool).await;
+        let target = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(target)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let moved = open_message(&pool, ws, person, enrollment, &[]).await;
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(person)
+            .bind(target)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM enrollments WHERE id = $1")
+            .bind(enrollment)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let ended = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ended,
+            [EndedOrphan {
+                message: moved,
+                workspace: ws.as_uuid(),
+                reason: INTERNAL_ERROR
+            }]
+        );
+        let row = stored(&pool, ws, moved).await;
+        assert_eq!(
+            (row.status.as_str(), row.reason.as_deref()),
+            ("failed", Some("internal_error"))
+        );
+        let again = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        assert!(again.is_empty(), "an ended row is not selected again");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_message_whose_enrollment_was_erased_under_its_person_is_ended(pool: PgPool) {
+        let (ws, person, enrollment) = seeded(&pool).await;
+        let id = open_message(&pool, ws, person, enrollment, &[]).await;
+        sqlx::query("DELETE FROM enrollments WHERE id = $1")
+            .bind(enrollment)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let ended = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        assert_eq!(ended.len(), 1);
+        assert_eq!(stored(&pool, ws, id).await.status, "failed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sweep_keeps_the_gates_a_message_passed_and_adds_its_job_gate_with_a_note(
+        pool: PgPool,
+    ) {
+        let (ws, person, enrollment) = seeded(&pool).await;
+        let gates = [
+            GateRecord::passed("enrollment"),
+            GateRecord::passed("address"),
+            GateRecord::passed("consent"),
+        ];
+        let id = open_message(&pool, ws, person, enrollment, &gates).await;
+        crate::mark_message_sending(&pool, ws, id, 1, None)
+            .await
+            .unwrap();
+
+        let ended = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        assert_eq!(ended.len(), 1);
+        let row = stored(&pool, ws, id).await;
+        assert_eq!(
+            (row.status.as_str(), row.reason.as_deref()),
+            ("failed", Some("delivery_unconfirmed"))
+        );
+        assert_eq!(
+            row.gate_results,
+            serde_json::json!([
+                {"gate": "enrollment", "result": "passed"},
+                {"gate": "address", "result": "passed"},
+                {"gate": "consent", "result": "passed"},
+                {"gate": "job", "result": "blocked", "reason": "delivery_unconfirmed",
+                 "note": "job_dead"},
+            ]),
+            "the passed gates stay, the transient in-flight mark goes, the job gate is noted"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_ending_follows_the_marks_of_the_row(pool: PgPool) {
+        let (ws, person, enrollment) = seeded(&pool).await;
+        let gates = [GateRecord::passed("enrollment")];
+        // pending: no attempt was made.
+        let pending = open_message(&pool, ws, person, enrollment, &gates).await;
+        // sending, in-flight set.
+        let in_flight = open_message(&pool, ws, person, enrollment, &gates).await;
+        crate::mark_message_sending(&pool, ws, in_flight, 1, None)
+            .await
+            .unwrap();
+        // sending, in-flight cleared by a definitive refusal, nothing else.
+        let refused = open_message(&pool, ws, person, enrollment, &gates).await;
+        crate::mark_message_sending(&pool, ws, refused, 1, None)
+            .await
+            .unwrap();
+        crate::clear_message_in_flight(&pool, ws, refused, 1)
+            .await
+            .unwrap();
+        // sending, in-flight cleared but a lost reply left the unconfirmed mark.
+        let lost = open_message(&pool, ws, person, enrollment, &gates).await;
+        crate::mark_message_sending(&pool, ws, lost, 1, None)
+            .await
+            .unwrap();
+        crate::mark_message_unconfirmed(&pool, ws, lost)
+            .await
+            .unwrap();
+        crate::clear_message_in_flight(&pool, ws, lost, 1)
+            .await
+            .unwrap();
+        // sending, both marks set.
+        let both = open_message(&pool, ws, person, enrollment, &gates).await;
+        crate::mark_message_sending(&pool, ws, both, 1, None)
+            .await
+            .unwrap();
+        crate::mark_message_unconfirmed(&pool, ws, both)
+            .await
+            .unwrap();
+
+        let ended = end_orphaned_messages(&pool, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        assert_eq!(ended.len(), 5);
+        for (id, reason) in [
+            (pending, "internal_error"),
+            (in_flight, "delivery_unconfirmed"),
+            (refused, "internal_error"),
+            (lost, "delivery_unconfirmed"),
+            (both, "delivery_unconfirmed"),
+        ] {
+            let row = stored(&pool, ws, id).await;
+            assert_eq!(
+                (row.status.as_str(), row.reason.as_deref()),
+                ("failed", Some(reason)),
+                "{id}"
+            );
+            assert!(
+                row.gate_results.to_string().contains("\"job_dead\""),
+                "{id}: {}",
+                row.gate_results
+            );
+        }
+    }
+
+    #[test]
+    fn the_ending_is_unconfirmed_only_while_a_mark_says_a_call_may_have_gone_out() {
+        let none = serde_json::json!([{"gate": "enrollment", "result": "passed"}]);
+        let in_flight = serde_json::json!([{"gate": "delivery", "result": "in_flight"}]);
+        let unconfirmed = serde_json::json!([{"gate": "delivery", "result": "unconfirmed"}]);
+        assert_eq!(ending_of("pending", &in_flight), INTERNAL_ERROR);
+        assert_eq!(ending_of("sending", &none), INTERNAL_ERROR);
+        assert_eq!(ending_of("sending", &in_flight), DELIVERY_UNCONFIRMED);
+        assert_eq!(ending_of("sending", &unconfirmed), DELIVERY_UNCONFIRMED);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_message_event_reaches_the_forwarding_outbox_in_its_transaction(pool: PgPool) {
@@ -529,6 +818,7 @@ mod tests {
                     },
                     trace,
                     job: Some((Uuid::from_u128(9), 1)),
+                    keep_gates: false,
                 }
             }
         };
