@@ -59,6 +59,7 @@ tpl="$(state_get "$tpl_key")"
 [ -n "$dest" ] && [ -n "$tpl" ] || die "run setup.sh first"
 login || die "cannot sign in; run stack.sh up"
 [ -f "$M6_SINK_DIR/sink.pid" ] && kill -0 "$(cat "$M6_SINK_DIR/sink.pid")" 2>/dev/null || die "the sink is not running; sink.sh start"
+wait_no_cargo
 busy="$(pgc -At -c "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND state IN ('ready', 'running')")"
 [ "$busy" = 0 ] || die "$busy delivery.send jobs are still ready or running: let the previous run drain first"
 
@@ -127,11 +128,22 @@ flow="$(api_json POST "/workspaces/$ws/flows" "$(jq -nc --arg n "bench-$label" -
 api POST "/workspaces/$ws/flows/$flow/publish" >/dev/null
 
 # 4. Sampler, start, wait.
+# The sink's cumulative CPU seconds (tasklist, one second resolution) and whether cargo.exe runs.
+sink_cpu_s() {
+  local pid
+  pid="$(cat "$M6_SINK_DIR/winpid" 2>/dev/null)" || return 0
+  tasklist //V //FI "PID eq $pid" //FO CSV //NH 2>/dev/null \
+    | awk -F'","' 'NF > 8 {t = $8; gsub(/"/, "", t); split(t, a, ":"); print a[1] * 3600 + a[2] * 60 + a[3]}'
+}
 sampler() {
+  local cpu
   while [ ! -e "$out/stop" ]; do
     # shellcheck disable=SC2046
     docker stats --no-stream --format '{{json .}}' $(compose ps -q) 2>/dev/null \
       | jq -c --arg t "$(date -u +%FT%T.%6NZ)" '. + {t: $t}' >>"$out/docker-stats.ndjson" || true
+    cpu="$(sink_cpu_s)"
+    [ -z "$cpu" ] || echo "$(date +%s%6N),$cpu" >>"$out/sink-cpu.csv"
+    echo "$(date +%s%6N),$(tasklist //FI 'IMAGENAME eq cargo.exe' 2>/dev/null | grep -ci cargo.exe || true)" >>"$out/cargo.log"
     sleep 3
   done
 }
@@ -235,3 +247,13 @@ for f in "$out"/metrics-w*.txt; do metrics_args+=(--metrics "$f"); done
 # Whether the bucket (or the workers) was the limit: a queue stood in the steady window.
 echo "queue_in_window=$(jq -c .queue "$out/report.json") db_cpu_in_window=$(jq -c .db_cpu "$out/report.json")" >>"$out/variant.txt"
 jq -c .metrics "$out/report.json" >&2
+# The sink's CPU over the steady window (cores = CPU seconds / wall seconds; tasklist has one
+# second resolution) and whether cargo.exe ran inside it.
+ws_us="$(jq -r .window.start_us "$out/report.json")"
+we_us="$(jq -r .window.end_us "$out/report.json")"
+awk -F, -v s="$ws_us" -v e="$we_us" '
+  $1 >= s && $1 <= e {if (!n++) {t0 = $1; c0 = $2}; t1 = $1; c1 = $2}
+  END {if (n > 1 && t1 > t0) printf "{\"samples\":%d,\"cpu_seconds\":%s,\"mean_cores\":%.2f}\n", n, c1 - c0, (c1 - c0) / ((t1 - t0) / 1e6); else print "{\"samples\":" n + 0 ",\"mean_cores\":null}"}' \
+  "$out/sink-cpu.csv" >"$out/sink-cpu.json"
+cargo_in_window="$(awk -F, -v s="$ws_us" -v e="$we_us" '$1 >= s && $1 <= e && $2 > 0 {n++} END {print n + 0}' "$out/cargo.log")"
+echo "sink_cpu_in_window=$(cat "$out/sink-cpu.json") cargo_samples_in_window=$cargo_in_window" >>"$out/variant.txt"

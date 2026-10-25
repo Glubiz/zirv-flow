@@ -22,6 +22,7 @@ case "${1:-}" in
     echo "$!" >"$pidfile"
     for _ in $(seq 1 50); do [ -s "$M6_SINK_DIR/ca.pem" ] && break; sleep 0.2; done
     [ -s "$M6_SINK_DIR/ca.pem" ] || die "the sink did not start; see $M6_SINK_DIR/sink.err"
+    tasklist //FI "IMAGENAME eq sendbench.exe" //NH | awk '/sendbench/ {print $2}' >"$M6_SINK_DIR/winpid"
     log "sink up on port $M6_SINK_PORT (pid $(cat "$pidfile"))" ;;
   stop)
     [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null || true

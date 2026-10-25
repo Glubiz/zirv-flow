@@ -8,8 +8,8 @@
 #   M6_OUT             results, default <main checkout>/.zirv/work/m6-send-out
 #   M6_SINK_PORT       the sink's port on the host, default 2525
 #   M6_SINK_HOST       the name containers use for the host, default host.docker.internal
-#   M6_DOMAIN          the fixture sending domain, default bench-send.example
-#   M6_RCPT_DOMAIN     the people's address domain, default bench.example
+#   M6_DOMAIN          the fixture sending domain, default bench-send.example.com
+#   M6_RCPT_DOMAIN     the people's address domain, default bench.example.com
 #   SENDBENCH          the sendbench binary, default <repo>/target/release/sendbench
 #
 # Needs bash, docker compose, jq, curl and awk, as the M4 scripts do.
@@ -34,8 +34,8 @@ BENCH_IMAGE_TAG_SET="$BENCH_IMAGE_TAG"
 [ -n "$BENCH_IMAGE_TAG_SET" ] || BENCH_IMAGE_TAG_UNSET=1
 M6_SINK_PORT="${M6_SINK_PORT:-2525}"
 M6_SINK_HOST="${M6_SINK_HOST:-host.docker.internal}"
-M6_DOMAIN="${M6_DOMAIN:-bench-send.example}"
-M6_RCPT_DOMAIN="${M6_RCPT_DOMAIN:-bench.example}"
+M6_DOMAIN="${M6_DOMAIN:-bench-send.example.com}"
+M6_RCPT_DOMAIN="${M6_RCPT_DOMAIN:-bench.example.com}"
 SENDBENCH="${SENDBENCH:-$m6_root/target/release/sendbench}"
 M6_SINK_DIR="$M6_OUT/sink"
 mkdir -p "$M6_OUT" "$M6_SINK_DIR"
@@ -50,4 +50,12 @@ pgc() {
     if [ "$1" = -c ]; then sql="$2"; shift 2; else args+=("$1"); shift; fi
   done
   printf '%s\n' "$sql" | pg "${args[@]}" -f -
+}
+
+# Waits until no cargo.exe is running (another build or test run would skew a measurement).
+wait_no_cargo() {
+  until ! tasklist //FI "IMAGENAME eq cargo.exe" 2>/dev/null | grep -qi cargo.exe; do
+    log "cargo.exe is running; waiting 30 s"
+    sleep 30
+  done
 }
