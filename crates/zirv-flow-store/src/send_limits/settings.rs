@@ -105,10 +105,14 @@ impl TryFrom<CapRow> for FrequencyCap {
 }
 
 /// The workspace's caps (in the order they were written) and its quiet hours, if it set any.
+///
+/// The revision is read first, in its own statement. A save that commits between the reads makes
+/// the document newer than the revision, so a save based on it is refused as stale, never accepted.
 pub async fn read_send_limits(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<SendLimits, StoreError> {
+    let revision = read_revision(connection, workspace).await?;
     let caps = sqlx::query_as::<_, CapRow>(
         "SELECT id, channel, window_hours, message_limit, mode FROM frequency_caps
          WHERE workspace_id = $1 ORDER BY id",
@@ -132,7 +136,6 @@ pub async fn read_send_limits(
         end: row.end_time,
         days: row.days,
     });
-    let revision = read_revision(connection, workspace).await?;
     Ok(SendLimits {
         caps,
         quiet_hours,
