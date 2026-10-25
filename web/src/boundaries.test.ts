@@ -67,4 +67,16 @@ describe("import boundaries", () => {
     expect(messages[0]?.ruleId).toBe("no-restricted-imports");
     expect(messages[0]?.message).toContain("import the session feature through its index.ts");
   });
+
+  it("passes for the block editor files of the templates feature", async () => {
+    const eslint = new ESLint({
+      cwd: root,
+      overrideConfigFile: true,
+      overrideConfig: [tseslint.configs.base, ...boundaryConfigs],
+    });
+    const results = await eslint.lintFiles(["src/features/templates/**/*.{ts,tsx}"]);
+
+    expect(results.flatMap((result) => result.messages.map((message) => `${result.filePath}: ${message.message}`))).toEqual([]);
+    expect(results.some((result) => result.filePath.includes("BlockEditor"))).toBe(true);
+  });
 });

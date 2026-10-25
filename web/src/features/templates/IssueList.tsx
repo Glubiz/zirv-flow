@@ -10,7 +10,7 @@ export function IssueList({
   issues: readonly TemplateIssue[];
   /** False until the server has checked the saved draft. */
   checked: boolean;
-  onGo?: (where: string) => void;
+  onGo?: (where: string, issue: TemplateIssue) => void;
 }) {
   const blocking = blockingCount(issues);
   if (!checked) {
@@ -36,7 +36,7 @@ export function IssueList({
             <Pill tone={isBlocking(issue) ? "error" : "attention"}>{isBlocking(issue) ? "Blocks publishing" : "Warning"}</Pill>{" "}
             <span>{issueText(issue)}</span>{" "}
             {onGo ? (
-              <button type="button" className="link-button" onClick={() => onGo(issueWhere(issue))}>
+              <button type="button" className="link-button" onClick={() => onGo(issueWhere(issue), issue)}>
                 Go to {issueWhere(issue).toLowerCase()}
               </button>
             ) : (
