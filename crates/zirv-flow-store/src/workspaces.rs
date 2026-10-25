@@ -62,7 +62,10 @@ struct WorkspaceRow {
     slug: String,
     timezone: String,
     created_at: OffsetDateTime,
-    utm: sqlx::types::Json<UtmSettings>,
+    /// Absent when the row was read before migration 0058 (the credential backfill tests) or by
+    /// a create, which returns the defaults.
+    #[sqlx(default)]
+    utm: Option<sqlx::types::Json<UtmSettings>>,
 }
 
 impl From<WorkspaceRow> for Workspace {
@@ -73,7 +76,7 @@ impl From<WorkspaceRow> for Workspace {
             slug: row.slug,
             timezone: row.timezone,
             created_at: row.created_at,
-            utm: row.utm.0,
+            utm: row.utm.map(|json| json.0).unwrap_or_default(),
         }
     }
 }
@@ -110,7 +113,7 @@ pub async fn create_workspace<'e>(
 ) -> Result<Workspace, StoreError> {
     let row: WorkspaceRow = sqlx::query_as(concat!(
         "INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3) RETURNING ",
-        workspace_columns!(),
+        "id, name, slug, timezone, created_at",
         ""
     ))
     .bind(WorkspaceId::new().as_uuid())
