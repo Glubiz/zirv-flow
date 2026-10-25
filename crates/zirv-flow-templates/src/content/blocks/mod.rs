@@ -134,7 +134,7 @@ mod tests {
         serde_json::json!({
             "schema": 1, "channel": "email", "mode": "blocks",
             "email": {"subject": "x", "html": "", "category": "marketing"},
-            "blocks": {"subject": "Hi", "category": "transactional", "sender": "snd_1", "lang": "en"}
+            "blocks": {"subject": "Hi", "category": "transactional", "sender": "0192b1a4-7c3e-7000-8000-00000000a001", "lang": "en"}
         })
     }
 

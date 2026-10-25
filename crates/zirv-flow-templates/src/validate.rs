@@ -111,7 +111,7 @@ pub(crate) fn sample_context(catalog: &FieldCatalog) -> Value {
 }
 
 /// Whether `text` is a UUID in its hyphenated form (8-4-4-4-12 hexadecimal digits).
-fn is_uuid(text: &str) -> bool {
+pub(crate) fn is_uuid(text: &str) -> bool {
     let groups: Vec<&str> = text.split('-').collect();
     groups.len() == 5
         && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, length)| {

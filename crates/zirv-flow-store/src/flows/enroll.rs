@@ -45,8 +45,8 @@ pub struct EnrollRequest<'a> {
     pub occurrence: Occurrence,
     /// The re-entry interval is measured against this instant.
     pub now: OffsetDateTime,
-    /// The trace of the work that enrolls. A refused person's decision is on it; each enrollment
-    /// starts a trace of its own with the same cause.
+    /// The trace of the work that enrolls. A refused person's decision is on it, and an
+    /// enrollment continues it with the same cause unless its entry names a trace of its own.
     pub trace: &'a TraceContext,
 }
 
@@ -55,7 +55,7 @@ pub struct EnrollRequest<'a> {
 pub struct Enrolled {
     pub person: Uuid,
     pub enrollment: Uuid,
-    /// The enrollment's trace.
+    /// The enrollment's trace: the trace of its entry, or the request's, with the trigger's cause.
     pub trace: TraceContext,
 }
 
@@ -117,6 +117,7 @@ pub async fn enroll(
             person: *person,
             occurrence: request.occurrence.id,
             cause: None,
+            trace_id: None,
         })
         .collect();
     enroll_entries(
@@ -144,6 +145,10 @@ pub struct EnrollEntry {
     /// The cause of this enrollment when it is not the request trace's (an event trigger is
     /// caused by its own event).
     pub cause: Option<Cause>,
+    /// The trace this enrollment continues when it is not the request trace: an event trigger
+    /// continues the trace its event arrived on, and an audience run gives each enrollment a
+    /// fresh one.
+    pub trace_id: Option<TraceId>,
 }
 
 /// Who to enroll in which version of which flow, each person for an occurrence of their own.
@@ -224,6 +229,8 @@ pub async fn enroll_entries(
 
     let mut outcome = EnrollOutcome::default();
     let mut accepted = Vec::new();
+    // The trace each skip is decided on, parallel to `outcome.skipped`: the entry's own.
+    let mut skipped_on = Vec::new();
     for entry in entries {
         let person = entry.person;
         if replayed.contains(&person) {
@@ -239,7 +246,10 @@ pub async fn enroll_entries(
             request.now,
         );
         match refusal {
-            Some(reason) => outcome.skipped.push((person, reason)),
+            Some(reason) => {
+                skipped_on.push(entry_trace(entry, request.trace));
+                outcome.skipped.push((person, reason));
+            }
             None => accepted.push(entry),
         }
     }
@@ -249,11 +259,12 @@ pub async fn enroll_entries(
     let mut decisions: Vec<NewDecision> = outcome
         .skipped
         .iter()
-        .filter(|(_, reason)| *reason != NO_SUCH_PERSON)
-        .map(|(person, reason)| NewDecision {
+        .zip(skipped_on)
+        .filter(|((_, reason), _)| *reason != NO_SUCH_PERSON)
+        .map(|((person, reason), trace)| NewDecision {
             graph: Some(GraphPoint::of_version(request.version)),
             workspace_id: request.workspace,
-            trace: request.trace.clone(),
+            trace,
             action: "flow.enroll",
             outcome: "skipped",
             reason: Some(reason),
@@ -263,17 +274,10 @@ pub async fn enroll_entries(
         .collect();
     let mut occurrence_of = Vec::with_capacity(accepted.len());
     for entry in accepted {
-        let cause = entry
-            .cause
-            .clone()
-            .unwrap_or_else(|| request.trace.cause.clone());
         outcome.enrolled.push(Enrolled {
             person: entry.person,
             enrollment: Uuid::now_v7(),
-            trace: TraceContext {
-                trace_id: TraceId::new(),
-                cause,
-            },
+            trace: entry_trace(entry, request.trace),
         });
         occurrence_of.push(entry.occurrence);
     }
@@ -319,6 +323,15 @@ pub async fn enroll_entries(
     }
     append_decisions(connection, &decisions).await?;
     Ok(outcome)
+}
+
+/// The trace an entry's decisions and enrollment are on: its own trace id and cause where it has
+/// them, else the request's.
+fn entry_trace(entry: &EnrollEntry, request: &TraceContext) -> TraceContext {
+    TraceContext {
+        trace_id: entry.trace_id.unwrap_or(request.trace_id),
+        cause: entry.cause.clone().unwrap_or_else(|| request.cause.clone()),
+    }
 }
 
 /// The reason a person is refused, or `None` when they may enter.

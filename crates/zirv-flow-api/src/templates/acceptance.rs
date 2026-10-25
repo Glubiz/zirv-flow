@@ -1179,7 +1179,7 @@ mod tests {
     /// A valid marketing block email: a sender, a language and the unsubscribe link.
     fn blocks_doc(subject: &str, footer: &str) -> Value {
         json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
-        "subject": subject, "sender": "snd_1", "lang": "en", "category": "marketing",
+        "subject": subject, "sender": SENDER, "lang": "en", "category": "marketing",
         "sections": [
             {"id": "intro", "columns": [[
                 {"type": "heading", "id": "title", "level": 1, "text": "Hello {{ person.plan }}"},
@@ -1189,6 +1189,71 @@ mod tests {
                 {"type": "text", "id": "legal", "content": footer}
             ]]}
         ]}})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_block_document_is_refused_when_its_sender_is_missing_or_unverified(pool: PgPool) {
+        use zirv_flow_store::sending_fixtures::{
+            plant_domain, plant_identity, plant_verified_sender,
+        };
+
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let domain = plant_domain(&pool, f.ws, "pending.example.org")
+            .await
+            .unwrap();
+        let pending = plant_identity(&pool, f.ws, domain, "news@pending.example.org")
+            .await
+            .unwrap()
+            .to_string();
+        let theirs = plant_verified_sender(&pool, f.other_ws, "theirs.example.org")
+            .await
+            .unwrap()
+            .to_string();
+        let with_sender = |sender: &str| {
+            let mut document = blocks_doc("Welcome", footer);
+            document["blocks"]["sender"] = json!(sender);
+            document
+        };
+
+        // A sender that names no identity is the same blocking issue as in a code document.
+        let mut missing = blocks_doc("Welcome", footer);
+        missing["blocks"]
+            .as_object_mut()
+            .expect("a blocks object")
+            .remove("sender");
+        let mut code_missing = email_doc("Welcome", "x");
+        code_missing["email"]
+            .as_object_mut()
+            .expect("an email object")
+            .remove("sender");
+        let mut codes = Vec::new();
+        for (name, document) in [
+            ("Code missing", code_missing),
+            ("Block missing", missing),
+            ("Block not an id", with_sender("snd_1")),
+        ] {
+            let id = f.create(name, document).await;
+            let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+            assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{name}");
+            codes.push(refused.body["code"].clone());
+        }
+        assert_eq!(codes, ["template_invalid"; 3]);
+
+        // An identity that exists but cannot send is `sender_unverified`.
+        for (name, sender) in [("Unverified", pending), ("Foreign", theirs)] {
+            let id = f.create(name, with_sender(&sender)).await;
+            let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+            assert_eq!(
+                refused.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{name}: {:?}",
+                refused.body
+            );
+            assert_eq!(refused.body["code"], "sender_unverified", "{name}");
+        }
     }
 
     #[sqlx::test]

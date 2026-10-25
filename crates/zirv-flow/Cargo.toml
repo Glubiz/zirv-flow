@@ -40,3 +40,10 @@ tower.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 time.workspace = true
+uuid.workspace = true
+# The end-to-end send test (#232) drives the API router and a real worker in one process, so it
+# reaches the test doubles of the lower crates: the local SMTP sink, the fixture DNS resolver and
+# the fake email provider.
+zirv-flow-connectors = { workspace = true, features = ["test-support"] }
+zirv-flow-core.workspace = true
+zirv-flow-store = { workspace = true, features = ["test-support"] }

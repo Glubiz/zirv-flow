@@ -958,7 +958,7 @@ mod tests {
                 "text": "t {{ system.unsubscribe_url }}"
             }}),
             json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
-            "subject": "Blocks", "sender": "snd_1", "lang": "en", "category": "marketing",
+            "subject": "Blocks", "sender": "0192b1a4-7c3e-7000-8000-00000000a001", "lang": "en", "category": "marketing",
             "sections": [
                 {"id": "intro", "columns": [[
                     {"type": "heading", "id": "title", "level": 1, "text": "Blocks"}
