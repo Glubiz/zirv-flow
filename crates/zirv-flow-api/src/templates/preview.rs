@@ -100,6 +100,7 @@ async fn render(
                 tracking: Tracking::Inert {
                     base_url: INERT_BASE_URL,
                 },
+                utm: None,
             };
             let email = pool
                 .render_email(doc, context, &hooks)

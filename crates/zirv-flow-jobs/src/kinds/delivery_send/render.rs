@@ -168,6 +168,7 @@ pub(crate) async fn render(
             base_url: &base,
             token: &token,
         },
+        utm: None,
     };
     let mut rendered = pool
         .render_email(&document, context, &hooks)

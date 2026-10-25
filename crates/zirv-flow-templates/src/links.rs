@@ -7,6 +7,7 @@
 use std::ops::Range;
 
 use crate::error::RenderError;
+use crate::utm::UtmTags;
 
 /// The token every rewritten link carries in inert (preview) mode.
 pub const INERT_TOKEN: &str = "inert";
@@ -36,6 +37,9 @@ pub enum Tracking<'a> {
 #[derive(Clone, Copy)]
 pub struct Hooks<'a> {
     pub tracking: Tracking<'a>,
+    /// Automatic UTM parameters (architecture 10.2), applied before click tracking. `None`
+    /// leaves the output exactly as it was without the step.
+    pub utm: Option<UtmTags<'a>>,
 }
 
 impl Hooks<'_> {
@@ -43,16 +47,20 @@ impl Hooks<'_> {
     pub const fn untracked() -> Hooks<'static> {
         Hooks {
             tracking: Tracking::Off,
+            utm: None,
         }
     }
 }
 
 /// The byte span of one `href` value inside an `<a>` tag.
-struct Href {
+pub(crate) struct Href {
     /// The value, without quotes.
-    value: Range<usize>,
+    pub(crate) value: Range<usize>,
     /// The span to replace: the value with its quotes, if it had any.
-    outer: Range<usize>,
+    pub(crate) outer: Range<usize>,
+    /// The span of a `data-zf-utm="off"` attribute on the same tag, with the whitespace
+    /// before it.
+    pub(crate) utm_off: Option<Range<usize>>,
 }
 
 /// The elements whose content is text, not markup: an `<a>` inside is not a link.
@@ -100,7 +108,7 @@ fn skip_non_markup(html: &str, start: usize) -> Option<usize> {
 
 /// The first `href` of every `<a>` tag, in document order. Comments and the content of raw-text
 /// elements hold no links.
-fn hrefs(html: &str) -> Vec<Href> {
+pub(crate) fn hrefs(html: &str) -> Vec<Href> {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
     let mut at = 0;
@@ -131,7 +139,10 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
     let mut at = from;
     // Browsers use the first `href` of a tag and ignore the rest.
     let mut seen_href = false;
+    let first_found = found.len();
+    let mut utm_off: Option<Range<usize>> = None;
     loop {
+        let gap_start = at;
         while bytes
             .get(at)
             .is_some_and(|b| b.is_ascii_whitespace() || matches!(*b, b'/' | 0))
@@ -185,7 +196,19 @@ fn scan_tag(html: &str, from: usize, found: &mut Vec<Href>) -> usize {
         };
         if name.eq_ignore_ascii_case("href") && !seen_href {
             seen_href = true;
-            found.push(Href { value, outer });
+            found.push(Href {
+                value,
+                outer,
+                utm_off: utm_off.clone(),
+            });
+        } else if name.eq_ignore_ascii_case("data-zf-utm")
+            && html[value.clone()].trim().eq_ignore_ascii_case("off")
+        {
+            let span = gap_start..at;
+            if let Some(first) = found.get_mut(first_found).filter(|_| seen_href) {
+                first.utm_off = Some(span.clone());
+            }
+            utm_off = Some(span);
         }
     }
 }

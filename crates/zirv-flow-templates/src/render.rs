@@ -15,6 +15,7 @@ use crate::sandbox::{
     MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment, is_header_name,
     map_error, render_string,
 };
+use crate::utm::{tag_html, tag_text};
 
 /// A rendered email.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -191,6 +192,13 @@ pub fn apply_tracking(
         system.unsubscribe_url.as_str(),
         system.preferences_url.as_str(),
     ];
+    if let Some(utm) = &hooks.utm {
+        rendered.html = tag_html(&rendered.html, utm, &keep);
+        rendered.text = tag_text(&rendered.text, utm, &keep);
+        if rendered.text.len() > MAX_TEXT_BYTES {
+            return Err(RenderError::OutputTooLarge { field: "text" });
+        }
+    }
     rendered.html = rewrite_links(&rendered.html, &hooks.tracking, &keep);
     // Rewriting lengthens each link, so the cap that held for the render is checked again.
     if rendered.html.len() > MAX_HTML_BYTES {
@@ -378,6 +386,7 @@ mod tests {
                 base_url: "https://t.example/c",
                 token: &tok,
             },
+            utm: None,
         }
     }
 
@@ -559,6 +568,7 @@ mod tests {
                 tracking: Tracking::Inert {
                     base_url: "https://t.example/c",
                 },
+                utm: None,
             },
         )
         .unwrap();
@@ -870,5 +880,84 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    // ----- UTM parameters ------------------------------------------------------------------
+
+    fn utm_doc() -> TemplateDocument {
+        let html = format!(
+            r#"<a href="https://shop.example.com/a?x=1">a</a><a href="https://other.example/b">b</a>{FOOTER}"#
+        );
+        TemplateDocument::email_code(EmailContent {
+            subject: "Hi".into(),
+            sender: None,
+            lang: None,
+            category: Category::Marketing,
+            syntax: Default::default(),
+            html,
+            text: "Shop https://shop.example.com/a?x=1 or https://other.example/b\nStop {{ system.unsubscribe_url }}".into(),
+        })
+    }
+
+    fn with_utm<'a>(domains: &'a [String], tracking: Tracking<'a>) -> Hooks<'a> {
+        Hooks {
+            tracking,
+            utm: Some(crate::UtmTags {
+                source: "acme",
+                medium: "email",
+                campaign: "spring",
+                content: "hero",
+                domains,
+            }),
+        }
+    }
+
+    #[test]
+    fn utm_tags_html_and_text_and_runs_before_click_tracking() {
+        let domains = vec!["example.com".to_owned()];
+        let seen = std::sync::Mutex::new(Vec::new());
+        let record = |index: usize, url: &str| {
+            seen.lock().unwrap().push(url.to_owned());
+            format!("tok{index}")
+        };
+        let hooks = with_utm(
+            &domains,
+            Tracking::Rewrite {
+                base_url: "https://t.example/c",
+                token: &record,
+            },
+        );
+        let out = render_email(&utm_doc(), &context(), &hooks).unwrap();
+        let q = "utm_source=acme&utm_medium=email&utm_campaign=spring&utm_content=hero";
+        // The token function (the recorded link) sees the tagged URL, the unsubscribe link is
+        // untouched, and the redirect target is the tagged one.
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen[0], format!("https://shop.example.com/a?x=1&{q}"));
+        assert_eq!(seen[1], "https://other.example/b");
+        assert!(
+            out.text
+                .contains(&format!("https://shop.example.com/a?x=1&{q} or"))
+        );
+        assert!(out.text.contains("https://other.example/b\n"));
+        assert!(out.text.contains("https://u.example/u/1?s=a&t=b"));
+        assert!(!out.text.contains("u/1?s=a&t=b&utm"));
+    }
+
+    #[test]
+    fn without_the_utm_part_output_is_byte_identical() {
+        let plain = render_email(&utm_doc(), &context(), &live()).unwrap();
+        let again = render_email(&utm_doc(), &context(), &live()).unwrap();
+        assert_eq!(plain, again);
+        assert!(!plain.html.contains("utm_") && !plain.text.contains("utm_"));
+        // An empty domain list tags nothing, so the output equals the untagged render too.
+        let none: Vec<String> = Vec::new();
+        let hooks = with_utm(
+            &none,
+            Tracking::Rewrite {
+                base_url: "https://t.example/c",
+                token: &tok,
+            },
+        );
+        assert_eq!(render_email(&utm_doc(), &context(), &hooks).unwrap(), plain);
     }
 }

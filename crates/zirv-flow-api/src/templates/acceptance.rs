@@ -1045,6 +1045,7 @@ mod tests {
             tracking: Tracking::Inert {
                 base_url: "https://preview.sample.invalid/t",
             },
+            utm: None,
         };
         let expected = render_email(&doc, &context, &hooks).unwrap();
         assert_eq!(email.status, StatusCode::OK, "{:?}", email.body);
@@ -1146,6 +1147,7 @@ mod tests {
             tracking: Tracking::Inert {
                 base_url: "https://preview.sample.invalid/t",
             },
+            utm: None,
         };
         let expected = render_email(&doc, &context, &hooks).unwrap();
         assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
@@ -1295,6 +1297,7 @@ mod tests {
             tracking: Tracking::Inert {
                 base_url: "https://preview.sample.invalid/t",
             },
+            utm: None,
         };
         let expected = render_email(&doc, &context, &hooks).unwrap();
         assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
