@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 
-import { Button, SelectField, TextField } from "../../ui";
+import { Button, defaultEventFilters, SelectField, TextField } from "../../ui";
 import type { Catalog } from "../segments";
 import { DurationField, EventFilters, EventSelect, fieldError, SegmentSelect } from "./fields";
 import { issueText, type Section } from "./issues";
@@ -136,7 +136,7 @@ export function SettingsView({ workspaceId, settings, catalog, readOnly, issues,
             <EventSelect
               label="Event"
               value={trigger.event}
-              onChange={(event) => setTrigger({ ...trigger, event, filters: [] })}
+              onChange={(event) => setTrigger({ ...trigger, event, filters: defaultEventFilters(event) })}
               catalog={catalog}
               disabled={readOnly}
               error={fieldError(at("trigger"), "/trigger/event")}
@@ -249,7 +249,7 @@ export function SettingsView({ workspaceId, settings, catalog, readOnly, issues,
             <EventSelect
               label="Goal event"
               value={settings.goal.event}
-              onChange={(event) => setGoal({ type: "event", event, filters: [] })}
+              onChange={(event) => setGoal({ type: "event", event, filters: defaultEventFilters(event) })}
               catalog={catalog}
               disabled={readOnly}
               error={fieldError(at("goal"), "/goal/event")}
@@ -313,7 +313,7 @@ export function SettingsView({ workspaceId, settings, catalog, readOnly, issues,
                 <EventSelect
                   label="Event"
                   value={criterion.event}
-                  onChange={(event) => setCriteria(criteria.map((entry, at) => (at === index ? { type: "event", event, filters: [] } : entry)))}
+                  onChange={(event) => setCriteria(criteria.map((entry, at) => (at === index ? { type: "event", event, filters: defaultEventFilters(event) } : entry)))}
                   catalog={catalog}
                   disabled={readOnly}
                   error={fieldError(at("exit"), `/exit_criteria/${index}/event`)}

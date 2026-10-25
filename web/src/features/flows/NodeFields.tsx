@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { client, describeError, unwrap, useResource } from "../../api";
-import { Button, InlineError, SelectField, TextField } from "../../ui";
+import { Button, defaultEventFilters, InlineError, SelectField, TextField } from "../../ui";
 import { ConditionEditor, type Catalog } from "../segments";
 import {
   DurationField,
@@ -173,7 +173,7 @@ function WaitUntilEvent({ node, issues, graph, catalog, workspaceId, readOnly, o
       <EventSelect
         label="Event"
         value={node.event}
-        onChange={(event) => onChange({ ...node, event, filters: [] })}
+        onChange={(event) => onChange({ ...node, event, filters: defaultEventFilters(event) })}
         catalog={catalog}
         disabled={readOnly}
         error={fieldError(issues, "/event", graph)}

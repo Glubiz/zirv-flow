@@ -688,4 +688,181 @@ mod tests {
             .unwrap();
         assert_eq!(rows, 0);
     }
+
+    async fn attempt(
+        fx: &Fixture,
+        workspace: WorkspaceId,
+        destination: &str,
+        outcome: zirv_flow_store::AttemptOutcome,
+        status: Option<u16>,
+        minutes_ago: i32,
+    ) {
+        let row = zirv_flow_store::record_delivery_attempt(
+            &fx.pool,
+            workspace,
+            &zirv_flow_store::NewDeliveryAttempt {
+                destination_id: destination.parse().unwrap(),
+                subject_kind: zirv_flow_store::SubjectKind::Message,
+                subject_id: uuid::Uuid::now_v7(),
+                attempt: 1,
+                outcome,
+                status_class: zirv_flow_store::StatusClass::of(status),
+                duration_ms: 5,
+            },
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE delivery_attempts SET attempted_at = now() - make_interval(mins => $2)              WHERE id = $1",
+        )
+        .bind(row.id)
+        .bind(minutes_ago)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_stats_count_attempts_by_outcome_and_status_class_inside_the_window(pool: PgPool) {
+        use zirv_flow_store::AttemptOutcome::{Delivered, Retryable, Terminal};
+        let fx = fixture(&pool).await;
+        let id = fx.create_ok("Mail", "ok").await;
+        attempt(&fx, fx.ws, &id, Delivered, Some(202), 5).await;
+        attempt(&fx, fx.ws, &id, Delivered, Some(200), 60).await;
+        attempt(&fx, fx.ws, &id, Retryable, Some(503), 90).await;
+        attempt(&fx, fx.ws, &id, Terminal, Some(404), 100).await;
+        attempt(&fx, fx.ws, &id, Retryable, None, 110).await;
+        // Inside the day but outside two hours, and outside the day.
+        attempt(&fx, fx.ws, &id, Delivered, Some(301), 121).await;
+        attempt(&fx, fx.ws, &id, Delivered, Some(200), 25 * 60).await;
+
+        let day = fx
+            .as_admin("GET", &format!("/destinations/{id}/stats"), None)
+            .await;
+        let two_hours = fx
+            .as_admin("GET", &format!("/destinations/{id}/stats?hours=2"), None)
+            .await;
+        let week = fx
+            .as_admin("GET", &format!("/destinations/{id}/stats?hours=168"), None)
+            .await;
+
+        assert_eq!(day.status, StatusCode::OK, "{:?}", day.body);
+        assert_eq!(day.body["window_hours"], 24);
+        assert_eq!(day.body["attempts"], 6);
+        assert_eq!(
+            day.body["outcomes"],
+            json!({"delivered": 3, "retryable": 2, "terminal": 1, "throttled": 0})
+        );
+        assert_eq!(
+            day.body["status_classes"],
+            json!({"none": 1, "2xx": 2, "3xx": 1, "4xx": 1, "5xx": 1})
+        );
+        assert_eq!(two_hours.body["window_hours"], 2);
+        assert_eq!(two_hours.body["attempts"], 5);
+        assert_eq!(two_hours.body["status_classes"]["3xx"], 0);
+        assert_eq!(week.body["attempts"], 7);
+        // Only counts: no subject id, no person.
+        assert!(!day.body.to_string().contains("subject"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_stats_refuse_a_bad_window_other_workspaces_and_non_admins(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        let id = fx.create_ok("Mail", "ok").await;
+        let empty = fx
+            .as_admin("GET", &format!("/destinations/{id}/stats"), None)
+            .await;
+        assert_eq!(empty.body["attempts"], 0);
+        assert_eq!(empty.body["outcomes"]["delivered"], 0);
+
+        for bad in ["0", "169", "-1", "x", ""] {
+            let reply = fx
+                .as_admin(
+                    "GET",
+                    &format!("/destinations/{id}/stats?hours={bad}"),
+                    None,
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        }
+        let tail = format!("/destinations/{id}/stats");
+        let anonymous = fx.send("GET", &tail, None, Auth::Anonymous).await;
+        let read_key = fx.send("GET", &tail, None, Auth::Key(&fx.read)).await;
+        let member = fx.send("GET", &tail, None, Auth::Session(&fx.member)).await;
+        let stranger = fx.send("GET", &tail, None, Auth::Key(&fx.stranger)).await;
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(read_key.status, StatusCode::FORBIDDEN);
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+        // A destination of another workspace is not found through ours.
+        let theirs = call(
+            &fx.router,
+            "POST",
+            &format!("/api/v1/workspaces/{}/destinations", fx.other.as_uuid()),
+            Some(json!({"kind": "fake", "name": "Theirs", "config": {},
+                        "credential": {"token": "ok"}})),
+            Auth::Key(&fx.stranger),
+        )
+        .await;
+        let theirs = theirs.body["id"].as_str().unwrap().to_owned();
+        let crossed = fx
+            .as_admin("GET", &format!("/destinations/{theirs}/stats"), None)
+            .await;
+        assert_eq!(crossed.status, StatusCode::NOT_FOUND);
+        let missing = fx
+            .as_admin(
+                "GET",
+                &format!("/destinations/{}/stats", uuid::Uuid::now_v7()),
+                None,
+            )
+            .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_kinds_endpoint_needs_a_sign_in_and_lists_every_kind_with_secrets_marked(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+
+        let anonymous = call(
+            &fx.router,
+            "GET",
+            "/api/v1/destination-kinds",
+            None,
+            Auth::Anonymous,
+        )
+        .await;
+        let member = call(
+            &fx.router,
+            "GET",
+            "/api/v1/destination-kinds",
+            None,
+            Auth::Session(&fx.member),
+        )
+        .await;
+
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(member.status, StatusCode::OK, "{:?}", member.body);
+        let kinds: Vec<_> = member
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["webhook", "smtp", "provider", "fake"]);
+        let smtp = &member.body[1];
+        let password = smtp["credential_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["key"] == "password")
+            .unwrap();
+        assert_eq!(password["secret"], true);
+        assert_eq!(password["required"], true);
+    }
 }

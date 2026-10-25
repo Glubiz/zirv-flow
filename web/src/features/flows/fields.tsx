@@ -1,7 +1,16 @@
 import { useState } from "react";
 
 import { client, describeError, unwrap, useResource, type components } from "../../api";
-import { Button, InlineError, SelectField, TextField } from "../../ui";
+import {
+  Button,
+  ENGAGEMENT_PROPERTIES,
+  InlineError,
+  isMachineFilter,
+  MACHINE_HINT,
+  OPENED_EVENT,
+  SelectField,
+  TextField,
+} from "../../ui";
 import type { Catalog } from "../segments";
 import { usePublishedTemplates } from "../templates";
 import {
@@ -93,7 +102,10 @@ export function EventSelect({ label, value, onChange, catalog, disabled, error, 
   return (
     <SelectField label={label} value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled || catalog === null} error={error} hint={hint}>
       <option value="">{catalog === null ? "Loading events" : "Choose an event"}</option>
-      {value !== "" && !known ? <option value={value}>{value}</option> : null}
+      {value !== "" && !known && value !== OPENED_EVENT ? <option value={value}>{value}</option> : null}
+      {catalog !== null && !catalog.events.some((entry) => entry.name === OPENED_EVENT) ? (
+        <option value={OPENED_EVENT}>{OPENED_EVENT}</option>
+      ) : null}
       {catalog?.events.map((entry) => (
         <option key={entry.name} value={entry.name}>
           {entry.name}
@@ -165,6 +177,7 @@ function useEventProperties(workspaceId: string, event: string): ReadonlyMap<str
     [workspaceId, event],
   );
   const map = new Map<string, PropertyType>();
+  for (const [name, type] of Object.entries(ENGAGEMENT_PROPERTIES[event] ?? {})) map.set(name, type);
   if (detail.status === "ready" && detail.data !== null) {
     for (const property of detail.data.versions[0]?.properties ?? detail.data.draft ?? []) {
       map.set(property.name, property.type);
@@ -225,6 +238,9 @@ export function EventFilters({ workspaceId, event, filters, onChange, disabled, 
     <fieldset className="fl-fieldset">
       <legend className="field-label">Only events where</legend>
       {filters.length === 0 ? <p className="faint">Every event of this name counts.</p> : null}
+      {event === OPENED_EVENT && filters.some(isMachineFilter) ? (
+        <p className="field-hint">machine = false means {MACHINE_HINT}. Remove the filter to count every open.</p>
+      ) : null}
       {filters.map((filter, position) => {
         const type = properties.get(filter.prop);
         const operand = FILTER_OPS.find((entry) => entry.op === filter.op)?.operand ?? true;
