@@ -174,10 +174,9 @@ The database, through the cost of each message in it. Established:
 
 ## 5. Misses and causes
 
-The target is missed by 39% at best. The causes, each with its own issue (the numbers are measured here;
-the issue numbers are filled in by the orchestrator):
+The target is missed by 39% at best. The causes, each with its own issue (the numbers are measured here):
 
-1. **Event lookup by id costs time proportional to the events of the workspace: `TBD-events-lookup`.**
+1. **Event lookup by id costs time proportional to the events of the workspace: #296.**
    `SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)` has no index it can use: the
    partition primary key is `(occurred_at, id)`, so the plan walks the workspace's whole
    `(workspace_id, occurred_at)` index range and filters on `id`. With 40,000 events in the workspace one
@@ -186,18 +185,19 @@ the issue numbers are filled in by the orchestrator):
    active database time at 4 processes. Set 1 against set 2 shows the effect on throughput (a 54.6 against
    82.2/s on the same variant, and f 36.1/s after the events piled up). A lookup by id and time (the v7 id
    carries the time) or an index on `(workspace_id, id)` would make it constant.
-2. **The people lock query without planner statistics: `TBD-people-lock-plan`.**
+2. **The people lock query without planner statistics: #297.**
    `SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE` chose
    `people_workspace_idx` and filtered 69,999 rows to find 1 (76,476 buffers, 41.5 ms); after `ANALYZE people`
    it uses `people_pkey` (0.075 ms). The bench database had lost its statistics (a crash; autovacuum's
    analyze threshold on a 10 M-row table is 1 M changed rows, so it never refreshed them). This is partly
    an operations matter (run `ANALYZE` after a restore), but a send path whose cost goes from 0.075 ms to
    41 ms per message on a statistics gap deserves a plan that does not depend on it.
-3. **Commits waiting for an object lock under parallel workers: `TBD-commit-lock`.** 108 of 1,010 active
+3. **Commits waiting for an object lock under parallel workers: #298.** 108 of 1,010 active
    samples (11%) at 4 processes were `COMMIT` in `Lock/object`, which a single process does not show. The
-   candidate is a transaction advisory lock (per person or per workspace) taken in the send path and held to
-   the commit; the sampling does not name the lock, so the cause is not established. It is why 4 processes
-   give 2.24 times, not 4 times, the rate of 1.
+   likely candidate is the database-wide lock PostgreSQL takes at commit for a transaction that issued a
+   `NOTIFY`, which every job enqueue does (`pg_notify` in the job store); the sampling does not name the
+   lock, so the cause is not established. It is why 4 processes give 2.24 times, not 4 times, the rate
+   of 1.
 
 With the first miss removed the others become the limit; the rate reachable at 300/s is not extrapolated
 here.

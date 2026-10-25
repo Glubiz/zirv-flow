@@ -310,7 +310,7 @@ document migrations (M7).
 - [ ] A forwarding fixture filters and maps the expected event, reuses its idempotency key across retries, exposes lag and a dead letter, re-drives successfully without triggering a flow, and receives its declared erase call.
 - [ ] A marketer builds an email from the v1 block set in the WYSIWYG editor, and preview and send give the same bytes through `mrml`; HTML and MJML code templates publish and preview the same way; a template that exceeds the render memory limit fails its render without stopping the worker.
 - [ ] The representative layout set (1, 2 and 3 columns, hero image, button, footer with unsubscribe) renders through `mrml` as golden tests and passes the client-matrix check before the v1 block set is frozen; results attached (OQ-25).
-- [ ] Send throughput benchmark attached against the section 19 target.
+- [x] Send throughput benchmark attached against the section 19 target ([`m6-send.md`](benchmarks/m6-send.md): 184 messages/s at best, missed; causes #296, #297, #298).
 
 **Dependencies.** M5 (flow actions) and M3 (connector runtime, manifests, secrets).
 
