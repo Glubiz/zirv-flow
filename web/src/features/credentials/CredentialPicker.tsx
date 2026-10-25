@@ -15,6 +15,8 @@ interface CredentialPickerProps {
   /** What the credential is for, such as the source type's name. */
   purpose?: string;
   disabled?: boolean;
+  /** Whether to offer no credential. Off when the credential cannot be cleared later. Default on. */
+  allowNone?: boolean;
 }
 
 /**
@@ -22,7 +24,7 @@ interface CredentialPickerProps {
  * field the type requires, and "New credential" to create one without leaving the form. Nothing
  * secret is ever shown or kept here.
  */
-export function CredentialPicker({ workspaceId, fields, value, onChange, purpose, disabled = false }: CredentialPickerProps) {
+export function CredentialPicker({ workspaceId, fields, value, onChange, purpose, disabled = false, allowNone = true }: CredentialPickerProps) {
   const credentials = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/credentials", { params: { path: { ws: workspaceId } } })),
     [workspaceId],
@@ -59,7 +61,7 @@ export function CredentialPicker({ workspaceId, fields, value, onChange, purpose
           onChange={(event) => onChange(event.target.value)}
           disabled={disabled}
         >
-          <option value="">Choose a credential</option>
+          {allowNone || value === "" ? <option value="">Choose a credential</option> : null}
           {credentials.data
             .filter((credential) => credential.id === value || covers(credential, required))
             .map((credential) => (

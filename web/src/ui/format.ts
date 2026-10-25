@@ -17,6 +17,10 @@ export function formatDuration(seconds: number | null | undefined): string {
   return `${(seconds / 86400).toFixed(1)} d`;
 }
 
+export function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
 export function shortId(id: string): string {
   return id.length > 13 ? `${id.slice(0, 4)}…${id.slice(-4)}` : id;
 }

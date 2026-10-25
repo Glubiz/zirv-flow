@@ -2975,3 +2975,166 @@ main:focus {
   padding: 0;
   border: 0;
 }
+
+
+/* Sending domain checklist: numbered steps, one card per DNS record. */
+.rec-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rec-step {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.rec-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.rec-number {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--night);
+  color: var(--night-ink);
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rec-number-done {
+  background: #1f6a3c;
+}
+
+.rec-line {
+  flex: 1;
+  width: 2px;
+  min-height: 12px;
+  background: var(--line);
+}
+
+.rec-card {
+  min-width: 0;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.rec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+
+.rec-head .st {
+  margin-left: auto;
+  align-items: center;
+}
+
+.rec-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.rec-tag {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.rec-grid {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  font-size: 14px;
+}
+
+.rec-label {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.rec-label-bad {
+  color: var(--error-text);
+  font-weight: 600;
+}
+
+.rec-value,
+.rec-value-plain {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rec-value {
+  padding: 7px 10px;
+  border: 1px solid var(--paper-3);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.rec-value-bad {
+  border-color: #f0c4c3;
+  background: #fbeaea;
+}
+
+.rec-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--paper);
+  font-size: 14px;
+}
+
+.rec-note p {
+  margin: 0;
+}
+
+@media (max-width: 560px) {
+  .rec-step {
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .rec-number {
+    width: 24px;
+    height: 24px;
+    font-size: 13px;
+  }
+
+  .rec-grid {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .rec-label {
+    grid-column: 1 / -1;
+  }
+
+  .rec-head .st {
+    margin-left: 0;
+  }
+}

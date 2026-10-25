@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router";
 
 import { AccountMenu, useSignedInUser } from "../features/session";
+import { DestinationsNav } from "../features/destinations";
+import { SendingNav } from "../features/sending";
 import { PrivacyNav } from "../features/privacy";
 import { useCurrentWorkspace, WorkspaceSwitcher } from "../features/workspaces";
 import { Brand } from "../ui";
@@ -27,6 +29,9 @@ const TITLES: Record<string, string> = {
   ai: "AI assistant",
   "api-keys": "API keys",
   credentials: "Credentials",
+  destinations: "Destinations",
+  "sending-domains": "Sending domains",
+  forwarding: "Forwarding",
   traces: "Traces",
   jobs: "Jobs",
   health: "Health",
@@ -136,6 +141,8 @@ export function Shell() {
             {current ? <PrivacyNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="ai">AI</WorkspaceItem>
             <WorkspaceItem base={base} segment="credentials">Credentials</WorkspaceItem>
+            {current ? <DestinationsNav workspaceId={current.id} /> : null}
+            {current ? <SendingNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
             <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}

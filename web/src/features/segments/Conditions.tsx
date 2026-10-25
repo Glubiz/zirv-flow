@@ -325,6 +325,97 @@ function windowKind(window: Window | undefined): WindowKind {
   return "since_trait";
 }
 
+/** The property filters of an event condition: the `where` list, shared with the forwarding rules. */
+export function PropertyFilters({
+  node,
+  path,
+  update,
+}: {
+  node: EventNode;
+  path: Path;
+  update: (change: Partial<EventNode>) => void;
+}) {
+  const { readOnly, eventTypes } = useBuilder();
+  const error = useErrors(path);
+  const properties = eventTypes.get(node.event);
+  const filters = node.where ?? [];
+  const names = [...(properties?.keys() ?? [])];
+
+  function setFilter(position: number, next: PropertyFilter) {
+    update({ where: filters.map((filter, at) => (at === position ? next : filter)) });
+  }
+
+  return (
+    <fieldset className="condition-group">
+      <legend className="field-label">Property filters</legend>
+      {filters.length === 0 ? <p className="faint">Every event of this name counts.</p> : null}
+      {node.event === OPENED_EVENT && filters.some(isMachineFilter) ? (
+        <p className="field-hint">
+          machine = false means {MACHINE_HINT}. Remove the filter to count every open.
+        </p>
+      ) : null}
+      {filters.map((filter, at) => {
+        const type = properties?.get(filter.prop) ?? null;
+        const label = `filter ${at + 1}`;
+        return (
+          <div key={at} className="filter-row" role="group" aria-label={`Property filter ${at + 1}`}>
+            <SelectField
+              label={`Property of ${label}`}
+              value={filter.prop}
+              onChange={(event) => {
+                const next = properties?.get(event.target.value) ?? null;
+                setFilter(at, { prop: event.target.value, op: next === null ? "eq" : keepOrFirst(next, "eq") });
+              }}
+              disabled={readOnly}
+              error={error(`where.${at}.prop`)}
+            >
+              <option value="">Choose a property</option>
+              {filter.prop !== "" && !names.includes(filter.prop) ? <option value={filter.prop}>{filter.prop}</option> : null}
+              {names.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </SelectField>
+            {type === null ? null : (
+              <>
+                <OpSelect
+                  label={`Comparison of ${label}`}
+                  type={type}
+                  op={filter.op}
+                  error={error(`where.${at}.op`)}
+                  onChange={(op) =>
+                    setFilter(at, withValue({ prop: filter.prop, op }, shapeOf(type, op) === shapeOf(type, filter.op) ? filter.value : initialOperand(type, op)))
+                  }
+                />
+                <Operand
+                  label={`Value of ${label}`}
+                  type={type}
+                  op={filter.op}
+                  value={filter.value}
+                  onChange={(value) => setFilter(at, withValue({ prop: filter.prop, op: filter.op }, value))}
+                  disabled={readOnly}
+                  error={error(`where.${at}.value`)}
+                />
+              </>
+            )}
+            {readOnly ? null : (
+              <Button onClick={() => update({ where: filters.filter((_, index) => index !== at) })}>
+                Remove <span className="visually-hidden">{label}</span>
+              </Button>
+            )}
+          </div>
+        );
+      })}
+      {readOnly ? null : (
+        <Button onClick={() => update({ where: [...filters, { prop: "", op: "eq" }] })} disabled={node.event === ""}>
+          Add a property filter
+        </Button>
+      )}
+    </fieldset>
+  );
+}
+
 interface WindowFieldsProps {
   window: Window | undefined;
   onChange: (window: Window | undefined) => void;
@@ -403,7 +494,6 @@ export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
   const { catalog, readOnly, edit, eventTypes } = useBuilder();
   const error = useErrors(path);
   const properties = eventTypes.get(node.event);
-  const filters = node.where ?? [];
   const timeTraits = catalog.traits.filter((trait) => trait.type === "timestamp" || trait.type === "date");
   const names = [...(properties?.keys() ?? [])];
   const numeric = names.filter((name) => properties?.get(name) === "number" || properties?.get(name) === "integer");
@@ -412,9 +502,6 @@ export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
     edit(path, withoutEmpty({ ...node, ...change }));
   }
 
-  function setFilter(position: number, next: PropertyFilter) {
-    update({ where: filters.map((filter, at) => (at === position ? next : filter)) });
-  }
 
   function setAgg(next: Aggregate | undefined) {
     update({ agg: next });
@@ -450,73 +537,7 @@ export function EventEditor({ node, path }: { node: EventNode; path: Path }) {
 
       <WindowFields window={window} onChange={(next) => update({ window: next })} timeTraits={timeTraits} error={error("window")} />
 
-      <fieldset className="condition-group">
-        <legend className="field-label">Property filters</legend>
-        {filters.length === 0 ? <p className="faint">Every event of this name counts.</p> : null}
-        {node.event === OPENED_EVENT && filters.some(isMachineFilter) ? (
-          <p className="field-hint">
-            machine = false means {MACHINE_HINT}. Remove the filter to count every open.
-          </p>
-        ) : null}
-        {filters.map((filter, at) => {
-          const type = properties?.get(filter.prop) ?? null;
-          const label = `filter ${at + 1}`;
-          return (
-            <div key={at} className="filter-row" role="group" aria-label={`Property filter ${at + 1}`}>
-              <SelectField
-                label={`Property of ${label}`}
-                value={filter.prop}
-                onChange={(event) => {
-                  const next = properties?.get(event.target.value) ?? null;
-                  setFilter(at, { prop: event.target.value, op: next === null ? "eq" : keepOrFirst(next, "eq") });
-                }}
-                disabled={readOnly}
-                error={error(`where.${at}.prop`)}
-              >
-                <option value="">Choose a property</option>
-                {filter.prop !== "" && !names.includes(filter.prop) ? <option value={filter.prop}>{filter.prop}</option> : null}
-                {names.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </SelectField>
-              {type === null ? null : (
-                <>
-                  <OpSelect
-                    label={`Comparison of ${label}`}
-                    type={type}
-                    op={filter.op}
-                    error={error(`where.${at}.op`)}
-                    onChange={(op) =>
-                      setFilter(at, withValue({ prop: filter.prop, op }, shapeOf(type, op) === shapeOf(type, filter.op) ? filter.value : initialOperand(type, op)))
-                    }
-                  />
-                  <Operand
-                    label={`Value of ${label}`}
-                    type={type}
-                    op={filter.op}
-                    value={filter.value}
-                    onChange={(value) => setFilter(at, withValue({ prop: filter.prop, op: filter.op }, value))}
-                    disabled={readOnly}
-                    error={error(`where.${at}.value`)}
-                  />
-                </>
-              )}
-              {readOnly ? null : (
-                <Button onClick={() => update({ where: filters.filter((_, index) => index !== at) })}>
-                  Remove <span className="visually-hidden">{label}</span>
-                </Button>
-              )}
-            </div>
-          );
-        })}
-        {readOnly ? null : (
-          <Button onClick={() => update({ where: [...filters, { prop: "", op: "eq" }] })} disabled={node.event === ""}>
-            Add a property filter
-          </Button>
-        )}
-      </fieldset>
+      <PropertyFilters node={node} path={path} update={update} />
 
       <fieldset className="condition-group">
         <legend className="field-label">Summary</legend>

@@ -8,3 +8,5 @@ export { SegmentExplainPanel } from "./SegmentExplainPanel";
 export { SegmentPage } from "./SegmentPage";
 export { SegmentsPage } from "./SegmentsPage";
 export { useLeaveGuard } from "./useLeaveGuard";
+export { PropertyFilterEditor } from "./PropertyFilterEditor";
+export type { PropertyFilter } from "./ast";
