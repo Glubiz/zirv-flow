@@ -171,6 +171,7 @@ impl Sink {
     }
 
     /// The arrivals kept in memory (empty unless `keep` was set).
+    #[cfg(test)]
     pub fn arrivals(&self) -> Vec<Arrival> {
         self.state
             .kept
