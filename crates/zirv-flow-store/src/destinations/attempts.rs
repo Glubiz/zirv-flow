@@ -231,7 +231,19 @@ pub async fn destination_attempt_stats<'e>(
     hours: i32,
 ) -> Result<AttemptStats, StoreError> {
     sqlx::query_as(
-        "SELECT count(*) AS attempts,             count(*) FILTER (WHERE outcome = 'delivered') AS delivered,             count(*) FILTER (WHERE outcome = 'retryable') AS retryable,             count(*) FILTER (WHERE outcome = 'terminal') AS terminal,             count(*) FILTER (WHERE outcome = 'throttled') AS throttled,             count(*) FILTER (WHERE status_class = 'none') AS class_none,             count(*) FILTER (WHERE status_class = '2xx') AS class_2xx,             count(*) FILTER (WHERE status_class = '3xx') AS class_3xx,             count(*) FILTER (WHERE status_class = '4xx') AS class_4xx,             count(*) FILTER (WHERE status_class = '5xx') AS class_5xx          FROM delivery_attempts          WHERE workspace_id = $1 AND destination_id = $2             AND attempted_at >= now() - make_interval(hours => $3)",
+        "SELECT count(*) AS attempts, \
+            count(*) FILTER (WHERE outcome = 'delivered') AS delivered, \
+            count(*) FILTER (WHERE outcome = 'retryable') AS retryable, \
+            count(*) FILTER (WHERE outcome = 'terminal') AS terminal, \
+            count(*) FILTER (WHERE outcome = 'throttled') AS throttled, \
+            count(*) FILTER (WHERE status_class = 'none') AS class_none, \
+            count(*) FILTER (WHERE status_class = '2xx') AS class_2xx, \
+            count(*) FILTER (WHERE status_class = '3xx') AS class_3xx, \
+            count(*) FILTER (WHERE status_class = '4xx') AS class_4xx, \
+            count(*) FILTER (WHERE status_class = '5xx') AS class_5xx \
+         FROM delivery_attempts \
+         WHERE workspace_id = $1 AND destination_id = $2 \
+            AND attempted_at >= now() - make_interval(hours => $3)",
     )
     .bind(workspace.as_uuid())
     .bind(destination)

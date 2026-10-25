@@ -78,7 +78,11 @@ fn hours_of(query: Option<&str>) -> Result<i32, ApiError> {
     let value = query
         .into_iter()
         .flat_map(|query| query.split('&'))
-        .find_map(|pair| pair.strip_prefix("hours="));
+        .find_map(|pair| match pair.split_once('=') {
+            Some(("hours", value)) => Some(value),
+            None if pair == "hours" => Some(""),
+            _ => None,
+        });
     match value {
         None => Ok(DEFAULT_HOURS),
         Some(text) => text
@@ -137,7 +141,14 @@ mod tests {
         assert_eq!(hours_of(Some("other=1")).unwrap(), 24);
         assert_eq!(hours_of(Some("hours=1")).unwrap(), 1);
         assert_eq!(hours_of(Some("x=1&hours=168")).unwrap(), 168);
-        for bad in ["hours=0", "hours=169", "hours=-3", "hours=", "hours=abc"] {
+        for bad in [
+            "hours=0",
+            "hours=169",
+            "hours=-3",
+            "hours=",
+            "hours",
+            "hours=abc",
+        ] {
             assert_eq!(
                 hours_of(Some(bad)).unwrap_err().status(),
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY,
