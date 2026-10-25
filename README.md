@@ -2222,9 +2222,10 @@ or `ZIRV_FLOW_TRACKING__PREFETCH_USER_AGENTS='["my-gateway-fetcher"]'`.
 
 ## Template editor and delivery counts
 
-The web app has a Templates page. A template is written as HTML or MJML (chosen when it is made; the
-Blocks mode arrives with the block editor) in a split view: the code fields on the left, the preview on
-the right. The draft is saved as you type and the server renders it again for the preview, shown in a
+The web app has a Templates page. A template is written as HTML, MJML or from blocks (chosen when it is made) in a split view:
+the editor on the left, the preview on the right. The block editor has a palette, a canvas you can
+reorder by drag or by keyboard, a settings panel and inline validation, and a one-way "Convert to
+MJML" action turns a block template into MJML code. The draft is saved as you type and the server renders it again for the preview, shown in a
 sandboxed iframe, so the app never renders template HTML itself. Admins can preview as a real person,
 publish, and send tests. A flow's send step chooses a published template and a destination; a sync step
 chooses a destination and the traits to keep in an external system.
