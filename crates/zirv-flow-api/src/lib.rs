@@ -341,6 +341,10 @@ fn routes() -> Router<AppState> {
             get(test_sends::allowlist_list).post(test_sends::allowlist_add),
         )
         .route(
+            "/api/v1/workspaces/{ws}/test-send-allowlist/options",
+            get(test_sends::allowlist_options),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/test-send-allowlist/{id}",
             delete(test_sends::allowlist_delete),
         )
@@ -556,6 +560,10 @@ fn routes() -> Router<AppState> {
                 .delete(contacts::crud::remove),
         )
         .route(
+            "/api/v1/workspaces/{ws}/destinations/options",
+            get(destinations::crud::options),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/destinations",
             get(destinations::crud::list).post(destinations::crud::create),
         )
@@ -632,6 +640,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/sending-domains/{id}/verify",
             post(sending::domains::verify),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/sender-identities/options",
+            get(sending::identities::options),
         )
         .route(
             "/api/v1/workspaces/{ws}/sender-identities",

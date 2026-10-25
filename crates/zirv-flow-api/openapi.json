@@ -5782,6 +5782,80 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/destinations/options": {
+      "get": {
+        "tags": [
+          "destinations"
+        ],
+        "summary": "The workspace's destinations as picker options, archived ones included and marked, ordered by\nname. Needs the write role: this is what a writer picks a flow step's destination from.",
+        "operationId": "list_destination_options",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The options: id, name, state and capabilities, nothing else",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DestinationOptionBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/destinations/{id}": {
       "get": {
         "tags": [
@@ -16406,6 +16480,80 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/sender-identities/options": {
+      "get": {
+        "tags": [
+          "sending"
+        ],
+        "summary": "The workspace's sender identities as picker options, archived ones included and marked, by\naddress. Needs the write role: this is what a writer picks a template's sender from.",
+        "operationId": "list_sender_identity_options",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The options: id, name, address and state, nothing else",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SenderIdentityOptionBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/sender-identities/{id}": {
       "get": {
         "tags": [
@@ -21187,6 +21335,80 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/test-send-allowlist/options": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The test-send allowlist as picker options, oldest first. Needs the write role: this is what a\nwriter picks a test recipient from.",
+        "operationId": "list_test_send_allowlist_options",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The options: id and masked address, nothing else",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AllowlistOptionBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/test-send-allowlist/{id}": {
       "delete": {
         "tags": [
@@ -23948,6 +24170,25 @@
           }
         }
       },
+      "AllowlistOptionBody": {
+        "type": "object",
+        "description": "One allowlisted address a writer may pick as a test recipient.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "The masked address, as the admin list shows it. The address itself is never returned.",
+            "example": "q***@example.com"
+          }
+        }
+      },
       "ApiKeyBody": {
         "type": "object",
         "required": [
@@ -26367,6 +26608,29 @@
           }
         }
       },
+      "DestinationAbilitiesBody": {
+        "type": "object",
+        "description": "What a destination can do, from its type and, for a provider, its manifest.",
+        "required": [
+          "send",
+          "sync",
+          "erase"
+        ],
+        "properties": {
+          "erase": {
+            "type": "boolean",
+            "description": "Declares the erase capability."
+          },
+          "send": {
+            "type": "boolean",
+            "description": "Delivers email: an `action.send` step may name it."
+          },
+          "sync": {
+            "type": "boolean",
+            "description": "Runs profile operations: an `action.sync` step may name it."
+          }
+        }
+      },
       "DestinationBody": {
         "type": "object",
         "required": [
@@ -26378,6 +26642,7 @@
           "rate",
           "burst",
           "archived",
+          "capabilities",
           "created_at",
           "updated_at"
         ],
@@ -26390,6 +26655,10 @@
             "type": "integer",
             "format": "int32",
             "description": "The most deliveries it may take at once."
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/DestinationAbilitiesBody",
+            "description": "What the destination can do."
           },
           "config": {
             "type": "object",
@@ -26545,6 +26814,32 @@
             "example": "webhook"
           },
           "label": {
+            "type": "string"
+          }
+        }
+      },
+      "DestinationOptionBody": {
+        "type": "object",
+        "description": "One destination a writer may pick: no settings, no credential.",
+        "required": [
+          "id",
+          "name",
+          "archived",
+          "capabilities"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "An archived destination is listed so a step that names it still shows its name; it\ncannot be picked."
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/DestinationAbilitiesBody"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
             "type": "string"
           }
         }
@@ -34775,6 +35070,34 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "SenderIdentityOptionBody": {
+        "type": "object",
+        "description": "One sender identity a writer may pick: the display name and address, no domain settings.",
+        "required": [
+          "id",
+          "name",
+          "from_address",
+          "archived"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "An archived identity is listed so a template that names it still shows its name; it\ncannot send."
+          },
+          "from_address": {
+            "type": "string",
+            "example": "news@example.com"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "description": "The display name."
           }
         }
       },

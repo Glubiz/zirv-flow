@@ -286,6 +286,56 @@ pub(crate) async fn archive_sender_identity(
     Ok(())
 }
 
+/// One sender identity a writer may pick: the display name and address, no domain settings.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SenderIdentityOptionBody {
+    id: Uuid,
+    /// The display name.
+    name: String,
+    #[schema(example = "news@example.com")]
+    from_address: String,
+    /// An archived identity is listed so a template that names it still shows its name; it
+    /// cannot send.
+    archived: bool,
+}
+
+/// The workspace's sender identities as picker options, archived ones included and marked, by
+/// address. Needs the write role: this is what a writer picks a template's sender from.
+#[utoipa::path(
+    get,
+    operation_id = "list_sender_identity_options",
+    path = "/api/v1/workspaces/{ws}/sender-identities/options",
+    tag = "sending",
+    params(("ws" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "The options: id, name, address and state, nothing else", body = Vec<SenderIdentityOptionBody>),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn options(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(ws): Path<String>,
+) -> Result<Json<Vec<SenderIdentityOptionBody>>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let identities =
+        zirv_flow_store::list_sender_identities(&state.pool, workspace.id, None, true).await?;
+    Ok(Json(
+        identities
+            .iter()
+            .map(|identity| SenderIdentityOptionBody {
+                id: identity.id,
+                name: identity.from_name.clone(),
+                from_address: identity.from_address.clone(),
+                archived: identity.archived_at.is_some(),
+            })
+            .collect(),
+    ))
+}
+
 /// The workspace's live sender identities by address; archived ones with `archived=true`, and
 /// only those of one domain with `domain_id`. Workspace admins only.
 #[utoipa::path(
