@@ -103,6 +103,8 @@ const BUILT_IN_KINDS: Record<string, string> = {
   smtp: "SMTP server",
   oauth2_client: "OAuth2 client",
   signing_secret: "Signing secret",
+  bearer_token: "Bearer token",
+  tls_client: "TLS client certificate",
 };
 
 /** The label of a kind: the server's list when given, else the built-in names. */
