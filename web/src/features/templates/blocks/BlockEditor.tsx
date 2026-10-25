@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type DragEvent } from "react";
 
 import { Button, MenuButton } from "../../../ui";
 import { IssueList } from "../IssueList";
@@ -13,7 +13,7 @@ import {
   MAX_SECTIONS,
   applyDrop,
   blockCount,
-  findBlock,
+  blockLabel,
   findById,
   issueBlockId,
   insertBlock,
@@ -22,6 +22,8 @@ import {
   moveSection,
   newBlock,
   newSection,
+  placeNewBlock,
+  sectionInsertIndex,
   removeBlock,
   removeSection,
   updateBlock,
@@ -69,19 +71,10 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
     onChange({ ...doc, content: next });
   }
 
-  /** Where a new section goes: after the selected section, or after the section of the selected block, or at the end. */
-  function sectionIndex(): number {
-    if (selected === null) return content.sections.length;
-    const own = content.sections.findIndex((section) => section.id === selected);
-    if (own >= 0) return own + 1;
-    const path = findBlock(content, selected);
-    return path ? path.section + 1 : content.sections.length;
-  }
-
   function addSection(columns: number) {
     if (content.sections.length >= MAX_SECTIONS) return;
     const section = newSection(columns, content);
-    commit(insertSection(content, section, sectionIndex()));
+    commit(insertSection(content, section, sectionInsertIndex(content, selected)));
     setSelected(section.id);
     setTab("block");
     setStatus(`Added a section with ${columns} ${columns === 1 ? "column" : "columns"}.`);
@@ -90,22 +83,23 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
   function addBlock(type: BlockType) {
     if (blockCount(content) >= MAX_BLOCKS) return;
     const block = newBlock(type, content);
-    let base = content;
-    let place = { section: 0, column: 0, index: 0 };
-    if (content.sections.length === 0) {
-      base = insertSection(content, newSection(1, content), 0);
-    } else {
-      const path = selected === null ? null : findBlock(content, selected);
-      const own = selected === null ? -1 : content.sections.findIndex((section) => section.id === selected);
-      const last = content.sections.length - 1;
-      if (path) place = { ...path, index: path.index + 1 };
-      else if (own >= 0) place = { section: own, column: 0, index: content.sections[own]?.columns[0]?.length ?? 0 };
-      else place = { section: last, column: 0, index: content.sections[last]?.columns[0]?.length ?? 0 };
-    }
+    const { base, place } = placeNewBlock(content, selected);
     commit(insertBlock(base, block, place));
     setSelected(block.id);
     setTab("block");
-    setStatus(`Added a ${BLOCK_TYPES.find((entry) => entry.type === type)?.label.toLowerCase() ?? type} block.`);
+    setStatus(`Added a ${blockLabel(type).toLowerCase()} block.`);
+  }
+
+  /** Drag props for a palette button: the drag starts with data, as Firefox needs, and ends by clearing. */
+  function paletteDrag(payload: Drag) {
+    return {
+      draggable: true,
+      onDragStart: (event: DragEvent) => {
+        setDrag(payload);
+        (event.dataTransfer as DataTransfer | null)?.setData("text/plain", "zirv-block");
+      },
+      onDragEnd: () => setDrag(null),
+    };
   }
 
   function drop(dragged: Drag, at: Drop) {
@@ -133,14 +127,14 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
   const block = selected === null ? undefined : findById(content, selected);
   const section = selected === null ? undefined : content.sections.find((entry) => entry.id === selected);
 
-  function go(issue: TemplateIssue) {
+  function go(where: string, issue: TemplateIssue) {
     const id = issueBlockId(issue.at);
     if (id !== null) {
       setSelected(id);
       setTab("block");
-    } else if (issue.at.startsWith("/blocks/settings")) {
+    } else if (where === "Document style") {
       setTab("style");
-    } else if (/^\/blocks\/(subject|preheader|sender|lang)/.test(issue.at)) {
+    } else if (where === "Message") {
       setTab("message");
     }
   }
@@ -172,12 +166,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
               <Button
                 key={columns}
                 aria-label={`Add a section with ${columns} ${columns === 1 ? "column" : "columns"}`}
-                draggable
-                onDragStart={(event) => {
-                  setDrag({ kind: "new-section", columns });
-                  (event.dataTransfer as DataTransfer | null)?.setData("text/plain", "zirv-block");
-                }}
-                onDragEnd={() => setDrag(null)}
+                {...paletteDrag({ kind: "new-section", columns })}
                 onClick={() => addSection(columns)}
                 disabled={content.sections.length >= MAX_SECTIONS}
               >
@@ -190,12 +179,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
               <Button
                 key={entry.type}
                 aria-label={`Add ${entry.label.toLowerCase()} block`}
-                draggable
-                onDragStart={(event) => {
-                  setDrag({ kind: "new-block", type: entry.type });
-                  (event.dataTransfer as DataTransfer | null)?.setData("text/plain", "zirv-block");
-                }}
-                onDragEnd={() => setDrag(null)}
+                {...paletteDrag({ kind: "new-block", type: entry.type })}
                 onClick={() => addBlock(entry.type)}
                 disabled={blockCount(content) >= MAX_BLOCKS}
               >
@@ -237,7 +221,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, canAdmin, is
           ) : null}
         </div>
       </div>
-      <IssueList issues={issues} checked={checked} onGo={(_where, issue) => go(issue)} />
+      <IssueList issues={issues} checked={checked} onGo={go} />
       {locked ? null : (
         <MergeTagPicker
           workspaceId={workspaceId}

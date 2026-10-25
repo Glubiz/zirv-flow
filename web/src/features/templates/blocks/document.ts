@@ -363,6 +363,31 @@ export function moveSection(content: BlocksContent, id: string, direction: "up" 
   return { ...content, sections: insertAt(rest, to, moving) };
 }
 
+/** Where a new section goes: after the selected section, or after the section of the selected block, or at the end. */
+export function sectionInsertIndex(content: BlocksContent, selected: string | null): number {
+  if (selected === null) return content.sections.length;
+  const own = content.sections.findIndex((section) => section.id === selected);
+  if (own >= 0) return own + 1;
+  const path = findBlock(content, selected);
+  return path ? path.section + 1 : content.sections.length;
+}
+
+/**
+ * Where a new block goes: after the selected block, at the end of the first column of the selected
+ * section, or at the end of the first column of the last section. With no section, the document
+ * gains one single-column section first.
+ */
+export function placeNewBlock(content: BlocksContent, selected: string | null): { base: BlocksContent; place: BlockPath } {
+  if (content.sections.length === 0) {
+    return { base: insertSection(content, newSection(1, content), 0), place: { section: 0, column: 0, index: 0 } };
+  }
+  const path = selected === null ? null : findBlock(content, selected);
+  if (path) return { base: content, place: { ...path, index: path.index + 1 } };
+  const own = selected === null ? -1 : content.sections.findIndex((section) => section.id === selected);
+  const section = own >= 0 ? own : content.sections.length - 1;
+  return { base: content, place: { section, column: 0, index: content.sections[section]?.columns[0]?.length ?? 0 } };
+}
+
 /** The id in a block pointer `/blocks/block/<id>[/field]`, or null for any other place. */
 export function issueBlockId(at: string): string | null {
   const prefix = "/blocks/block/";
