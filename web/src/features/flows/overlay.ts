@@ -11,6 +11,12 @@ export interface NodeTally {
   entered: number;
   waiting: number;
   failed: number;
+  /** Messages of a send step that went out. */
+  sent?: number;
+  /** Messages of a send step that ended failed. */
+  send_failed?: number;
+  /** Messages of a send step that were skipped, by reason code. */
+  skipped?: readonly { reason: string; count: number }[];
 }
 
 /** What is drawn over the canvas: a path with its numbers, counts per step, marks. */

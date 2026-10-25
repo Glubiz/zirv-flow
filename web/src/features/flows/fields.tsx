@@ -1,8 +1,18 @@
 import { useState } from "react";
 
-import { client, unwrap, useResource, type components } from "../../api";
-import { Button, ENGAGEMENT_PROPERTIES, isMachineFilter, MACHINE_HINT, OPENED_EVENT, SelectField, TextField } from "../../ui";
+import { client, describeError, unwrap, useResource, type components } from "../../api";
+import {
+  Button,
+  ENGAGEMENT_PROPERTIES,
+  InlineError,
+  isMachineFilter,
+  MACHINE_HINT,
+  OPENED_EVENT,
+  SelectField,
+  TextField,
+} from "../../ui";
 import type { Catalog } from "../segments";
+import { usePublishedTemplates } from "../templates";
 import {
   DURATION_UNITS,
   MAX_DURATION_SECONDS,
@@ -294,5 +304,104 @@ export function EventFilters({ workspaceId, event, filters, onChange, disabled, 
         <Button onClick={() => onChange([...filters, { prop: "", op: "eq", value: "" }])}>Add a filter</Button>
       )}
     </fieldset>
+  );
+}
+
+interface TemplateSelectProps {
+  workspaceId: string;
+  channel: "email" | "webhook";
+  label: string;
+  /** The template id, or the placeholder id, or empty for none. */
+  value: string | undefined;
+  onChange: (value: string | undefined) => void;
+  disabled: boolean;
+  /** Whether "none" is a valid choice. */
+  optional?: boolean;
+  error?: string;
+  hint?: string;
+}
+
+/** A published template of the workspace. An id the list does not hold is kept and shown, so nothing is lost. */
+export function TemplateSelect({ workspaceId, channel, label, value, onChange, disabled, optional = false, error, hint }: TemplateSelectProps) {
+  const templates = usePublishedTemplates(workspaceId, channel);
+  const chosen = value === undefined || value === NIL_UUID ? "" : value;
+  if (templates.status === "error") {
+    return (
+      <div className="field">
+        <span className="field-label">{label}</span>
+        <InlineError {...describeError(templates.error)} />
+        <Button onClick={templates.reload}>Try again</Button>
+      </div>
+    );
+  }
+  const list = templates.status === "ready" ? templates.data : [];
+  const known = list.some((entry) => entry.id === chosen);
+  return (
+    <SelectField
+      label={label}
+      value={chosen}
+      onChange={(event) => onChange(event.target.value === "" ? (optional ? undefined : NIL_UUID) : event.target.value)}
+      disabled={disabled || templates.status === "loading"}
+      error={error}
+      hint={templates.status === "ready" && list.length === 0 ? "No template is published yet. Publish one under Templates." : hint}
+    >
+      <option value="">{templates.status === "loading" ? "Loading templates" : optional ? "No template, send the standard envelope" : "Choose a template"}</option>
+      {chosen !== "" && !known && templates.status === "ready" ? <option value={chosen}>A template that is not published</option> : null}
+      {list.map((entry) => (
+        <option key={entry.id} value={entry.id}>
+          {entry.name}
+        </option>
+      ))}
+    </SelectField>
+  );
+}
+
+interface DestinationSelectProps {
+  workspaceId: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  error?: string;
+  hint?: string;
+}
+
+/** A live destination. Only workspace admins can list them, so anyone else sees the chosen id and cannot change it. */
+export function DestinationSelect({ workspaceId, label, value, onChange, disabled, error, hint }: DestinationSelectProps) {
+  const destinations = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/destinations", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+  const chosen = value === NIL_UUID ? "" : value;
+  if (destinations.status === "error") {
+    return (
+      <div className="field">
+        <span className="field-label">{label}</span>
+        <p className="faint">{chosen === "" ? "No destination chosen." : <span className="mono">{chosen}</span>}</p>
+        <p className="field-hint">The destinations can not be listed: {describeError(destinations.error).title}. Workspace admins choose them.</p>
+        {error ? <span className="field-error">{error}</span> : null}
+        <Button onClick={destinations.reload}>Try again</Button>
+      </div>
+    );
+  }
+  const list = destinations.status === "ready" ? destinations.data.filter((entry) => !entry.archived) : [];
+  const known = list.some((entry) => entry.id === chosen);
+  return (
+    <SelectField
+      label={label}
+      value={chosen}
+      onChange={(event) => onChange(event.target.value || NIL_UUID)}
+      disabled={disabled || destinations.status === "loading"}
+      error={error}
+      hint={hint}
+    >
+      <option value="">{destinations.status === "loading" ? "Loading destinations" : "Choose a destination"}</option>
+      {chosen !== "" && !known && destinations.status === "ready" ? <option value={chosen}>A destination that is not in the list</option> : null}
+      {list.map((entry) => (
+        <option key={entry.id} value={entry.id}>
+          {entry.name} ({entry.kind})
+        </option>
+      ))}
+    </SelectField>
   );
 }

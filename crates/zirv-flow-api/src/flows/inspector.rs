@@ -158,6 +158,19 @@ pub(crate) struct NodeCountBody {
     /// For a `goal` node its completed count, for `settings.goal` its entered count; zero for the
     /// rest.
     goal_conversions: i64,
+    /// Messages of this node that ended `sent`; zero for a node that sends nothing.
+    sent: i64,
+    /// Messages of this node that ended `failed`.
+    send_failed: i64,
+    /// Messages of this node that ended `skipped`, one row per reason code, sorted by reason.
+    skipped: Vec<SkippedCountBody>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SkippedCountBody {
+    /// The fixed skip reason code.
+    reason: String,
+    count: i64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -405,6 +418,13 @@ fn count_row(node_id: &str, node_type: String, count: Option<&NodeCount>) -> Nod
         waiting: count.waiting,
         failed: count.failed,
         goal_conversions,
+        sent: count.sent,
+        send_failed: count.send_failed,
+        skipped: count
+            .skipped
+            .into_iter()
+            .map(|(reason, count)| SkippedCountBody { reason, count })
+            .collect(),
     }
 }
 
@@ -536,12 +556,30 @@ mod tests {
     }
 
     #[test]
+    fn a_count_row_carries_the_delivery_counts_with_their_reasons() {
+        let count = NodeCount {
+            sent: 4,
+            send_failed: 1,
+            skipped: vec![("no_consent".to_owned(), 2)],
+            ..NodeCount::default()
+        };
+
+        let row = count_row("mail", "action.send".into(), Some(&count));
+
+        assert_eq!((row.sent, row.send_failed), (4, 1));
+        assert_eq!(row.skipped.len(), 1);
+        assert_eq!(row.skipped[0].reason, "no_consent");
+        assert_eq!(row.skipped[0].count, 2);
+    }
+
+    #[test]
     fn a_goal_node_counts_its_completions_and_the_settings_goal_its_rows() {
         let count = NodeCount {
             entered: 5,
             completed: 3,
             waiting: 1,
             failed: 1,
+            ..NodeCount::default()
         };
 
         assert_eq!(

@@ -31315,7 +31315,10 @@
           "completed",
           "waiting",
           "failed",
-          "goal_conversions"
+          "goal_conversions",
+          "sent",
+          "send_failed",
+          "skipped"
         ],
         "properties": {
           "completed": {
@@ -31345,6 +31348,23 @@
           "node_type": {
             "type": "string",
             "description": "The node's type; `settings.goal` for the goal setting."
+          },
+          "send_failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages of this node that ended `failed`."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages of this node that ended `sent`; zero for a node that sends nothing."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedCountBody"
+            },
+            "description": "Messages of this node that ended `skipped`, one row per reason code, sorted by reason."
           },
           "waiting": {
             "type": "integer",
@@ -34974,6 +34994,23 @@
               "type": "string"
             },
             "description": "The nodes none of the synthetic people reached."
+          }
+        }
+      },
+      "SkippedCountBody": {
+        "type": "object",
+        "required": [
+          "reason",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "type": "string",
+            "description": "The fixed skip reason code."
           }
         }
       },

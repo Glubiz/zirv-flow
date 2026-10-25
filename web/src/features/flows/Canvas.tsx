@@ -18,7 +18,7 @@ import {
 } from "@xyflow/react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
-import { MenuButton } from "../../ui";
+import { MenuButton, reasonLabel } from "../../ui";
 import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
@@ -104,6 +104,13 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
           <span className="fl-count">{data.counts.entered.toLocaleString("en")} entered</span>
           {data.counts.waiting > 0 ? <span className="fl-count fl-count-lite">{data.counts.waiting.toLocaleString("en")} waiting</span> : null}
           {data.counts.failed > 0 ? <span className="fl-count fl-count-bad">{data.counts.failed.toLocaleString("en")} failed</span> : null}
+          {data.counts.sent ? <span className="fl-count">{data.counts.sent.toLocaleString("en")} sent</span> : null}
+          {(data.counts.skipped ?? []).map((skip) => (
+            <span key={skip.reason} className="fl-count fl-count-lite">
+              {skip.count.toLocaleString("en")} skipped: {reasonLabel(skip.reason)}
+            </span>
+          ))}
+          {data.counts.send_failed ? <span className="fl-count fl-count-bad">{data.counts.send_failed.toLocaleString("en")} send failed</span> : null}
         </div>
       ) : null}
       {many ? (
@@ -340,6 +347,15 @@ function IssuesButton({
   );
 }
 
+/** The delivery counts of a send step as words, empty for a step that sends nothing. */
+function deliveryWords(counts: NodeTally): string {
+  const parts: string[] = [];
+  if ((counts.sent ?? 0) > 0) parts.push(`${counts.sent} sent`);
+  for (const skip of counts.skipped ?? []) parts.push(`${skip.count} skipped, ${reasonLabel(skip.reason)}`);
+  if ((counts.send_failed ?? 0) > 0) parts.push(`${counts.send_failed} send failed`);
+  return parts.length === 0 ? "" : `, ${parts.join(", ")}`;
+}
+
 /** What the overlay says about one step, as node data and as words for its accessible name. */
 function overlayFacts(overlay: Overlay | undefined, id: string) {
   const stepNumbers = overlay?.steps?.get(id) ?? [];
@@ -348,7 +364,7 @@ function overlayFacts(overlay: Overlay | undefined, id: string) {
   const dim = overlay?.dimOthers === true && overlay.steps?.has(id) !== true;
   const words = [
     stepNumbers.length > 0 ? `, on the path as step ${stepNumbers.join(" and ")}` : "",
-    counts ? `, ${counts.entered} entered, ${counts.waiting} waiting, ${counts.failed} failed` : "",
+    counts ? `, ${counts.entered} entered, ${counts.waiting} waiting, ${counts.failed} failed${deliveryWords(counts)}` : "",
     mark ? `, ${mark.text}` : "",
   ].join("");
   return { words, data: { stepNumbers, dim, counts, mark } };

@@ -1,14 +1,17 @@
 import { useState } from "react";
 
-import { Button, defaultEventFilters, SelectField, TextField } from "../../ui";
+import { client, describeError, unwrap, useResource } from "../../api";
+import { Button, defaultEventFilters, InlineError, SelectField, TextField } from "../../ui";
 import { ConditionEditor, type Catalog } from "../segments";
 import {
   DurationField,
   EventFilters,
   EventSelect,
   fieldError,
+  DestinationSelect,
   ListSelect,
   operandText,
+  TemplateSelect,
   TraitSelect,
 } from "./fields";
 import { conditionIssues } from "./issues";
@@ -16,6 +19,7 @@ import {
   MAX_ARMS,
   MAX_CONDITIONS,
   MIN_ARMS,
+  NIL_UUID,
   type Condition,
   type FlowIssue,
   type FlowNode,
@@ -63,6 +67,10 @@ export function NodeFields(props: FieldsProps) {
       return <Split {...props} node={node} />;
     case "action.webhook":
       return <Webhook {...props} node={node} />;
+    case "action.send":
+      return <Send {...props} node={node} />;
+    case "action.sync":
+      return <Sync {...props} node={node} />;
     case "action.update_trait":
       return <UpdateTrait {...props} node={node} />;
     case "action.list":
@@ -340,10 +348,74 @@ function WeightField({ label, weight, onChange, disabled, error }: WeightFieldPr
   );
 }
 
-function Webhook({ node, issues, graph, catalog, readOnly, onChange }: FieldsProps & { node: Of<"action.webhook"> }) {
-  const keys = node.trait_keys ?? [];
+/** A copy of `value` without `key`. */
+function omit<T extends object, K extends keyof T>(value: T, key: K): Omit<T, K> {
+  return Object.fromEntries(Object.entries(value).filter(([name]) => name !== String(key))) as Omit<T, K>;
+}
+
+interface TraitKeysProps {
+  id: string;
+  label: string;
+  empty: string;
+  keys: string[];
+  catalog: Catalog | null;
+  readOnly: boolean;
+  error?: string;
+  onChange: (keys: string[]) => void;
+}
+
+/** A list of trait keys as chips, with a picker to add one. */
+function TraitKeys({ id, label, empty, keys, catalog, readOnly, error, onChange }: TraitKeysProps) {
   const offered = catalog?.traits.filter((trait) => !keys.includes(trait.key)) ?? [];
   const [picked, setPicked] = useState("");
+  return (
+    <div className="field">
+      <span className="field-label" id={`${id}-keys`}>
+        {label}
+      </span>
+      {keys.length === 0 ? <p className="faint">{empty}</p> : null}
+      <ul className="fl-chips" aria-labelledby={`${id}-keys`}>
+        {keys.map((key, index) => (
+          <li key={key} className="fl-chip">
+            <span className="mono">{key}</span>
+            {readOnly ? null : (
+              <button
+                type="button"
+                className="fl-chip-remove"
+                aria-label={`Remove ${key}`}
+                onClick={() => onChange(keys.filter((_, at) => at !== index))}
+              >
+                ×
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {error ? <p className="field-error">{error}</p> : null}
+      {readOnly ? null : (
+        <SelectField
+          label="Add a trait"
+          value={picked}
+          onChange={(event) => {
+            if (event.target.value === "") return;
+            setPicked("");
+            onChange([...keys, event.target.value]);
+          }}
+          disabled={catalog === null || offered.length === 0}
+        >
+          <option value="">{offered.length === 0 && catalog !== null ? "No more traits" : "Choose a trait"}</option>
+          {offered.map((trait) => (
+            <option key={trait.key} value={trait.key}>
+              {trait.key}
+            </option>
+          ))}
+        </SelectField>
+      )}
+    </div>
+  );
+}
+
+function Webhook({ node, issues, graph, catalog, workspaceId, readOnly, onChange }: FieldsProps & { node: Of<"action.webhook"> }) {
   return (
     <div className="stack">
       <TextField
@@ -356,49 +428,30 @@ function Webhook({ node, issues, graph, catalog, readOnly, onChange }: FieldsPro
         spellCheck={false}
         error={fieldError(issues, "/url", graph)}
       />
-      <div className="field">
-        <span className="field-label" id={`${node.id}-keys`}>
-          Traits sent with each call
-        </span>
-        {keys.length === 0 ? <p className="faint">None. Only the standard envelope is sent.</p> : null}
-        <ul className="fl-chips" aria-labelledby={`${node.id}-keys`}>
-          {keys.map((key, index) => (
-            <li key={key} className="fl-chip">
-              <span className="mono">{key}</span>
-              {readOnly ? null : (
-                <button
-                  type="button"
-                  className="fl-chip-remove"
-                  aria-label={`Remove ${key}`}
-                  onClick={() => onChange({ ...node, trait_keys: keys.filter((_, at) => at !== index) })}
-                >
-                  ×
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-        {fieldError(issues, "/trait_keys", graph) ? <p className="field-error">{fieldError(issues, "/trait_keys", graph)}</p> : null}
-        {readOnly ? null : (
-          <SelectField
-            label="Add a trait"
-            value={picked}
-            onChange={(event) => {
-              if (event.target.value === "") return;
-              setPicked("");
-              onChange({ ...node, trait_keys: [...keys, event.target.value] });
-            }}
-            disabled={catalog === null || offered.length === 0}
-          >
-            <option value="">{offered.length === 0 && catalog !== null ? "No more traits" : "Choose a trait"}</option>
-            {offered.map((trait) => (
-              <option key={trait.key} value={trait.key}>
-                {trait.key}
-              </option>
-            ))}
-          </SelectField>
-        )}
-      </div>
+      <TemplateSelect
+        workspaceId={workspaceId}
+        channel="webhook"
+        label="Payload template"
+        value={node.template}
+        optional
+        onChange={(template) => {
+          const rest = omit(node, "template");
+          onChange(template === undefined ? rest : { ...rest, template });
+        }}
+        disabled={readOnly}
+        error={fieldError(issues, "/template", graph)}
+        hint="Shapes the headers and body of the call. With none, the standard envelope is sent."
+      />
+      <TraitKeys
+        id={node.id}
+        label="Traits sent with each call"
+        empty="None. Only the standard envelope is sent."
+        keys={node.trait_keys ?? []}
+        catalog={catalog}
+        readOnly={readOnly}
+        error={fieldError(issues, "/trait_keys", graph)}
+        onChange={(trait_keys) => onChange({ ...node, trait_keys })}
+      />
       <div className="fl-note">
         <div className="strong">What gets sent</div>
         <p>
@@ -406,6 +459,167 @@ function Webhook({ node, issues, graph, catalog, readOnly, onChange }: FieldsPro
           The result arrives as <span className="mono">webhook.succeeded</span> or <span className="mono">webhook.failed</span>.
         </p>
       </div>
+    </div>
+  );
+}
+
+function Send({ node, issues, graph, catalog, workspaceId, readOnly, onChange }: FieldsProps & { node: Of<"action.send"> }) {
+  const topics = catalog?.topics.filter((topic) => !topic.archived && topic.channel === "email") ?? [];
+  return (
+    <div className="stack">
+      <TemplateSelect
+        workspaceId={workspaceId}
+        channel="email"
+        label="Template"
+        value={node.template}
+        onChange={(template) => onChange({ ...node, template: template ?? NIL_UUID })}
+        disabled={readOnly}
+        error={fieldError(issues, "/template", graph)}
+        hint="The step sends the newest published version of the template, so a fix needs no new flow version."
+      />
+      <DestinationSelect
+        workspaceId={workspaceId}
+        label="Destination"
+        value={node.destination}
+        onChange={(destination) => onChange({ ...node, destination })}
+        disabled={readOnly}
+        error={fieldError(issues, "/destination", graph)}
+      />
+      <SelectField
+        label="Topic"
+        value={node.topic ?? ""}
+        onChange={(event) => {
+          const rest = omit(node, "topic");
+          onChange(event.target.value === "" ? rest : { ...rest, topic: event.target.value });
+        }}
+        disabled={readOnly || catalog === null}
+        error={fieldError(issues, "/topic", graph)}
+        hint="Consent is judged against the topic. With none, it is judged with no topic."
+      >
+        <option value="">{catalog === null ? "Loading topics" : "No topic"}</option>
+        {node.topic !== undefined && !topics.some((topic) => topic.id === node.topic) ? <option value={node.topic}>A topic that is not in the list</option> : null}
+        {topics.map((topic) => (
+          <option key={topic.id} value={topic.id}>
+            {topic.name}
+          </option>
+        ))}
+      </SelectField>
+      <DimensionValues
+        workspaceId={workspaceId}
+        values={node.dimensions ?? {}}
+        readOnly={readOnly}
+        error={fieldError(issues, "/dimensions", graph)}
+        onChange={(dimensions) => {
+          const rest = omit(node, "dimensions");
+          onChange(Object.keys(dimensions).length === 0 ? rest : { ...rest, dimensions });
+        }}
+      />
+      <div className="fl-note">
+        <div className="strong">What happens</div>
+        <p>
+          Before a message goes out the person&rsquo;s consent, suppressions, quiet hours and caps are checked. A message that is held back
+          is skipped, with the reason shown on the step in the Enrollments view.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function DimensionValues({
+  workspaceId,
+  values,
+  readOnly,
+  error,
+  onChange,
+}: {
+  workspaceId: string;
+  values: Record<string, string>;
+  readOnly: boolean;
+  error?: string;
+  onChange: (next: Record<string, string>) => void;
+}) {
+  const dimensions = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/consent/dimensions", { params: { path: { ws: workspaceId } } })),
+    [workspaceId],
+  );
+  if (dimensions.status === "loading") return <p className="faint">Loading consent dimensions</p>;
+  if (dimensions.status === "error") {
+    return (
+      <div className="field">
+        <InlineError {...describeError(dimensions.error)} />
+        <Button onClick={dimensions.reload}>Try again</Button>
+      </div>
+    );
+  }
+  const offered = dimensions.data.filter((dimension) => !dimension.archived && !dimension.builtin);
+  if (offered.length === 0) return null;
+  return (
+    <fieldset className="fl-fieldset" aria-invalid={error ? true : undefined}>
+      <legend className="field-label">Consent dimension values</legend>
+      {offered.map((dimension) => (
+        <SelectField
+          key={dimension.key}
+          label={dimension.name}
+          value={values[dimension.key] ?? ""}
+          disabled={readOnly}
+          onChange={(event) => {
+            const rest = omit(values, dimension.key);
+            onChange(event.target.value === "" ? rest : { ...rest, [dimension.key]: event.target.value });
+          }}
+        >
+          <option value="">Not set</option>
+          {dimension.values
+            .filter((value) => !value.archived)
+            .map((value) => (
+              <option key={value.key} value={value.key}>
+                {value.name}
+              </option>
+            ))}
+        </SelectField>
+      ))}
+      {error ? <p className="field-error">{error}</p> : null}
+    </fieldset>
+  );
+}
+
+function Sync({ node, issues, graph, catalog, workspaceId, readOnly, onChange }: FieldsProps & { node: Of<"action.sync"> }) {
+  return (
+    <div className="stack">
+      <DestinationSelect
+        workspaceId={workspaceId}
+        label="Destination"
+        value={node.destination}
+        onChange={(destination) => onChange({ ...node, destination })}
+        disabled={readOnly}
+        error={fieldError(issues, "/destination", graph)}
+        hint="A provider destination that can keep a profile."
+      />
+      <SelectField
+        label="Operation"
+        value={node.operation}
+        onChange={(event) =>
+          onChange(event.target.value === "remove" ? { ...node, operation: "remove", trait_keys: [] } : { ...node, operation: "upsert" })
+        }
+        disabled={readOnly}
+        error={fieldError(issues, "/operation", graph)}
+      >
+        <option value="upsert">Update the profile</option>
+        <option value="remove">Remove the profile</option>
+      </SelectField>
+      {node.operation === "upsert" ? (
+        <TraitKeys
+          id={node.id}
+          label="Traits to send"
+          empty="None chosen yet."
+          keys={node.trait_keys ?? []}
+          catalog={catalog}
+          readOnly={readOnly}
+          error={fieldError(issues, "/trait_keys", graph)}
+          onChange={(trait_keys) => onChange({ ...node, trait_keys })}
+        />
+      ) : (
+        <p className="muted">Removing a profile sends no traits.</p>
+      )}
     </div>
   );
 }

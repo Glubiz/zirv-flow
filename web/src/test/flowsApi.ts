@@ -128,3 +128,83 @@ export function aiSettings(enabled: boolean) {
     updated_at: "2026-10-01T09:00:00Z",
   };
 }
+
+export const TEMPLATE_ID = "77777777-0000-4000-8000-000000000001";
+export const HOOK_TEMPLATE_ID = "77777777-0000-4000-8000-000000000002";
+export const DESTINATION_ID = "99999999-0000-4000-8000-000000000001";
+export const TOPIC_ID = "44444444-0000-4000-8000-000000000001";
+
+/** A wait, a send, a profile sync and an exit, wired in a line. */
+export function sendGraph() {
+  return {
+    v: 1,
+    nodes: [
+      { id: "n1", type: "wait.duration", seconds: 86_400 },
+      { id: "n2", type: "action.send", template: TEMPLATE_ID, destination: DESTINATION_ID, topic: TOPIC_ID, dimensions: { vertical: "retail" } },
+      { id: "n3", type: "action.sync", destination: DESTINATION_ID, operation: "upsert", trait_keys: ["city"] },
+      { id: "n4", type: "action.webhook", url: "https://crm.example.com/hooks", template: HOOK_TEMPLATE_ID, trait_keys: [] },
+      { id: "n5", type: "exit" },
+    ],
+    edges: [
+      { id: "e1", from: "n1", port: "next", to: "n2" },
+      { id: "e2", from: "n2", port: "next", to: "n3" },
+      { id: "e3", from: "n3", port: "next", to: "n4" },
+      { id: "e4", from: "n4", port: "next", to: "n5" },
+    ],
+  };
+}
+
+function publishedTemplate(id: string, name: string, channel: string) {
+  return {
+    id,
+    name,
+    channel,
+    category: channel === "email" ? "marketing" : "transactional",
+    current_version: 1,
+    archived_at: null,
+    created_at: "2026-10-01T09:00:00Z",
+    updated_at: "2026-10-01T09:00:00Z",
+    created_by: null,
+    sender_identity_id: null,
+  };
+}
+
+/** The templates, destinations and consent dimensions a send, sync or webhook step offers to choose from. */
+export function deliveryRoutes(): Record<string, Handler> {
+  return {
+    [`GET ${WS}/templates`]: () =>
+      json([
+        publishedTemplate(TEMPLATE_ID, "Trial nudge", "email"),
+        publishedTemplate("77777777-0000-4000-8000-000000000003", "Unpublished", "email"),
+        publishedTemplate(HOOK_TEMPLATE_ID, "CRM payload", "webhook"),
+      ].map((entry) => (entry.name === "Unpublished" ? { ...entry, current_version: null } : entry))),
+    [`GET ${WS}/destinations`]: () =>
+      json([
+        {
+          id: DESTINATION_ID,
+          name: "Transactional mail",
+          kind: "smtp",
+          archived: false,
+          burst: 10,
+          rate: 5,
+          config: {},
+          credential_fields_set: [],
+          created_at: "2026-10-01T09:00:00Z",
+          updated_at: "2026-10-01T09:00:00Z",
+        },
+      ]),
+    [`GET ${WS}/consent/dimensions`]: () =>
+      json([
+        {
+          key: "vertical",
+          name: "Vertical",
+          archived: false,
+          builtin: false,
+          values: [
+            { key: "retail", name: "Retail", archived: false },
+            { key: "b2b", name: "B2B", archived: false },
+          ],
+        },
+      ]),
+  };
+}

@@ -9,6 +9,7 @@ import {
   formatDateTime,
   InlineError,
   Pill,
+  reasonLabel,
   ResourceView,
   SelectField,
   Sheet,
@@ -414,6 +415,15 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
   );
 }
 
+/** The delivery counts of a send step as words; a dash for a step that sends nothing. */
+function deliveryText(entry: NodeCount): string {
+  const parts: string[] = [];
+  if (entry.sent > 0) parts.push(`${entry.sent} sent`);
+  for (const skip of entry.skipped) parts.push(`${skip.count} skipped: ${reasonLabel(skip.reason)}`);
+  if (entry.send_failed > 0) parts.push(`${entry.send_failed} send failed`);
+  return parts.length === 0 ? "None" : parts.join("; ");
+}
+
 /** The counts as text, for those who do not read them off the canvas. */
 function Tally({
   counts,
@@ -432,7 +442,12 @@ function Tally({
     );
   }
   if (counts.status === "error") {
-    return <InlineError {...describeError(counts.error)} />;
+    return (
+      <div className="stack">
+        <InlineError {...describeError(counts.error)} />
+        <Button onClick={counts.reload}>Try again</Button>
+      </div>
+    );
   }
   return (
     <details>
@@ -445,6 +460,7 @@ function Tally({
             <th scope="col">Entered (step runs)</th>
             <th scope="col">Waiting</th>
             <th scope="col">Failed</th>
+            <th scope="col">Delivery</th>
           </tr>
         </thead>
         <tbody>
@@ -454,6 +470,7 @@ function Tally({
               <td>{entry.entered}</td>
               <td>{entry.waiting}</td>
               <td>{entry.failed}</td>
+              <td>{deliveryText(entry)}</td>
             </tr>
           ))}
         </tbody>
