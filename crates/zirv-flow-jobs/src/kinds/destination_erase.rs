@@ -29,12 +29,12 @@ use std::time::Duration;
 use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
-use zirv_flow_connectors::destinations::{DestinationContext, Registry};
+use zirv_flow_connectors::destinations::{DestinationContext, ErasedDestination, Registry};
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_store::{
-    Admission, Destination, ERASE_CALL_JOB_KIND, EXTERNAL_KEY_FIELD, PgPool, find_destination,
-    finish_erasure_call, idempotency_key, throttle_bucket,
+    Admission, Clock, Destination, ERASE_CALL_JOB_KIND, EXTERNAL_KEY_FIELD, PgPool,
+    find_destination, finish_erasure_call, idempotency_key, throttle_bucket,
 };
 
 use crate::delivery::credential::open_credential;
@@ -79,13 +79,7 @@ impl EraseCall {
 /// What the call needs, or the fixed code of why it cannot be made.
 fn plan(
     found: Option<Destination>,
-) -> Result<
-    (
-        Destination,
-        &'static dyn zirv_flow_connectors::destinations::ErasedDestination,
-    ),
-    &'static str,
-> {
+) -> Result<(Destination, &'static dyn ErasedDestination), &'static str> {
     let destination = found
         .filter(|destination| destination.archived_at.is_none())
         .ok_or(DESTINATION_UNAVAILABLE)?;
@@ -183,7 +177,7 @@ async fn conclude(
     ctx: &mut JobContext<'_>,
     job: &EraseCall,
     verdict: Verdict,
-    bucket: Option<(&PgPool, &Destination, &zirv_flow_store::Clock)>,
+    bucket: Option<(&PgPool, &Destination, &Clock)>,
 ) -> Result<(), JobError> {
     let last_attempt = ctx.attempts() >= ctx.max_attempts();
     match verdict {

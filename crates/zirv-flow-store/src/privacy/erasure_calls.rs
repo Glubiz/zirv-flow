@@ -182,36 +182,26 @@ pub(super) async fn plan(
         if !handled(connection, workspace, target.destination, people).await? {
             continue;
         }
-        let Some(external) = resolve(connection, workspace, (current, people), &target.key).await?
-        else {
-            sqlx::query(
-                "INSERT INTO erasure_destination_calls \
-                    (erasure_id, workspace_id, destination_id, outcome, error_code) \
-                 VALUES ($1, $2, $3, 'failed', $4) ON CONFLICT DO NOTHING",
-            )
-            .bind(erasure)
-            .bind(workspace.as_uuid())
-            .bind(target.destination)
-            .bind(MISSING_KEY)
-            .execute(&mut *connection)
-            .await
-            .map_err(StoreError::query)?;
-            continue;
+        let external = resolve(connection, workspace, (current, people), &target.key).await?;
+        let (outcome, code) = match external {
+            Some(_) => (EraseCallOutcome::Pending, None),
+            None => (EraseCallOutcome::Failed, Some(MISSING_KEY)),
         };
         let inserted = sqlx::query(
-            "INSERT INTO erasure_destination_calls (erasure_id, workspace_id, destination_id) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            "INSERT INTO erasure_destination_calls                 (erasure_id, workspace_id, destination_id, outcome, error_code)              VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
         )
         .bind(erasure)
         .bind(workspace.as_uuid())
         .bind(target.destination)
+        .bind(outcome.as_str())
+        .bind(code)
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?
         .rows_affected();
-        if inserted == 0 {
+        let Some(external) = external.filter(|_| inserted == 1) else {
             continue;
-        }
+        };
         let mut job = NewJob::new(ERASE_CALL_JOB_KIND, trace.clone());
         job.workspace_id = Some(workspace);
         job.payload = json!({
