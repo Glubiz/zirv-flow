@@ -12,6 +12,7 @@
 #   M4_OUT          where measurement results go, default $M4_STATE/out
 #   M4_HOST, M4_PORT  the API, default 127.0.0.1:8080
 #   M4_EMAIL        the bench owner, default bench@example.com
+#   M4_EXTRA_COMPOSE  one more compose file layered last (the M6 send bench adds its environment)
 #   M4_TIER         app tier S, M or L (compose.tiers.yaml), default M: 4 vCPU, worker concurrency 4
 #   BENCH_IMAGE_TAG release tag of ghcr.io/glubiz/zirv-flow, default 0.55.0
 #   BENCH_PG_CPUSET, BENCH_PG_SHM  PostgreSQL cpuset (default 8-31) and /dev/shm (default 1gb)
@@ -51,7 +52,8 @@ die() { log "FAILED: $*"; exit 1; }
 # The project name given with -p wins over the `name:` in compose.bench.yaml.
 compose() {
   docker compose -p "$M4_PROJECT" -f docker-compose.yml -f scripts/bench/compose.bench.yaml \
-    -f scripts/bench/compose.tiers.yaml -f scripts/bench/m4/compose.m4.yaml "$@"
+    -f scripts/bench/compose.tiers.yaml -f scripts/bench/m4/compose.m4.yaml \
+    ${M4_EXTRA_COMPOSE:+-f "$M4_EXTRA_COMPOSE"} "$@"
 }
 
 pg_container() { compose ps -q postgres; }
