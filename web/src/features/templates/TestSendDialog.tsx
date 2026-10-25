@@ -8,7 +8,6 @@ import {
   useAllowlistOptions,
   useDestinationOptions,
   useResource,
-  useSenderOptions,
   type components,
   type ErrorSummary,
   type Resource,
@@ -17,6 +16,8 @@ import { Button, Dialog, EmptyState, ErrorState, InlineError, LoadingState, Pill
 import { formatDateTime } from "../../ui/format";
 import { useMembers } from "../members";
 import type { Template, TestSend } from "./model";
+import { SenderSelect } from "./SenderPicker";
+import { WithSenderOptions, type SenderOptions } from "./senderOptions";
 
 interface Props {
   workspaceId: string;
@@ -42,9 +43,12 @@ function outcome(row: TestSend) {
   return OUTCOMES[row.outcome] ?? { label: row.outcome, tone: "neutral" as const };
 }
 
-export function TestSendDialog({ workspaceId, template, flush, personId, onClose }: Props) {
+export function TestSendDialog(props: Props) {
+  return <WithSenderOptions workspaceId={props.workspaceId}>{(senders) => <TestSendBody {...props} senders={senders} />}</WithSenderOptions>;
+}
+
+function TestSendBody({ workspaceId, template, flush, personId, onClose, senders }: Props & { senders: SenderOptions }) {
   const destinations = useDestinationOptions(workspaceId);
-  const senders = useSenderOptions(workspaceId);
   const members = useMembers(workspaceId);
   const allowlist = useAllowlistOptions(workspaceId);
   const log = useResource(
@@ -137,18 +141,7 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
                 </option>
               ))}
             </SelectField>
-            <SelectField label="Sender identity" value={sender} onChange={(event) => setSender(event.target.value)}>
-              <option value="">Choose a sender</option>
-              {senders.status === "ready"
-                ? senders.data
-                    .filter((entry) => !entry.archived)
-                    .map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.name} &lt;{entry.from_address}&gt;
-                      </option>
-                    ))
-                : null}
-            </SelectField>
+            <SenderSelect senders={senders} value={sender} onChange={setSender} disabled={false} />
             <SelectField label="Version" value={version} onChange={(event) => setVersion(event.target.value)}>
               <option value="draft">The current draft</option>
               {template.current_version ? <option value={String(template.current_version)}>Published version {template.current_version}</option> : null}

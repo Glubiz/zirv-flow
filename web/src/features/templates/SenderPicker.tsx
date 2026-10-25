@@ -1,5 +1,6 @@
-import { describeError, useSenderOptions } from "../../api";
+import { describeError } from "../../api";
 import { ErrorState, LoadingState, SelectField } from "../../ui";
+import { WithSenderOptions, type SenderOptions } from "./senderOptions";
 
 /** The sender identities of the workspace as a choice. */
 export function SenderPicker({
@@ -13,7 +14,25 @@ export function SenderPicker({
   onChange: (id: string) => void;
   disabled: boolean;
 }) {
-  const senders = useSenderOptions(workspaceId);
+  return (
+    <WithSenderOptions workspaceId={workspaceId}>
+      {(senders) => <SenderSelect senders={senders} value={value} onChange={onChange} disabled={disabled} />}
+    </WithSenderOptions>
+  );
+}
+
+/** The sender choice over options already read: loading, a failure with retry, or the select. A chosen sender that is archived or unlisted stays, with a warning. */
+export function SenderSelect({
+  senders,
+  value,
+  onChange,
+  disabled,
+}: {
+  senders: SenderOptions;
+  value: string;
+  onChange: (id: string) => void;
+  disabled: boolean;
+}) {
   if (senders.status === "loading") return <LoadingState label="Loading sender identities" />;
   if (senders.status === "error") {
     return (

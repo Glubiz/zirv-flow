@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { json, MEMBER, mockApi, problem } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
-import { DESTINATION_ID, SENDER_ID, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
+import { DESTINATION_ID, SENDER_ID, SENDER_OPTIONS, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
 
 function mount() {
@@ -180,6 +180,33 @@ describe("the test-send dialog", () => {
 
     expect(within(dialog).queryByRole("option", { name: "Order hook" })).not.toBeInTheDocument();
     expect(within(dialog).queryByRole("option", { name: "Old mail" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the template's archived sender as the choice and warns about it", async () => {
+    mockApi({
+      ...templateRoutes(),
+      [`GET ${WS}/sender-identities/options`]: () => json([{ ...SENDER_OPTIONS[0], archived: true }]),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const dialog = await openDialog(user);
+
+    expect(within(dialog).getByRole("option", { name: "Acme <hello@mail.acme.example> (archived)" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Sender identity")).toHaveValue(SENDER_ID);
+    expect(within(dialog).getByText(/the chosen sender is archived/)).toBeInTheDocument();
+  });
+
+  it("reads the sender options once while the editor's picker and the dialog are both open", async () => {
+    const calls = mockApi(templateRoutes());
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Settings" }));
+    await screen.findByLabelText("Sender identity");
+    await openDialog(user);
+
+    expect(calls.filter((call) => call.path === `${WS}/sender-identities/options`)).toHaveLength(1);
   });
 
   it("says no destination can send email when the list holds none that can", async () => {
