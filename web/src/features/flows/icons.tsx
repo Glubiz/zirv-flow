@@ -89,6 +89,20 @@ export function FlowIcon({ name, size }: { name: IconName; size?: number }) {
           <path d="M11.5 9.5v4h-9v-9h4" />
         </Icon>
       );
+    case "action.send":
+      return (
+        <Icon size={size}>
+          <rect x="2" y="3.5" width="12" height="9" rx="1.5" />
+          <path d="M2.5 5l5.5 4 5.5-4" />
+        </Icon>
+      );
+    case "action.sync":
+      return (
+        <Icon size={size}>
+          <path d="M13 6.5A5 5 0 0 0 3.7 5M3 2.5V5h2.5" />
+          <path d="M3 9.5A5 5 0 0 0 12.3 11M13 13.5V11h-2.5" />
+        </Icon>
+      );
     case "action.update_trait":
       return (
         <Icon size={size}>

@@ -7034,6 +7034,18 @@ export interface components {
             node_type: string;
             /**
              * Format: int64
+             * @description Messages of this node that ended `failed`.
+             */
+            send_failed: number;
+            /**
+             * Format: int64
+             * @description Messages of this node that ended `sent`; zero for a node that sends nothing.
+             */
+            sent: number;
+            /** @description Messages of this node that ended `skipped`, one row per reason code, sorted by reason. */
+            skipped: components["schemas"]["SkippedCountBody"][];
+            /**
+             * Format: int64
              * @description Enrollments of this version waiting at the node now.
              */
             waiting: number;
@@ -8431,6 +8443,12 @@ export interface components {
             start_at: string;
             /** @description The nodes none of the synthetic people reached. */
             unreached_nodes: string[];
+        };
+        SkippedCountBody: {
+            /** Format: int64 */
+            count: number;
+            /** @description The fixed skip reason code. */
+            reason: string;
         };
         /**
          * @description What the reference evaluator reads about one person. `capped_events` and

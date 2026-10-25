@@ -2208,6 +2208,9 @@ mod tests {
             .collect();
         assert_eq!(ids, ["wait", "win", "end", "settings.goal"]);
         assert_eq!(reply.body["nodes"][1]["node_type"], "goal");
+        assert_eq!(reply.body["nodes"][0]["sent"], 0);
+        assert_eq!(reply.body["nodes"][0]["send_failed"], 0);
+        assert_eq!(reply.body["nodes"][0]["skipped"], serde_json::json!([]));
 
         let unknown = f
             .lead("GET", &format!("/{flow}/versions/9/counts"), None)

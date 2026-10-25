@@ -82,7 +82,8 @@ export function wordsFor(node: FlowNode, names: Names = NO_NAMES): Words {
       return { title: `${node.arms.length} arms`, detail: node.arms.map((arm) => `${arm.weight}%`).join(" / ") };
     case "action.webhook": {
       const count = node.trait_keys?.length ?? 0;
-      return { title: hostOf(node.url), detail: count === 0 ? "Sends the standard envelope" : `Sends ${count} trait${count === 1 ? "" : "s"}` };
+      const shape = node.template === undefined ? "Sends the standard envelope" : "Sends a payload template";
+      return { title: hostOf(node.url), detail: count === 0 ? shape : `${shape}, ${count} trait${count === 1 ? "" : "s"}` };
     }
     case "action.sync": {
       const count = node.trait_keys?.length ?? 0;
@@ -91,7 +92,9 @@ export function wordsFor(node: FlowNode, names: Names = NO_NAMES): Words {
         : { title: "Update the profile", detail: `Sends ${count} trait${count === 1 ? "" : "s"}` };
     }
     case "action.send":
-      return { title: "Send an email", detail: node.topic === undefined ? "No topic" : "Under a topic" };
+      return node.template === NIL_UUID
+        ? { title: "Choose a template", detail: "Send an email" }
+        : { title: "Send an email", detail: node.topic === undefined ? "No topic" : "Under a topic" };
     case "action.update_trait": {
       const key = node.key === "" ? "a trait" : node.key;
       if (node.change.op === "set") return { title: `${key} = ${valueText(node.change.value)}`, detail: "Set" };

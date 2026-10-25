@@ -42,6 +42,8 @@ export const KINDS: readonly KindInfo[] = [
   { type: "branch", label: "Branch", hint: "Send people down a path by a condition" },
   { type: "split.random", label: "Random split", hint: "Send people down a path by chance" },
   { type: "action.webhook", label: "Webhook", hint: "Call a web address" },
+  { type: "action.send", label: "Send an email", hint: "Send a published template" },
+  { type: "action.sync", label: "Sync a profile", hint: "Update or remove the person in an external system" },
   { type: "action.update_trait", label: "Update a trait", hint: "Set, add to or clear a field" },
   { type: "action.list", label: "Update a list", hint: "Add people to a list or remove them" },
   { type: "goal", label: "Goal", hint: "Record a conversion" },
