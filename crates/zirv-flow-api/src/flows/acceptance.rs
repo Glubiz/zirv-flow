@@ -938,6 +938,51 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_sync_node_naming_a_send_only_provider_gets_operation_unsupported(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let manifest: Value = serde_json::from_str(include_str!(
+            "../../../zirv-flow-connectors/tests/fixtures/providers/bearer_timestamped.json"
+        ))
+        .unwrap();
+        let id = Uuid::now_v7();
+        zirv_flow_store::create_destination(
+            &pool,
+            f.ws,
+            &zirv_flow_store::NewDestination {
+                id,
+                kind: "provider",
+                name: "Send only",
+                config: &json!({"manifest": manifest}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "s", "type": "action.sync", "destination": id,
+                "operation": "upsert", "trait_keys": ["plan"]},
+            {"id": "end", "type": "exit"}
+        ], "edges": [{"id": "e", "from": "s", "port": "next", "to": "end"}]});
+        let flow = f.create("Sync", graph, manual()).await;
+
+        let validated = f.lead("POST", &format!("/{flow}/validate"), None).await;
+
+        assert_eq!(validated.status, StatusCode::OK);
+        assert_eq!(
+            issue_tuples(&validated.body["issues"]),
+            [(
+                "operation_unsupported".to_owned(),
+                "s".to_owned(),
+                "/operation".to_owned()
+            )]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_dry_run_reports_the_impact_and_writes_nothing(pool: PgPool) {
         let f = fixture(&pool).await;
         // A segment with members, and a failing source that feeds the trait a branch reads.

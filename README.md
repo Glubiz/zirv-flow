@@ -2267,6 +2267,7 @@ changed." and does nothing.
 | `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
 | `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
 | `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; the list shows only a masked hint (`q***@example.com`) |
+| `GET /test-send-allowlist/options` | write | the same entries as `{id, name}`, `name` being the masked hint, for the test-send dialog |
 
 Any other recipient is a 422 `recipient_not_allowed`. At most 10 test sends per member and 100 per
 workspace start in any rolling hour; past that the answer is 429 with `Retry-After`. A suppressed
@@ -2297,6 +2298,13 @@ with any other sender is a 422 `sender_unverified`). Workspace admins manage bot
   nothing and the check is retried. `POST .../sending-domains/{id}/verify` queues a check now;
   otherwise the scheduler re-checks every `sending.recheck_hours` (default 6).
 - `POST /api/v1/workspaces/{ws}/sender-identities` binds a from name and an address on the domain.
+- The pickers read `GET .../sender-identities/options`, `GET .../destinations/options` and
+  `GET .../test-send-allowlist/options`. They need the write role (a `write` key, or any member). Each returns
+  only ids, names and state (archived ones are listed and marked): never a setting, a credential or an
+  address. A destination option and every destination body carry `capabilities`
+  `{send, sync, erase}`, derived from the destination type and, for a provider, its manifest; the flow
+  editor lists only destinations that can send in an `action.send` step and only those that can sync
+  in an `action.sync` step. A read-only member still sees the chosen id.
 - `GET` and `PUT /api/v1/workspaces/{ws}/sending/settings` read (any reader) and replace (admins) the
   workspace's frequency caps and quiet hours. A cap is `{channel, window, limit, mode}`: at most
   `limit` messages to one person in any `window` (an ISO 8601 duration in whole hours or days, up to

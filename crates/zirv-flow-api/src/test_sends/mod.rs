@@ -13,8 +13,8 @@ pub(crate) mod allowlist;
 pub(crate) mod send;
 
 pub(crate) use allowlist::{
-    AllowlistAddRequest, AllowlistBody, AllowlistEntryBody, allowlist_add, allowlist_delete,
-    allowlist_list,
+    AllowlistAddRequest, AllowlistBody, AllowlistEntryBody, AllowlistOptionBody, allowlist_add,
+    allowlist_delete, allowlist_list, allowlist_options,
 };
 pub(crate) use send::{TestSendRecipient, TestSendRequest, TestSendsBody, list, test_send};
 

@@ -1,10 +1,23 @@
 import { useState, type SyntheticEvent } from "react";
 
-import { client, describeError, unwrap, useResource, type components, type ErrorSummary, type Resource } from "../../api";
+import {
+  client,
+  describeError,
+  offeredDestinations,
+  unwrap,
+  useAllowlistOptions,
+  useDestinationOptions,
+  useResource,
+  type components,
+  type ErrorSummary,
+  type Resource,
+} from "../../api";
 import { Button, Dialog, EmptyState, ErrorState, InlineError, LoadingState, Pill, SelectField, TextField } from "../../ui";
 import { formatDateTime } from "../../ui/format";
 import { useMembers } from "../members";
 import type { Template, TestSend } from "./model";
+import { SenderSelect } from "./SenderPicker";
+import { WithSenderOptions, type SenderOptions } from "./senderOptions";
 
 interface Props {
   workspaceId: string;
@@ -30,20 +43,14 @@ function outcome(row: TestSend) {
   return OUTCOMES[row.outcome] ?? { label: row.outcome, tone: "neutral" as const };
 }
 
-export function TestSendDialog({ workspaceId, template, flush, personId, onClose }: Props) {
-  const destinations = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/destinations", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
-  const senders = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/sender-identities", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
+export function TestSendDialog(props: Props) {
+  return <WithSenderOptions workspaceId={props.workspaceId}>{(senders) => <TestSendBody {...props} senders={senders} />}</WithSenderOptions>;
+}
+
+function TestSendBody({ workspaceId, template, flush, personId, onClose, senders }: Props & { senders: SenderOptions }) {
+  const destinations = useDestinationOptions(workspaceId);
   const members = useMembers(workspaceId);
-  const allowlist = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/test-send-allowlist", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
-  );
+  const allowlist = useAllowlistOptions(workspaceId);
   const log = useResource(
     () =>
       unwrap(
@@ -67,6 +74,7 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
   const loading = [destinations, senders, members, allowlist].some((entry) => entry.status === "loading");
   const loadFailed = [destinations, senders, members, allowlist].find((entry) => entry.status === "error");
   const ready = !loading && !loadFailed;
+  const sendable = destinations.status === "ready" ? offeredDestinations(destinations.data, "send") : [];
   const incomplete = destination === "" || sender === "" || (toKind === "member" ? member === "" : address.trim() === "");
 
   async function submit(event: SyntheticEvent) {
@@ -120,28 +128,20 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
         {loadFailed?.status === "error" ? <ErrorState {...describeError(loadFailed.error)} onRetry={retryAll} /> : null}
         {ready ? (
           <form className="stack" onSubmit={(event) => void submit(event)} noValidate aria-label="Test send">
-            <SelectField label="Destination" value={destination} onChange={(event) => setDestination(event.target.value)}>
+            <SelectField
+              label="Destination"
+              value={destination}
+              onChange={(event) => setDestination(event.target.value)}
+              hint={destinations.status === "ready" && sendable.length === 0 ? "No destination can send email. An admin adds one under destinations." : undefined}
+            >
               <option value="">Choose a destination</option>
-              {destinations.status === "ready"
-                ? destinations.data
-                    .filter((entry) => !entry.archived)
-                    .map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.name}
-                    </option>
-                  ))
-                : null}
+              {sendable.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {entry.name}
+                </option>
+              ))}
             </SelectField>
-            <SelectField label="Sender identity" value={sender} onChange={(event) => setSender(event.target.value)}>
-              <option value="">Choose a sender</option>
-              {senders.status === "ready"
-                ? senders.data.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {entry.from_name} &lt;{entry.from_address}&gt;
-                    </option>
-                  ))
-                : null}
-            </SelectField>
+            <SenderSelect senders={senders} value={sender} onChange={setSender} disabled={false} />
             <SelectField label="Version" value={version} onChange={(event) => setVersion(event.target.value)}>
               <option value="draft">The current draft</option>
               {template.current_version ? <option value={String(template.current_version)}>Published version {template.current_version}</option> : null}
@@ -173,8 +173,8 @@ export function TestSendDialog({ workspaceId, template, flush, personId, onClose
                 onChange={(event) => setAddress(event.target.value)}
                 autoComplete="off"
                 hint={
-                  allowlist.status === "ready" && allowlist.data.entries.length > 0
-                    ? `On the allowlist: ${allowlist.data.entries.map((entry) => entry.display_hint).join(", ")}`
+                  allowlist.status === "ready" && allowlist.data.length > 0
+                    ? `On the allowlist: ${allowlist.data.map((entry) => entry.name).join(", ")}`
                     : "The allowlist is empty. An admin adds addresses to it."
                 }
               />

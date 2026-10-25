@@ -75,32 +75,14 @@ export function useBody(overrides: Doc = {}) {
   return { flow_id: FLOW_ID, flow_name: "Welcome series", flow_state: "published", active: true, versions: [1], ...overrides };
 }
 
-export const SENDERS = [
-  {
-    id: SENDER_ID,
-    from_name: "Acme",
-    from_address: "hello@mail.acme.example",
-    domain_id: "dddddddd-0000-4000-8000-000000000001",
-    archived: false,
-    created_at: "2026-10-01T09:00:00Z",
-    updated_at: "2026-10-01T09:00:00Z",
-    reply_to: null,
-  },
-];
+/** What the writers' sender read returns: no domain, no reply-to. */
+export const SENDER_OPTIONS = [{ id: SENDER_ID, name: "Acme", from_address: "hello@mail.acme.example", archived: false }];
 
-export const DESTINATIONS = [
-  {
-    id: DESTINATION_ID,
-    name: "Transactional mail",
-    kind: "smtp",
-    archived: false,
-    burst: 10,
-    rate: 5,
-    config: {},
-    credential_fields_set: [],
-    created_at: "2026-10-01T09:00:00Z",
-    updated_at: "2026-10-01T09:00:00Z",
-  },
+/** What the writers' destination read returns: one that sends, one that cannot, and an archived one. */
+export const DESTINATION_OPTIONS = [
+  { id: DESTINATION_ID, name: "Transactional mail", archived: false, capabilities: { send: true, sync: false, erase: false } },
+  { id: "99999999-0000-4000-8000-000000000002", name: "Order hook", archived: false, capabilities: { send: false, sync: false, erase: false } },
+  { id: "99999999-0000-4000-8000-000000000003", name: "Old mail", archived: true, capabilities: { send: true, sync: false, erase: false } },
 ];
 
 interface Options {
@@ -157,9 +139,9 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     },
     [`GET ${base}/versions`]: () => json(versions),
     [`GET ${base}/where-used`]: () => json(uses),
-    [`GET ${WS}/sender-identities`]: () => json(SENDERS),
-    [`GET ${WS}/destinations`]: () => json(DESTINATIONS),
-    [`GET ${WS}/test-send-allowlist`]: () => json({ entries: [{ id: "a1", display_hint: "q***@example.com", created_at: "2026-10-01T09:00:00Z" }] }),
+    [`GET ${WS}/sender-identities/options`]: () => json(SENDER_OPTIONS),
+    [`GET ${WS}/destinations/options`]: () => json(DESTINATION_OPTIONS),
+    [`GET ${WS}/test-send-allowlist/options`]: () => json([{ id: "a1", name: "q***@example.com" }]),
     [`GET ${WS}/test-sends`]: () => json({ test_sends: [], next_before: null }),
   };
 }

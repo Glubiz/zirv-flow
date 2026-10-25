@@ -1,5 +1,6 @@
-import { client, describeError, unwrap, useResource } from "../../api";
+import { describeError } from "../../api";
 import { ErrorState, LoadingState, SelectField } from "../../ui";
+import { WithSenderOptions, type SenderOptions } from "./senderOptions";
 
 /** The sender identities of the workspace as a choice. */
 export function SenderPicker({
@@ -13,26 +14,59 @@ export function SenderPicker({
   onChange: (id: string) => void;
   disabled: boolean;
 }) {
-  const senders = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/sender-identities", { params: { path: { ws: workspaceId } } })),
-    [workspaceId],
+  return (
+    <WithSenderOptions workspaceId={workspaceId}>
+      {(senders) => <SenderSelect senders={senders} value={value} onChange={onChange} disabled={disabled} />}
+    </WithSenderOptions>
   );
+}
+
+/** The sender choice over options already read: loading, a failure with retry, or the select. A chosen sender that is archived or unlisted stays, with a warning. */
+export function SenderSelect({
+  senders,
+  value,
+  onChange,
+  disabled,
+}: {
+  senders: SenderOptions;
+  value: string;
+  onChange: (id: string) => void;
+  disabled: boolean;
+}) {
   if (senders.status === "loading") return <LoadingState label="Loading sender identities" />;
-  if (senders.status === "error") return <ErrorState {...describeError(senders.error)} onRetry={senders.reload} />;
-  const known = senders.data.some((sender) => sender.id === value);
+  if (senders.status === "error") {
+    return (
+      <div className="field">
+        <span className="field-label">Sender identity</span>
+        <p className="faint">{value === "" ? "No sender chosen." : <span className="mono">{value}</span>}</p>
+        <ErrorState {...describeError(senders.error)} onRetry={senders.reload} />
+      </div>
+    );
+  }
+  const chosen = senders.data.find((sender) => sender.id === value);
+  const live = senders.data.filter((sender) => !sender.archived);
+  let hint = "A sender on a verified domain.";
+  if (live.length === 0) hint = "No sender identity yet. Add one under sending.";
+  if (value !== "" && chosen === undefined) hint = "Warning: the chosen sender is not in this workspace's list. Choose another.";
+  if (chosen?.archived) hint = "Warning: the chosen sender is archived and cannot send. Choose another.";
   return (
     <SelectField
       label="Sender identity"
       value={value}
       onChange={(event) => onChange(event.target.value)}
       disabled={disabled}
-      hint={senders.data.length === 0 ? "No sender identity yet. Add one under sending." : "A sender on a verified domain."}
+      hint={hint}
     >
       <option value="">Choose a sender</option>
-      {value !== "" && !known ? <option value={value}>{value}</option> : null}
-      {senders.data.map((sender) => (
+      {value !== "" && chosen === undefined ? <option value={value}>{value}</option> : null}
+      {chosen?.archived ? (
+        <option value={chosen.id}>
+          {chosen.name} &lt;{chosen.from_address}&gt; (archived)
+        </option>
+      ) : null}
+      {live.map((sender) => (
         <option key={sender.id} value={sender.id}>
-          {sender.from_name} &lt;{sender.from_address}&gt;
+          {sender.name} &lt;{sender.from_address}&gt;
         </option>
       ))}
     </SelectField>

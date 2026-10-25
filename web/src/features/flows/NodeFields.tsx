@@ -481,6 +481,7 @@ function Send({ node, issues, graph, catalog, workspaceId, readOnly, onChange }:
         workspaceId={workspaceId}
         label="Destination"
         value={node.destination}
+        capability="send"
         onChange={(destination) => onChange({ ...node, destination })}
         disabled={readOnly}
         error={fieldError(issues, "/destination", graph)}
@@ -589,6 +590,7 @@ function Sync({ node, issues, graph, catalog, workspaceId, readOnly, onChange }:
         workspaceId={workspaceId}
         label="Destination"
         value={node.destination}
+        capability="sync"
         onChange={(destination) => onChange({ ...node, destination })}
         disabled={readOnly}
         error={fieldError(issues, "/destination", graph)}

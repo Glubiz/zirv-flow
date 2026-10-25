@@ -154,6 +154,17 @@ describe("building with blocks", () => {
     }, WAIT);
   });
 
+  it("lets a writer who is not an admin pick the sender by name on the Message tab", async () => {
+    mockApi(templateRoutes({ role: "member", detail: detailOf(blocksDocument()) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Message" }));
+
+    expect(await screen.findByRole("option", { name: "Acme <hello@mail.acme.example>" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Sender identity")).toHaveValue(SENDER_ID);
+  });
+
   it("puts a merge tag from the picker into the focused text field", async () => {
     const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[heading("h", "Hi ")]] }])) }));
     const user = userEvent.setup();

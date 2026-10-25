@@ -79,6 +79,49 @@ pub(crate) async fn allowlist_list(
     }))
 }
 
+/// One allowlisted address a writer may pick as a test recipient.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct AllowlistOptionBody {
+    id: Uuid,
+    /// The masked address, as the admin list shows it. The address itself is never returned.
+    #[schema(example = "q***@example.com")]
+    name: String,
+}
+
+/// The test-send allowlist as picker options, oldest first. Needs the write role: this is what a
+/// writer picks a test recipient from.
+#[utoipa::path(
+    get,
+    operation_id = "list_test_send_allowlist_options",
+    path = "/api/v1/workspaces/{ws}/test-send-allowlist/options",
+    tag = "templates",
+    params(("ws" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "The options: id and masked address, nothing else", body = Vec<AllowlistOptionBody>),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the write scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn allowlist_options(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(ws): Path<String>,
+) -> Result<Json<Vec<AllowlistOptionBody>>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let entries = zirv_flow_store::list_allowlist(&state.pool, workspace.id).await?;
+    Ok(Json(
+        entries
+            .into_iter()
+            .map(|entry| AllowlistOptionBody {
+                id: entry.id,
+                name: entry.display_hint,
+            })
+            .collect(),
+    ))
+}
+
 /// Allows test sends to an address. The address is normalised, hashed here and stored as the hash,
 /// a masked hint and the address sealed with the master key. Needs the workspace admin role and the CSRF token. Audited as
 /// `test_send.allowlist_added`, with the entry id and nothing else.

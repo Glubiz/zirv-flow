@@ -9,6 +9,7 @@ import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane
 import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
+import { SenderOptionsProvider } from "./senderOptions";
 import { TestSendDialog } from "./TestSendDialog";
 import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
@@ -204,6 +205,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     : null;
 
   return (
+    <SenderOptionsProvider workspaceId={workspaceId} enabled={canWrite && template.channel === "email"}>
     <div className="tp-page">
       <div className="tp-head">
         <Link to={`/w/${workspaceId}/templates`}>← Templates</Link>
@@ -231,7 +233,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             Save draft
           </Button>
         ) : null}
-        {editable && canAdmin && template.channel === "email" ? (
+        {editable && template.channel === "email" ? (
           <Button onClick={() => setTesting(true)}>Test send</Button>
         ) : null}
         {editable && canAdmin ? (
@@ -259,7 +261,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} canAdmin={canAdmin} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
           {canWrite ? (
             <PreviewPane
               workspaceId={workspaceId}
@@ -308,5 +310,6 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
       ) : null}
       {testing ? <TestSendDialog workspaceId={workspaceId} template={template} flush={flush} personId={person?.id ?? null} onClose={() => setTesting(false)} /> : null}
     </div>
+    </SenderOptionsProvider>
   );
 }

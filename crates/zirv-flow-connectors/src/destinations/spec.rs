@@ -40,6 +40,39 @@ pub struct Capabilities {
     pub signs_dkim: bool,
 }
 
+/// What one destination can do for a marketer, from its type and its configuration. The one
+/// place the pickers and the erase job read it from.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Abilities {
+    /// Delivers email.
+    pub send: bool,
+    /// Runs profile operations (an upsert or a remove).
+    pub sync: bool,
+    /// Declares the erase capability.
+    pub erase: bool,
+}
+
+impl DestinationSpec {
+    /// The abilities of a destination of this type with `config`. A type that carries the
+    /// `profile_sync` channel is a manifest provider: its manifest decides what it does.
+    pub fn abilities(&self, config: &Value) -> Abilities {
+        let channels = self.capabilities.channels;
+        if channels.contains(&"profile_sync") {
+            let support = super::provider::profile_support(config);
+            return Abilities {
+                send: channels.contains(&"email") && support.email,
+                sync: support.upsert || support.remove,
+                erase: super::provider::erase_key_source(config).is_some(),
+            };
+        }
+        Abilities {
+            send: channels.contains(&"email"),
+            sync: false,
+            erase: self.capabilities.erase,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +103,65 @@ mod tests {
                 ..base
             }
         );
+    }
+
+    fn provider_abilities(fixture: &str) -> Abilities {
+        let config =
+            serde_json::json!({"manifest": serde_json::from_str::<Value>(fixture).unwrap()});
+        super::super::Registry::built_in()
+            .get("provider")
+            .unwrap()
+            .spec()
+            .abilities(&config)
+    }
+
+    #[test]
+    fn a_plain_type_sends_by_its_email_channel_and_never_syncs() {
+        let registry = super::super::Registry::built_in();
+        let of = |kind: &str| {
+            registry
+                .get(kind)
+                .unwrap()
+                .spec()
+                .abilities(&serde_json::json!({}))
+        };
+
+        assert_eq!(
+            of("smtp"),
+            Abilities {
+                send: true,
+                sync: false,
+                erase: false
+            }
+        );
+        assert_eq!(of("webhook"), Abilities::default());
+    }
+
+    #[test]
+    fn a_provider_sends_when_its_manifest_has_send_and_syncs_when_it_has_a_profile_operation() {
+        let email = provider_abilities(include_str!(
+            "../../tests/fixtures/providers/bearer_timestamped.json"
+        ));
+        let profiles = provider_abilities(include_str!(
+            "../../tests/fixtures/providers/profile_sync.json"
+        ));
+
+        assert_eq!(
+            email,
+            Abilities {
+                send: true,
+                sync: false,
+                erase: false
+            }
+        );
+        assert_eq!(
+            profiles,
+            Abilities {
+                send: false,
+                sync: true,
+                erase: false
+            }
+        );
+        assert_eq!(provider_abilities("{}"), Abilities::default());
     }
 }

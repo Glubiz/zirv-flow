@@ -117,10 +117,10 @@ describe("the other template fixes", () => {
     const user = userEvent.setup();
     mockApi({
       ...templateRoutes(),
-      [`GET ${WS}/destinations`]: () =>
+      [`GET ${WS}/destinations/options`]: () =>
         json([
-          { id: "d-live", name: "Live mail", kind: "smtp", archived: false },
-          { id: "d-old", name: "Old mail", kind: "smtp", archived: true },
+          { id: "d-live", name: "Live mail", archived: false, capabilities: { send: true, sync: false, erase: false } },
+          { id: "d-old", name: "Old mail", archived: true, capabilities: { send: true, sync: false, erase: false } },
         ]),
     });
     mount();
