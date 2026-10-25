@@ -41,7 +41,17 @@ pub fn validate_credential_fit(
     spec: &DestinationSpec,
     present: &BTreeSet<String>,
 ) -> Result<(), Vec<FieldError>> {
-    check_credential_fit(spec.credential_fields, "destination", present)
+    validate_credential_fit_with(spec, &BTreeSet::new(), present)
+}
+
+/// [`validate_credential_fit`] where the destination also declares the fields in `extra` (a
+/// provider manifest's credential schema).
+pub fn validate_credential_fit_with(
+    spec: &DestinationSpec,
+    extra: &BTreeSet<String>,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_fit(spec.credential_fields, extra, "destination", present)
 }
 
 #[cfg(test)]

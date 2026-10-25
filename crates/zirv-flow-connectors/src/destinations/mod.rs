@@ -47,7 +47,8 @@ pub use smtp::{
 };
 pub use spec::{Capabilities, DestinationSpec};
 pub use validate::{
-    validate_config, validate_credential, validate_credential_fit, validate_credential_names,
+    validate_config, validate_credential, validate_credential_fit, validate_credential_fit_with,
+    validate_credential_names,
 };
 
 /// The token the fake destination's check accepts.

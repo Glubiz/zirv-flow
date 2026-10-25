@@ -142,14 +142,16 @@ pub(crate) fn check_credential_names(
 
 /// Checks that a stored credential, which has the fields named in `present`, fits the owner:
 /// it holds every required credential field and at least one field the owner declares, so a
-/// credential the owner reads nothing from is refused. Reasons name fields and never a value.
+/// credential the owner reads nothing from is refused. `extra` names further fields the owner
+/// declares (a manifest's credential schema). Reasons name fields and never a value.
 pub(crate) fn check_credential_fit(
     fields: &[FieldSpec],
+    extra: &BTreeSet<String>,
     noun: &str,
     present: &BTreeSet<String>,
 ) -> Result<(), Vec<FieldError>> {
     check_credential_names(fields, noun, present)?;
-    if fields.iter().any(|field| present.contains(field.key)) {
+    if fields.iter().any(|field| present.contains(field.key)) || !extra.is_disjoint(present) {
         Ok(())
     } else {
         Err(vec![error(
@@ -172,7 +174,16 @@ pub fn validate_credential_fit(
     spec: &SourceSpec,
     present: &BTreeSet<String>,
 ) -> Result<(), Vec<FieldError>> {
-    check_credential_fit(spec.credential_fields, "source", present)
+    validate_credential_fit_with(spec, &BTreeSet::new(), present)
+}
+
+/// [`validate_credential_fit`] where the owner also declares the fields in `extra`.
+pub fn validate_credential_fit_with(
+    spec: &SourceSpec,
+    extra: &BTreeSet<String>,
+    present: &BTreeSet<String>,
+) -> Result<(), Vec<FieldError>> {
+    check_credential_fit(spec.credential_fields, extra, "source", present)
 }
 
 /// The settings of a stream a user chose, as they are stored.

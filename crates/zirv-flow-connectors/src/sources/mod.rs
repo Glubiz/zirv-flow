@@ -35,7 +35,7 @@ pub use types::{
 };
 pub use validate::{
     FieldError, StreamSettingsInput, validate_config, validate_credential, validate_credential_fit,
-    validate_credential_names, validate_stream_settings,
+    validate_credential_fit_with, validate_credential_names, validate_stream_settings,
 };
 pub(crate) use validate::{
     check_config, check_credential, check_credential_fit, check_credential_names, url_problem_https,

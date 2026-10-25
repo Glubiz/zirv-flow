@@ -1659,6 +1659,64 @@ mod tests {
         );
     }
 
+    const PROVIDER: &str = include_str!(
+        "../../../zirv-flow-connectors/tests/fixtures/providers/api_key_body_only.json"
+    );
+
+    /// A provider manifest with the given auth and credential fields (key, required), whose
+    /// feedback is verified under `secret_field`.
+    fn provider_manifest(auth: &str, fields: &[(&str, bool)], secret_field: &str) -> Value {
+        let mut manifest: Value = serde_json::from_str(PROVIDER).unwrap();
+        let fields: Vec<Value> = fields
+            .iter()
+            .map(|(key, required)| {
+                json!({"key": key, "label": key, "type": "string",
+                       "required": required, "secret": true})
+            })
+            .collect();
+        manifest["auth"] = json!({"type": auth, "credential": {"fields": fields}});
+        manifest["destination"]["feedback"]["verification"]["secret_field"] = json!(secret_field);
+        manifest
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_credential_with_only_the_fields_a_provider_manifest_declares_fits_the_destination(
+        pool: PgPool,
+    ) {
+        let fx = fixture(&pool).await;
+        let manifest = provider_manifest("none", &[("signing_secret", true)], "signing_secret");
+        let credential = fx
+            .as_admin(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": "Feedback only",
+                            "schema": {"fields": [
+                                {"key": "signing_secret", "label": "S", "type": "string",
+                                 "required": true, "secret": true}]},
+                            "secret": {"signing_secret": "sig"}})),
+            )
+            .await;
+        assert_eq!(
+            credential.status,
+            StatusCode::CREATED,
+            "{:?}",
+            credential.body
+        );
+
+        let created = fx
+            .as_admin(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "provider", "name": "Mail",
+                            "config": {"manifest": manifest},
+                            "credential_id": credential.body["id"]})),
+            )
+            .await;
+
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_credential_needs_the_master_key(pool: PgPool) {
