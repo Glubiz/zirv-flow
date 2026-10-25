@@ -63,6 +63,19 @@ wait_no_cargo
 busy="$(pgc -At -c "SELECT count(*) FROM jobs WHERE kind = 'delivery.send' AND state IN ('ready', 'running')")"
 [ "$busy" = 0 ] || die "$busy delivery.send jobs are still ready or running: let the previous run drain first"
 
+# The events of this workspace make a by-id lookup in the flow path slower the more there are
+# (docs/benchmarks/m6-send.md, "Event lookup by id"). RESET_EVENTS=1 deletes the bench workspace's
+# events (and vacuums the current partition) so that variants are comparable; the count at the
+# start is recorded either way.
+events_before="$(pgc -At -v ws="$ws" -c "SET max_parallel_workers_per_gather = 0; SELECT count(*) FROM events WHERE workspace_id = :'ws'")"
+if [ "${RESET_EVENTS:-0}" = 1 ]; then
+  pgc -v ws="$ws" -c "SET max_parallel_workers_per_gather = 0; DELETE FROM events WHERE workspace_id = :'ws'" >/dev/null
+  pg -At -f - >/dev/null <<'SQL'
+SELECT format('VACUUM (PARALLEL 0) %I', to_char(now(), '"events_y"YYYY"m"MM')) \gexec
+SQL
+  log "reset $events_before events of the bench workspace"
+fi
+
 # clock_offset: the database clock minus the host clock, microseconds, from the midpoint of a host
 # time bracket around SELECT clock_timestamp(); prints "offset bracket_width".
 clock_offset() {
@@ -82,8 +95,10 @@ clock_offset() {
 log "starting $workers worker process(es), concurrency $BENCH_WORKER_CONCURRENCY"
 compose up -d --no-build --no-deps --force-recreate --scale "zirv-flow-worker=$workers" zirv-flow-worker >&2
 ports=()
-for i in $(seq 1 "$workers"); do
-  hostport="$(compose port --index "$i" zirv-flow-worker 9100 | sed 's/.*://')"
+i=0
+for cid in $(compose ps -q zirv-flow-worker); do
+  i=$((i + 1))
+  hostport="$(docker port "$cid" 9100 | head -n 1 | sed 's/.*://')"
   ports+=("$hostport")
   for _ in $(seq 1 60); do curl -fsS "http://127.0.0.1:$hostport/metrics" >/dev/null 2>&1 && break; sleep 1; done
   curl -fsS "http://127.0.0.1:$hostport/metrics" >/dev/null 2>&1 || die "worker $i has no /metrics on $hostport"
@@ -106,6 +121,7 @@ api_json PATCH "/workspaces/$ws/destinations/$dest" "$(jq -nc --argjson r "$dest
 {
   echo "label=$label people=$people workers=$workers worker_concurrency=$BENCH_WORKER_CONCURRENCY"
   echo "template=$template dest_rate=$dest_rate limits=$limits dkim=on"
+  echo "events_in_workspace_at_start=$events_before reset_events=${RESET_EVENTS:-0}"
   echo "image=$BENCH_IMAGE_TAG render_pool=${BENCH_RENDER_POOL:-2} tier=$M4_TIER sink_delay_ms=${M6_SINK_DELAY_MS:-0}"
   echo "started=$(date -u +%FT%TZ)"
 } >"$out/variant.txt"

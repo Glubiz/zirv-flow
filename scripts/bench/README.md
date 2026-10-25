@@ -304,23 +304,28 @@ the consent import: no SQL writes. `run.sh` then creates a list and a manual-tri
 (`action.send` then exit) for the chosen template, adds the people to the list, starts the flow for
 the list (the product path of the M5 bench) and waits for the sink.
 
-**The sink stands in for provider limits.** It runs on the host (`sink.sh start`, listening on
-`0.0.0.0:2525`) so the containers reach it as `host.docker.internal` (the host gateway, set with
-`extra_hosts` in `compose.m6.yaml`). The egress policy refuses private addresses unless listed, so
-`compose.m6.yaml` sets `ZIRV_FLOW_EGRESS__ALLOW` to the Docker private ranges (override with
-`BENCH_EGRESS_ALLOW`; the host gateway must fall inside). The released image refuses plaintext
-SMTP, so the sink offers STARTTLS with a generated authority; `sink.sh` writes its PEM to
-`$M6_OUT/sink/ca.pem` and `setup.sh`/`run.sh` put it in the destination's `ca_certificate`
-(restarting the sink makes a new authority: run `setup.sh` again). The sink accepts any login and
-logs `{"t_us", "rcpt"}` per accepted message; `M6_SINK_DELAY_MS` adds a reply delay to imitate a
-slower provider.
+**The sink stands in for provider limits.** It runs as a container (`zirv-m6-sink`, CPUs 4 to 7) on the
+project's network, so the workers reach it as `zirv-m6-sink:2525` inside the egress allowlist of
+`compose.m6.yaml` (the Docker private ranges; override with `BENCH_EGRESS_ALLOW`). A sink on the host reached
+through `host.docker.internal` was tried and rejected: Docker Desktop's host path stalled new connections
+for 10 s or more at 2 parallel connections. The container runs a Linux build of `sendbench` (`sink.sh
+build` compiles it in the local `rust:1-bookworm` image; nothing is pulled). The released image refuses
+plaintext SMTP, so the sink offers STARTTLS with a generated authority; `sink.sh` writes its PEM to
+`$M6_OUT/sink/ca.pem` and `setup.sh`/`run.sh` put it in the destination's `ca_certificate` (restarting the
+sink makes a new authority: run `setup.sh` again or let `run.sh` patch it). The sink accepts any login and
+logs `{"t_us", "rcpt"}` per accepted message inside the container; `M6_SINK_DELAY_MS` adds a reply delay.
+The public URL of the stack must be `https` (`BENCH_PUBLIC_URL`, default `https://flow.bench.example.com`):
+the renderer refuses click tracking on a plain `http` base and every block email fails as `render_error`.
+Run `ANALYZE` on a restored database first, and set `RESET_EVENTS=1` on `run.sh` to delete the bench
+workspace's events before a run (a lookup in the send path costs time proportional to them; see
+`docs/benchmarks/m6-send.md`).
 
 ```sh
 docker pull ghcr.io/glubiz/zirv-flow:<tag>                  # BENCH_IMAGE_TAG; pull_policy is never
 cargo build --release -p zirv-flow-loadgen                  # loadgen and sendbench
 export BENCH_IMAGE_TAG=<tag>
 scripts/bench/m6/stack.sh up                                # the stack, one worker
-scripts/bench/m6/sink.sh start
+scripts/bench/m6/sink.sh build && scripts/bench/m6/sink.sh start
 scripts/bench/m6/setup.sh
 SEED_PEOPLE=20000 scripts/bench/m6/seed.sh
 PEOPLE=5000 scripts/bench/m6/run.sh smoke-1w                # one light run first
