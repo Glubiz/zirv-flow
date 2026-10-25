@@ -171,7 +171,10 @@ and shows where it is used. Under `/api/v1/workspaces/{ws}`, all for workspace a
 A schema is a list of fields; each has a `key`, a `label`, a `type` (`string`, `integer`, `enum` or
 `url`), `required` and `secret`. The built-in kinds are `api_key` (a key sent as a named header or as
 a bearer token), `basic` (username and password), `smtp` (host, port, TLS mode, username and
-password), `oauth2_client` (client id, client secret and token URL) and `signing_secret`. A
+password), `oauth2_client` (client id, client secret and an optional token URL: a manifest carries
+the URL it uses and wins over the credential's), `signing_secret` (the current secret and an
+optional `previous_signing_secret` for a rollover), `bearer_token` (a secret `token`) and
+`tls_client` (a client certificate and its secret private key, for mutual TLS). A
 credential of kind `custom` carries its own schema in the create request, which is how an
 implementation described by a manifest gets the same form (see The HTTP manifest source). Create
 with `{"kind", "name", "fields", "secret"}`: the non-secret values go in `fields`, every secret value
@@ -1740,8 +1743,8 @@ connected earlier, because a refresh token belongs to one client and scope set.
 
 **Credential schema.** `auth.credential` is optional and declares the shape of the credential the API
 needs, so a manifest source gets the same form, storage and rotation as a built-in one. It holds
-either `{"kind": "<built-in kind>"}` (`api_key`, `basic`, `smtp`, `oauth2_client` or
-`signing_secret`) or `{"fields": [{"key", "label", "type", "required", "secret", "options"}]}` with
+either `{"kind": "<built-in kind>"}` (`api_key`, `basic`, `smtp`, `oauth2_client`,
+`signing_secret`, `bearer_token` or `tls_client`) or `{"fields": [{"key", "label", "type", "required", "secret", "options"}]}` with
 the field rules of Workspace credentials (1 to 32 fields, unique lowercase keys, `options` only on an
 `enum`, and only a `string` can be `secret`), never both. The schema must contain every credential
 field the auth type reads (above; `client_secret` of the authorization-code grant is optional), or

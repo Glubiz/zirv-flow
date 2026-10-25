@@ -2402,7 +2402,8 @@ credentials must be re-entered (documented).
 **Workspace credentials (M6, ruling 20303fa3).** A source or destination does not seal a
 credential of its own: it references a named workspace credential by `credential_id`. A
 credential has a `kind` (the schema id: a fixed built-in `CredentialKind` of `api_key`, `basic`,
-`smtp`, `oauth2_client` or `signing_secret`, data in `core` and not a registry, or `custom` with a
+`smtp`, `oauth2_client`, `signing_secret`, `bearer_token` or `tls_client`, data in `core` and not a
+registry, or `custom` with a
 schema carried in the row, which is how a manifest `auth.credential` schema is stored), its non-secret
 `fields` as JSON, and one `secret_id` that holds every secret field as a single sealed JSON object
 (purpose `workspace_credential`, same associated data rule as every secret). It also keeps a hint per
@@ -2421,7 +2422,11 @@ old `credential_secret_id` and `credential_fields` columns of `sources` and `des
 dropped after the backfill; the secret id and the field names are derived from the credential. OAuth
 access and refresh tokens stay per source (`oauth_token`), because they are runtime state. Archiving
 is refused while a live source or destination references the credential, and an archived credential
-cannot be referenced.
+cannot be referenced. As built (issue 261): `bearer_token` (secret `token`) and `tls_client`
+(`tls_client_cert`, secret `tls_client_key`) are built-in kinds so the file, HTTP and Kafka sources
+can share them, `signing_secret` gains an optional secret `previous_signing_secret` for the webhook
+destination's rollover, and `oauth2_client.token_url` is optional because the manifest's token URL is
+the only one the runtime uses (it wins over the credential's, which is unused).
 
 As built (M2): the master key arrives in M2 as `secrets.master_key_file` or `secrets.master_key`, with per-purpose HMAC keys derived by HKDF-SHA256 (identifier and redaction hashes); M3 reuses it for the envelope encryption above.
 
