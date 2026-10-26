@@ -279,8 +279,8 @@ pub struct QuotaUsage {
 pub struct TestSendQuota {
     pub member: QuotaUsage,
     pub workspace: QuotaUsage,
-    /// When the oldest counted send leaves the window: the caller's own, or the workspace's for a
-    /// caller with no member (an API key). None when nothing is counted.
+    /// When the limit that blocks the caller frees a slot (the later one when both do), as the
+    /// reservation's refusal computes it. None when the caller can send now.
     pub resets_at: Option<OffsetDateTime>,
 }
 
@@ -292,11 +292,6 @@ pub async fn test_send_quota(
     now: OffsetDateTime,
 ) -> Result<TestSendQuota, StoreError> {
     let (in_workspace, by_member) = counted_in_window(connection, workspace, member, now).await?;
-    let oldest = if member.is_some() {
-        by_member.first()
-    } else {
-        in_workspace.first()
-    };
     Ok(TestSendQuota {
         member: QuotaUsage {
             used: by_member.len(),
@@ -306,18 +301,27 @@ pub async fn test_send_quota(
             used: in_workspace.len(),
             limit: WORKSPACE_HOURLY_LIMIT,
         },
-        resets_at: oldest.map(|at| *at + WINDOW),
+        resets_at: [
+            frees_at(&by_member, MEMBER_HOURLY_LIMIT),
+            frees_at(&in_workspace, WORKSPACE_HOURLY_LIMIT),
+        ]
+        .into_iter()
+        .flatten()
+        .max(),
     })
+}
+
+/// When a slot frees, when `counted` (oldest first, all inside the window) fills `limit`: the
+/// `counted.len() - limit + 1`-th oldest row leaves the window an hour after it was made.
+fn frees_at(counted: &[OffsetDateTime], limit: usize) -> Option<OffsetDateTime> {
+    (counted.len() >= limit).then(|| counted[counted.len() - limit] + WINDOW)
 }
 
 /// Seconds until a slot frees, when `counted` (oldest first, all inside the window) fills `limit`:
 /// the slot of the `counted.len() - limit + 1`-th oldest row, which leaves the window an hour
 /// after it was made. At least one second.
 fn wait_for(counted: &[OffsetDateTime], limit: usize, now: OffsetDateTime) -> Option<u64> {
-    if counted.len() < limit {
-        return None;
-    }
-    let frees = counted[counted.len() - limit] + WINDOW;
+    let frees = frees_at(counted, limit)?;
     let seconds = (frees - now).as_seconds_f64().ceil();
     Some(if seconds < 1.0 { 1 } else { seconds as u64 })
 }
@@ -987,12 +991,12 @@ mod tests {
                 limit: WORKSPACE_HOURLY_LIMIT
             }
         );
-        assert_eq!(quota.resets_at, Some(oldest + WINDOW));
+        assert_eq!(quota.resets_at, None, "the caller can send now");
         let keyless = test_send_quota(&mut connection, ws, None, now)
             .await
             .unwrap();
         assert_eq!(keyless.member.used, 0);
-        assert_eq!(keyless.resets_at, Some(oldest + WINDOW));
+        assert_eq!(keyless.resets_at, None);
         let idle = test_send_quota(&mut connection, ws, Some(mine), now + Duration::hours(3))
             .await
             .unwrap();
@@ -1141,5 +1145,59 @@ mod tests {
             [None, Some(5), Some(6)],
             "a version test keeps no revision"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reset_time_is_that_of_the_limit_that_blocks(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let me = user(&pool, "m@example.test").await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = datetime!(2031-05-06 07:00 UTC);
+        let now = start + Duration::minutes(30);
+        let mut connection = pool.acquire().await.unwrap();
+
+        // Others fill the workspace; the caller has none of their own.
+        for minute in 0..WORKSPACE_HOURLY_LIMIT {
+            let other = user(&pool, &format!("{}@example.test", Uuid::now_v7())).await;
+            let at = start + Duration::seconds(minute as i64);
+            reserve(&pool, &new(ws, Some(other), at, &trace)).await;
+        }
+        let workspace_full = test_send_quota(&mut connection, ws, Some(me), now)
+            .await
+            .unwrap();
+        assert_eq!(workspace_full.member.used, 0);
+        assert_eq!(workspace_full.resets_at, Some(start + WINDOW));
+        let refused = reserve(&pool, &new(ws, Some(me), now, &trace)).await;
+        let retry_after = (workspace_full.resets_at.unwrap() - now).whole_seconds() as u64;
+        assert_eq!(refused, TestSendReservation::Limited { retry_after });
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_reset_time_of_a_caller_at_the_member_limit_is_the_member_release(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let me = user(&pool, "m@example.test").await;
+        let other = user(&pool, "o@example.test").await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = datetime!(2031-05-06 07:00 UTC);
+        let now = start + Duration::minutes(30);
+        // Another member's older send is the workspace's oldest, but the workspace is not full.
+        reserve(
+            &pool,
+            &new(ws, Some(other), start - Duration::minutes(10), &trace),
+        )
+        .await;
+        for minute in 0..MEMBER_HOURLY_LIMIT {
+            let at = start + Duration::minutes(minute as i64);
+            reserve(&pool, &new(ws, Some(me), at, &trace)).await;
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let quota = test_send_quota(&mut connection, ws, Some(me), now)
+            .await
+            .unwrap();
+
+        assert_eq!(quota.resets_at, Some(start + WINDOW));
     }
 }

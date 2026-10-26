@@ -1002,7 +1002,7 @@ mod tests {
             })
         );
         assert_eq!(lead.body["member"]["used"], 1);
-        assert_eq!(lead.body["resets_at"], "2031-05-06T08:09:00Z");
+        assert_eq!(lead.body["resets_at"], Value::Null, "the lead can send now");
         assert_eq!(key.status, StatusCode::OK);
         assert_eq!(key.body["member"]["used"], 0, "a key has no member count");
         // The reset time is the moment the refusal's Retry-After points at.
