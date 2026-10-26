@@ -17,11 +17,9 @@ use uuid::Uuid;
 use zirv_flow_core::HmacKey;
 use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::tracking::{TokenKind, sign};
-use zirv_flow_render::{
-    Hooks, RenderContext, RenderFailure, RenderPool, Rendered, TemplateDocument, Tracking,
-};
+use zirv_flow_render::{Hooks, RenderContext, RenderFailure, RenderPool, Rendered, Tracking};
 use zirv_flow_store::{StoreError, Template, VerifiedSender, find_workspace};
-use zirv_flow_templates::{UtmPlan, UtmValues};
+use zirv_flow_templates::{UtmPlan, UtmValues, parse_template_document};
 
 use super::payload::SendJob;
 
@@ -186,7 +184,7 @@ pub(crate) async fn render(
         warn!("email not rendered: the worker has no render pool");
         return Err(RENDER_ERROR);
     };
-    let Ok(document) = serde_json::from_value::<TemplateDocument>(document) else {
+    let Ok(document) = parse_template_document(&document) else {
         warn!("email not rendered: the stored document is not a template document");
         return Err(RENDER_ERROR);
     };
@@ -385,6 +383,7 @@ mod tests {
                 "List-Unsubscribe".to_owned(),
                 "<https://x.invalid/u>".to_owned(),
             )],
+            hidden: Vec::new(),
         };
 
         let payload = email_payload(&sender, &rendered);

@@ -1,0 +1,28 @@
+{
+  "blocks": {
+    "category": "transactional",
+    "footer": "none",
+    "lang": "en",
+    "preheader": "A preview for {{ person.name }}",
+    "sections": [
+      {
+        "columns": [
+          [
+            {
+              "html": "<table role=\"presentation\"><tr><td style=\"padding:8px\">Raw for {{ person.name }} &amp; <b>co</b></td></tr></table>",
+              "id": "r1",
+              "type": "raw_html"
+            }
+          ]
+        ],
+        "id": "s1"
+      }
+    ],
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "subject": "Hi {{ person.name }}",
+    "theme": "none"
+  },
+  "channel": "email",
+  "mode": "blocks",
+  "schema": 2
+}

@@ -10,13 +10,15 @@ use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
-use crate::content::{ContentError, validate_document};
-use crate::context::RenderContext;
+use crate::content::blocks::{SnippetContent, validate_snippet};
+use crate::content::{ContentError, validate_document_with};
+use crate::context::{RenderContext, RenderExtras};
 use crate::document::TemplateDocument;
 use crate::error::RenderError;
 use crate::issue::{FieldCatalog, Issue};
 use crate::links::Hooks;
-use crate::render::{Rendered, RenderedWebhook, render_email, render_webhook};
+use crate::render::{Rendered, RenderedWebhook, render_email_with, render_webhook};
+use crate::theme::{ThemeTokens, validate_theme};
 
 /// One render call.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,6 +27,9 @@ pub enum RenderRequest<'a> {
     Email {
         doc: Cow<'a, TemplateDocument>,
         context: Cow<'a, RenderContext>,
+        /// The resolved inputs of a block email; an old request has none.
+        #[serde(default, skip_serializing_if = "no_extras")]
+        extras: Cow<'a, RenderExtras>,
     },
     Webhook {
         doc: Cow<'a, TemplateDocument>,
@@ -34,7 +39,20 @@ pub enum RenderRequest<'a> {
     Validate {
         doc: Cow<'a, TemplateDocument>,
         catalog: Cow<'a, FieldCatalog>,
+        #[serde(default, skip_serializing_if = "no_extras")]
+        extras: Cow<'a, RenderExtras>,
     },
+    /// The shape and contrast checks of a theme.
+    ValidateTheme { theme: Cow<'a, ThemeTokens> },
+    /// The checks of a snippet.
+    ValidateSnippet {
+        snippet: Cow<'a, SnippetContent>,
+        catalog: Cow<'a, FieldCatalog>,
+    },
+}
+
+fn no_extras(extras: &RenderExtras) -> bool {
+    *extras == RenderExtras::default()
 }
 
 /// The answer to one [`RenderRequest`].
@@ -61,14 +79,31 @@ impl RenderRequest<'_> {
     /// Run the call in this process, as the render host does.
     pub fn run(&self) -> RenderResponse {
         match self {
-            Self::Email { doc, context } => {
-                RenderResponse::from_email(render_email(doc, context, &Hooks::untracked()))
-            }
-            Self::Validate { doc, catalog } => match validate_document(doc, catalog) {
+            Self::Email {
+                doc,
+                context,
+                extras,
+            } => RenderResponse::from_email(render_email_with(
+                doc,
+                context,
+                &Hooks::untracked(),
+                extras,
+            )),
+            Self::Validate {
+                doc,
+                catalog,
+                extras,
+            } => match validate_document_with(doc, catalog, extras) {
                 Ok(issues) => RenderResponse::Issues { issues },
                 Err(ContentError::UnsupportedDocument | ContentError::Unregistered(_)) => {
                     RenderResponse::UnsupportedDocument
                 }
+            },
+            Self::ValidateTheme { theme } => RenderResponse::Issues {
+                issues: validate_theme(theme),
+            },
+            Self::ValidateSnippet { snippet, catalog } => RenderResponse::Issues {
+                issues: validate_snippet(snippet, catalog),
             },
             Self::Webhook { doc, context } => {
                 RenderResponse::from_webhook(render_webhook(doc, context))
@@ -161,12 +196,13 @@ mod tests {
         let request = RenderRequest::Email {
             doc: Cow::Borrowed(&doc),
             context: Cow::Borrowed(&context),
+            extras: Cow::default(),
         };
         let json = serde_json::to_vec(&request).unwrap();
         let back: RenderRequest<'static> = serde_json::from_slice(&json).unwrap();
         assert_eq!(back, request);
 
-        let direct = render_email(&doc, &context, &Hooks::untracked());
+        let direct = crate::render_email(&doc, &context, &Hooks::untracked());
         let response = back.run();
         let wire = serde_json::to_vec(&response).unwrap();
         let response: RenderResponse = serde_json::from_slice(&wire).unwrap();
@@ -180,6 +216,7 @@ mod tests {
         let request = RenderRequest::Validate {
             doc: Cow::Borrowed(&doc),
             catalog: Cow::Borrowed(&catalog),
+            extras: Cow::default(),
         };
         let json = serde_json::to_vec(&request).unwrap();
         let back: RenderRequest<'static> = serde_json::from_slice(&json).unwrap();
@@ -204,6 +241,7 @@ mod tests {
         let request = RenderRequest::Validate {
             doc: Cow::Borrowed(&blocks),
             catalog: Cow::Borrowed(&catalog),
+            extras: Cow::default(),
         };
 
         let wire = serde_json::to_vec(&request.run()).unwrap();
@@ -221,6 +259,7 @@ mod tests {
         let request = RenderRequest::Email {
             doc: Cow::Owned(doc),
             context: Cow::Owned(RenderContext::default()),
+            extras: Cow::default(),
         };
         let response = request.run();
         assert!(matches!(response, RenderResponse::Error { .. }));

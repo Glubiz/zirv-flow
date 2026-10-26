@@ -51,13 +51,14 @@ use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::flow::Envelope;
 use zirv_flow_core::{Keyring, SecretPurpose, SecretString, TraceId, WorkspaceId};
-use zirv_flow_render::{RenderContext, TemplateDocument};
+use zirv_flow_render::RenderContext;
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{
     SigningKey, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
     find_template, find_template_version, list_identities, live_signing_keys, lock_webhook_person,
     read_template_field_catalog, read_webhook_subject, record_webhook_outcome, secrets,
 };
+use zirv_flow_templates::parse_template_document;
 
 use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError, JobKind};
@@ -295,7 +296,7 @@ async fn render(
     else {
         return Ok(unavailable());
     };
-    let Ok(doc) = serde_json::from_value::<TemplateDocument>(version.document) else {
+    let Ok(doc) = parse_template_document(&version.document) else {
         return Ok(unavailable());
     };
 
