@@ -27,11 +27,10 @@ import {
 export const DEBOUNCE_MS = 400;
 
 type SaveState = "saved" | "pending" | "saving" | "error";
-type Tab = "editor" | "versions" | "used";
+type Tab = "editor" | "used";
 
 const TABS: readonly { id: Tab; label: string }[] = [
   { id: "editor", label: "Editor" },
-  { id: "versions", label: "Versions" },
   { id: "used", label: "Where used" },
 ];
 
@@ -219,7 +218,17 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           <Pill tone={status.tone}>{status.label}</Pill>
           <span className="faint">{modeLabel(doc)}</span>
         </span>
-        <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={(next) => (next === "versions" ? void openPage("history") : setTab(next))} />
+        <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={setTab} />
+        <Link
+          className="fl-tab"
+          to={`/w/${workspaceId}/templates/${template.id}/history`}
+          onClick={(event) => {
+            event.preventDefault();
+            void openPage("history");
+          }}
+        >
+          Versions
+        </Link>
         <div className="fl-status" role="status">
           {!editable ? (
             <span className="muted">{archived ? "This template is archived. You can look at it but not change it." : "You can look at this template but not change it."}</span>

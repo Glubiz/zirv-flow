@@ -49,16 +49,6 @@ describe("publishing", () => {
 });
 
 describe("versions and where used", () => {
-  it("opens the Versions and use page from the Versions tab", async () => {
-    mockApi(templateRoutes());
-    const user = userEvent.setup();
-    const { router } = mount();
-
-    await user.click(await screen.findByRole("tab", { name: "Versions" }));
-
-    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}/history`), WAIT);
-  });
-
   it("shows where the template is used, active or not", async () => {
     mockApi(templateRoutes({ uses: [useBody(), useBody({ flow_id: "f2", flow_name: "Paused flow", active: false, flow_state: "paused" })] }));
     const user = userEvent.setup();

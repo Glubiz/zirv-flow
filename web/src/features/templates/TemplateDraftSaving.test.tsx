@@ -126,6 +126,20 @@ describe("the other template fixes", () => {
     expect(drafts(calls).map(htmlOf).join()).toContain("fresh");
   });
 
+  it("saves the draft, then opens the history from the Versions link", async () => {
+    const calls = mockApi(templateRoutes());
+    const user = userEvent.setup();
+    const view = mount();
+
+    await user.click(await screen.findByRole("textbox", { name: /source/ }));
+    await user.paste("<b>fresh</b>");
+    expect(screen.queryByRole("tab", { name: "Versions" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("link", { name: "Versions" }));
+
+    await waitFor(() => expect(view.router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}/history`), WAIT);
+    expect(drafts(calls).map(htmlOf).join()).toContain("fresh");
+  });
+
   it("moves between the view tabs with the arrow keys", async () => {
     mockApi(templateRoutes());
     const user = userEvent.setup();
@@ -133,12 +147,12 @@ describe("the other template fixes", () => {
 
     const editor = await screen.findByRole("tab", { name: "Editor" });
     editor.focus();
-    await user.keyboard("{ArrowLeft}");
+    await user.keyboard("{ArrowRight}");
 
     const used = screen.getByRole("tab", { name: "Where used" });
     expect(used).toHaveAttribute("aria-selected", "true");
     expect(used).toHaveFocus();
-    await user.keyboard("{ArrowRight}");
+    await user.keyboard("{ArrowLeft}");
     expect(screen.getByRole("tab", { name: "Editor" })).toHaveFocus();
   });
 });
