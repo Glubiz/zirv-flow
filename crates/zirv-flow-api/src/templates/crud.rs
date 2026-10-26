@@ -20,9 +20,10 @@ use zirv_flow_templates::{
     content_type_of, migrate_to_current,
 };
 
+use super::publish::{publish_inputs, publish_issues};
 use super::{
-    category_name, channel_name, check_matches, field_catalog, issue_problems, name_taken,
-    parse_document, skeleton, stored_document, template_error,
+    category_name, channel_name, check_matches, issue_problems, name_taken, parse_document,
+    skeleton, stored_document, template_error,
 };
 use crate::AppState;
 use crate::admin::{self, Context};
@@ -522,15 +523,7 @@ pub(crate) async fn convert_draft_to_mjml(
     Ok((template, draft))
 }
 
-async fn catalog_of(
-    state: &AppState,
-    workspace: WorkspaceId,
-) -> Result<zirv_flow_store::TemplateFieldCatalog, zirv_flow_store::StoreError> {
-    let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    zirv_flow_store::read_template_field_catalog(&mut tx, workspace).await
-}
-
-/// Validates the saved draft once, as the preview does, and stores the issue counts on it. This runs
+/// Validates the saved draft once, exactly as a publish does (the same catalog, render inputs and checks), and stores the issue counts on it. This runs
 /// after the save committed and never fails it: a document the renderer cannot read, a render pool
 /// that is down or a validation that fails leaves the checks empty and logs a warning with ids only.
 pub(crate) async fn record_checks(state: &AppState, workspace: WorkspaceId, draft: &TemplateDraft) {
@@ -542,18 +535,21 @@ pub(crate) async fn record_checks(state: &AppState, workspace: WorkspaceId, draf
         tracing::warn!(template = %draft.template_id, "draft checks skipped: unreadable document");
         return;
     };
-    let read = match catalog_of(state, workspace).await {
-        Ok(read) => read,
-        Err(error) => {
-            tracing::warn!(template = %draft.template_id, "draft checks skipped: {error}");
-            return;
-        }
-    };
-    let catalog = field_catalog(read);
-    let issues = match tokio::time::timeout(CHECKS_TIMEOUT, pool.validate(&doc, &catalog)).await {
+    let found = tokio::time::timeout(CHECKS_TIMEOUT, async {
+        let mut connection = state
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal())?;
+        let (catalog, inputs) = publish_inputs(state, &mut connection, workspace, &doc).await?;
+        drop(connection);
+        publish_issues(pool, &doc, &catalog, &inputs).await
+    })
+    .await;
+    let issues = match found {
         Ok(Ok(issues)) => issues,
-        Ok(Err(failure)) => {
-            tracing::warn!(template = %draft.template_id, "draft checks skipped: {failure}");
+        Ok(Err(error)) => {
+            tracing::warn!(template = %draft.template_id, "draft checks skipped: {}", error.detail());
             return;
         }
         Err(_) => {

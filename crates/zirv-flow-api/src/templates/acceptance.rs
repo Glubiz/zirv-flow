@@ -3066,4 +3066,70 @@ mod tests {
 
         assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_stored_checks_resolve_snippets_and_the_theme_footer_as_a_publish_does(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let linked = f
+            .snippet(
+                "Legal",
+                json!([{"type": "text", "id": "t", "content": LINK}]),
+            )
+            .await;
+        let theme = f
+            .theme(
+                "Brand",
+                json!({"primary": "#112233", "footer_snippet": linked}),
+            )
+            .await;
+        let mut doc = blocks_doc("Hi", "<p>bye</p>");
+        doc["blocks"]["sections"][1]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "snippet", "id": "legal2", "snippet_id": linked}));
+        doc["blocks"]["theme"] = json!({"id": theme});
+        let id = f.create("Resolved", blocks_doc("Hi", LINK)).await;
+
+        let saved = f.put_draft(&id, doc).await;
+        let stored = stored_checks(&pool, &id).await.unwrap();
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        let warnings: i64 = f
+            .count("SELECT jsonb_array_length(validation)::bigint FROM template_versions")
+            .await;
+        assert_eq!(stored["blocking"], 0, "{stored}");
+        assert_eq!(stored["warnings"], warnings);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_broken_snippet_reference_stores_a_blocking_count_and_publish_refuses_it(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let mut doc = blocks_doc("Hi", LINK);
+        doc["blocks"]["sections"][1]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "snippet", "id": "gone", "snippet_id": Uuid::now_v7()}));
+        let id = f.create("Broken", blocks_doc("Hi", LINK)).await;
+
+        let saved = f.put_draft(&id, doc).await;
+        let stored = stored_checks(&pool, &id).await.unwrap();
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert!(stored["blocking"].as_i64().unwrap() >= 1, "{stored}");
+        assert_eq!(published.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
 }
