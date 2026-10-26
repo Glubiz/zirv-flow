@@ -1418,6 +1418,7 @@ mod tests {
             stream_name: Some("contacts"),
             segment_id: None,
             flow_id: None,
+            template_id: None,
             status: DraftStatus::Valid,
             content: Some(&content),
             base_digest: None,

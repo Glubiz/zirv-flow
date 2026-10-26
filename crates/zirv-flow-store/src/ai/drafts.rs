@@ -1,4 +1,4 @@
-//! Assistant drafts (architecture 13.2): a mapping or manifest the model drafted and the validator
+//! Assistant drafts (architecture 13.2): a mapping, manifest, segment, flow or template the model drafted and the validator
 //! approved, kept until its author accepts it into an editor or it expires. A draft that never
 //! validated is stored without content, so raw model output is never kept. A draft belongs to the
 //! user who ran the assistant, and every read and write is scoped to that user and workspace.
@@ -24,6 +24,8 @@ pub enum DraftKind {
     Segment,
     /// A flow graph with its settings. It names the flow whose draft it would replace.
     Flow,
+    /// A template document. It names the template whose draft it would replace.
+    Template,
 }
 
 impl DraftKind {
@@ -33,6 +35,7 @@ impl DraftKind {
             Self::Manifest => "manifest",
             Self::Segment => "segment",
             Self::Flow => "flow",
+            Self::Template => "template",
         }
     }
 
@@ -42,6 +45,7 @@ impl DraftKind {
             "manifest" => Some(Self::Manifest),
             "segment" => Some(Self::Segment),
             "flow" => Some(Self::Flow),
+            "template" => Some(Self::Template),
             _ => None,
         }
     }
@@ -90,6 +94,8 @@ pub struct NewAiDraft<'a> {
     pub segment_id: Option<Uuid>,
     /// The flow a flow draft would change; none for the other kinds.
     pub flow_id: Option<Uuid>,
+    /// The template a template draft would change; none for the other kinds.
+    pub template_id: Option<Uuid>,
     pub status: DraftStatus,
     pub content: Option<&'a Value>,
     /// SHA-256 of the saved artifact the draft was compared with.
@@ -107,6 +113,7 @@ pub struct AiDraft {
     pub stream_name: Option<String>,
     pub segment_id: Option<Uuid>,
     pub flow_id: Option<Uuid>,
+    pub template_id: Option<Uuid>,
     pub status: DraftStatus,
     pub content: Option<Value>,
     pub base_digest: Option<[u8; 32]>,
@@ -125,6 +132,7 @@ struct Row {
     stream_name: Option<String>,
     segment_id: Option<Uuid>,
     flow_id: Option<Uuid>,
+    template_id: Option<Uuid>,
     status: String,
     content: Option<Value>,
     base_digest: Option<Vec<u8>>,
@@ -147,6 +155,7 @@ impl TryFrom<Row> for AiDraft {
             stream_name: row.stream_name,
             segment_id: row.segment_id,
             flow_id: row.flow_id,
+            template_id: row.template_id,
             status: DraftStatus::parse(&row.status).ok_or_else(corrupt)?,
             content: row.content,
             base_digest: row
@@ -161,7 +170,7 @@ impl TryFrom<Row> for AiDraft {
 }
 
 const COLUMNS: &str = "id, workspace_id, user_id, kind, source_id, stream_name, \
-    segment_id, flow_id, status, content, base_digest, created_at, accepted_at, expires_at";
+    segment_id, flow_id, template_id, status, content, base_digest, created_at, accepted_at, expires_at";
 
 /// Stores a draft. The table's checks refuse an invalid draft with content, a valid one without,
 /// and a mapping without its source and stream.
@@ -171,8 +180,8 @@ pub async fn insert_ai_draft(
 ) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO ai_drafts (id, workspace_id, user_id, kind, source_id, stream_name, \
-            segment_id, flow_id, status, content, base_digest, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+            segment_id, flow_id, template_id, status, content, base_digest, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(new.id)
     .bind(new.workspace_id.as_uuid())
@@ -182,6 +191,7 @@ pub async fn insert_ai_draft(
     .bind(new.stream_name)
     .bind(new.segment_id)
     .bind(new.flow_id)
+    .bind(new.template_id)
     .bind(new.status.as_str())
     .bind(new.content)
     .bind(new.base_digest.as_ref().map(<[u8; 32]>::as_slice))
@@ -326,6 +336,7 @@ mod tests {
             stream_name: Some("contacts"),
             segment_id: None,
             flow_id: None,
+            template_id: None,
             status: if content.is_some() {
                 DraftStatus::Valid
             } else {
@@ -349,6 +360,7 @@ mod tests {
             DraftKind::Manifest,
             DraftKind::Segment,
             DraftKind::Flow,
+            DraftKind::Template,
         ] {
             assert_eq!(DraftKind::parse(kind.as_str()), Some(kind));
         }
@@ -603,6 +615,7 @@ mod tests {
             stream_name: None,
             segment_id,
             flow_id: None,
+            template_id: None,
             status: DraftStatus::Valid,
             content: Some(content),
             base_digest: Some([3; 32]),
@@ -802,5 +815,112 @@ mod tests {
         ] {
             assert!(insert_ai_draft(&mut connection, &refused).await.is_err());
         }
+    }
+
+    fn template_draft<'a>(
+        ws: WorkspaceId,
+        user: UserId,
+        template_id: Option<Uuid>,
+        content: &'a Value,
+        expires_at: OffsetDateTime,
+    ) -> NewAiDraft<'a> {
+        NewAiDraft {
+            kind: DraftKind::Template,
+            template_id,
+            source_id: None,
+            stream_name: None,
+            segment_id: None,
+            ..segment_draft(ws, user, None, content, expires_at)
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_draft_names_one_template_of_its_own_workspace_and_nothing_else(
+        pool: PgPool,
+    ) {
+        use crate::templates::tests_support::create as create_template;
+
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        let ada = user(&pool, "ada@example.com").await;
+        let mine = create_template(&pool, one, "Welcome").await.id;
+        let foreign = create_template(&pool, two, "Elsewhere").await.id;
+        let source_id = source(&pool, one).await;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let later = now + Duration::days(7);
+        let content = json!({"document": {}});
+        let mut connection = pool.acquire().await.unwrap();
+
+        let good = template_draft(one, ada, Some(mine), &content, later);
+        insert_ai_draft(&mut connection, &good).await.unwrap();
+        let found = find_ai_draft(&pool, one, ada, good.id, now)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.kind, DraftKind::Template);
+        assert_eq!(found.template_id, Some(mine));
+        assert_eq!(
+            (found.source_id, found.segment_id, found.flow_id),
+            (None, None, None)
+        );
+
+        // A template draft without a template, of a template of another workspace, or that also
+        // names a source, is refused; so is a template named by another kind of draft.
+        for refused in [
+            template_draft(one, ada, None, &content, later),
+            template_draft(one, ada, Some(foreign), &content, later),
+            NewAiDraft {
+                source_id: Some(source_id),
+                ..template_draft(one, ada, Some(mine), &content, later)
+            },
+            NewAiDraft {
+                kind: DraftKind::Flow,
+                ..template_draft(one, ada, Some(mine), &content, later)
+            },
+        ] {
+            assert!(insert_ai_draft(&mut connection, &refused).await.is_err());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_draft_row_holds_no_person_and_the_erasure_scan_finds_none(pool: PgPool) {
+        use crate::templates::tests_support::create as create_template;
+
+        let one = workspace(&pool, "one").await;
+        let ada = user(&pool, "ada@example.com").await;
+        let template = create_template(&pool, one, "Welcome").await.id;
+        let now = datetime!(2026-05-15 12:00 UTC);
+        let content = json!({"document": {"email": {"subject": "Hello"}}});
+        let draft = template_draft(one, ada, Some(template), &content, now + Duration::days(7));
+        insert(&pool, &draft).await;
+
+        // No column of the table is a person, and no id the scan looks for appears in the row.
+        let columns: Vec<String> = sqlx::query_scalar(
+            "SELECT column_name::text FROM information_schema.columns              WHERE table_schema = current_schema() AND table_name = 'ai_drafts'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            columns.iter().all(|name| !name.contains("person")),
+            "{columns:?}"
+        );
+        for id in [template, draft.id, ada.as_uuid(), one.as_uuid()] {
+            let scanned = crate::people::erasure::rows_referencing_person(&pool, id).await;
+            assert!(
+                scanned
+                    .iter()
+                    .all(|(place, _)| !place.starts_with("ai_drafts.")),
+                "{scanned:?}"
+            );
+        }
+        let stored: String =
+            sqlx::query_scalar("SELECT row_to_json(d)::text FROM ai_drafts d WHERE id = $1")
+                .bind(draft.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!stored.contains("person"), "{stored}");
     }
 }
