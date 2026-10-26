@@ -1,6 +1,6 @@
 [package]
 name = "zirv-flow-loadgen"
-description = "Deterministic ingestion load generator for the zirv-flow benchmarks. Not shipped."
+description = "Deterministic ingestion load generator and send-throughput bench tooling for the zirv-flow benchmarks. Not shipped."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -12,15 +12,23 @@ publish = false
 name = "loadgen"
 path = "src/main.rs"
 
-# Deliberately no zirv-flow crate: it talks to a running instance over HTTP only.
+# The send-throughput bench (#233): the SMTP sink, the people seeder and the report generator.
+[[bin]]
+name = "sendbench"
+path = "src/sendbench/main.rs"
+
+# Deliberately no zirv-flow crate: it talks to a running instance over HTTP (and SMTP) only.
 [dependencies]
 clap.workspace = true
 hashbrown.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

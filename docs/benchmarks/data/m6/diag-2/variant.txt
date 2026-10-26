@@ -1,0 +1,10 @@
+label=diag-2 people=40000 workers=4 worker_concurrency=4
+template=blocks dest_rate=1000 limits=off dkim=on
+events_in_workspace_at_start=25000 reset_events=1
+image=0.116.0 render_pool=2 tier=M sink_delay_ms=0
+started=2026-10-25T23:25:47Z
+clock_offset_before_us=580847 bracket_before_us=1274297
+clock_offset_after_us=555871 bracket_after_us=1255187
+finished=2026-10-25T23:30:20Z
+queue_in_window={"max_depth":1501.0,"max_oldest_s":9.0,"missed_scrapes":0,"samples":143} cpu_in_window={"database":{"max_pct":1199.78,"mean_pct":1005.0882142857143,"samples":28},"sink":{"max_pct":31.97,"mean_pct":18.058928571428574,"samples":28},"worker1":{"max_pct":53.61,"mean_pct":48.207857142857144,"samples":28},"worker2":{"max_pct":54.42,"mean_pct":47.88499999999999,"samples":28},"worker3":{"max_pct":53.83,"mean_pct":49.04357142857143,"samples":28},"worker4":{"max_pct":54.57,"mean_pct":48.09071428571429,"samples":28}}
+cargo_samples_in_window=0

@@ -1,0 +1,59 @@
+Append (actual rows=1 loops=1)
+  Buffers: shared hit=42296
+  ->  Index Scan using events_y2025m10_workspace_id_occurred_at_idx on events_y2025m10 events_14 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2025m11_workspace_id_occurred_at_idx on events_y2025m11 events_15 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2025m12_workspace_id_occurred_at_idx on events_y2025m12 events_16 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m01_workspace_id_occurred_at_idx on events_y2026m01 events_17 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m02_workspace_id_occurred_at_idx on events_y2026m02 events_18 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m03_workspace_id_occurred_at_idx on events_y2026m03 events_19 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m04_workspace_id_occurred_at_idx on events_y2026m04 events_20 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m05_workspace_id_occurred_at_idx on events_y2026m05 events_21 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m06_workspace_id_occurred_at_idx on events_y2026m06 events_22 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m07_workspace_id_occurred_at_idx on events_y2026m07 events_23 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m08_workspace_id_occurred_at_idx on events_y2026m08 events_24 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m09_workspace_id_occurred_at_idx on events_y2026m09 events_25 (actual rows=0 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Buffers: shared hit=3
+  ->  Index Scan using events_y2026m10_workspace_id_occurred_at_idx on events_y2026m10 events_26 (actual rows=1 loops=1)
+        Index Cond: (workspace_id = '<ws>'::uuid)
+        Filter: (id = ANY ('{01a17566-4244-750d-be17-9d31d9b326f7}'::uuid[]))
+        Rows Removed by Filter: 39999
+        Buffers: shared hit=42260
+Planning:
+  Buffers: shared hit=267
+Planning Time: 0.818 ms
+Execution Time: 36.026 ms

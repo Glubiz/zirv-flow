@@ -6,11 +6,12 @@ tools here only measure; the results, the environment and the pass or miss calls
 
 | Tool | What it is |
 |------|------------|
-| `tools/loadgen` | `loadgen`, a paced, seeded load generator that writes a JSON report |
+| `tools/loadgen` | `loadgen`, a paced, seeded load generator that writes a JSON report; `sendbench`, the SMTP sink, people seeder and send report |
 | `scripts/bench/applied-latency.sql` | inbox-to-applied p50, p95 and p99 for track and identify, from the database |
 | `scripts/bench/compose.bench.yaml` | compose override: separate serve, worker and scheduler, PostgreSQL published on 55432 |
 | `bench-no-decisions` | cargo feature of `zirv-flow-store`: decision appends become no-ops (benchmark builds only) |
 | `scripts/bench/oq1/` | the OQ-1 trait storage benchmark (SQL and `run.sh`) |
+| `sendbench` (in `tools/loadgen`), `scripts/bench/m6/` | the send-throughput benchmark (section 11) |
 
 Not reference hardware: record the CPU, RAM, disk, OS, Docker resources and `SHOW ALL` of the
 PostgreSQL that served the run with every result, and say the targets are re-checked on reference
@@ -283,3 +284,104 @@ scripts/bench/m5/stack.sh stop                              # keep the volumes
 `measure.sh start RUN LABEL load` adds `tools/loadgen` at 2,000 track events/s for the window.
 `seed.sh` fixes the window start (`M5_T0_LEAD_MIN` minutes ahead) when it stages; the load and the
 checks must finish before it. Results go to `M4_OUT/run<RUN>-<LABEL>/`.
+
+## 11. Send throughput (M6, issue #233)
+
+`scripts/bench/m6/` measures `action.send` through the SMTP destination against the architecture 19
+target (300 messages/s per deployment, provider limits permitting), on the published image, in the
+compose project `zirv-flow-m4bench10m` with the M6 environment layer `m6/compose.m6.yaml`. The
+tooling is `sendbench` in `tools/loadgen` (a sink, a people seeder and the report generator) and the
+scripts; nothing under `crates/` is involved.
+
+**Scenario.** `setup.sh` creates, through the API, a workspace, a sending domain and sender
+identity, an `smtp` credential and destination on the sink (STARTTLS), a published block template
+and a published HTML template, and an ingest key. **One step is SQL:** the domain verification,
+because the API path needs the DNS records of a real domain; the statements are the ones the verify
+job runs (`store/sending/verify.rs`), so the rows have the product's shape (records `ok` with the
+expected text observed, domain `verified` with `verified_at`). `seed.sh` identifies the people with
+an email address through the ingest batch endpoint (`sendbench people`) and subscribes them with
+the consent import: no SQL writes. `run.sh` then creates a list and a manual-trigger flow
+(`action.send` then exit) for the chosen template, adds the people to the list, starts the flow for
+the list (the product path of the M5 bench) and waits for the sink.
+
+**The sink stands in for provider limits.** It runs as a container (`zirv-m6-sink`, CPUs 4 to 7) on the
+project's network, so the workers reach it as `zirv-m6-sink:2525` inside the egress allowlist of
+`compose.m6.yaml` (the Docker private ranges; override with `BENCH_EGRESS_ALLOW`). A sink on the host reached
+through `host.docker.internal` was tried and rejected: Docker Desktop's host path stalled new connections
+for 10 s or more at 2 parallel connections. The container runs a Linux build of `sendbench` (`sink.sh
+build` compiles it in the `rust:1-bookworm` image, which docker pulls if it is not local, `cargo build
+--locked` downloads the crates, and the build cache is the docker volume `m6-sendbench-target`; remove it
+afterwards with `docker volume rm m6-sendbench-target`). The sink container carries the label
+`zirv.bench=m6-sink` and `sink.sh` removes only a container with it. The released image refuses
+plaintext SMTP, so the sink offers STARTTLS with a generated authority; `sink.sh` writes its PEM to
+`$M6_OUT/sink/ca.pem` and `setup.sh`/`run.sh` put it in the destination's `ca_certificate` (restarting the
+sink makes a new authority: run `setup.sh` again or let `run.sh` patch it). The sink accepts any login and
+logs `{"t_us", "rcpt"}` per accepted message inside the container; `M6_SINK_DELAY_MS` adds a reply delay.
+The public URL of the stack must be `https` (`BENCH_PUBLIC_URL`, default `https://flow.bench.example.com`):
+the renderer refuses click tracking on a plain `http` base and every block email fails as `render_error`.
+Run `ANALYZE` on a restored database first, and set `RESET_EVENTS=1` on `run.sh` to delete the bench
+workspace's events before a run (a lookup in the send path costs time proportional to them; see
+`docs/benchmarks/m6-send.md`).
+
+```sh
+docker pull ghcr.io/glubiz/zirv-flow:<tag>                  # BENCH_IMAGE_TAG; pull_policy is never
+cargo build --release -p zirv-flow-loadgen                  # loadgen and sendbench
+export BENCH_IMAGE_TAG=<tag>
+scripts/bench/m6/stack.sh up                                # the stack, one worker
+scripts/bench/m6/sink.sh build && scripts/bench/m6/sink.sh start
+scripts/bench/m6/setup.sh
+SEED_PEOPLE=20000 scripts/bench/m6/seed.sh
+PEOPLE=5000 scripts/bench/m6/run.sh smoke-1w                # one light run first
+WORKERS=3 TEMPLATE=html DEST_RATE=300 LIMITS=on PEOPLE=20000 scripts/bench/m6/run.sh html-3w-300-limits
+M6_CONFIRM_CLEAN=1 scripts/bench/m6/clean.sh                # delete the bench workspace, stop the sink
+scripts/bench/m6/stack.sh stop                              # keep the volumes
+```
+
+**Variants** are environment switches of `run.sh`; each run recreates the workers so their metrics
+cover that run only:
+
+| Variant | Switch | Notes |
+|---------|--------|-------|
+| one worker process or several | `WORKERS=1..10`, `WORKER_CONCURRENCY` (default 4) | all processes share the tier's cpuset, so this compares process layout, not added CPU |
+| DKIM | `DKIM=on` only | the SMTP destination refuses a message with no signer, so DKIM cannot be switched off; `DKIM=off` exits 3. The signing cost is in every result |
+| cap and quiet hours | `LIMITS=on` | a cap of 1,000,000 per day and quiet hours on a weekday three days off: the gates run, no message is blocked |
+| destination rate | `DEST_RATE=1000` (above the target) or `DEST_RATE=300` | at 300 the report allows 3% under the target, because the bucket is the limit |
+| block or HTML template | `TEMPLATE=blocks` or `html` | `BENCH_RENDER_POOL` sets `render.pool_size` (default 2) in the workers |
+
+**Measures.** `sendbench report` joins the sink log with the enrollment times (`enrollments.created_at`
+by address) and prints, one line each, `Target`, `Result` and `Verdict`, then detail lines.
+- Only real, unique deliveries count: the rate and "complete" use distinct addresses that appear in
+  this run's `enrollments.csv`. Duplicates and arrivals with no enrollment (a previous run's
+  stragglers) are counted apart and make `met` and "complete" false. `run.sh` refuses to start while
+  a `delivery.send` job is `ready` or `running`, so a run never drains the previous one.
+- Rate: messages per second at the sink over the steady window, from the arrival at rank 10% to the
+  arrival at rank 90% (`--trim`), plus the overall rate and the busiest second.
+- Delay: enrollment to the sink, nearest-rank p50, p95, p99 and max, printed `n/a` when there is
+  nothing to measure. The database and host clocks are compared right before and right after the
+  run (host time before, `clock_timestamp()`, host time after; the midpoint). The offset moves the
+  enrollment instants onto the host clock, both offsets and the bracket width (the delay's
+  uncertainty) are printed, negative delays are counted, and a delay below minus the uncertainty
+  makes the run invalid. A run with 0 matched deliveries is invalid too, and `sendbench report`
+  exits non-zero for an invalid run.
+- Bucket-limited runs (`DEST_RATE` at most 300): `met` also needs the window rate at most
+  `rate x (1 + tolerance 3%) + burst / window seconds` and the busiest second at most
+  `rate x 1.03 + burst`; the report names the tolerance and the burst slack and says EXCEEDED
+  otherwise.
+- From each worker's `/metrics` (summed over processes; quantiles are estimated from the buckets):
+  `zirv_flow_job_claim_lag_seconds{kind="delivery.send"}`, the render pool's
+  `zirv_flow_render_wait_seconds`, `zirv_flow_render_duration_seconds` and
+  `zirv_flow_render_restarts_total`, and the destination counters. **There is no dedicated
+  rate-bucket wait metric in the product**; the bucket shows as `delivery.send` job duration and
+  claim lag, the queue gauges and `messages.txt`, and the report says so rather than inventing a
+  number.
+- Queue gauges: `zirv_flow_destination_queue_depth` and `_oldest_seconds` are published by the
+  scheduler leader, not the workers, so `run.sh` samples the scheduler (`:9101`) every second into
+  `queue.csv`; the report gives the max depth and max oldest age inside the steady window (a queue
+  standing there means the destination or the workers were the limit; `variant.txt` records it).
+- Database CPU: `docker stats` of the PostgreSQL container every few seconds (about 6 s), cut to the steady window by
+  the report (mean and max percent of one core, with the sample count).
+- `messages.txt` holds the outcome counts of the flow's messages and any dead jobs.
+
+Results are in `$M6_OUT/<label>/`. Run the light variants first (a few thousand people), then the
+full set, and report them in `docs/benchmarks/m6-send.md` with the hardware and PostgreSQL settings
+(`$M4_OUT/stack.txt` from `stack.sh up`).

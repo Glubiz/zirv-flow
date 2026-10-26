@@ -1,0 +1,109 @@
+{
+  "arrivals": 25000,
+  "bucket_check": null,
+  "clock_violations": 0,
+  "cpu": {
+    "database": {
+      "max_pct": 320.06,
+      "mean_pct": 292.22666666666674,
+      "samples": 42
+    },
+    "sink": {
+      "max_pct": 11.93,
+      "mean_pct": 5.3259523809523825,
+      "samples": 42
+    },
+    "worker1": {
+      "max_pct": 107.98,
+      "mean_pct": 52.83428571428571,
+      "samples": 42
+    }
+  },
+  "delay": {
+    "count": 25000,
+    "max_s": 35.517265,
+    "p50_s": 19.452315,
+    "p95_s": 26.825088,
+    "p99_s": 32.709999
+  },
+  "duplicates": 0,
+  "inputs": {
+    "bucket": null,
+    "clocks": {
+      "offset_after_us": 546352,
+      "offset_before_us": 576718,
+      "uncertainty_us": 1268699
+    },
+    "expected": 25000,
+    "label": "set2-f-1w-blocks-repeat",
+    "target_rate": 300.0,
+    "tolerance": 0.0,
+    "trim_percent": 10.0
+  },
+  "metrics": {
+    "attempt_record_failures_total": -0.0,
+    "delivery_send_claim_lag": {
+      "count": 25000.0,
+      "mean_s": 7.222543726160002,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 7.7441301183469395,
+      "p95_s": 14.863932662489717,
+      "p99_s": 26.3768115942029
+    },
+    "delivery_send_duration": {
+      "count": 25000.0,
+      "mean_s": 0.04471438548420002,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0625,
+      "p95_s": 0.09625,
+      "p99_s": 0.09925
+    },
+    "destination_attempts_total": 25000.0,
+    "destination_outcomes_total": {
+      "outcome=delivered": 25000.0
+    },
+    "render_duration": {
+      "count": 25000.0,
+      "mean_s": 0.0003993169035199995,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.00495
+    },
+    "render_failures_total": -0.0,
+    "render_restarts_total": -0.0,
+    "render_wait": {
+      "count": 25000.0,
+      "mean_s": 8.079089960000004e-6,
+      "note": "quantiles are estimated from the exposed buckets",
+      "p50_s": 0.0025,
+      "p95_s": 0.00475,
+      "p99_s": 0.00495
+    }
+  },
+  "negative_delays": 0,
+  "overall_rate": 79.8259895604848,
+  "peak_per_second": 96,
+  "queue": {
+    "max_depth": 1470.0,
+    "max_oldest_s": 21.0,
+    "missed_scrapes": 0,
+    "samples": 206
+  },
+  "unique_delivered": 25000,
+  "unmatched_arrivals": 0,
+  "unreadable_arrival_lines": 0,
+  "verdict": {
+    "complete": true,
+    "met": false,
+    "problems": [],
+    "valid": true
+  },
+  "window": {
+    "end_us": 1792970652176171,
+    "messages": 19999,
+    "rate": 79.95268739056529,
+    "seconds": 250.135432,
+    "start_us": 1792970402040739
+  }
+}

@@ -1,0 +1,9 @@
+Target: 300 messages/s per deployment (architecture 19), the sink standing in for provider limits
+Result: 82.2 messages/s over the steady window (19999 unique deliveries in 243.3 s)
+Verdict: missed
+Detail [set2-a-1w-blocks-c]: 25000 unique of 25000 expected (25000 arrivals, 0 duplicates, 0 unmatched); overall 81.7/s; busiest second 100; delay enrollment to sink p50 18.90 s, p95 27.99 s, p99 33.70 s, max 37.49 s (25000 matched)
+Clocks: database minus host +0.496 s before, +0.504 s after the run; delay uncertainty 1.197 s; 0 negative delays, 0 beyond the uncertainty
+Queue (scheduler gauges of the destination, steady window, 202 samples, 0 missed scrapes in the run): max depth 1442, max oldest age 22.0 s: a queue stood in the window, so the destination or the workers were the limit
+CPU database (steady window, 41 samples): mean 298, max 333 percent of one core
+CPU sink (steady window, 41 samples): mean 5, max 10 percent of one core
+CPU worker1 (steady window, 41 samples): mean 50, max 78 percent of one core

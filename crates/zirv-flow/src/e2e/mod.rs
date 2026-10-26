@@ -516,4 +516,113 @@ mod tests {
         );
         world.finish().await;
     }
+
+    /// The smoke run of the send benchmark scenario (#233): the same shape the bench scripts
+    /// seed (a verified domain, one SMTP destination, a published block template and a published
+    /// HTML template, a manual flow with an `action.send` node per template), small N, through
+    /// the in-process sink. People are identified through ingest, subscribed through the
+    /// consent endpoint and enrolled by starting the flow for a list.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_send_bench_scenario_delivers_one_message_per_person_per_template(pool: PgPool) {
+        const PEOPLE: usize = 12;
+        let world = World::start(pool).await;
+        let (sender, _) = world
+            .verified_sender("example.com", "news@example.com")
+            .await;
+        let smtp = world.smtp_destination().await;
+        let blocks = world.template("Bench blocks", blocks_doc(&sender)).await;
+        let html = world.template("Bench html", html_doc(&sender)).await;
+
+        let items: Vec<Value> = (0..PEOPLE)
+            .map(|n| {
+                json!({"type": "identify",
+                       "identifiers": {"email": format!("sb-{n}@bench.example")},
+                       "messageId": format!("sb-{n}")})
+            })
+            .collect();
+        let identify = call(
+            &world.router,
+            "POST",
+            "/api/v1/ingest/batch",
+            Some(json!({ "batch": items })),
+            Some(&world.ingest),
+        )
+        .await;
+        assert_eq!(identify.status, StatusCode::ACCEPTED, "{}", identify.text);
+        world.settle().await;
+        let people: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM people")
+            .fetch_all(&world.pool)
+            .await
+            .expect("people");
+        assert_eq!(people.len(), PEOPLE);
+        for person in &people {
+            world
+                .api_ok(
+                    "PUT",
+                    &format!("/people/{person}/consent"),
+                    Some(json!({"channel": "email", "status": "subscribed"})),
+                    StatusCode::OK,
+                )
+                .await;
+        }
+
+        let mut expected = 0;
+        for (name, template) in [("blocks", &blocks), ("html", &html)] {
+            let list = world
+                .api_ok(
+                    "POST",
+                    "/lists",
+                    Some(json!({"name": format!("bench {name}")})),
+                    StatusCode::CREATED,
+                )
+                .await["id"]
+                .as_str()
+                .expect("a list id")
+                .to_owned();
+            world
+                .api_ok(
+                    "POST",
+                    &format!("/lists/{list}/members"),
+                    Some(json!({"person_ids": people})),
+                    StatusCode::OK,
+                )
+                .await;
+            let flow = world
+                .flow(
+                    &format!("Bench {name}"),
+                    json!({"v": 1, "nodes": [send_node("send", template, &smtp),
+                                             {"id": "end", "type": "exit"}],
+                           "edges": [edge("send", "end")]}),
+                    json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
+                )
+                .await;
+            world
+                .api_ok(
+                    "POST",
+                    &format!("/flows/{flow}/start"),
+                    Some(json!({"list_id": list})),
+                    StatusCode::ACCEPTED,
+                )
+                .await;
+            world.settle().await;
+            expected += PEOPLE;
+            assert_eq!(
+                world.sink.messages().len(),
+                expected,
+                "after the {name} flow"
+            );
+        }
+
+        let mut recipients: Vec<String> = world
+            .sink
+            .messages()
+            .iter()
+            .flat_map(|message| message.recipients.clone())
+            .collect();
+        recipients.sort();
+        recipients.dedup();
+        assert_eq!(recipients.len(), PEOPLE, "each person got mail");
+        world.finish().await;
+    }
 }
