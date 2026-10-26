@@ -31,6 +31,8 @@ export interface ProblemDetails {
   snippetTemplates?: NamedRef[];
   /** The themes that use a snippet (`snippet_in_use`). */
   snippetThemes?: NamedRef[];
+  /** The active flows that send a template (`template_in_use`), by id and name. */
+  flows?: NamedRef[];
   /** The live templates a snippet or theme version would stop from sending (`snippet_breaks_templates`, `theme_breaks_templates`). */
   templates?: BrokenTemplate[];
   /** How many templates there are in all; `templates` lists the first few. */
@@ -82,6 +84,7 @@ export class ApiError extends Error {
   readonly snippetThemes: NamedRef[];
   readonly templates: BrokenTemplate[];
   readonly total: number;
+  readonly flows: NamedRef[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -100,6 +103,7 @@ export class ApiError extends Error {
     this.snippetThemes = problem.snippetThemes ?? [];
     this.templates = problem.templates ?? [];
     this.total = problem.total ?? this.templates.length;
+    this.flows = problem.flows ?? [];
   }
 }
 
@@ -128,6 +132,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       snippetThemes: namedRefs(body["snippet_themes"]),
       templates: brokenTemplates(body["templates"]),
       ...(typeof body["total"] === "number" ? { total: body["total"] } : {}),
+      flows: flowRefs(body["flows"]),
     });
   }
   return new ApiError({
@@ -203,6 +208,15 @@ function brokenTemplates(value: unknown): BrokenTemplate[] {
     const { id, name, codes } = entry;
     if (typeof id !== "string" || typeof name !== "string" || !Array.isArray(codes)) return [];
     return [{ id, name, codes: codes.filter((code): code is string => typeof code === "string") }];
+  });
+}
+
+function flowRefs(value: unknown): NamedRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { flow_id: id, flow_name: name } = entry;
+    return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
   });
 }
 

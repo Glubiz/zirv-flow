@@ -56,6 +56,9 @@ pub struct Problem {
     /// How many templates `templates` is the first of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u32>,
+    /// The active flows whose running version sends a template (`template_in_use`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flows: Option<Vec<FlowRefProblem>>,
 }
 
 /// A live template that a new snippet or theme version would stop from sending.
@@ -103,6 +106,13 @@ pub struct TemplateIssueProblem {
     pub message: Option<String>,
 }
 
+/// A flow named in a problem.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FlowRefProblem {
+    pub flow_id: uuid::Uuid,
+    pub flow_name: String,
+}
+
 /// One issue of a segment definition.
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct SegmentIssueProblem {
@@ -146,6 +156,8 @@ struct SegmentExtra {
     snippet_themes: Option<Vec<SegmentRefProblem>>,
     /// The templates a new snippet or theme version would break, and how many there are.
     templates: Option<(Vec<BrokenTemplateProblem>, u32)>,
+    /// The active flows that send a template (`template_in_use`).
+    flows: Option<Vec<FlowRefProblem>>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -1041,6 +1053,21 @@ impl ApiError {
         }
     }
 
+    /// An archive of a template that active flows still send, with those flows.
+    pub(crate) fn template_in_use(flows: Vec<FlowRefProblem>) -> Self {
+        Self {
+            code: Some("template_in_use"),
+            segment: Some(Box::new(SegmentExtra {
+                flows: Some(flows),
+                ..SegmentExtra::default()
+            })),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "active flows still send the template; remove it from them first",
+            )
+        }
+    }
+
     /// A template that already keeps the most saved preview people.
     pub(crate) fn preview_people_limit() -> Self {
         Self {
@@ -1214,6 +1241,7 @@ impl IntoResponse for ApiError {
                 .and_then(|extra| extra.snippet_themes.take()),
             total: templates.as_ref().map(|(_, total)| *total),
             templates: templates.map(|(listed, _)| listed),
+            flows: self.segment.as_mut().and_then(|extra| extra.flows.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
@@ -1257,6 +1285,23 @@ mod tests {
         let (listed, total) = error.segment.and_then(|extra| extra.templates).unwrap();
         assert_eq!((listed.len(), total), (20, 25));
         assert_eq!(listed[19].name, "Template 19");
+    }
+
+    #[test]
+    fn a_template_in_use_is_a_409_that_lists_the_flows() {
+        let flow = uuid::Uuid::nil();
+        let error = ApiError::template_in_use(vec![FlowRefProblem {
+            flow_id: flow,
+            flow_name: "Welcome".into(),
+        }]);
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code(), Some("template_in_use"));
+        let flows = error
+            .segment
+            .as_ref()
+            .and_then(|extra| extra.flows.as_ref());
+        assert_eq!(flows.map(Vec::len), Some(1));
     }
 
     #[test]

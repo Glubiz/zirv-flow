@@ -26,7 +26,7 @@ pub use publish::{
 pub use where_used::{
     ThemeTemplate, ThemeUse, theme_live_templates, theme_template_counts, theme_where_used,
 };
-pub(crate) use where_used::{default_following_templates, is_default_theme};
+pub(crate) use where_used::{default_following_templates, follows_default, is_default_theme};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]

@@ -10,6 +10,7 @@ use zirv_flow_store::{Candidate, LiveTemplate};
 use zirv_flow_templates::{Issue, content_type_of};
 
 use super::inputs::{Subject, resolve_with};
+use super::publish::publish_issues;
 use super::{field_catalog, stored_document};
 use crate::AppState;
 use crate::problem::{ApiError, BrokenTemplateProblem};
@@ -87,11 +88,7 @@ pub(crate) async fn broken_by(
             .await?;
             (doc, inputs)
         };
-        let mut issues: Vec<Issue> = render
-            .validate_with(&doc, &catalog, &inputs.extras)
-            .await
-            .map_err(|failure| ApiError::render_failed(&failure))?;
-        issues.extend(inputs.issues);
+        let issues = publish_issues(render, &doc, &catalog, &inputs).await?;
         let codes = blocking_codes(&issues);
         if !codes.is_empty() {
             broken.push(BrokenTemplateProblem {

@@ -69,9 +69,10 @@ export function AssetSheet({ workspaceId, asset, canDelete, onClose, onDeleted }
           <ul className="image-owners">
             {owners.map((owner) => (
               <li key={`${owner.kind}:${owner.id}:${owner.version}`}>
-                <Link to={ownerPath(workspaceId, owner)}>{ownerKindLabel(owner.kind)}</Link>
+                <Link to={ownerPath(workspaceId, owner)}>{owner.name ?? ownerKindLabel(owner.kind)}</Link>
                 <span className="muted">
                   {owner.kind} · v{owner.version}
+                  {owner.archived ? " · archived" : ""}
                 </span>
               </li>
             ))}
