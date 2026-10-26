@@ -15,6 +15,7 @@ mod crud;
 mod extras;
 mod preview_people;
 mod publish;
+mod version_stats;
 mod where_used;
 
 pub use catalog::{TemplateFieldCatalog, read_template_field_catalog};
@@ -33,6 +34,7 @@ pub use publish::{
     LockedTemplate, NOTE_MAX_CHARS, TemplateVersion, TemplateVersionSummary, find_template_version,
     list_template_versions, lock_template, publish_template,
 };
+pub use version_stats::{TemplateVersionStats, VersionRender, template_version_stats};
 pub use where_used::{
     TemplateFlowUse, TemplateSendVolume, TemplateUse, active_flows_using, template_send_volume,
     template_where_used,

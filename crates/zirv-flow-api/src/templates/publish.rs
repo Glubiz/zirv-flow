@@ -14,7 +14,8 @@ use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     AssetOwnerKind, AssetReferenceError, SenderError, TEMPLATE_NOTE_MAX_CHARS, Template,
-    TemplateUse, TemplateVersion, TemplateVersionSummary, require_verified_sender,
+    TemplateUse, TemplateVersion, TemplateVersionStats, TemplateVersionSummary,
+    require_verified_sender,
 };
 use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
 
@@ -433,6 +434,83 @@ pub(crate) async fn version(
     Ok(Json(TemplateVersionBody::from(&version)))
 }
 
+/// One theme and snippet combination recorded on the messages sent with a version.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct VersionRenderBody {
+    /// The theme in effect, or none.
+    theme_id: Option<Uuid>,
+    theme_version: Option<i32>,
+    /// Snippet id to the version number used.
+    #[schema(value_type = Object)]
+    snippet_versions: Value,
+    /// The non-test messages with this combination.
+    count: i64,
+}
+
+/// What one template version sent.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateVersionStatsBody {
+    /// The non-test messages sent with the version.
+    messages: i64,
+    /// The distinct theme and snippet combinations, most used first, at most 20.
+    renders: Vec<VersionRenderBody>,
+    /// Whether more combinations exist than `renders` lists.
+    more: bool,
+}
+
+impl From<&TemplateVersionStats> for TemplateVersionStatsBody {
+    fn from(stats: &TemplateVersionStats) -> Self {
+        Self {
+            messages: stats.messages,
+            renders: stats
+                .renders
+                .iter()
+                .map(|render| VersionRenderBody {
+                    theme_id: render.theme_id,
+                    theme_version: render.theme_version,
+                    snippet_versions: render.snippet_versions.clone(),
+                    count: render.count,
+                })
+                .collect(),
+            more: stats.more,
+        }
+    }
+}
+
+/// What one version sent: its non-test message count and the theme and snippet versions those
+/// messages recorded.
+#[utoipa::path(
+    get,
+    operation_id = "get_template_version_stats",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id"),
+        ("n" = i32, Path, description = "Version number")
+    ),
+    responses(
+        (status = 200, description = "The messages sent with the version and their theme and snippet versions", body = TemplateVersionStatsBody),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, template or version, or no access", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn version_stats(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id, n)): Path<(String, String, String)>,
+) -> Result<Json<TemplateVersionStatsBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let (id, n): (Uuid, i32) = (path_id(&id)?, path_id(&n)?);
+    zirv_flow_store::find_template_version(&state.pool, workspace.id, id, n)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let stats = zirv_flow_store::template_version_stats(&state.pool, workspace.id, id, n).await?;
+    Ok(Json(TemplateVersionStatsBody::from(&stats)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,5 +546,28 @@ mod tests {
 
         assert_eq!(back.len(), issues.len());
         assert_eq!(back[0].code, issues[0].code);
+    }
+
+    #[test]
+    fn stats_keep_the_counts_and_the_recorded_versions() {
+        let theme = Uuid::now_v7();
+        let stats = TemplateVersionStats {
+            messages: 9,
+            renders: vec![zirv_flow_store::VersionRender {
+                theme_id: Some(theme),
+                theme_version: Some(2),
+                snippet_versions: json!({"s": 3}),
+                count: 7,
+            }],
+            more: true,
+        };
+
+        let body = serde_json::to_value(TemplateVersionStatsBody::from(&stats)).unwrap();
+
+        assert_eq!(body["messages"], 9);
+        assert_eq!(body["more"], true);
+        assert_eq!(body["renders"][0]["theme_id"], json!(theme));
+        assert_eq!(body["renders"][0]["snippet_versions"], json!({"s": 3}));
+        assert_eq!(body["renders"][0]["count"], 7);
     }
 }
