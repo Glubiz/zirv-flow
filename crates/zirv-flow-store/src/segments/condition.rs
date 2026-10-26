@@ -6,27 +6,79 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
-use super::preview::{SqlQuery, run_person_batch};
+use super::preview::{SqlParam, SqlQuery, bind_all};
 use crate::StoreError;
 
 /// A condition lowered to SQL: `CompiledSegment::batch_sql` and its bound values.
 pub type CompiledCondition = SqlQuery;
 
-/// Whether `person` meets each condition, in the order given. All the conditions run in the
-/// caller's transaction, so they see what it has written. A person who is not in the workspace
-/// meets none.
+/// Whether `person` meets each condition, in the order given, in one statement. The statement
+/// holds one `EXISTS` per condition over that condition's own query, with its placeholders moved
+/// past those of the conditions before it (`$1`, the workspace, is shared). It runs in the
+/// caller's transaction, so it sees what it has written. A person who is not in the workspace
+/// meets none. No condition runs no query.
 pub async fn evaluate_conditions(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person: Uuid,
     conditions: &[CompiledCondition],
 ) -> Result<Vec<bool>, StoreError> {
-    let mut results = Vec::with_capacity(conditions.len());
-    for condition in conditions {
-        let members = run_person_batch(&mut *connection, workspace, condition, &[person]).await?;
-        results.push(members.contains(&person));
+    if conditions.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(results)
+    let combined = combine(conditions, person);
+    // The SQL comes from the compiler, which binds every value.
+    let met: Vec<bool> = bind_all(
+        sqlx::query_scalar(sqlx::AssertSqlSafe(combined.sql)),
+        workspace,
+        &combined.params,
+    )
+    .persistent(false)
+    .fetch_one(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(met)
+}
+
+/// One query that returns an array with one boolean per condition. Each condition's values are
+/// followed by the batch of one person, as `run_person_batch` binds it.
+fn combine(conditions: &[CompiledCondition], person: Uuid) -> SqlQuery {
+    let mut params: Vec<SqlParam> = Vec::new();
+    let mut columns = Vec::with_capacity(conditions.len());
+    for condition in conditions {
+        let moved_by = params.len();
+        columns.push(format!(
+            "EXISTS ({})",
+            shift_placeholders(&condition.sql, moved_by)
+        ));
+        params.extend(condition.params.iter().cloned());
+        params.push(SqlParam::UuidArray(vec![person]));
+    }
+    SqlQuery {
+        sql: format!("SELECT ARRAY[{}]", columns.join(", ")),
+        params,
+    }
+}
+
+/// `sql` with every placeholder above `$1` moved up by `by`.
+fn shift_placeholders(sql: &str, by: usize) -> String {
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut rest = sql;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let digits = rest[at + 1..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let number: Option<usize> = rest[at + 1..at + 1 + digits].parse().ok();
+        match number {
+            Some(n) if n >= 2 => out.push_str(&format!("${}", n + by)),
+            _ => out.push_str(&rest[at..at + 1 + digits]),
+        }
+        rest = &rest[at + 1 + digits..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -44,6 +96,27 @@ mod tests {
             ),
             params: Vec::new(),
         }
+    }
+
+    #[test]
+    fn placeholders_above_the_workspace_move_past_the_earlier_conditions() {
+        let first = SqlQuery {
+            sql: "a = $1 AND b = $2 AND c = ANY($3) AND d = $12".into(),
+            params: vec![SqlParam::Text("x".into())],
+        };
+        let second = SqlQuery {
+            sql: "e = $1 AND f = $2::text AND g = ANY($3)".into(),
+            params: vec![SqlParam::Text("y".into())],
+        };
+
+        let combined = combine(&[first, second], Uuid::nil());
+
+        assert_eq!(
+            combined.sql,
+            "SELECT ARRAY[EXISTS (a = $1 AND b = $2 AND c = ANY($3) AND d = $12), EXISTS (e = $1 AND f = $4::text AND g = ANY($5))]"
+        );
+        assert_eq!(combined.params.len(), 4);
+        assert_eq!(shift_placeholders("x '$' $a $", 5), "x '$' $a $");
     }
 
     #[sqlx::test]
