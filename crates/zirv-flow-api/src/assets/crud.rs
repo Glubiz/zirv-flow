@@ -172,6 +172,8 @@ mod tests {
             owner_kind: "theme".into(),
             owner_id: id,
             version: 2,
+            name: Some("Brand".into()),
+            archived: false,
         }]);
 
         assert_eq!(error.status(), StatusCode::CONFLICT);
