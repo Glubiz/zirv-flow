@@ -2383,6 +2383,425 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/assets": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "The workspace's images, newest first, with the bytes they take and the limit for them.",
+        "operationId": "list_assets",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Assets per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The next_before of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of assets and the quota",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetsBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit is out of range or before is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Uploads an image. The body is the raw file with its own `Content-Type`: `image/png`,\n`image/jpeg`, `image/gif` or `image/webp`; SVG and every other type are refused before the\nbody is read. The type must match the file's magic bytes. The file may be at most\n`assets.max_file_bytes` (5 MiB by default) and 8192 pixels a side and 40 megapixels, read from\nits header. The workspace's images may take at most `assets.max_workspace_bytes` together. The\nsame bytes uploaded again to the workspace return the existing asset with 200. Audited as\n`asset.uploaded` with the id, name and size.",
+        "operationId": "upload_asset",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "description": "A name for the image, 1 to 200 characters without path separators",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The image file; image/jpeg, image/gif and image/webp are accepted too",
+          "content": {
+            "image/png": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The workspace already had these bytes; the existing asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetBody"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The new asset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A missing name, or an upload that broke off",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "No byte arrived for 60 seconds",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "asset_too_large: over assets.max_file_bytes; asset_quota_exceeded: the workspace is over assets.max_workspace_bytes",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "asset_type_unsupported: not a PNG, JPEG, GIF or WebP content type; asset_type_mismatch: the file is not the declared type",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "A bad name, or asset_dimensions_exceeded",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/assets/{id}": {
+      "get": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "One image, with the published versions that use it.",
+        "operationId": "get_asset",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Asset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The asset and its users",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or asset, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "assets"
+        ],
+        "summary": "Deletes an image: it is marked deleted and its bytes are dropped. Refused with 409\n(`asset_in_use`, the users in the detail) while a published template, theme or snippet\nversion uses it. Workspace admins only. Audited as `asset.deleted`.",
+        "operationId": "delete_asset",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Asset id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a missing scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or asset, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "asset_in_use: published versions use the asset",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/consent/dimensions": {
       "get": {
         "tags": [
@@ -24528,6 +24947,154 @@
             "example": [
               "read"
             ]
+          }
+        }
+      },
+      "AssetBody": {
+        "type": "object",
+        "description": "An image asset.",
+        "required": [
+          "id",
+          "name",
+          "content_type",
+          "size_bytes",
+          "width",
+          "height",
+          "sha256",
+          "url",
+          "references",
+          "created_at"
+        ],
+        "properties": {
+          "content_type": {
+            "type": "string",
+            "example": "image/png"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "height": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Spring banner"
+          },
+          "references": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many published versions of templates, themes and snippets use it."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The lowercase hex SHA-256 of the file."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "url": {
+            "type": "string",
+            "description": "Where the world reaches the file: absolute when `server.public_url` is set, else the\npath `/a/<sha256>.<ext>`."
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "AssetDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AssetBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "used_by"
+            ],
+            "properties": {
+              "used_by": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AssetOwnerBody"
+                }
+              }
+            }
+          }
+        ],
+        "description": "An asset with the versions that use it."
+      },
+      "AssetOwnerBody": {
+        "type": "object",
+        "description": "A published version that uses an asset.",
+        "required": [
+          "kind",
+          "id",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`template`, `theme` or `snippet`."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "AssetsBody": {
+        "type": "object",
+        "description": "A page of assets with the workspace's quota.",
+        "required": [
+          "assets",
+          "used_bytes",
+          "limit_bytes",
+          "max_file_bytes"
+        ],
+        "properties": {
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssetBody"
+            },
+            "description": "Newest first."
+          },
+          "limit_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The most bytes they may take (`assets.max_workspace_bytes`).",
+            "minimum": 0
+          },
+          "max_file_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The largest single image (`assets.max_file_bytes`).",
+            "minimum": 0
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Pass as `before` for the next page; null when there is none."
+          },
+          "used_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The bytes the workspace's live assets take."
           }
         }
       },
