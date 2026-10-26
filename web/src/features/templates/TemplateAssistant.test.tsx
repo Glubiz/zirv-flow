@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { json, mockApi, OWNER, problem, session, type Call, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { drafts, emailDocument, SENDER_ID, templateDetail, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
+import { DEBOUNCE_MS } from "./TemplateEditor";
 import { TemplateAssistant } from "./TemplateAssistant";
 import { TemplatePage } from "./TemplatePage";
 import { readDocument, startingDocument } from "./model";
@@ -50,6 +51,12 @@ function valid(overrides: Record<string, unknown> = {}) {
 function blocksDetail() {
   const document = { ...startingDocument("email", "blocks", "marketing"), sender: SENDER_ID };
   return templateDetail({}, document);
+}
+
+function accepted() {
+  const detail = templateDetail({}, emailDocument({}, { subject: "Hi there" }));
+  (detail.draft as { revision: number }).revision = 5;
+  return { id: "d1", kind: "template", template_id: TEMPLATE_ID, content: detail.draft.document, template: detail };
 }
 
 function mount(routes: Record<string, Handler>) {
@@ -315,14 +322,23 @@ describe("the assistant and the editor's saves", () => {
     return user;
   }
 
-  it("accepts when unsaved edits are replaced and sends no save", async () => {
-    const { calls, props } = host({ unsaved: true });
-    const user = await draftOnce();
+  it("cancels the queued save when unsaved edits are replaced, and accepts", async () => {
+    const calls = mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()), [ACCEPT]: () => json(accepted()) } }));
+    const user = await open();
+    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await screen.findByTitle("After render");
+    // Look at the editor, make an edit (its save is queued behind the debounce), and come back.
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.click(screen.getByRole("button", { name: "Accept into draft" }));
     await user.click(await screen.findByRole("button", { name: "Replace them" }));
 
-    await waitFor(() => expect(props.onAccepted).toHaveBeenCalled());
-    expect(props.hold).toHaveBeenCalledTimes(1);
-    expect(calls.some((call) => call.method === "PUT")).toBe(false);
+    expect(await screen.findByText(/saved as the template's draft/)).toBeInTheDocument();
+    // Past the debounce: the queued save never goes out.
+    await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_MS + 300));
+    expect(calls.some((call) => call.method === "PUT" && call.path.endsWith("/draft"))).toBe(false);
     expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(true);
   });
 

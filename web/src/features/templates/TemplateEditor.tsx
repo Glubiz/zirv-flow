@@ -63,6 +63,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const [published, setPublished] = useState<string | null>(null);
   const [versionsKey, setVersionsKey] = useState(0);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  /** Once opened, the panel stays mounted while hidden, so a draft under review survives a look at the editor. */
+  const [assistantUsed, setAssistantUsed] = useState(false);
   /** True from the moment an assistant draft is accepted until it lands: nothing is saved or typed meanwhile. */
   const [holding, setHolding] = useState(false);
   const holdingRef = useRef(false);
@@ -295,7 +297,10 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           )}
         </div>
         {assistantEligible ? (
-          <Button aria-pressed={assistantOpen} onClick={() => setAssistantOpen((open) => !open)}>
+          <Button aria-pressed={assistantOpen} onClick={() => {
+              setAssistantOpen((open) => !open);
+              setAssistantUsed(true);
+            }}>
             Assistant
           </Button>
         ) : null}
@@ -332,7 +337,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          {assistantOpen && assistantEligible ? (
+          {assistantUsed && assistantEligible ? (
+            <div hidden={!assistantOpen}>
             <TemplateAssistant
               workspaceId={workspaceId}
               templateId={template.id}
@@ -346,7 +352,9 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               onReload={reload}
               onClose={() => setAssistantOpen(false)}
             />
-          ) : (
+            </div>
+          ) : null}
+          {assistantOpen && assistantEligible ? null : (
           <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable || holding} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
           )}
           {canWrite ? (
