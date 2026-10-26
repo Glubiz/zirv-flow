@@ -189,7 +189,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_send_path_and_its_trace_hold_end_to_end(pool: PgPool) {
-        let world = World::start(pool).await;
+        let world = World::start(pool, PUBLIC_URL).await;
 
         // A verified sender (its records resolve in the fixture DNS), two destinations, a
         // marketing template and a flow: send over SMTP, send through the provider, wait a day,
@@ -483,7 +483,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_block_document_email_is_the_preview_render_apart_from_tracking(pool: PgPool) {
-        let world = World::start(pool).await;
+        let world = World::start(pool, PUBLIC_URL).await;
         let (sender, _) = world
             .verified_sender("example.com", "news@example.com")
             .await;
@@ -526,7 +526,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_send_bench_scenario_delivers_one_message_per_person_per_template(pool: PgPool) {
         const PEOPLE: usize = 12;
-        let world = World::start(pool).await;
+        let world = World::start(pool, PUBLIC_URL).await;
         let (sender, _) = world
             .verified_sender("example.com", "news@example.com")
             .await;
