@@ -79,10 +79,10 @@ run_gate() {
   fi
 }
 
-# Checks that building `args` without the variable `var` fails with the guard's message `message`.
+# Checks that building `args` in `root` without the variable `var` fails with the guard's message `message`.
 guard_fails() {
-  var="$1"; message="$2"; shift 2
-  if output="$(cd "$ROOT_FOR_CARGO" && env -u "$var" cargo check --quiet "$@" 2>&1)"; then
+  root="$1"; var="$2"; message="$3"; shift 3
+  if output="$(cd "$root" && env -u "$var" cargo check --quiet "$@" 2>&1)"; then
     echo "test-feature gate: $* compiled without $var" >&2
     return 1
   fi
@@ -94,9 +94,8 @@ guard_fails() {
 }
 
 run_guard_check() {
-  ROOT_FOR_CARGO="$1"
-  guard_fails ZIRV_FLOW_BENCH_BUILD "is for benchmark builds only" -p zirv-flow-store --features bench-no-decisions
-  guard_fails ZIRV_FLOW_BROWSER_TEST_BUILD "is for the browser test server only" -p zirv-flow --features browser-test
+  guard_fails "$1" ZIRV_FLOW_BENCH_BUILD "is for benchmark builds only" -p zirv-flow-store --features bench-no-decisions
+  guard_fails "$1" ZIRV_FLOW_BROWSER_TEST_BUILD "is for the browser test server only" -p zirv-flow --features browser-test
 }
 
 # The server binary of a default build must not carry the test sink route. Cargo's default target

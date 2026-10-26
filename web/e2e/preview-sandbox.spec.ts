@@ -29,7 +29,6 @@ function watchConsole(page: Page): ConsoleMessage[] {
   return lines;
 }
 
-
 test("a script in a raw HTML block never runs in the preview, and the detection works", async ({ page, context }) => {
   await listenForMessages(page);
   const logged = watchConsole(page);
@@ -50,13 +49,10 @@ test("a script in a raw HTML block never runs in the preview, and the detection 
   await page.getByLabel("Sender identity").selectOption({ index: 1 });
 
   const frame = page.locator('iframe[title="Preview of the message"]');
-  await expect(frame).toBeVisible();
-  await expect(async () => {
-    expect(await frame.getAttribute("srcdoc")).toContain("sandbox probe");
-  }).toPass();
+  await expect(frame).toHaveAttribute("srcdoc", /sandbox probe/);
+  // sandbox="" grants nothing, so no allow-scripts.
   await expect(frame).toHaveAttribute("sandbox", "");
-  expect(await frame.getAttribute("sandbox")).not.toContain("allow-scripts");
-  await expect(page.frameLocator('iframe[title="Preview of the message"]').getByText("sandbox probe")).toBeVisible();
+  await expect(frame.contentFrame().getByText("sandbox probe")).toBeVisible();
 
   // Give a script that did run every chance to be heard.
   await page.waitForTimeout(1000);
