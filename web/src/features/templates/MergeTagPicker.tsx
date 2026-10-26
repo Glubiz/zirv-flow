@@ -4,7 +4,7 @@ import { describeError } from "../../api";
 import { Button, ErrorState, LoadingState, SelectField, TextField } from "../../ui";
 import { useEventCatalog, useEventProperties } from "../events";
 import { useFieldRegistry } from "../people";
-import { MERGE_SYSTEM_VALUES } from "./model";
+import { MERGE_SYSTEM_VALUES, MERGE_THEME_VALUES } from "./model";
 
 interface Props {
   workspaceId: string;
@@ -13,6 +13,8 @@ interface Props {
   /** What the tag is put into, for the hint. */
   target: string;
   onInsert: (tag: string) => void;
+  /** Whether a theme styles the template: its values are offered only then. */
+  theme?: boolean;
 }
 
 /** The expression a field inserts: a default keeps the message readable when the value is missing. */
@@ -20,7 +22,7 @@ export function personTag(key: string, type: string): string {
   return type === "string" ? `{{ person.${key} | default("there") }}` : `{{ person.${key} }}`;
 }
 
-export function MergeTagPicker({ workspaceId, disabled, target, onInsert }: Props) {
+export function MergeTagPicker({ workspaceId, disabled, target, onInsert, theme = false }: Props) {
   const fields = useFieldRegistry(workspaceId);
   const events = useEventCatalog(workspaceId);
   const [search, setSearch] = useState("");
@@ -45,6 +47,7 @@ export function MergeTagPicker({ workspaceId, disabled, target, onInsert }: Prop
   }
   const traits = fields.data.filter((trait) => !trait.archived && trait.key.toLowerCase().includes(needle));
   const system = MERGE_SYSTEM_VALUES.filter((value) => value.label.toLowerCase().includes(needle) || value.expression.includes(needle));
+  const themed = theme ? MERGE_THEME_VALUES.filter((value) => value.label.toLowerCase().includes(needle) || value.expression.includes(needle)) : [];
   const names = properties.status === "ready" ? properties.data.filter((name) => name.toLowerCase().includes(needle)) : [];
 
   return (
@@ -82,6 +85,21 @@ export function MergeTagPicker({ workspaceId, disabled, target, onInsert }: Prop
           </li>
         ))}
       </ul>
+      {theme ? (
+        <>
+          <h4 className="field-label">Theme</h4>
+          {themed.length === 0 ? <p className="faint">No theme value matches.</p> : null}
+          <ul className="list-plain">
+            {themed.map((value) => (
+              <li key={value.expression}>
+                <Button disabled={disabled} aria-label={`Insert ${value.expression}`} onClick={() => onInsert(`{{ ${value.expression} }}`)}>
+                  {value.label} <span className="mono faint">{value.expression}</span>
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
       <h4 className="field-label">Trigger event</h4>
       <SelectField label="Event" value={event} onChange={(entry) => setEvent(entry.target.value)}>
         <option value="">Choose an event</option>
