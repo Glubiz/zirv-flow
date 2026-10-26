@@ -3459,6 +3459,8 @@ main:focus {
 
 .ts-kept {
   text-align: right;
+}
+
 /* Template library tabs */
 .library-nav {
   align-self: flex-start;
