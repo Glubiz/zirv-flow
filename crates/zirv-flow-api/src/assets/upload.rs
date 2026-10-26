@@ -98,7 +98,7 @@ async fn receive(
 fn check(bytes: &[u8], declared: ImageKind) -> Result<(u32, u32), ApiError> {
     let sniffed = sniff(bytes).map_err(|error| match error {
         SniffError::NotAnImage => mismatch("the body is not a PNG, JPEG, GIF or WebP image"),
-        SniffError::Unreadable(_) => mismatch("the image header is cut off or malformed"),
+        SniffError::Unreadable => mismatch("the image header is cut off or malformed"),
     })?;
     if sniffed.kind != declared {
         return Err(mismatch(

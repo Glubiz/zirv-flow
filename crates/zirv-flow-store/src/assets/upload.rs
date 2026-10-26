@@ -5,7 +5,7 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
-use super::{ASSET_COLUMNS, Asset, AssetListing, workspace_asset_bytes};
+use super::{ASSET_COLUMNS, Asset, AssetListing, LISTING_COLUMNS, workspace_asset_bytes};
 use crate::StoreError;
 
 /// An image to store. The caller has checked the type and read the dimensions from the header.
@@ -62,9 +62,7 @@ pub async fn store_asset(
         .await
         .map_err(StoreError::query)?;
     let existing: Option<AssetListing> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {ASSET_COLUMNS}, \
-                (SELECT count(*) FROM asset_references r WHERE r.asset_id = assets.id) \
-                    AS \"references\" \
+        "SELECT {LISTING_COLUMNS} \
          FROM assets WHERE workspace_id = $1 AND sha256 = $2 AND deleted_at IS NULL"
     )))
     .bind(workspace.as_uuid())

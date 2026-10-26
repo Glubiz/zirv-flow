@@ -84,6 +84,11 @@ pub struct AssetOwner {
 pub(crate) const ASSET_COLUMNS: &str = "id, workspace_id, sha256, ext, content_type, size_bytes, \
      width, height, name, created_by, created_at";
 
+/// The columns of an [`AssetListing`]: an asset and the number of versions that reference it.
+pub(crate) const LISTING_COLUMNS: &str = "id, workspace_id, sha256, ext, content_type, size_bytes, \
+     width, height, name, created_by, created_at, \
+     (SELECT count(*) FROM asset_references r WHERE r.asset_id = assets.id) AS \"references\"";
+
 /// The lowercase hex of a hash.
 pub fn sha256_hex(hash: &[u8]) -> String {
     let mut text = String::with_capacity(hash.len() * 2);
@@ -141,15 +146,12 @@ pub async fn list_assets<'e>(
     before: Option<Uuid>,
     limit: u32,
 ) -> Result<(Vec<AssetListing>, bool), StoreError> {
-    let mut assets: Vec<AssetListing> = sqlx::query_as(
-        "SELECT id, workspace_id, sha256, ext, content_type, size_bytes, width, height, name, \
-                created_by, created_at, \
-                (SELECT count(*) FROM asset_references r WHERE r.asset_id = assets.id) \
-                    AS \"references\" \
+    let mut assets: Vec<AssetListing> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {LISTING_COLUMNS} \
          FROM assets WHERE workspace_id = $1 AND deleted_at IS NULL \
            AND ($2::uuid IS NULL OR id < $2) \
-         ORDER BY id DESC LIMIT $3",
-    )
+         ORDER BY id DESC LIMIT $3"
+    )))
     .bind(workspace.as_uuid())
     .bind(before)
     .bind(i64::from(limit) + 1)

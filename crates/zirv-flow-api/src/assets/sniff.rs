@@ -57,7 +57,7 @@ pub(crate) enum SniffError {
     /// No allowed image type starts like this.
     NotAnImage,
     /// The magic bytes match a type but the header is cut off, malformed or empty-sized.
-    Unreadable(ImageKind),
+    Unreadable,
 }
 
 fn slice(bytes: &[u8], at: usize, len: usize) -> Option<&[u8]> {
@@ -110,7 +110,7 @@ pub(crate) fn sniff(bytes: &[u8]) -> Result<Sniffed, SniffError> {
             width,
             height,
         }),
-        _ => Err(SniffError::Unreadable(kind)),
+        _ => Err(SniffError::Unreadable),
     }
 }
 
@@ -293,7 +293,7 @@ mod tests {
     fn a_jpeg_with_no_frame_header_before_the_scan_is_unreadable() {
         let bytes = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02, 0, 0, 0, 0];
 
-        assert_eq!(sniff(&bytes), Err(SniffError::Unreadable(ImageKind::Jpeg)));
+        assert_eq!(sniff(&bytes), Err(SniffError::Unreadable));
     }
 
     #[test]
@@ -311,14 +311,8 @@ mod tests {
 
     #[test]
     fn a_zero_size_is_unreadable() {
-        assert_eq!(
-            sniff(&png(0, 5)),
-            Err(SniffError::Unreadable(ImageKind::Png))
-        );
-        assert_eq!(
-            sniff(&gif(5, 0)),
-            Err(SniffError::Unreadable(ImageKind::Gif))
-        );
+        assert_eq!(sniff(&png(0, 5)), Err(SniffError::Unreadable));
+        assert_eq!(sniff(&gif(5, 0)), Err(SniffError::Unreadable));
     }
 
     #[test]
