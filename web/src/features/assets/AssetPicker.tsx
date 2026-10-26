@@ -1,7 +1,7 @@
 import { useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { useParams } from "react-router";
 
-import { Button, Dialog, InlineError, ResourceView, TextField } from "../../ui";
+import { Button, Dialog, EmptyState, InlineError, ResourceView, TextField } from "../../ui";
 import { useAssetAccess } from "./access";
 import { ACCEPTED_TYPES, DEFAULT_MAX_FILE_BYTES, dimensionsText, matchesSearch } from "./model";
 import { SendingTile, Thumb, UploadIcon } from "./Thumb";
@@ -38,9 +38,9 @@ export function AssetPicker({ open, onPick, onClose, themeLogo = false }: Props)
 
 function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open"> & { workspaceId: string }) {
   const access = useAssetAccess(workspaceId);
-  const { resource, hasMore, loadingMore, loadMore, add } = useAssets(workspaceId);
+  const { resource, hasMore, loadingMore, loadMoreFailed, loadMore, add } = useAssets(workspaceId);
   const maxBytes = resource.status === "ready" ? resource.data.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
-  const { sending, failure, upload } = useAssetUpload(workspaceId, maxBytes);
+  const { sending, failure, upload, cancel } = useAssetUpload(workspaceId, maxBytes);
   const [search, setSearch] = useState("");
   const [choice, setChoice] = useState<string | null>(null);
   const [byAddress, setByAddress] = useState(false);
@@ -52,11 +52,16 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    const asset = await upload(file);
-    if (asset) {
-      add(asset);
-      setChoice(asset.id);
+    const uploaded = await upload(file);
+    if (uploaded) {
+      if (uploaded.created) add(uploaded.asset);
+      setChoice(uploaded.asset.id);
     }
+  }
+
+  function close() {
+    cancel();
+    onClose();
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
@@ -86,11 +91,13 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
     }
   }
 
-  const firstRadio = themeLogo ? THEME_LOGO : (assets.find((asset) => matchesSearch(asset, search))?.id ?? null);
-  const tabStop = (key: string) => (choice === null ? key === firstRadio : key === choice) ? 0 : -1;
+  const shown = assets.filter((asset) => matchesSearch(asset, search));
+  const visible = [...(themeLogo ? [THEME_LOGO] : []), ...shown.map((asset) => asset.id)];
+  const stop = choice !== null && visible.includes(choice) ? choice : visible[0];
+  const tabStop = (key: string) => (key === stop ? 0 : -1);
 
   return (
-    <Dialog title="Choose an image" onClose={onClose} wide>
+    <Dialog title="Choose an image" onClose={close} wide>
       <div className="stack">
         {byAddress ? (
           <TextField
@@ -113,11 +120,8 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
               onChange={(event) => setSearch(event.target.value)}
             />
             {failure ? <InlineError {...failure} /> : null}
-            <ResourceView
-              resource={resource}
-              loadingLabel="Loading images"
-            >
-              {(data) => (
+            <ResourceView resource={resource} loadingLabel="Loading images">
+              {() => (
                 <>
                   <ul className="image-grid image-grid-compact" aria-label="Images">
                     {access.canWrite ? (
@@ -166,9 +170,7 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
                             </button>
                           </div>
                         ) : null}
-                        {data.assets
-                          .filter((asset) => matchesSearch(asset, search))
-                          .map((asset) => (
+                        {shown.map((asset) => (
                             <div key={asset.id}>
                               <button
                                 type="button"
@@ -187,11 +189,19 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
                       </div>
                     </li>
                   </ul>
+                  {assets.length === 0 ? (
+                    <EmptyState title="No images yet">
+                      {access.canWrite ? "Upload a PNG, JPEG, GIF or WebP, or drop it here." : "Members of the workspace upload the images."}
+                    </EmptyState>
+                  ) : shown.length === 0 ? (
+                    <p className="muted">No image is named like that.</p>
+                  ) : null}
                   {hasMore ? (
                     <div>
                       <Button onClick={loadMore} disabled={loadingMore}>
                         {loadingMore ? "Loading" : "Show more"}
                       </Button>
+                      {loadMoreFailed ? <span className="field-error"> Could not load more images. Try again.</span> : null}
                     </div>
                   ) : null}
                 </>
@@ -203,7 +213,7 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
           <Button onClick={() => setByAddress(!byAddress)} className="btn-ghost">
             {byAddress ? "Choose from images" : "Use a web address"}
           </Button>
-          <Button onClick={onClose}>Cancel</Button>
+          <Button onClick={close}>Cancel</Button>
           <Button variant="primary" disabled={!ready} onClick={use}>
             Use image
           </Button>

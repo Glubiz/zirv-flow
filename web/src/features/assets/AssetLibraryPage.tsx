@@ -26,10 +26,10 @@ function Library({ workspaceId }: { workspaceId: string }) {
 
   async function send(file: File | undefined) {
     if (!file) return;
-    const asset = await upload(file);
-    if (asset) {
-      add(asset);
-      setSelectedId(asset.id);
+    const uploaded = await upload(file);
+    if (uploaded) {
+      if (uploaded.created) add(uploaded.asset);
+      setSelectedId(uploaded.asset.id);
       reload();
     }
   }

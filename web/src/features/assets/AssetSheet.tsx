@@ -98,6 +98,7 @@ export function AssetSheet({ workspaceId, asset, canDelete, onClose, onDeleted }
           onInUse={() => {
             setConfirming(false);
             setRaced(true);
+            detail.reload();
           }}
           onDeleted={onDeleted}
         />

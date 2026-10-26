@@ -50,6 +50,7 @@ export class FakeRequest {
   onload: (() => void) | null = null;
   onerror: (() => void) | null = null;
   onabort: (() => void) | null = null;
+  aborted = false;
 
   constructor() {
     FakeRequest.all.push(this);
@@ -66,6 +67,11 @@ export class FakeRequest {
 
   send(body: unknown) {
     this.body = body;
+  }
+
+  abort() {
+    this.aborted = true;
+    this.onabort?.();
   }
 
   progress(loaded: number, total: number) {

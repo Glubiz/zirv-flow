@@ -149,6 +149,41 @@ describe("uploading an image", () => {
     expect(screen.getAllByRole("button", { name: /photo-1\.png/ })).toHaveLength(1);
   });
 
+  it("keeps the newest-first order when the same bytes of an older image are uploaded again", async () => {
+    asRole("admin");
+    mount();
+
+    await sendFile(PNG());
+    act(() => FakeRequest.all[0]!.respond(200, B));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /banner\.jpg/ })).toHaveAttribute("aria-pressed", "true"));
+    const names = Array.from(document.querySelectorAll(".image-grid .image-name")).map((node) => node.textContent);
+    expect(names).toEqual(["photo-1.png", "banner.jpg"]);
+  });
+
+  it("sends the type from the extension when the browser gives none, and the browser's word otherwise", async () => {
+    asRole("admin");
+    mount();
+
+    await sendFile(new File(["x"], "Pic.JPG", { type: "" }));
+    expect(FakeRequest.all[0]!.headers["content-type"]).toBe("image/jpeg");
+    act(() => FakeRequest.all[0]!.respond(200, A));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled());
+
+    await sendFile(new File(["x"], "notes.txt", { type: "" }));
+    expect(FakeRequest.all[1]!.headers["content-type"]).toBe("application/octet-stream");
+  });
+
+  it("cancels an upload in flight when the page goes away", async () => {
+    asRole("admin");
+    const view = mount();
+
+    await sendFile(PNG());
+    view.unmount();
+
+    expect(FakeRequest.all[0]!.aborted).toBe(true);
+  });
+
   it("refuses a file over 5 MiB without a request", async () => {
     asRole("admin");
     mount();
@@ -194,6 +229,27 @@ describe("the details sheet", () => {
     expect(await within(sheet).findByRole("link", { name: "Template" })).toHaveAttribute("href", "/w/ws1/templates/t-1");
     expect(within(sheet).getByRole("link", { name: "Theme" })).toHaveAttribute("href", "/w/ws1/themes/th-1");
     expect(within(sheet).getByText("template · v6")).toBeInTheDocument();
+  });
+
+  it("reads where an image is used again after a delete race, so the sheet does not claim it is unused", async () => {
+    let reads = 0;
+    asRole("admin", listBody([A, B]), {
+      [`GET ${WS}/assets/${A.id}`]: () => {
+        reads += 1;
+        return json({ ...A, used_by: reads > 1 ? [{ kind: "template", id: "t-9", version: 2 }] : [] });
+      },
+      [`DELETE ${WS}/assets/${A.id}`]: () => problem(409, "In use", "A published version uses it", undefined, "asset_in_use"),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: /photo-1\.png/ }));
+    expect(await screen.findByText("Nothing uses this image yet.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await user.click(screen.getByRole("button", { name: "Delete image" }));
+
+    expect(await screen.findByRole("link", { name: "Template" })).toHaveAttribute("href", "/w/ws1/templates/t-9");
+    expect(screen.queryByText("Nothing uses this image yet.")).not.toBeInTheDocument();
   });
 
   it("disables Delete for an image in use and says why", async () => {
