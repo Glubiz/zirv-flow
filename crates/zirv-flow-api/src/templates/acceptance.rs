@@ -227,6 +227,14 @@ mod tests {
     }
 
     async fn fixture_with(pool: &PgPool, render_pool: Option<RenderPool>) -> Fixture {
+        fixture_at(pool, render_pool, None).await
+    }
+
+    async fn fixture_at(
+        pool: &PgPool,
+        render_pool: Option<RenderPool>,
+        public_url: Option<&str>,
+    ) -> Fixture {
         zirv_flow_store::migrate(pool).await.unwrap();
         let ws = workspace(pool, "ours").await;
         let other_ws = workspace(pool, "theirs").await;
@@ -234,6 +242,7 @@ mod tests {
         if let Some(render_pool) = render_pool {
             state = state.with_render_pool(render_pool);
         }
+        state = state.with_public_url(public_url.map(str::to_owned));
         let router = router(state);
         let key = |workspace: WorkspaceId, scope: Scope| {
             let pool = pool.clone();
@@ -1436,6 +1445,54 @@ mod tests {
                 .any(|(code, _)| code == "broken_asset_reference"),
             "{:?}",
             refused.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn preview_builds_asset_urls_on_the_public_url_like_a_send_and_an_http_one_is_refused(
+        pool: PgPool,
+    ) {
+        use zirv_flow_store::NewAsset;
+        let render_pool = start_pool("serve", Duration::from_secs(10)).await;
+        let f = fixture_at(&pool, Some(render_pool), Some("http://localhost:8080")).await;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let stored = zirv_flow_store::store_asset(
+            &mut tx,
+            f.ws,
+            &NewAsset {
+                name: "hero",
+                ext: "png",
+                content_type: "image/png",
+                bytes: b"hero-bytes",
+                width: 2,
+                height: 3,
+                created_by: None,
+            },
+            1 << 30,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut doc = blocks_doc("Hi", LINK);
+        doc["blocks"]["sections"][0]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "image", "id": "pic", "alt": "x",
+                         "src": {"asset": stored.asset.id.to_string()}}));
+        let id = f.create("Http", doc).await;
+
+        let preview = f.preview_of(&id, json!({})).await;
+
+        assert_eq!(preview.body["rendered"], false, "{:?}", preview.body);
+        assert!(
+            preview.body["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == "broken_asset_reference"),
+            "{:?}",
+            preview.body
         );
     }
 

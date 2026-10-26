@@ -52,12 +52,12 @@ pub(crate) struct Inputs {
     pub(crate) reasons: BTreeMap<String, String>,
 }
 
-/// The base asset URLs are built on in a preview or a publish check: the public URL when it is
-/// `https`, else a host that never resolves, because the renderer takes `https` URLs only.
+/// The base asset URLs are built on in a preview or a publish check: `server.public_url` as it
+/// is, so a preview has the outcome a send has (an `http` URL gives no asset URL the renderer
+/// accepts, in both). Only without a public URL, where a send has none either, is it a host that
+/// never resolves, so a preview can still show where an image goes.
 pub(crate) fn asset_base(public_url: Option<&str>) -> &str {
-    public_url
-        .filter(|url| url.starts_with("https://"))
-        .unwrap_or(INERT_ASSET_HOST)
+    public_url.unwrap_or(INERT_ASSET_HOST)
 }
 
 /// The store's request for what a document names.
@@ -374,12 +374,16 @@ mod tests {
     }
 
     #[test]
-    fn asset_urls_use_the_public_url_only_when_it_is_https() {
+    fn asset_urls_use_the_public_url_whenever_it_is_set() {
         assert_eq!(
             asset_base(Some("https://flow.example.com")),
             "https://flow.example.com"
         );
-        assert_eq!(asset_base(Some("http://localhost:8080")), INERT_ASSET_HOST);
+        assert_eq!(
+            asset_base(Some("http://localhost:8080")),
+            "http://localhost:8080",
+            "an http public URL stays http, as a send builds it"
+        );
         assert_eq!(asset_base(None), INERT_ASSET_HOST);
     }
 
