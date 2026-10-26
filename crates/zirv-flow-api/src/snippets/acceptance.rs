@@ -671,6 +671,44 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_list_counts_the_templates_that_hold_each_snippet(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let held = f.create("Held", heading("Hi")).await;
+        f.create("Free", heading("Hi")).await;
+        let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hi", "preheader": "", "category": "marketing",
+            "sections": [{"id": "sec", "columns": [[
+                {"type": "snippet", "id": "s", "snippet_id": held}]]}]}});
+        let template = f
+            .admin(
+                "POST",
+                "/templates",
+                Some(
+                    json!({"name": "Mail", "channel": "email", "category": "marketing",
+                    "document": document}),
+                ),
+            )
+            .await;
+        assert_eq!(template.status, StatusCode::CREATED, "{:?}", template.body);
+
+        let list = f.admin("GET", "/snippets", None).await;
+
+        let counts: Vec<(&str, i64)> = list
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["name"].as_str().unwrap(),
+                    item["used_by_templates"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(counts, [("Free", 0), ("Held", 1)]);
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn audit_rows_hold_ids_and_names_and_never_the_content(pool: PgPool) {
         let f = fixture(&pool).await;
         let marker = "unmistakable-marker-text";

@@ -8,8 +8,10 @@
 //! A theme's footer is appended to every email that follows the theme, so when the default theme
 //! uses the snippet, the templates that follow the default count as using it too.
 
+use hashbrown::HashMap;
+
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::{Acquire, PgConnection, PgExecutor, Postgres};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
@@ -67,6 +69,107 @@ pub(super) async fn templates_holding<'e>(
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)
+}
+
+/// The snippet ids a block document names, by the rule of [`block_path!`] without its id test.
+macro_rules! named_snippets {
+    ($document:literal) => {
+        concat!(
+            "jsonb_path_query(",
+            $document,
+            ", '$.blocks.sections[*].columns[*][*] ? (@.type == \"snippet\").snippet_id') #>> '{}'"
+        )
+    };
+}
+
+/// The snippets the workspace default theme names as its footer, in its draft or current version
+/// (the rule of [`themes_using`] with drafts counted). At most two.
+async fn default_footer_snippets(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Vec<Uuid>, StoreError> {
+    let named: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT d.tokens ->> 'footer_snippet' FROM workspace_default_theme w \
+            JOIN themes t ON t.id = w.theme_id AND t.archived_at IS NULL \
+            JOIN theme_drafts d ON d.theme_id = t.id WHERE w.workspace_id = $1 \
+         UNION \
+         SELECT v.tokens ->> 'footer_snippet' FROM workspace_default_theme w \
+            JOIN themes t ON t.id = w.theme_id AND t.archived_at IS NULL \
+            JOIN theme_versions v ON v.theme_id = t.id AND v.version = t.current_version \
+         WHERE w.workspace_id = $1",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(named
+        .iter()
+        .flatten()
+        .filter_map(|id| id.parse().ok())
+        .collect())
+}
+
+/// How many templates of the workspace, not archived, use each snippet: they hold a block for it in
+/// their draft or current version, or follow the default theme while it names the snippet as its
+/// footer, as [`snippet_where_used`] lists them. A snippet no template uses is absent. A fixed
+/// number of reads, not one per snippet.
+pub async fn snippet_template_counts<'e, A>(
+    executor: A,
+    workspace: WorkspaceId,
+) -> Result<HashMap<Uuid, i64>, StoreError>
+where
+    A: Acquire<'e, Database = Postgres>,
+{
+    let mut connection = executor.acquire().await.map_err(StoreError::query)?;
+    let mut counts = held_counts(&mut connection, workspace).await?;
+    let footers = default_footer_snippets(&mut connection, workspace).await?;
+    if !footers.is_empty() {
+        let followers: Vec<Uuid> = default_following_templates(&mut *connection, workspace)
+            .await?
+            .into_iter()
+            .map(|template| template.id)
+            .collect();
+        for footer in footers {
+            let mut users: hashbrown::HashSet<Uuid> = followers.iter().copied().collect();
+            users.extend(
+                templates_holding(&mut *connection, workspace, footer)
+                    .await?
+                    .into_iter()
+                    .map(|template| template.id),
+            );
+            counts.insert(footer, i64::try_from(users.len()).unwrap_or(i64::MAX));
+        }
+    }
+    Ok(counts)
+}
+
+/// How many templates hold a block for each snippet, in one grouped read.
+async fn held_counts(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+) -> Result<HashMap<Uuid, i64>, StoreError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(concat!(
+        "SELECT snippet, count(*) FROM ( \
+            SELECT d.template_id, ",
+        named_snippets!("d.document"),
+        " AS snippet FROM template_drafts d JOIN templates t ON t.id = d.template_id \
+              WHERE t.workspace_id = $1 AND t.archived_at IS NULL \
+            UNION \
+            SELECT v.template_id, ",
+        named_snippets!("v.document"),
+        " AS snippet FROM template_versions v JOIN templates t ON t.id = v.template_id \
+              AND v.version = t.current_version \
+              WHERE t.workspace_id = $1 AND t.archived_at IS NULL \
+         ) held GROUP BY snippet"
+    ))
+    .bind(workspace.as_uuid())
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(snippet, count)| Some((snippet.parse().ok()?, count)))
+        .collect())
 }
 
 /// The themes of the workspace, not archived, that name the snippet as their footer, by name. With
@@ -212,6 +315,47 @@ mod tests {
         assert_eq!(by_name, [("First", true, false), ("Second", false, true)]);
         assert!(found.themes.is_empty());
         assert!(!found.templates.iter().any(|t| t.id == plain.id));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_counts_cover_draft_and_current_templates_and_skip_archived_ones(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let snippet = create(&pool, ws, "Offer").await;
+        let unused = create(&pool, ws, "Unused").await;
+        let in_draft = create_template(&pool, ws, "Draft").await;
+        let in_current = create_template(&pool, ws, "Current").await;
+        let archived = create_template(&pool, ws, "Gone").await;
+        for template in [&in_draft, &in_current, &archived] {
+            set_draft(&pool, ws, template.id, &holding(snippet.id, false)).await;
+        }
+        // `in_current` publishes the block and then drops it from its draft.
+        sqlx::query(
+            "INSERT INTO template_versions (workspace_id, template_id, version, document, \
+                validation, trace_id) \
+             SELECT workspace_id, template_id, 1, document, '[]'::jsonb, gen_random_uuid() \
+             FROM template_drafts WHERE template_id = $1",
+        )
+        .bind(in_current.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+            .bind(in_current.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_draft(&pool, ws, in_current.id, &holding(Uuid::now_v7(), false)).await;
+        let mut connection = pool.acquire().await.unwrap();
+        crate::archive_template(&mut connection, ws, archived.id)
+            .await
+            .unwrap();
+        drop(connection);
+
+        let counts = snippet_template_counts(&pool, ws).await.unwrap();
+
+        assert_eq!(counts.get(&snippet.id), Some(&2));
+        assert_eq!(counts.get(&unused.id), None);
     }
 
     #[sqlx::test]
@@ -401,6 +545,62 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_count_includes_the_default_themes_followers_once(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let footer = create(&pool, ws, "Footer").await;
+        let theme = theme_with_footer(&pool, ws, "Brand", footer.id, true).await;
+        let follower = create_template(&pool, ws, "Follower").await;
+        let both = create_template(&pool, ws, "Both").await;
+        let plain = create_template(&pool, ws, "Plain").await;
+        let mut document = json!({"schema": 2, "channel": "email", "mode": "blocks",
+            "blocks": {"subject": "Hi", "sections": []}});
+        set_draft(&pool, ws, follower.id, &document).await;
+        // `both` follows the default and also holds the block itself.
+        set_draft(&pool, ws, both.id, &holding(footer.id, false)).await;
+        // `plain` names another theme, so it follows nothing.
+        document["blocks"]["theme"] = json!("none");
+        set_draft(&pool, ws, plain.id, &document).await;
+        let count = |pool: PgPool| async move {
+            snippet_template_counts(&pool, ws)
+                .await
+                .unwrap()
+                .get(&footer.id)
+                .copied()
+        };
+        let before = count(pool.clone()).await;
+        crate::set_default_theme(&mut pool.acquire().await.unwrap(), ws, theme.id)
+            .await
+            .unwrap();
+
+        let after = count(pool.clone()).await;
+
+        assert_eq!(before, Some(1));
+        let listed = used(&pool, ws, footer.id).await.templates.len();
+        assert_eq!(listed, 2);
+        assert_eq!(after, Some(i64::try_from(listed).unwrap()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_default_theme_without_a_footer_leaves_the_counts_to_the_blocks(pool: PgPool) {
+        use crate::themes::tests_support::{create as create_theme, publish as publish_theme};
+        let ws = workspace(&pool, "one").await;
+        let snippet = create(&pool, ws, "Offer").await;
+        let holder = create_template(&pool, ws, "Holder").await;
+        set_draft(&pool, ws, holder.id, &holding(snippet.id, false)).await;
+        let theme = create_theme(&pool, ws, "Plain").await;
+        publish_theme(&pool, ws, theme.id).await;
+        crate::set_default_theme(&mut pool.acquire().await.unwrap(), ws, theme.id)
+            .await
+            .unwrap();
+
+        let counts = snippet_template_counts(&pool, ws).await.unwrap();
+
+        assert_eq!(counts.get(&snippet.id), Some(&1));
     }
 
     #[sqlx::test]

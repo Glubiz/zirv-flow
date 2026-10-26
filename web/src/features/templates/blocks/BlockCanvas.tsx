@@ -16,6 +16,8 @@ interface Props {
   onDrop: (drag: Drag, drop: Drop) => void;
   onMove: (kind: "block" | "section", id: string, direction: "up" | "down") => void;
   onRemove: (kind: "block" | "section", id: string) => void;
+  /** One column of blocks with no section chrome: how a snippet is laid out. */
+  flat?: boolean;
 }
 
 /** A line of words that stands for a block on the canvas. The block is never rendered here; the preview is the server's. */
@@ -192,6 +194,21 @@ export function BlockCanvas(props: Props) {
     );
   }
 
+  if (props.flat) {
+    const column = content.sections[0]?.columns[0] ?? [];
+    return (
+      <div className={drag ? "be-canvas be-dragging" : "be-canvas"} role="group" aria-label="Canvas">
+        {column.length === 0 ? <EmptyState title="No blocks yet">Add a block from the palette, or drag one onto the canvas.</EmptyState> : null}
+        {slot({ kind: "column", section: 0, column: 0, index: 0 }, "Start of the snippet")}
+        {column.map((block, b) => (
+          <div key={block.id}>
+            {blockView(block, column.length, b)}
+            {slot({ kind: "column", section: 0, column: 0, index: b + 1 }, `After block ${ordinals.get(block.id) ?? 0}`)}
+          </div>
+        ))}
+      </div>
+    );
+  }
   if (content.sections.length === 0) {
     return (
       <div className="be-canvas" aria-label="Canvas">
