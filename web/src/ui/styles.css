@@ -3461,6 +3461,64 @@ main:focus {
   text-align: right;
 }
 
+.be-snippet {
+  border-style: dashed;
+  background: transparent;
+}
+
+.be-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.be-footer {
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.be-footer-off {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.be-lock {
+  display: inline-flex;
+  padding: 0 6px;
+  color: var(--ink-2);
+}
+
+.be-more {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.be-more > summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.be-more[open] > summary {
+  margin-bottom: 8px;
+}
+
+.tp-hidden {
+  margin: 0;
+}
+
+.tp-hidden .link-button {
+  margin-left: 8px;
+}
+
 /* Template library tabs */
 .library-nav {
   align-self: flex-start;
