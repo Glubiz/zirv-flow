@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 
 import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError } from "../../ui";
 import { useLeaveGuard } from "../segments";
-import { IssueList, TabBar, blockingCount } from "../templates";
+import { IssueList, TabBar, blockingCount, isBlocking } from "../templates";
 import { asTokens, isArchived, readTokens, statusText, type Theme, type ThemeDetail, type ThemeTokens } from "./model";
 import { ArchiveDialog, SetDefaultDialog, ThemeMenu } from "./ThemeActions";
 import { ThemePreviewPane, type PreviewState } from "./ThemePreview";
@@ -51,6 +51,7 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
   const [published, setPublished] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const usedBy = useThemeUsedBy(workspaceId, theme.id, reloadKey);
+  const [jump, setJump] = useState(0);
 
   const archived = isArchived(theme);
   const editable = canWrite && !archived;
@@ -167,7 +168,7 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
   }
 
   const guard = useLeaveGuard(editable && save !== "saved");
-  const issues = preview.status === "ready" ? preview.data.issues : [];
+  const issues = useMemo(() => (preview.status === "ready" ? preview.data.issues : []), [preview]);
   const blocking = blockingCount(issues);
   const warnings = issues.length - blocking;
   const canPublish = editable && !conflict && preview.status === "ready" && blocking === 0 && save === "saved" && !refreshing;
@@ -179,11 +180,25 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
         ? "Waiting for the draft to be saved."
         : "Waiting for the preview.";
 
+  const wantsWarning = useRef(false);
+
   function goToWarning() {
-    const target = page.current?.querySelector<HTMLElement>("[data-th-warning]") ?? page.current?.querySelector<HTMLElement>("[data-th-issues]");
-    target?.scrollIntoView({ block: "center" });
-    target?.focus();
+    wantsWarning.current = true;
+    setTab("editor");
+    setJump((n) => n + 1);
   }
+
+  useEffect(() => {
+    if (!wantsWarning.current || tab !== "editor") return;
+    wantsWarning.current = false;
+    const first = issues.findIndex((issue) => !isBlocking(issue));
+    const target =
+      page.current?.querySelector<HTMLElement>("[data-th-warning]") ?? page.current?.querySelectorAll<HTMLElement>("[data-th-issues] li")[first];
+    if (!target) return;
+    target.tabIndex = -1;
+    target.scrollIntoView({ block: "center" });
+    target.focus();
+  }, [jump, tab, issues]);
 
   return (
     <div className="tp-page" ref={page}>
