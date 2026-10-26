@@ -905,6 +905,9 @@ field with a patch is refused the same way. The key is also kept as the contact'
 identifier; changing the value of an identifier field (by `PUT`, `PATCH` or a bulk upsert)
 replaces the identity: the old one leaves the person unless another source's record of the
 person also lists it, so it is no longer found by search and can no longer merge people.
+If the definition drops an identifier field and no remaining field produces that identifier
+kind, a `PATCH` keeps its stored value and identity until a `PUT` or bulk upsert retracts the
+field.
 
 **Search.** `GET .../contacts/search?q=` matches a contact key by prefix and an email address
 or phone number exactly, after normalisation. The value is then in the URL and the access
@@ -1351,15 +1354,17 @@ user is under `ai.rate_limit_per_user_per_minute` and the workspace is under its
 (a calendar month in UTC; a budget of 0 allows no calls). A refused call sends nothing, records
 nothing and answers `402` (budget), `429` with `Retry-After` (rate limit), `409` (not enabled) or
 `422` (personal data without opt-in). Both counts are read from the call log in the database, so
-they hold across instances; a burst of simultaneous calls can overshoot either by the calls
-already in flight. The cost of a call is estimated from the reported tokens and the configured
-prices.
+they hold across instances. Calls in flight reserve the cost of the request's input-token upper
+bound and full output cap. A provider that reports usage above either bound can overrun the
+budget by the calls in flight; the reported usage is still recorded and counted as a provider
+fault. The cost of a call is estimated from the reported tokens and the configured prices.
 
 **The call log.** Every dispatched call writes a row with the workspace, user, feature,
 provider, model, token counts, estimated cost, latency and outcome, and never a prompt, an
-answer or an error body. The metrics are `zirv_flow_ai_calls_total{feature,outcome}` and
-`zirv_flow_ai_refusals_total{reason}`. The tests never call a real model: they use a fake
-provider and local mock servers.
+answer or an error body. The metrics are `zirv_flow_ai_calls_total{feature,outcome}`,
+`zirv_flow_ai_refusals_total{reason}` and `zirv_flow_ai_provider_faults_total{feature,reason}`
+(`usage_over_reservation` when reported usage exceeds the request's bounds). The tests never
+call a real model: they use a fake provider and local mock servers.
 
 
 ### Mapping and manifest assistant
@@ -2472,6 +2477,28 @@ For UI work, run the server (`cargo run -- all`), then in `web/` run `npm ci` on
 `npm run gen:api` regenerates the API client from `crates/zirv-flow-api/openapi.json`
 and `npm run gen:api:check` fails when it is stale. The Docker image and the release
 build compile the app first, so released binaries always carry it.
+
+### Browser tests
+
+Playwright drives Chromium against a test server that runs the end-to-end harness (architecture
+section 18). The server is the `zirv-flow-browser-test` binary of the `browser-test` cargo feature,
+which refuses to compile unless `ZIRV_FLOW_BROWSER_TEST_BUILD` is set; it is never part of the
+release build or the Docker image. It needs a PostgreSQL server (`DATABASE_URL`), on which it
+makes and drops its own scratch database.
+
+```sh
+npm --prefix web ci
+npm --prefix web run build            # the binary embeds web/dist
+ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo build --features browser-test --bin zirv-flow-browser-test
+npm --prefix web run e2e:install      # Chromium, once
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres npm --prefix web run e2e
+```
+
+Playwright starts the binary, waits for its `READY` line and generates a password for the run. The
+tests are in `web/e2e/`; `ZIRV_FLOW_BROWSER_TEST_PORT` (default 47700) and
+`ZIRV_FLOW_BROWSER_TEST_BIN` (the binary, default under `target/debug`) change where it runs.
+The run cleans up after itself: a global teardown asks the server to stop (`POST /__test/shutdown`)
+which answers once it has dropped its scratch database. CI runs the same steps in the `browser` job.
 
 ## Benchmarks
 

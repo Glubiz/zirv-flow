@@ -1690,7 +1690,7 @@ preview-equals-send test rely on this.
 
 - **Versions:** drafts are editable; publishing creates an immutable version. `action.send` references the template, not a version, and sends its current published version at send time, so a typo fix needs no flow republish. Publishing a template, snippet or theme returns the active flows that use it. Version history and where-used are available for templates, snippets and themes. A message row records `theme_id`, `theme_version` and `snippet_versions` (snippet id to version) beside `template_version`, and a test send records them too.
 - **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`; until M8 introduces that grant, owners and admins only) or a sample person built from registry types, at desktop and mobile widths (#307). The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks with their reasons and validation results.
-- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge.
+- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge. As built (#308): `template_preview_people` (migration 0064; `template_id`, `workspace_id`, `person_id`, `added_by`, `created_at`; primary key `(template_id, person_id)`) holds at most 20 rows per template, checked under the template row lock (`preview_people_limit`, 409). `GET`, `POST` and `DELETE /{person_id}` on `/templates/{id}/preview-people` are Admin only and audited as `template.preview_person_added` and `template.preview_person_removed` with ids only; a person already saved answers 200 and writes no second row or audit. The list shows each person with the strongest identifier masked as the people search masks it. The preview endpoint is unchanged: only an Admin previews a real person. A merge moves the loser's rows to the survivor in the merge transaction and drops a row when the survivor is already saved on that template.
 - **Assistant template drafts (#309):** a template tool (the ninth in the registry) drafts email copy, subject variants, block layouts and translations. The draft is an `ai_drafts` row of kind `template`, validated by template validation with bounded repair before it is stored. The response carries the field diff and a render diff at desktop and mobile widths. Accepting writes the template's ordinary draft after validation passes again and never publishes. An accepted translation updates only the current draft, including its `lang`; saving it as a new template is a separate marketer action.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
 - **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
@@ -2372,20 +2372,21 @@ database clock), so they hold across instances. The reservation is one transacti
 lock on the workspace: it counts every row, `pending` ones included, and inserts a `pending` row
 whose cost is the worst case (one input token per byte of the request text plus framing, the full
 output cap), and admits the call only when the month's spend plus that cost stays within the budget,
-so concurrent calls cannot all pass the gates and real spend never exceeds the budget. The call then
-runs in a task of its own, so a dropped handler cannot leave the row pending, and the row is
-finished with the real tokens and cost. A panic marks it `abandoned`; a process that dies mid-call
-leaves it `pending`, and the next reservation of the workspace marks `pending` rows older than the
-client timeout plus a margin `abandoned`. Both keep the worst-case cost, which is conservative and
-intended. Personal data is a
-distinct request content type (`Personal`), and a request builder at `SchemaOnly` privacy returns
-`PersonalDataNotAllowed` for it, so the check does not depend on the caller. Untrusted content is
-fenced in `<untrusted_data>` delimiters, with a system notice added whenever it appears. Bounded
-repair sends each attempt through the same gates. `ai_calls` has no column that can hold content
-(a test lists its columns); `ai_transcripts` carries `expires_at`, and the
-`maintenance.ai_transcripts` job, scheduled hourly by the migration, deletes expired rows in batches.
-Erasing a person deletes the workspace's transcripts whose text contains their ids or identifier
-values, ignoring case, in the erase transaction.
+so concurrent calls cannot all pass the gates. A provider that reports usage above either bound can
+overrun the budget by the calls in flight. The reported usage is still recorded and increments
+`zirv_flow_ai_provider_faults_total{feature,reason="usage_over_reservation"}`, with a content-free
+warning. The call then runs in a task of its own, so a dropped handler cannot leave the row pending,
+and the row is finished with the real tokens and cost. A panic marks it `abandoned`; a process that
+dies mid-call leaves it `pending`, and the next reservation of the workspace marks `pending` rows
+older than the client timeout plus a margin `abandoned`. Both keep the worst-case cost, which is
+conservative and intended. Personal data is a distinct request content type (`Personal`), and a
+request builder at `SchemaOnly` privacy returns `PersonalDataNotAllowed` for it, so the check does
+not depend on the caller. Untrusted content is fenced in `<untrusted_data>` delimiters, with a
+system notice added whenever it appears. Bounded repair sends each attempt through the same gates.
+`ai_calls` has no column that can hold content (a test lists its columns); `ai_transcripts` carries
+`expires_at`, and the `maintenance.ai_transcripts` job, scheduled hourly by the migration, deletes
+expired rows in batches. Erasing a person deletes the workspace's transcripts whose text contains
+their ids or identifier values, ignoring case, in the erase transaction.
 
 As built (M3, #93): the two dispatch residuals are closed. The reservation now runs in the same
 spawned task as the provider call, so a dropped handler cannot leave a reserved row without a
@@ -2726,8 +2727,8 @@ identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
 segment memberships, enrollments, step executions, enrollment waits, flow entries, messages, test-send log entries,
 person-scoped decision records, stored assistant transcripts, pending
-and dead forwarding payloads and pending exports, and clear saved preview-person
-references; (4) call `erase` on forwarding and delivery destinations that
+and dead forwarding payloads and pending exports, and delete saved preview-person
+rows (`template_preview_people`); (4) call `erase` on forwarding and delivery destinations that
 declare it and record results; (5) delete the person; (6) write an audit entry
 without personal data. Templates,
 snippets, themes and assets hold no personal data by design. Each milestone
@@ -2881,6 +2882,8 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | Browser end-to-end | Playwright (`@playwright/test`, Chromium only) in `web/e2e` (#315, #316). A test-only server binary behind a cargo feature (like the bench-feature gate) boots the Rust e2e harness (`crates/zirv-flow/src/e2e/`) on a port with the fixture DNS resolver and the in-process SMTP sink, and seeds a workspace, an owner, a verified domain, a sender, an SMTP destination and the allowlist. A test-only route exposes the sink's captured messages. A CI job runs it. One test builds the reference newsletter through the UI with a theme, a snippet and an uploaded asset, test-sends it, and compares the captured HTML with the preview render, normalising only the tracking tokens; another puts a script in a raw HTML block and checks in the real browser that it never runs in the app preview |
 | Performance | Load generator and benchmarks per milestone slice; full validation in M8 |
 | Gates | The M0 CI gates (fmt, clippy, nextest, test-presence, advisory security scan) apply to every PR; from M1, the crate-dependency allowlist, purity check and frontend import-boundary lint in section 5.5 are also required |
+
+**As built (#315): browser end-to-end tests.** The `zirv-flow` crate has a cargo feature `browser-test`, never a default feature, which adds the binary `zirv-flow-browser-test` (`src/browser_test/`, `required-features`) and turns on `test-support` of the connectors and store crates as optional dependencies. The binary includes `e2e/harness.rs` and `e2e/mail.rs` by path and builds the harness `World` on the real (database) clock with the real worker pool, the render host (the binary answers its own `render-host` argument), the fixture DNS resolver and the in-process `SmtpSink`; the parts only the send test needs stay under `cfg(test)`. The feature refuses to compile unless `ZIRV_FLOW_BROWSER_TEST_BUILD` is set at build time (an inline `option_env!` assertion in the `main.rs` of the server binary and of the main binary), and `scripts/check-bench-features.sh` fails when the feature name, the variable or the binary name appears in a shipped build input (any workflow but `ci.yaml`, a Dockerfile, a compose file, cargo config, a script those invoke), when a `Cargo.toml` lists `browser-test` among its default features, when the guard does not stop a build without the variable, or when the default `zirv-flow` binary contains the `/__test/` string; a unit test of the main binary proves the router has no such route. At boot the server binds `127.0.0.1` (port 47700, `ZIRV_FLOW_BROWSER_TEST_PORT` overrides), creates a scratch database `zf_browser_<pid>_<random>` on the server `DATABASE_URL` names, migrates it and drops it (with `FORCE`) on exit; no other database is touched. It seeds the workspace `acme`, the instance owner `owner@browser-test.example` (a workspace admin) whose password is the run's `ZIRV_FLOW_BROWSER_TEST_PASSWORD` (Playwright generates it with `crypto.randomBytes` per run; it is never written down), a verified sending domain with a sender identity, an SMTP destination on the sink and one test-send allowlist address, prints one line `READY http://127.0.0.1:<port>`, and serves the embedded `web/dist` and the API. `GET /__test/sink` returns the captured messages as JSON (`recipients`, `headers` as name and value pairs, `html`, `text`), `DELETE /__test/sink` clears them and `POST /__test/shutdown` finishes the worker, closes the pool and drops the scratch database while still serving, answers 200 only once that succeeded (500 with the reason otherwise) and then stops the server (the Playwright global teardown calls it and fails the run on any other answer, so the database is dropped even on Windows, which has no signal); all are mounted on the same loopback listener, by the test binary only. SIGINT, SIGTERM and Ctrl-C stop it cleanly. Playwright (`@playwright/test`, Chromium only, `web/e2e/`) starts the binary through `webServer`, signs in through the real sign-in page, and the `browser` job of `ci.yaml` runs it on pull requests against PostgreSQL 16 and uploads the report on failure.
 
 ## 19. Scalability envelope
 

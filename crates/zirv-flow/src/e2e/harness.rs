@@ -7,46 +7,57 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, StatusCode, header};
+#[cfg(test)]
+use axum::http::HeaderMap;
+use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+#[cfg(test)]
 use time::OffsetDateTime;
+#[cfg(test)]
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
+#[cfg(test)]
 use uuid::Uuid;
 use zirv_flow_api::AppState;
 use zirv_flow_api::admin::{self, Context};
-use zirv_flow_connectors::destinations::{
-    FakeProvider, FakeProviderOptions, SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink,
-    SmtpSinkOptions,
-};
-use zirv_flow_connectors::dns::FixtureResolver;
-use zirv_flow_core::{
-    HmacPurpose, HmacRoot, Keyring, MasterKey, Scope, Slug, WorkspaceId, WorkspaceName,
-    deployment_key_aad,
+#[cfg(test)]
+use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+use zirv_flow_jobs::test_support::{
+    FixtureResolver, SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions,
 };
 use zirv_flow_jobs::{Registry, Worker, WorkerConfig};
 use zirv_flow_render::{PoolConfig, RenderPool};
-use zirv_flow_store::{Clock, ManualClock, secrets};
+#[cfg(test)]
+use zirv_flow_store::ManualClock;
+use zirv_flow_store::{
+    Clock, HmacPurpose, HmacRoot, Keyring, MasterKey, Scope, Slug, WorkspaceId, WorkspaceName,
+    deployment_key_aad, secrets,
+};
 
 /// Where browsers reach the server in this world: tracking links are built on it.
+#[cfg(test)]
 pub(super) const PUBLIC_URL: &str = "https://flow.example.test";
 
 /// The provider's signing secret and API token. They only ever appear inside the sealed
 /// credential, so the privacy scan can look for them.
+#[cfg(test)]
 pub(super) const PROVIDER_TOKEN: &str = "zz-e2e-provider-token-0815";
+#[cfg(test)]
 pub(super) const PROVIDER_SECRET: &str = "zz-e2e-feedback-secret-4711";
 
 /// The provider manifest the fake provider stands in for.
+#[cfg(test)]
 const PROVIDER_MANIFEST: &str =
     include_str!("../../../zirv-flow-connectors/tests/fixtures/providers/bearer_timestamped.json");
 
 /// What one API call answered.
 pub(super) struct Reply {
     pub(super) status: StatusCode,
+    #[cfg(test)]
     pub(super) headers: HeaderMap,
     pub(super) body: Value,
     pub(super) text: String,
@@ -68,6 +79,7 @@ pub(super) async fn call(
 }
 
 /// One request with a form body, as a browser or a mail client posts it.
+#[cfg(test)]
 pub(super) async fn call_form(router: &Router, method: &str, uri: &str, form: &str) -> Reply {
     send(
         router,
@@ -101,6 +113,7 @@ async fn send(
         .await
         .expect("the router answers");
     let status = response.status();
+    #[cfg(test)]
     let headers = response.headers().clone();
     let bytes = response
         .into_body()
@@ -110,6 +123,7 @@ async fn send(
         .to_bytes();
     Reply {
         status,
+        #[cfg(test)]
         headers,
         body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         text: String::from_utf8_lossy(&bytes).into_owned(),
@@ -123,9 +137,12 @@ pub(super) struct World {
     /// A key with every scope but ingest.
     pub(super) admin: String,
     /// A write-only key for the ingest endpoints.
+    #[cfg(test)]
     pub(super) ingest: String,
+    #[cfg(test)]
     pub(super) clock: ManualClock,
     pub(super) sink: SmtpSink,
+    #[cfg(test)]
     pub(super) provider: FakeProvider,
     pub(super) dns: FixtureResolver,
     render: RenderPool,
@@ -134,8 +151,10 @@ pub(super) struct World {
 }
 
 impl World {
-    /// Builds the database content every scenario starts from, and starts the worker.
-    pub(super) async fn start(pool: PgPool) -> Self {
+    /// Builds the database content every scenario starts from, and starts the worker. Links are
+    /// built on `public_url`. Tests run on a clock they move; the browser test server on the
+    /// database clock, which is the real one.
+    pub(super) async fn start(pool: PgPool, public_url: &str) -> Self {
         zirv_flow_store::migrate(&pool).await.expect("migrations");
         let master = MasterKey::parse("BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=").expect("key");
         let keyring = Arc::new(Keyring::new(master, None).expect("a keyring"));
@@ -157,7 +176,12 @@ impl World {
         .expect("a workspace")
         .id;
 
-        let clock = ManualClock::new(OffsetDateTime::now_utc());
+        #[cfg(test)]
+        let manual = ManualClock::new(OffsetDateTime::now_utc());
+        #[cfg(test)]
+        let clock = Clock::Manual(manual.clone());
+        #[cfg(not(test))]
+        let clock = Clock::Database;
         let render = RenderPool::start(
             crate::render_host_command(std::env::current_exe().expect("this executable"), 0),
             PoolConfig {
@@ -174,8 +198,9 @@ impl World {
         let state = AppState::new(pool.clone(), Arc::new(String::new))
             .with_hmac_root(&root)
             .with_keyring(Arc::clone(&keyring))
-            .with_public_url(Some(PUBLIC_URL.to_owned()))
-            .with_clock(Clock::Manual(clock.clone()))
+            .with_public_url(Some(public_url.to_owned()))
+            .with_cookie_secure(public_url.starts_with("https:"))
+            .with_clock(clock.clone())
             .with_render_pool(render.clone())
             .with_egress_policy(Arc::clone(&loopback));
         let router = zirv_flow_api::router(state);
@@ -190,18 +215,20 @@ impl World {
             }
         };
         let admin_key = key("e2e", &[Scope::Admin, Scope::Write, Scope::Read]).await;
+        #[cfg(test)]
         let ingest = key("e2e ingest", &[Scope::Ingest]).await;
 
         let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        #[cfg(test)]
         let provider = FakeProvider::start(FakeProviderOptions::default()).await;
         let dns = FixtureResolver::new();
 
         let mut config = WorkerConfig::new(1);
         config.poll_interval = Duration::from_millis(50);
-        config.clock = Clock::Manual(clock.clone());
+        config.clock = clock;
         config.render_pool = Some(render.clone());
         config.dns = Some(Arc::new(dns.clone()));
-        config.public_url = Some(PUBLIC_URL.to_owned());
+        config.public_url = Some(public_url.to_owned());
         config.keyring = Some(keyring);
         config.egress = loopback;
         config.redaction_key = Some(Arc::new(root.hmac_key(HmacPurpose::Redaction)));
@@ -216,9 +243,12 @@ impl World {
             router,
             ws,
             admin: admin_key,
+            #[cfg(test)]
             ingest,
-            clock,
+            #[cfg(test)]
+            clock: manual,
             sink,
+            #[cfg(test)]
             provider,
             dns,
             render,
@@ -298,6 +328,7 @@ impl World {
     }
 
     /// One row count.
+    #[cfg(test)]
     pub(super) async fn count(&self, sql: &str) -> i64 {
         sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(&self.pool)
@@ -392,6 +423,7 @@ impl World {
     }
 
     /// The manifest of the provider destination, pointed at the fake provider.
+    #[cfg(test)]
     pub(super) fn provider_config(&self) -> Value {
         let text = PROVIDER_MANIFEST.replace(
             "https://api.fixture-provider.example.test",
@@ -402,6 +434,7 @@ impl World {
 
     /// A provider destination on the fake provider, with a credential holding the API token and
     /// the signing secret of the feedback webhook.
+    #[cfg(test)]
     pub(super) async fn provider_destination(&self) -> String {
         let fields: Vec<Value> = ["token", "feedback_secret"]
             .iter()
@@ -438,6 +471,7 @@ impl World {
     }
 
     /// Creates and publishes an email template; returns its id.
+    #[cfg(test)]
     pub(super) async fn template(&self, name: &str, document: Value) -> String {
         let created = self
             .api_ok(
@@ -459,6 +493,7 @@ impl World {
     }
 
     /// Creates a segment; returns its id.
+    #[cfg(test)]
     pub(super) async fn segment(&self, name: &str, definition: Value) -> String {
         let created = self
             .api_ok(
@@ -472,6 +507,7 @@ impl World {
     }
 
     /// Creates and publishes a flow; returns its id.
+    #[cfg(test)]
     pub(super) async fn flow(&self, name: &str, graph: Value, settings: Value) -> String {
         let created = self
             .api_ok(
@@ -493,6 +529,7 @@ impl World {
     }
 
     /// The only person of the workspace.
+    #[cfg(test)]
     pub(super) async fn the_person(&self) -> Uuid {
         sqlx::query_scalar("SELECT id FROM people")
             .fetch_one(&self.pool)
@@ -502,6 +539,7 @@ impl World {
 
     /// Identifies the person with `address` through the ingest endpoint and subscribes them to
     /// email. Returns their id.
+    #[cfg(test)]
     pub(super) async fn subscribed_person(&self, address: &str) -> Uuid {
         let identify = call(
             &self.router,
@@ -526,6 +564,7 @@ impl World {
 
     /// A minute on, a track call of the `order_placed` event for `address`. Returns the trace id
     /// the call answered with.
+    #[cfg(test)]
     pub(super) async fn track_order(&self, address: &str) -> String {
         self.clock.advance(time::Duration::minutes(1));
         let at = self.clock.now().format(&Rfc3339).expect("a time");
@@ -548,6 +587,7 @@ impl World {
     }
 
     /// Publishes an event name that carries no properties, so segments can name it.
+    #[cfg(test)]
     pub(super) async fn event_schema(&self, name: &str) {
         self.api_ok(
             "POST",
@@ -575,7 +615,7 @@ mod tests {
     async fn the_world_starts_and_a_sending_domain_verifies_through_the_fixture_resolver(
         pool: PgPool,
     ) {
-        let world = World::start(pool).await;
+        let world = World::start(pool, PUBLIC_URL).await;
 
         let (identity, dkim) = world
             .verified_sender("example.com", "news@example.com")

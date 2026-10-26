@@ -130,6 +130,7 @@ const DELETIONS: &[&str] = &[
         (SELECT id FROM messages WHERE workspace_id = $1 AND person_id = ANY($2))",
     "DELETE FROM messages WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2)",
+    "DELETE FROM template_preview_people WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM segment_members WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM list_member_changes WHERE workspace_id = $1 AND person_id = ANY($2)",
     "DELETE FROM consent WHERE workspace_id = $1 AND person_id = ANY($2)",
@@ -498,6 +499,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "only the bystander's membership is left");
+        let saved: Vec<Uuid> = sqlx::query_scalar("SELECT person_id FROM template_preview_people")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            saved,
+            [bystander],
+            "only the bystander stays a preview person"
+        );
     }
 
     #[sqlx::test]

@@ -372,6 +372,14 @@ fn routes() -> Router<AppState> {
             post(templates::preview::preview),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/preview-people",
+            get(templates::preview_people::list).post(templates::preview_people::add),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}",
+            delete(templates::preview_people::remove),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/templates/{id}/test-send",
             post(test_sends::test_send),
         )
