@@ -756,6 +756,7 @@ fn http_state(
         .with_event_retention(config.events_retention())
         .with_ingest_limits(config.ingest_limits())
         .with_import_limits(config.import_limits())
+        .with_asset_limits(config.asset_limits())
         .with_explorer_limits(config.explorer_limits())
         .with_egress_policy(config.egress_policy())
         .with_public_url(config.public_url())

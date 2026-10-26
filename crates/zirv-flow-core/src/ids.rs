@@ -74,6 +74,11 @@ id_type!(
     "secret_id"
 );
 id_type!(
+    /// The id of an uploaded image asset.
+    AssetId,
+    "asset_id"
+);
+id_type!(
     /// The id of an API key; part of the key's public prefix.
     ApiKeyId,
     "api_key_id"
