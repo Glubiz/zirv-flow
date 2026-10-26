@@ -2962,7 +2962,8 @@ export interface paths {
         post?: never;
         /**
          * Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused
-         *     while the draft of a template holds a block for it. Audited as `snippet.archived`.
+         *     while the draft of a template holds a block for it, or the published version of a theme uses it
+         *     as its footer. Audited as `snippet.archived`.
          */
         delete: operations["archive_snippet"];
         options?: never;
@@ -3804,6 +3805,192 @@ export interface paths {
          *     limits `POST .../test-send` enforces, counted in the same window.
          */
         get: operations["test_send_quota"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's live themes by name; archived ones with `archived=true`. */
+        get: operations["list_themes"];
+        put?: never;
+        /** Creates a theme with its first draft. Audited as `theme.created`. */
+        post: operations["create_theme"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/default": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Makes a published theme the workspace default, replacing the previous one. Emails that follow
+         *     the default use the theme's current version at their next render; emails that name a theme are
+         *     unchanged. The theme must be a live, published theme of the workspace, else 409
+         *     `theme_not_publishable_default`. Audited as `theme.default_set`.
+         */
+        put: operations["set_default_theme"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One theme with its draft. */
+        get: operations["get_theme"];
+        /** Renames a theme. */
+        put: operations["update_theme"];
+        post?: never;
+        /**
+         * Archives a theme. Nothing is deleted: the draft and the versions stay readable, and a template
+         *     that names the theme still renders with it. Refused while the theme is the workspace default.
+         *     Audited as `theme.archived`.
+         */
+        delete: operations["archive_theme"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replaces the theme's draft. The draft is not validated beyond being a set of known tokens: a
+         *     theme is edited in steps, and the publish checks it. Audited as `theme.draft_saved`.
+         */
+        put: operations["save_theme_draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Renders the sample document under the draft tokens, or under a published version's, for the
+         *     sample person. Tokens with blocking issues are not rendered: the response lists the issues and
+         *     `rendered` is false. A logo that is not a live asset is shown as a stand-in image, and a footer
+         *     snippet that cannot be used is left out, each with a warning (`broken_asset_reference`,
+         *     `broken_snippet_reference`). A render that fails its limits (memory, deadline) or whose host
+         *     dies is a problem document, and the next preview works.
+         */
+        post: operations["preview_theme"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publishes the draft as the next immutable version. The tokens are checked by the renderer's
+         *     theme rules (colours, width, font, URL and ids; contrast below WCAG AA is a warning and never
+         *     blocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the
+         *     footer a snippet of the workspace that is not archived and has a published version
+         *     (`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue
+         *     and writes nothing. The logo's asset reference is written with the version. The response lists
+         *     the templates and active flows that use the theme. Audited as `theme.published`.
+         */
+        post: operations["publish_theme"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The versions of a theme, newest first. */
+        get: operations["list_theme_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}/versions/{n}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of a theme. */
+        get: operations["get_theme_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/themes/{id}/where-used": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The templates that name a theme, the templates that follow it as the default, and the active
+         *     flows that send them.
+         */
+        get: operations["theme_where_used"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5076,6 +5263,16 @@ export interface components {
              * @example Order shipped
              */
             name: string;
+        };
+        CreateThemeRequest: {
+            /**
+             * @description 1 to 100 characters after trimming; unique among the workspace's live themes, ignoring
+             *     case.
+             * @example Brand
+             */
+            name: string;
+            /** @description The first draft: any of the tokens, the rest take their defaults. Absent: all defaults. */
+            tokens?: Record<string, never> | null;
         };
         CreateTopicRequest: {
             /**
@@ -6930,6 +7127,13 @@ export interface components {
              */
             reason: string;
         };
+        /** @description A section or block left out of the render, and why. */
+        HiddenBlockBody: {
+            /** @description The id of the section or block. */
+            id: string;
+            /** @description Which condition was not met, by name; never a value. */
+            reason: string;
+        };
         HistoryBody: {
             /** @description Newest first. */
             entries: components["schemas"]["HistoryEntryBody"][];
@@ -7410,6 +7614,7 @@ export interface components {
              * @example no_consent
              */
             reason?: string | null;
+            rendered_with?: null | components["schemas"]["RenderedWithBody"];
             /**
              * @description `pending`, `sending`, `sent`, `skipped` or `failed`.
              * @example skipped
@@ -7819,6 +8024,8 @@ export interface components {
             request_id?: string | null;
             /** @description The templates whose drafts hold a block for a snippet (`snippet_in_use`). */
             snippet_templates?: components["schemas"]["SegmentRefProblem"][] | null;
+            /** @description The themes whose published version uses a snippet as its footer (`snippet_in_use`). */
+            snippet_themes?: components["schemas"]["SegmentRefProblem"][] | null;
             /** Format: int32 */
             status: number;
             /**
@@ -8137,6 +8344,22 @@ export interface components {
             /** @description At most 1000. */
             person_ids: string[];
         };
+        /** @description A theme or snippet and the version a message was rendered with. */
+        RenderedVersionBody: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            version: number;
+        };
+        /**
+         * @description What a message was rendered with, beyond its template version. Present once the message was
+         *     rendered.
+         */
+        RenderedWithBody: {
+            /** @description The snippets it used, by id. */
+            snippets: components["schemas"]["RenderedVersionBody"][];
+            theme?: null | components["schemas"]["RenderedVersionBody"];
+        };
         ReplayBody: {
             dry_run: boolean;
             /** @description The predictions of a dry run, in the order of the rejects; empty for a real run. */
@@ -8406,6 +8629,16 @@ export interface components {
         SaveTemplateDraftRequest: {
             /** @description The content document. */
             document: Record<string, never>;
+        };
+        SaveThemeDraftRequest: {
+            /**
+             * Format: int32
+             * @description The revision the caller read. When it is not the draft's current revision the save is a
+             *     409 `theme_revision_mismatch` and nothing is written. Absent: save regardless.
+             */
+            revision?: number | null;
+            /** @description The tokens: any of them, the rest take their defaults. */
+            tokens: Record<string, never>;
         };
         /** @description A list of fields: the shape of one credential. */
         SchemaBody: {
@@ -8933,6 +9166,13 @@ export interface components {
             /** @description The topic to change; absent changes the channel as a whole. */
             topic_key?: string | null;
         };
+        SetDefaultThemeRequest: {
+            /**
+             * Format: uuid
+             * @description A published, live theme of the workspace.
+             */
+            theme_id: string;
+        };
         SetRoleRequest: {
             /** @description `admin` or `member`. */
             role: string;
@@ -9186,7 +9426,11 @@ export interface components {
              *     in a section column.
              */
             templates: components["schemas"]["SnippetTemplateBody"][];
-            /** @description Themes that use it as their footer. Always empty until themes exist (#304). */
+            /**
+             * @description Themes, not archived, whose draft or current version names it as their footer. When the
+             *     default theme is one of them, the templates that follow the default are listed in
+             *     `templates` too.
+             */
             themes: components["schemas"]["SnippetThemeBody"][];
         };
         /** @description One immutable published version. */
@@ -9561,6 +9805,8 @@ export interface components {
             content_type: string;
             /** @description An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers. */
             headers: components["schemas"]["TemplateHeaderBody"][];
+            /** @description The sections and blocks this person does not see because their `visible_if` was false. */
+            hidden_blocks: components["schemas"]["HiddenBlockBody"][];
             /** @description An email's HTML, with inert tracking links. */
             html?: string | null;
             /** @description The same checks a publish makes, against the workspace's fields now. */
@@ -9598,6 +9844,8 @@ export interface components {
         /** @description The new version and the template after the publish. */
         TemplatePublishedBody: {
             template: components["schemas"]["TemplateBody"];
+            /** @description The active flows that send this template, which now send the new version. */
+            used_by: components["schemas"]["TemplateUseBody"][];
             version: components["schemas"]["TemplateVersionBody"];
         };
         /** @description One flow with a version that names the template. */
@@ -9778,6 +10026,143 @@ export interface components {
             next_before?: string | null;
             /** @description Newest first. */
             test_sends: components["schemas"]["TestSendBody"][];
+        };
+        ThemeBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The newest published version; null before the first publish.
+             */
+            current_version?: number | null;
+            /** Format: uuid */
+            id: string;
+            /** @description Whether emails that follow the default theme use this one. */
+            is_default: boolean;
+            /** @example Brand */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description A theme with its draft. */
+        ThemeDetailBody: components["schemas"]["ThemeBody"] & {
+            draft: components["schemas"]["ThemeDraftBody"];
+        };
+        /** @description The one editable copy of a theme's tokens. */
+        ThemeDraftBody: {
+            /**
+             * Format: int32
+             * @description How many times the draft has been saved; the first save is 1. Send it back as `revision`
+             *     to save only if nobody saved in between.
+             */
+            revision: number;
+            /** @description The tokens. They may fail the publish checks; only a publish validates them fully. */
+            tokens: Record<string, never>;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: uuid */
+            updated_by?: string | null;
+        };
+        /** @description An active flow that sends a template that uses the theme. */
+        ThemeFlowBody: {
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+            /** @description `published` or `paused`. */
+            flow_state: string;
+            /** @description The templates of the flow that use the theme. */
+            template_ids: string[];
+        };
+        /** @description The rendered sample and the theme's validation results. */
+        ThemePreviewBody: {
+            /** @description The sample document's HTML, with inert tracking links. */
+            html?: string | null;
+            /**
+             * @description The checks a publish makes. A logo or footer that cannot be used is a warning here: the
+             *     preview shows a stand-in logo or no footer.
+             */
+            issues: components["schemas"]["TemplateIssueProblem"][];
+            /** @description False when the tokens have blocking issues, so nothing was rendered. */
+            rendered: boolean;
+            /** @description `draft` or `version`. */
+            source: string;
+            /** @description The sample document's text part. */
+            text?: string | null;
+            /** Format: int32 */
+            version?: number | null;
+        };
+        ThemePreviewRequest: {
+            /**
+             * Format: int32
+             * @description Preview this published version. Absent: the draft.
+             */
+            version?: number | null;
+        };
+        /** @description The new version, the theme after the publish, and what uses the theme. */
+        ThemePublishedBody: {
+            theme: components["schemas"]["ThemeBody"];
+            /** @description What picks the new version up: later renders use it without a template being republished. */
+            used_by: components["schemas"]["ThemeUsedByBody"];
+            version: components["schemas"]["ThemeVersionBody"];
+        };
+        /** @description A template whose draft or current version uses the theme. */
+        ThemeTemplateBody: {
+            /** Format: uuid */
+            id: string;
+            /** @description Whether the template's current version uses the theme. */
+            in_current: boolean;
+            /** @description Whether the template's draft uses the theme. */
+            in_draft: boolean;
+            name: string;
+        };
+        /** @description Everything that uses a theme. */
+        ThemeUsedByBody: {
+            /**
+             * @description Flows whose running version names a template of either list. A flow that does not run it
+             *     now, and an archived flow, is not listed.
+             */
+            active_flows: components["schemas"]["ThemeFlowBody"][];
+            /**
+             * @description Block templates, not archived, whose draft or current version follows the workspace
+             *     default (`theme` absent or `"default"`). Empty unless this theme is the default.
+             */
+            default_templates: components["schemas"]["ThemeTemplateBody"][];
+            /** @description Templates, not archived, whose draft or current version names the theme. */
+            named_templates: components["schemas"]["ThemeTemplateBody"][];
+        };
+        /** @description One immutable published version. */
+        ThemeVersionBody: {
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** @description The tokens as they were published. */
+            tokens: Record<string, never>;
+            /** Format: int32 */
+            version: number;
+            /** @description The warnings found when it was published; a blocking issue refuses the publish. */
+            warnings: components["schemas"]["TemplateIssueProblem"][];
+        };
+        /** @description One published version in the history list: no tokens, which `GET .../versions/{n}` returns. */
+        ThemeVersionSummaryBody: {
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
+            /**
+             * Format: int64
+             * @description The warnings stored with the version.
+             */
+            warnings: number;
         };
         TimelineBody: {
             /** @description Newest first. */
@@ -10063,6 +10448,9 @@ export interface components {
         UpdateTemplateRequest: {
             name?: string | null;
             utm?: null | components["schemas"]["TemplateUtmRequest"];
+        };
+        UpdateThemeRequest: {
+            name: string;
         };
         UpdateTopicRequest: {
             archived?: boolean | null;
@@ -22672,7 +23060,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The snippet is already archived (`snippet_archived`), or template drafts hold it (`snippet_in_use`, with `snippet_templates`) */
+            /** @description The snippet is already archived (`snippet_archived`), or template drafts or published theme footers use it (`snippet_in_use`, with `snippet_templates` and `snippet_themes`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -26111,6 +26499,784 @@ export interface operations {
                 };
             };
             /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_themes: {
+        parameters: {
+            query?: {
+                /** @description Include archived themes; default false */
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The themes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeBody"][];
+                };
+            };
+            /** @description archived is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateThemeRequest"];
+            };
+        };
+        responses: {
+            /** @description The new theme with its draft */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live theme has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, or tokens that are not a theme (`theme_malformed`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    set_default_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetDefaultThemeRequest"];
+            };
+        };
+        responses: {
+            /** @description The new default theme */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The theme is not a published, live theme of the workspace (`theme_not_publishable_default`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The theme */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateThemeRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated theme */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live theme has that name, or the theme is archived (`theme_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived theme */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The theme is already archived (`theme_archived`), or is the workspace default (`theme_is_default`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    save_theme_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveThemeDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The theme with its saved draft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The theme is archived (`theme_archived`), or the draft is not at the `revision` named (`theme_revision_mismatch`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Tokens that are not a theme (`theme_malformed`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    preview_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ThemePreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description The rendered sample and the validation results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemePreviewBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, theme or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The renderer refused the sample (`template_render_failed`), or it used too much memory or time (`render_memory_limit`, `render_deadline`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The render host answered unusably (`render_protocol`) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    publish_theme: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The theme, its new version and what uses it */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemePublishedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The theme is archived (`theme_archived`), or its draft was saved while it was being validated (`theme_draft_changed`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft has blocking issues (`theme_invalid`, with `template_issues`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Rendering is not available (`render_unavailable`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_theme_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions without their tokens, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeVersionSummaryBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_theme_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, theme or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    theme_where_used: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Theme id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What uses the theme */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ThemeUsedByBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or theme, or no access */
             404: {
                 headers: {
                     [name: string]: unknown;

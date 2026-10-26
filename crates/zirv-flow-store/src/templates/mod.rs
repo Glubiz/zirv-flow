@@ -12,6 +12,7 @@
 
 mod catalog;
 mod crud;
+mod extras;
 mod preview_people;
 mod publish;
 mod where_used;
@@ -22,6 +23,7 @@ pub use crud::{
     create_template, document_sender, find_template, find_template_draft, list_templates,
     save_template_draft, update_template,
 };
+pub use extras::{ExtrasRequest, LoadedInputs, LoadedSnippet, ThemeRequest, load_render_inputs};
 pub(crate) use preview_people::move_to_survivor;
 pub use preview_people::{
     MAX_PREVIEW_PEOPLE, PreviewPerson, PreviewPersonError, add_preview_person, list_preview_people,
@@ -31,7 +33,7 @@ pub use publish::{
     LockedTemplate, TemplateVersion, TemplateVersionSummary, find_template_version,
     list_template_versions, lock_template, publish_template,
 };
-pub use where_used::{TemplateUse, template_where_used};
+pub use where_used::{TemplateFlowUse, TemplateUse, active_flows_using, template_where_used};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]

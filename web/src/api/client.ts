@@ -71,16 +71,19 @@ export async function unwrapEmpty(call: Promise<Result<unknown>>): Promise<void>
 /**
  * Sends `file` as the raw body of a POST, with the CSRF token, and reports how much has gone
  * out. `fetch` cannot report upload progress, so this one call uses XMLHttpRequest. Resolves
- * with the parsed JSON answer; rejects with an ApiError for a problem answer.
+ * with the parsed JSON answer; rejects with an ApiError for a problem answer. Aborting `options.signal`
+ * cancels the request and rejects; `options.onStatus` is told the status of a successful answer.
  */
 export function uploadFile<T>(
   url: string,
   file: Blob,
   contentType: string,
   onProgress?: (sent: number, total: number) => void,
+  options: { signal?: AbortSignal; onStatus?: (status: number) => void } = {},
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const request = new XMLHttpRequest();
+    options.signal?.addEventListener("abort", () => request.abort(), { once: true });
     request.open("POST", url);
     request.setRequestHeader("Content-Type", contentType);
     if (csrfToken !== null) {
@@ -101,6 +104,7 @@ export function uploadFile<T>(
         body = request.responseText;
       }
       if (request.status >= 200 && request.status < 300) {
+        options.onStatus?.(request.status);
         resolve(body as T);
         return;
       }
@@ -109,6 +113,10 @@ export function uploadFile<T>(
       }
       reject(problemFrom(body, new Response(null, { status: request.status === 0 ? 500 : request.status })));
     };
+    if (options.signal?.aborted) {
+      reject(new Error("The upload was cancelled."));
+      return;
+    }
     request.send(file);
   });
 }

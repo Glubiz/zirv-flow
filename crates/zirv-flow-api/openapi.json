@@ -18227,7 +18227,7 @@
         "tags": [
           "snippets"
         ],
-        "summary": "Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused\nwhile the draft of a template holds a block for it. Audited as `snippet.archived`.",
+        "summary": "Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused\nwhile the draft of a template holds a block for it, or the published version of a theme uses it\nas its footer. Audited as `snippet.archived`.",
         "operationId": "archive_snippet",
         "parameters": [
           {
@@ -18293,7 +18293,7 @@
             }
           },
           "409": {
-            "description": "The snippet is already archived (`snippet_archived`), or template drafts hold it (`snippet_in_use`, with `snippet_templates`)",
+            "description": "The snippet is already archived (`snippet_archived`), or template drafts or published theme footers use it (`snippet_in_use`, with `snippet_templates` and `snippet_themes`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -23431,6 +23431,1167 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/themes": {
+      "get": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "The workspace's live themes by name; archived ones with `archived=true`.",
+        "operationId": "list_themes",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived themes; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The themes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThemeBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Creates a theme with its first draft. Audited as `theme.created`.",
+        "operationId": "create_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateThemeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new theme with its draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live theme has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, or tokens that are not a theme (`theme_malformed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/default": {
+      "put": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Makes a published theme the workspace default, replacing the previous one. Emails that follow\nthe default use the theme's current version at their next render; emails that name a theme are\nunchanged. The theme must be a live, published theme of the workspace, else 409\n`theme_not_publishable_default`. Audited as `theme.default_set`.",
+        "operationId": "set_default_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDefaultThemeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The new default theme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The theme is not a published, live theme of the workspace (`theme_not_publishable_default`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}": {
+      "get": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "One theme with its draft.",
+        "operationId": "get_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The theme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Renames a theme.",
+        "operationId": "update_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateThemeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated theme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another live theme has that name, or the theme is archived (`theme_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Archives a theme. Nothing is deleted: the draft and the versions stay readable, and a template\nthat names the theme still renders with it. Refused while the theme is the workspace default.\nAudited as `theme.archived`.",
+        "operationId": "archive_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived theme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The theme is already archived (`theme_archived`), or is the workspace default (`theme_is_default`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}/draft": {
+      "put": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Replaces the theme's draft. The draft is not validated beyond being a set of known tokens: a\ntheme is edited in steps, and the publish checks it. Audited as `theme.draft_saved`.",
+        "operationId": "save_theme_draft",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveThemeDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The theme with its saved draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The theme is archived (`theme_archived`), or the draft is not at the `revision` named (`theme_revision_mismatch`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Tokens that are not a theme (`theme_malformed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}/preview": {
+      "post": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Renders the sample document under the draft tokens, or under a published version's, for the\nsample person. Tokens with blocking issues are not rendered: the response lists the issues and\n`rendered` is false. A logo that is not a live asset is shown as a stand-in image, and a footer\nsnippet that cannot be used is left out, each with a warning (`broken_asset_reference`,\n`broken_snippet_reference`). A render that fails its limits (memory, deadline) or whose host\ndies is a problem document, and the next preview works.",
+        "operationId": "preview_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThemePreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rendered sample and the validation results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemePreviewBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, theme or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The renderer refused the sample (`template_render_failed`), or it used too much memory or time (`render_memory_limit`, `render_deadline`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The render host answered unusably (`render_protocol`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}/publish": {
+      "post": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "Publishes the draft as the next immutable version. The tokens are checked by the renderer's\ntheme rules (colours, width, font, URL and ids; contrast below WCAG AA is a warning and never\nblocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the\nfooter a snippet of the workspace that is not archived and has a published version\n(`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue\nand writes nothing. The logo's asset reference is written with the version. The response lists\nthe templates and active flows that use the theme. Audited as `theme.published`.",
+        "operationId": "publish_theme",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The theme, its new version and what uses it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemePublishedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The theme is archived (`theme_archived`), or its draft was saved while it was being validated (`theme_draft_changed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The draft has blocking issues (`theme_invalid`, with `template_issues`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Rendering is not available (`render_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}/versions": {
+      "get": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "The versions of a theme, newest first.",
+        "operationId": "list_theme_versions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The versions without their tokens, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ThemeVersionSummaryBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}/versions/{n}": {
+      "get": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "One version of a theme.",
+        "operationId": "get_theme_version",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, theme or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/themes/{id}/where-used": {
+      "get": {
+        "tags": [
+          "themes"
+        ],
+        "summary": "The templates that name a theme, the templates that follow it as the default, and the active\nflows that send them.",
+        "operationId": "theme_where_used",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Theme id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What uses the theme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThemeUsedByBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or theme, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/topics": {
       "get": {
         "tags": [
@@ -27613,6 +28774,26 @@
             "type": "string",
             "description": "1 to 100 characters after trimming; unique among the workspace's live templates, ignoring\ncase.",
             "example": "Order shipped"
+          }
+        }
+      },
+      "CreateThemeRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters after trimming; unique among the workspace's live themes, ignoring\ncase.",
+            "example": "Brand"
+          },
+          "tokens": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The first draft: any of the tokens, the rest take their defaults. Absent: all defaults."
           }
         }
       },
@@ -32304,6 +33485,24 @@
           }
         }
       },
+      "HiddenBlockBody": {
+        "type": "object",
+        "description": "A section or block left out of the render, and why.",
+        "required": [
+          "id",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The id of the section or block."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Which condition was not met, by name; never a value."
+          }
+        }
+      },
       "HistoryBody": {
         "type": "object",
         "required": [
@@ -33498,6 +34697,17 @@
             "description": "The code a skipped or failed message ended with, such as `no_consent`.",
             "example": "no_consent"
           },
+          "rendered_with": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedWithBody",
+                "description": "The theme and snippet versions the message was rendered with."
+              }
+            ]
+          },
           "status": {
             "type": "string",
             "description": "`pending`, `sending`, `sent`, `skipped` or `failed`.",
@@ -34499,6 +35709,16 @@
             },
             "description": "The templates whose drafts hold a block for a snippet (`snippet_in_use`)."
           },
+          "snippet_themes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SegmentRefProblem"
+            },
+            "description": "The themes whose published version uses a snippet as its footer (`snippet_in_use`)."
+          },
           "status": {
             "type": "integer",
             "format": "int32",
@@ -35214,6 +36434,51 @@
           }
         }
       },
+      "RenderedVersionBody": {
+        "type": "object",
+        "description": "A theme or snippet and the version a message was rendered with.",
+        "required": [
+          "id",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "RenderedWithBody": {
+        "type": "object",
+        "description": "What a message was rendered with, beyond its template version. Present once the message was\nrendered.",
+        "required": [
+          "snippets"
+        ],
+        "properties": {
+          "snippets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenderedVersionBody"
+            },
+            "description": "The snippets it used, by id."
+          },
+          "theme": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedVersionBody",
+                "description": "The theme in effect; none when the email had no theme."
+              }
+            ]
+          }
+        }
+      },
       "ReplayBody": {
         "type": "object",
         "required": [
@@ -35841,6 +37106,26 @@
           "document": {
             "type": "object",
             "description": "The content document."
+          }
+        }
+      },
+      "SaveThemeDraftRequest": {
+        "type": "object",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The revision the caller read. When it is not the draft's current revision the save is a\n409 `theme_revision_mismatch` and nothing is written. Absent: save regardless."
+          },
+          "tokens": {
+            "type": "object",
+            "description": "The tokens: any of them, the rest take their defaults."
           }
         }
       },
@@ -37415,6 +38700,19 @@
           }
         }
       },
+      "SetDefaultThemeRequest": {
+        "type": "object",
+        "required": [
+          "theme_id"
+        ],
+        "properties": {
+          "theme_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A published, live theme of the workspace."
+          }
+        }
+      },
       "SetRoleRequest": {
         "type": "object",
         "required": [
@@ -38035,7 +39333,7 @@
             "items": {
               "$ref": "#/components/schemas/SnippetThemeBody"
             },
-            "description": "Themes that use it as their footer. Always empty until themes exist (#304)."
+            "description": "Themes, not archived, whose draft or current version names it as their footer. When the\ndefault theme is one of them, the templates that follow the default are listed in\n`templates` too."
           }
         }
       },
@@ -38930,7 +40228,8 @@
           "content_type",
           "rendered",
           "headers",
-          "issues"
+          "issues",
+          "hidden_blocks"
         ],
         "properties": {
           "body": {
@@ -38950,6 +40249,13 @@
               "$ref": "#/components/schemas/TemplateHeaderBody"
             },
             "description": "An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers."
+          },
+          "hidden_blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HiddenBlockBody"
+            },
+            "description": "The sections and blocks this person does not see because their `visible_if` was false."
           },
           "html": {
             "type": [
@@ -39030,11 +40336,19 @@
         "description": "The new version and the template after the publish.",
         "required": [
           "template",
-          "version"
+          "version",
+          "used_by"
         ],
         "properties": {
           "template": {
             "$ref": "#/components/schemas/TemplateBody"
+          },
+          "used_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateUseBody"
+            },
+            "description": "The active flows that send this template, which now send the new version."
           },
           "version": {
             "$ref": "#/components/schemas/TemplateVersionBody"
@@ -39394,6 +40708,351 @@
               "$ref": "#/components/schemas/TestSendBody"
             },
             "description": "Newest first."
+          }
+        }
+      },
+      "ThemeBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "is_default",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "current_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The newest published version; null before the first publish."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "Whether emails that follow the default theme use this one."
+          },
+          "name": {
+            "type": "string",
+            "example": "Brand"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ThemeDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ThemeBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "draft"
+            ],
+            "properties": {
+              "draft": {
+                "$ref": "#/components/schemas/ThemeDraftBody"
+              }
+            }
+          }
+        ],
+        "description": "A theme with its draft."
+      },
+      "ThemeDraftBody": {
+        "type": "object",
+        "description": "The one editable copy of a theme's tokens.",
+        "required": [
+          "tokens",
+          "revision",
+          "updated_at"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times the draft has been saved; the first save is 1. Send it back as `revision`\nto save only if nobody saved in between."
+          },
+          "tokens": {
+            "type": "object",
+            "description": "The tokens. They may fail the publish checks; only a publish validates them fully."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "ThemeFlowBody": {
+        "type": "object",
+        "description": "An active flow that sends a template that uses the theme.",
+        "required": [
+          "flow_id",
+          "flow_name",
+          "flow_state",
+          "template_ids"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          },
+          "flow_state": {
+            "type": "string",
+            "description": "`published` or `paused`."
+          },
+          "template_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The templates of the flow that use the theme."
+          }
+        }
+      },
+      "ThemePreviewBody": {
+        "type": "object",
+        "description": "The rendered sample and the theme's validation results.",
+        "required": [
+          "source",
+          "rendered",
+          "issues"
+        ],
+        "properties": {
+          "html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sample document's HTML, with inert tracking links."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "The checks a publish makes. A logo or footer that cannot be used is a warning here: the\npreview shows a stand-in logo or no footer."
+          },
+          "rendered": {
+            "type": "boolean",
+            "description": "False when the tokens have blocking issues, so nothing was rendered."
+          },
+          "source": {
+            "type": "string",
+            "description": "`draft` or `version`."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sample document's text part."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "ThemePreviewRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Preview this published version. Absent: the draft."
+          }
+        }
+      },
+      "ThemePublishedBody": {
+        "type": "object",
+        "description": "The new version, the theme after the publish, and what uses the theme.",
+        "required": [
+          "theme",
+          "version",
+          "used_by"
+        ],
+        "properties": {
+          "theme": {
+            "$ref": "#/components/schemas/ThemeBody"
+          },
+          "used_by": {
+            "$ref": "#/components/schemas/ThemeUsedByBody",
+            "description": "What picks the new version up: later renders use it without a template being republished."
+          },
+          "version": {
+            "$ref": "#/components/schemas/ThemeVersionBody"
+          }
+        }
+      },
+      "ThemeTemplateBody": {
+        "type": "object",
+        "description": "A template whose draft or current version uses the theme.",
+        "required": [
+          "id",
+          "name",
+          "in_draft",
+          "in_current"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "in_current": {
+            "type": "boolean",
+            "description": "Whether the template's current version uses the theme."
+          },
+          "in_draft": {
+            "type": "boolean",
+            "description": "Whether the template's draft uses the theme."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ThemeUsedByBody": {
+        "type": "object",
+        "description": "Everything that uses a theme.",
+        "required": [
+          "named_templates",
+          "default_templates",
+          "active_flows"
+        ],
+        "properties": {
+          "active_flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThemeFlowBody"
+            },
+            "description": "Flows whose running version names a template of either list. A flow that does not run it\nnow, and an archived flow, is not listed."
+          },
+          "default_templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThemeTemplateBody"
+            },
+            "description": "Block templates, not archived, whose draft or current version follows the workspace\ndefault (`theme` absent or `\"default\"`). Empty unless this theme is the default."
+          },
+          "named_templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ThemeTemplateBody"
+            },
+            "description": "Templates, not archived, whose draft or current version names the theme."
+          }
+        }
+      },
+      "ThemeVersionBody": {
+        "type": "object",
+        "description": "One immutable published version.",
+        "required": [
+          "version",
+          "tokens",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "tokens": {
+            "type": "object",
+            "description": "The tokens as they were published."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "The warnings found when it was published; a blocking issue refuses the publish."
+          }
+        }
+      },
+      "ThemeVersionSummaryBody": {
+        "type": "object",
+        "description": "One published version in the history list: no tokens, which `GET .../versions/{n}` returns.",
+        "required": [
+          "version",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The warnings stored with the version."
           }
         }
       },
@@ -40289,6 +41948,17 @@
                 "description": "`inherit` or `off`: whether the workspace's automatic UTM parameters apply to this\ntemplate."
               }
             ]
+          }
+        }
+      },
+      "UpdateThemeRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
           }
         }
       },

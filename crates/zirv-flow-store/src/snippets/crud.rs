@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{UserId, WorkspaceId};
 
-use super::where_used::templates_holding;
+use super::where_used::{SnippetThemeUse, templates_holding, themes_using};
 use crate::StoreError;
 
 /// A snippet: its name and which version is current. The content is in its draft and its
@@ -89,8 +89,12 @@ pub enum SnippetError {
     Archived,
     /// The draft was saved since the caller read it.
     RevisionMismatch,
-    /// Template drafts hold a block for the snippet, so it cannot be archived.
-    InUse(Vec<SnippetTemplate>),
+    /// Template drafts hold a block for the snippet, or the published version of a theme uses it
+    /// as its footer, so it cannot be archived.
+    InUse {
+        templates: Vec<SnippetTemplate>,
+        themes: Vec<SnippetThemeUse>,
+    },
     /// A name already taken is [`StoreError::is_conflict`].
     Store(StoreError),
 }
@@ -107,7 +111,9 @@ impl fmt::Display for SnippetError {
             Self::NotFound => formatter.write_str("no such snippet"),
             Self::Archived => formatter.write_str("the snippet is archived"),
             Self::RevisionMismatch => formatter.write_str("the snippet draft changed"),
-            Self::InUse(_) => formatter.write_str("template drafts use the snippet"),
+            Self::InUse { .. } => {
+                formatter.write_str("template drafts or theme footers use the snippet")
+            }
             Self::Store(error) => error.fmt(formatter),
         }
     }
@@ -284,7 +290,8 @@ pub async fn save_snippet_draft(
 }
 
 /// Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused while
-/// the draft of a template that is not archived holds a block for the snippet.
+/// the draft of a template that is not archived holds a block for the snippet, or the published
+/// version of a theme that is not archived uses it as its footer.
 pub async fn archive_snippet(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -296,8 +303,12 @@ pub async fn archive_snippet(
         .into_iter()
         .filter(|template| template.in_draft)
         .collect();
-    if !in_drafts.is_empty() {
-        return Err(SnippetError::InUse(in_drafts));
+    let themes = themes_using(&mut *connection, workspace, id, true).await?;
+    if !in_drafts.is_empty() || !themes.is_empty() {
+        return Err(SnippetError::InUse {
+            templates: in_drafts,
+            themes,
+        });
     }
     let snippet = sqlx::query_as(concat!(
         "UPDATE snippets SET archived_at = now(), updated_at = now() \

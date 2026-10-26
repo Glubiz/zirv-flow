@@ -3459,4 +3459,255 @@ main:focus {
 
 .ts-kept {
   text-align: right;
+/* Template library tabs */
+.library-nav {
+  align-self: flex-start;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+}
+
+.library-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.library-nav a:hover {
+  background: var(--paper-3);
+}
+
+.library-nav a[aria-current="page"] {
+  background: var(--night);
+  color: var(--night-ink);
+}
+
+/* Images */
+.images-layout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.images-main {
+  flex: 999 1 560px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.images-side {
+  flex: 1 1 320px;
+  max-width: 380px;
+  min-width: 0;
+}
+
+.images-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+}
+
+.images-title {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.images-search {
+  margin-left: auto;
+  flex: 0 1 260px;
+  min-width: 0;
+}
+
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 170px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.meter-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  background: var(--night);
+}
+
+.image-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.image-grid-compact {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.image-picker-group {
+  display: contents;
+}
+
+.image-tile {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.image-tile:hover {
+  border-color: var(--line-2);
+}
+
+.image-tile[aria-pressed="true"],
+.image-tile[aria-checked="true"] {
+  border-color: var(--link);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--link);
+}
+
+.image-tile-dashed {
+  border-style: dashed;
+}
+
+.image-tile[disabled] {
+  cursor: progress;
+}
+
+.image-thumb {
+  aspect-ratio: 4 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--paper-3);
+  color: var(--ink-2);
+  overflow: hidden;
+}
+
+.image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.image-name {
+  font-size: 14px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-meta {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.image-preview {
+  height: 140px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-3);
+  overflow: hidden;
+}
+
+.image-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.image-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: 14px;
+}
+
+.image-facts dt {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.image-facts dd {
+  margin: 0;
+}
+
+.image-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.image-link .mono {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-owners {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+
+.image-owners li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.image-danger {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--paper-3);
+}
+
+.image-drop {
+  outline: 2px dashed var(--night);
+  outline-offset: 4px;
+  border-radius: var(--radius-control);
 }

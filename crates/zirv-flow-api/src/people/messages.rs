@@ -30,6 +30,44 @@ pub(crate) struct MessageTemplateBody {
     category: Option<String>,
 }
 
+/// A theme or snippet and the version a message was rendered with.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RenderedVersionBody {
+    id: Uuid,
+    version: i32,
+}
+
+/// What a message was rendered with, beyond its template version. Present once the message was
+/// rendered.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RenderedWithBody {
+    /// The theme in effect; none when the email had no theme.
+    theme: Option<RenderedVersionBody>,
+    /// The snippets it used, by id.
+    snippets: Vec<RenderedVersionBody>,
+}
+
+fn rendered_with(
+    theme: Option<(Uuid, i32)>,
+    snippet_versions: Option<&Value>,
+) -> Option<RenderedWithBody> {
+    let used = snippet_versions?.as_object()?;
+    let mut snippets: Vec<RenderedVersionBody> = used
+        .iter()
+        .filter_map(|(id, version)| {
+            Some(RenderedVersionBody {
+                id: id.parse().ok()?,
+                version: i32::try_from(version.as_i64()?).ok()?,
+            })
+        })
+        .collect();
+    snippets.sort_by_key(|snippet| snippet.id);
+    Some(RenderedWithBody {
+        theme: theme.map(|(id, version)| RenderedVersionBody { id, version }),
+        snippets,
+    })
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct MessageFlowBody {
     id: Uuid,
@@ -80,6 +118,8 @@ pub(crate) struct MessageBody {
     #[schema(value_type = Option<String>, format = DateTime)]
     completed_at: Option<OffsetDateTime>,
     template: MessageTemplateBody,
+    /// The theme and snippet versions the message was rendered with.
+    rendered_with: Option<RenderedWithBody>,
     flow: Option<MessageFlowBody>,
     node: MessageNodeBody,
     destination: MessageDestinationBody,
@@ -139,8 +179,13 @@ impl From<LoggedMessage> for MessageBody {
             .as_array()
             .map(|entries| entries.iter().filter_map(gate_body).collect())
             .unwrap_or_default();
+        let rendered_with = rendered_with(
+            message.theme_id.zip(message.theme_version),
+            message.snippet_versions.as_ref(),
+        );
         Self {
             id: message.id,
+            rendered_with,
             created_at: message.created_at,
             completed_at: message.completed_at,
             template: MessageTemplateBody {
@@ -353,6 +398,23 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_rendered_message_lists_its_theme_and_snippet_versions_and_an_unrendered_one_none() {
+        let (theme, first, second) = (Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3));
+        let used = json!({ second.to_string(): 4, first.to_string(): 1 });
+
+        let body = serde_json::to_value(rendered_with(Some((theme, 3)), Some(&used))).unwrap();
+        let bare = serde_json::to_value(rendered_with(None, Some(&json!({})))).unwrap();
+
+        assert_eq!(body["theme"], json!({"id": theme, "version": 3}));
+        assert_eq!(
+            body["snippets"],
+            json!([{"id": first, "version": 1}, {"id": second, "version": 4}])
+        );
+        assert_eq!(bare, json!({"theme": null, "snippets": []}));
+        assert!(rendered_with(Some((theme, 3)), None).is_none());
     }
 
     #[test]

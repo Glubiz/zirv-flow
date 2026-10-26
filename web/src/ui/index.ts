@@ -4,6 +4,7 @@ export { CopyButton } from "./CopyButton";
 export { Dialog } from "./Dialog";
 export { SelectField, TextAreaField, TextField } from "./Field";
 export { HiddenValue } from "./HiddenValue";
+export { LibraryNav } from "./LibraryNav";
 export { MenuButton } from "./Menu";
 export type { MenuEntry } from "./Menu";
 export { PageHeader, Panel } from "./Page";

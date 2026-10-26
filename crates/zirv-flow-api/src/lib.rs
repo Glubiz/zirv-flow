@@ -39,6 +39,7 @@ mod sources;
 mod state;
 mod templates;
 mod test_sends;
+mod themes;
 mod trace;
 mod traces;
 mod tracking;
@@ -332,6 +333,44 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/snippets/{id}/where-used",
             get(snippets::where_used::where_used),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes",
+            get(themes::crud::list).post(themes::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/default",
+            put(themes::default::put_default),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}",
+            get(themes::crud::get)
+                .put(themes::crud::update)
+                .delete(themes::crud::archive),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}/draft",
+            put(themes::crud::put_draft),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}/preview",
+            post(themes::preview::preview),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}/publish",
+            post(themes::publish::publish),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}/versions",
+            get(themes::publish::versions),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}/versions/{n}",
+            get(themes::publish::version),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/themes/{id}/where-used",
+            get(themes::where_used::where_used),
         )
         .route(
             "/api/v1/workspaces/{ws}/templates",

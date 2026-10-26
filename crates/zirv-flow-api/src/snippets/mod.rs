@@ -17,7 +17,9 @@ use serde_json::Value;
 
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_store::{Asset, PgConnection, SnippetError, SnippetTemplate, StoreError};
+use zirv_flow_store::{
+    Asset, PgConnection, SnippetError, SnippetTemplate, SnippetThemeUse, StoreError,
+};
 use zirv_flow_templates::{Block, BlocksError, ImageSrc, Issue, SnippetContent, code, severity_of};
 
 use crate::problem::{ApiError, SegmentRefProblem};
@@ -28,7 +30,9 @@ pub(crate) fn snippet_error(error: SnippetError) -> ApiError {
         SnippetError::NotFound => ApiError::not_found(),
         SnippetError::Archived => ApiError::snippet_archived(),
         SnippetError::RevisionMismatch => ApiError::snippet_revision_mismatch(),
-        SnippetError::InUse(templates) => ApiError::snippet_in_use(template_refs(&templates)),
+        SnippetError::InUse { templates, themes } => {
+            ApiError::snippet_in_use(template_refs(&templates), theme_refs(&themes))
+        }
         SnippetError::Store(error) => name_taken(error),
     }
 }
@@ -40,6 +44,17 @@ fn template_refs(templates: &[SnippetTemplate]) -> Vec<SegmentRefProblem> {
         .map(|template| SegmentRefProblem {
             id: template.id,
             name: template.name.clone(),
+        })
+        .collect()
+}
+
+/// The themes as a problem body lists them.
+fn theme_refs(themes: &[SnippetThemeUse]) -> Vec<SegmentRefProblem> {
+    themes
+        .iter()
+        .map(|theme| SegmentRefProblem {
+            id: theme.id,
+            name: theme.name.clone(),
         })
         .collect()
 }
@@ -74,7 +89,7 @@ pub(crate) fn parse_content(value: &Value) -> Result<SnippetContent, ApiError> {
     })
 }
 
-pub(super) fn issue(code: &'static str, at: String, message: &str) -> Issue {
+pub(crate) fn issue(code: &'static str, at: String, message: &str) -> Issue {
     Issue {
         code,
         severity: severity_of(code),
@@ -175,12 +190,18 @@ mod tests {
     #[test]
     fn the_archive_refusal_lists_the_templates() {
         let id = Uuid::nil();
-        let error = snippet_error(SnippetError::InUse(vec![SnippetTemplate {
-            id,
-            name: "Welcome".into(),
-            in_draft: true,
-            in_current: false,
-        }]));
+        let error = snippet_error(SnippetError::InUse {
+            themes: vec![SnippetThemeUse {
+                id,
+                name: "Brand".into(),
+            }],
+            templates: vec![SnippetTemplate {
+                id,
+                name: "Welcome".into(),
+                in_draft: true,
+                in_current: false,
+            }],
+        });
         assert_eq!(error.code(), Some("snippet_in_use"));
         assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
         assert_eq!(

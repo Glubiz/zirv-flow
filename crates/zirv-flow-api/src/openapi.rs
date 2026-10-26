@@ -41,6 +41,7 @@ use crate::setup::{self, SetupRequest, SetupStatus};
 use crate::snippets;
 use crate::sources;
 use crate::templates;
+use crate::themes;
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
 use crate::users::{self, CreateUserRequest};
 use crate::version::{self, VersionBody};
@@ -185,6 +186,18 @@ use crate::workspaces::{
         snippets::publish::versions,
         snippets::publish::version,
         snippets::where_used::where_used,
+        themes::crud::list,
+        themes::crud::create,
+        themes::crud::get,
+        themes::crud::update,
+        themes::crud::archive,
+        themes::crud::put_draft,
+        themes::default::put_default,
+        themes::preview::preview,
+        themes::publish::publish,
+        themes::publish::versions,
+        themes::publish::version,
+        themes::where_used::where_used,
         templates::crud::list,
         templates::crud::create,
         templates::crud::get,
@@ -541,6 +554,21 @@ use crate::workspaces::{
         snippets::where_used::SnippetFlowBody,
         snippets::preview::SnippetPreviewRequest,
         snippets::preview::SnippetPreviewBody,
+        themes::crud::ThemeBody,
+        themes::crud::ThemeDraftBody,
+        themes::crud::ThemeDetailBody,
+        themes::crud::CreateThemeRequest,
+        themes::crud::UpdateThemeRequest,
+        themes::crud::SaveThemeDraftRequest,
+        themes::default::SetDefaultThemeRequest,
+        themes::publish::ThemeVersionBody,
+        themes::publish::ThemeVersionSummaryBody,
+        themes::publish::ThemePublishedBody,
+        themes::where_used::ThemeUsedByBody,
+        themes::where_used::ThemeTemplateBody,
+        themes::where_used::ThemeFlowBody,
+        themes::preview::ThemePreviewRequest,
+        themes::preview::ThemePreviewBody,
         templates::crud::TemplateBody,
         templates::crud::TemplateDraftBody,
         templates::crud::TemplateDetailBody,
