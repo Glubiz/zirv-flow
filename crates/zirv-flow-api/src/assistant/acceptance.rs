@@ -4209,9 +4209,30 @@ mod tests {
             .unwrap();
         assert_eq!(status, "accepted");
         // Accepting again is refused: the template's draft moved on.
+        let accepted_state = fx.template_detail(&id).await;
+        let writes = fx.template_writes().await;
+        let audit = fx.count("audit_log").await;
         let again = fx.accept(&fx.admin, draft_id).await;
         assert_eq!(again.status, StatusCode::CONFLICT);
         assert_eq!(again.body["code"], "template_draft_changed");
+        assert!(
+            again.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("ask the assistant again"),
+            "{:?}",
+            again.body
+        );
+        // The second accept changed nothing: not the draft, not its revision, not the audit.
+        assert_eq!(fx.template_detail(&id).await, accepted_state);
+        assert_eq!(fx.template_writes().await, writes);
+        assert_eq!(fx.count("audit_log").await, audit);
+        let status: String = sqlx::query_scalar("SELECT status FROM ai_drafts WHERE id = $1::uuid")
+            .bind(draft_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "accepted");
     }
 
     #[sqlx::test]
