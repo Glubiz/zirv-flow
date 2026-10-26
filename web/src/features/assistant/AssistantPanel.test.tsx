@@ -220,7 +220,7 @@ describe("the assistant panel", () => {
     await user.click(await screen.findByRole("button", { name: "Accept" }));
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
-    expect(onAccept).toHaveBeenCalledWith(CONTENT);
+    expect(onAccept).toHaveBeenCalledWith(CONTENT, expect.objectContaining({ id: "d1" }));
     expect(calls.some((call) => call.method === "PUT")).toBe(false);
     expect(screen.queryByRole("button", { name: "Accept" })).not.toBeInTheDocument();
   });
@@ -502,7 +502,7 @@ describe("the assistant panel for a segment", () => {
     decide(true);
 
     expect(await screen.findByText("Loaded into the editor. Save to apply it.")).toBeInTheDocument();
-    expect(onAccept).toHaveBeenCalledWith(SEGMENT_CONTENT);
+    expect(onAccept).toHaveBeenCalledWith(SEGMENT_CONTENT, expect.objectContaining({ id: "d1" }));
   });
 
   it("names why an accept was refused: the saved version changed, or the draft no longer validates", async () => {

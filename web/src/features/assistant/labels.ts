@@ -7,7 +7,20 @@ export type DryRun = components["schemas"]["DryRunBody"];
 export type DraftIssue = components["schemas"]["DraftIssue"];
 
 /** What a draft is of. */
-export type DraftKindName = "mapping" | "manifest" | "segment" | "flow";
+export type DraftKindName = "mapping" | "manifest" | "segment" | "flow" | "template";
+
+/** What the assistant is asked to do to a template. */
+export type TemplateTask = components["schemas"]["TemplateTask"];
+
+/** The accepted draft, as the editor takes it. */
+export type AcceptedDraft = components["schemas"]["AcceptedDraftBody"];
+
+export const TEMPLATE_TASKS: readonly { id: TemplateTask; label: string }[] = [
+  { id: "copy", label: "Rewrite copy" },
+  { id: "subject_variants", label: "Subject lines" },
+  { id: "block_layout", label: "Block layout" },
+  { id: "translation", label: "Translate" },
+];
 
 /** What a validator code means, in a sentence. The wording of the mapping and manifest editors, kept in step by hand. */
 const ISSUE_TEXT: Record<string, string> = {
@@ -91,9 +104,22 @@ const SEGMENT_ISSUE_TEXT: Record<string, string> = {
   placeholder_invented: "The answer used a value the assistant was never given.",
 };
 
+/** What a template validator code means, in a sentence; the editor's own wording where it has one. */
+const TEMPLATE_ISSUE_TEXT: Record<string, string> = {
+  unknown_merge_field: "A merge field here is not a field in this workspace.",
+  missing_unsubscribe: "A marketing email needs an unsubscribe link.",
+  missing_content: "The template has no content.",
+  syntax_error: "The merge tags have a syntax error.",
+  invalid_columns: "A section holds one to three columns.",
+  invalid_url: "A web address is not valid. Use https, http or mailto.",
+  fragment_field_not_allowed: "The answer changed something this task may not change.",
+  lang_invalid: "The language is not a valid language tag.",
+  arguments_invalid: "The answer was not in the shape the draft needs.",
+};
+
 /** A problem of a draft as a sentence, with the place it concerns when there is one. */
 export function issueSentence(issue: DraftIssue, kind: DraftKindName = "mapping"): string {
-  const table = kind === "segment" ? SEGMENT_ISSUE_TEXT : ISSUE_TEXT;
+  const table = kind === "segment" ? SEGMENT_ISSUE_TEXT : kind === "template" ? TEMPLATE_ISSUE_TEXT : ISSUE_TEXT;
   const text =
     kind === "flow"
       ? `This part of the flow is not valid (${issue.code.replaceAll("_", " ")}).`
@@ -148,6 +174,24 @@ export function failureText(error: unknown): Failure {
             error.issues.length > 0
               ? `It no longer passes the rules for saving. ${error.issues
                   .map((issue) => issueSentence({ code: issue.code, at: issue.pointer === "" ? null : issue.pointer }, "segment"))
+                  .join(" ")}`
+              : "It did not pass validation.",
+        };
+      case "template_draft_changed":
+        return {
+          traceId,
+          title: "The template's draft changed",
+          detail: "It was saved after this draft was made, so accepting would overwrite it. Reload the draft, then draft again.",
+        };
+      case "template_invalid":
+        return {
+          traceId,
+          title: "This draft cannot be accepted",
+          detail:
+            error.templateIssues.length > 0
+              ? `It no longer passes the checks of a publish. ${error.templateIssues
+                  .filter((issue) => issue.severity === "blocking")
+                  .map((issue) => `${issue.field ?? issue.code.replaceAll("_", " ")} at ${issue.at}.`)
                   .join(" ")}`
               : "It did not pass validation.",
         };
