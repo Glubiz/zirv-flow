@@ -96,6 +96,9 @@ worker processes, serve and the scheduler); the sink ran on CPUs 4 to 7 and neve
   STARTTLS with a generated authority, any login accepted, one JSON line per accepted message with the
   arrival time. The egress policy allows the Docker private ranges (`compose.m6.yaml`). The released
   image refuses plaintext SMTP, so the destination uses `tls: starttls` and the sink's authority.
+  The sink binary was built in the `rust:1-bookworm` image (pulled by docker if not local; `cargo build
+  --locked` downloaded the crates; cache in the docker volume `m6-sendbench-target`, still present after
+  the runs: `docker volume rm m6-sendbench-target` removes it) and runs in `debian:bookworm-slim`.
 - **Why a container, not the host.** The first sink ran on the host and was reached as
   `host.docker.internal`. Through Docker Desktop's host path new connections stalled for 10 s or more even
   at 2 parallel connections (a loop of connect, `QUIT`, close from a container: 3 stalls of 12 s per worker
@@ -118,8 +121,8 @@ worker processes, serve and the scheduler); the sink ran on CPUs 4 to 7 and neve
   has an uncertainty of about 1.2 s). The offset is applied to the enrollment instants. No delay was
   negative.
 - **Statistics and events (set 2).** The database had no planner statistics after its earlier crash
-  (`last_analyze` empty for every table), which made the people lock query 500 times slower (section 5, miss
-  2). Before set 2 the whole database was analysed (`ANALYZE`, 12 s). The bench workspace's events were also
+  (`last_analyze` empty for every table), which made the planner pick a worse index for the people lock query
+  (section 5, miss 2). Before set 2 the whole database was analysed (`ANALYZE`, 12 s). The bench workspace's events were also
   deleted before each run (`RESET_EVENTS=1`, then `VACUUM` of the current partition), because a lookup in
   the send path costs time proportional to the events already in the workspace (miss 1), which otherwise
   makes later runs slower than earlier ones. Set 1 (section 3) was run without either, and shows the drift.
@@ -149,7 +152,12 @@ the drift. Same variants and sizes.
 | g (f after `VACUUM (ANALYZE)` of the send tables) | 38.2/s | 53.2 s | 11.2 s | 347% |
 
 The repeat f is 34% below a: the set is not stable, because the environment changed from run to run
-(stale statistics, events accumulating in the workspace). `VACUUM` of the send tables (g) did not help.
+(events accumulating in the workspace; the statistics stayed stale throughout). That drift within set 1
+is the part attributable to events piling up. `VACUUM` of the send tables (g) did not help.
+
+Set 2 changed two things at once, `ANALYZE` and the event reset, so the gap between set 1 and set 2 on
+the same variant (a: 54.6 against 82.2/s) is the combined effect of misses 1 and 2; this data does not
+split it.
 The cause was found with the active-query samples of section 5. Set 1 is not used for the verdict.
 
 ## 4. The limiting resource
@@ -160,7 +168,8 @@ The database, through the cost of each message in it. Established:
   cores: not CPU-saturated anywhere, but the 4 job slots of one process cannot go faster than the database
   answers them (the claim lag of 7 s and a queue of 1,400 show the slots are the throttle).
 - With 4 processes (16 slots) the rate rises 2.24 times (82.2 to 184.2/s) and the database goes from 3 to
-  10 cores of 24, still not saturated, while each worker stays at 49% and the app cpuset is not full.
+  10 cores of 24, still not saturated, while each worker stays at 49%: the four workers together used about 195% of the 400% app cpuset, and
+  serve and the scheduler were not sampled, so the cpuset's total use is not known.
   The database spends about 36 ms of CPU per message with 1 process and 55 ms with 4.
 - Sampling `pg_stat_activity` during a 4-process run (`data/m6/diag-2-active-queries.txt`, 1,010 active
   samples) puts **68% of all active database time in one statement**, the event lookup by id of the
@@ -180,18 +189,20 @@ The target is missed by 39% at best. The causes, each with its own issue (the nu
    `SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)` has no index it can use: the
    partition primary key is `(occurred_at, id)`, so the plan walks the workspace's whole
    `(workspace_id, occurred_at)` index range and filters on `id`. With 40,000 events in the workspace one
-   lookup of 1 id reads 42,260 buffers and takes 34.7 ms (`data/m6/explain-events-by-id-40000-events.txt`);
-   with 274,599 events removed by the filter it read 276,701 buffers and took 45.6 ms. It is 68% of the
-   active database time at 4 processes. Set 1 against set 2 shows the effect on throughput (a 54.6 against
-   82.2/s on the same variant, and f 36.1/s after the events piled up). A lookup by id and time (the v7 id
+   lookup of 1 id reads 42,260 buffers and takes 36.0 ms (`data/m6/explain-events-by-id-40000-events.txt`),
+   and the time grew with the event count (an earlier look at a larger workspace was slower; that output was
+   not kept, so no figure is quoted). It is 68% of the active database time at 4 processes. Within set 1 the
+   drift of the same variant (a 54.6, f 36.1/s) is the part attributable to events piling up; the larger
+   gap to set 2 (a 82.2/s) also includes miss 2, since set 2 changed both. A lookup by id and time (the v7 id
    carries the time) or an index on `(workspace_id, id)` would make it constant.
 2. **The people lock query without planner statistics: #297.**
    `SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE` chose
-   `people_workspace_idx` and filtered 69,999 rows to find 1 (76,476 buffers, 41.5 ms); after `ANALYZE people`
-   it uses `people_pkey` (0.075 ms). The bench database had lost its statistics (a crash; autovacuum's
+   `people_workspace_idx` and filtered the workspace's other rows to find 1; after `ANALYZE people` the plan
+   switched to `people_pkey` and the statement became far cheaper (the EXPLAIN outputs were not kept, so no
+   figures are quoted). The bench database had lost its statistics (a crash; autovacuum's
    analyze threshold on a 10 M-row table is 1 M changed rows, so it never refreshed them). This is partly
-   an operations matter (run `ANALYZE` after a restore), but a send path whose cost goes from 0.075 ms to
-   41 ms per message on a statistics gap deserves a plan that does not depend on it.
+   an operations matter (run `ANALYZE` after a restore), but a send path whose plan changes this much on a
+   statistics gap deserves a plan that does not depend on it.
 3. **Commits waiting for an object lock under parallel workers: #298.** 108 of 1,010 active
    samples (11%) at 4 processes were `COMMIT` in `Lock/object`, which a single process does not show. The
    likely candidate is the database-wide lock PostgreSQL takes at commit for a transaction that issued a

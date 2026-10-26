@@ -23,3 +23,41 @@
       2 active|Client/ClientRead|SELECT state FROM flows WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE
       2 active|Client/ClientRead|SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)
       2 active|Client/ClientRead|INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id, te
+      2 active|Client/ClientRead|INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause
+      2 active|-/-|UPDATE enrollments SET state = $4, node = $5, state_version = $6, wake_at = $7, exit_reason = $8, er
+      2 active|-/-|SELECT id, name, state, draft_graph, draft_settings, current_version, archived_at, created_by, creat
+      2 active|-/-|SELECT id, kind, name, config, credential_id, credential_secret_of(workspace_id, credential_id) AS c
+      2 active|-/-|SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND
+      2 active|-/-|SELECT COALESCE(merged_into, id) FROM people WHERE workspace_id = $1 AND id = $2
+      2 active|-/-|INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, properties, source,
+      1 active|Timeout/VacuumDelay|autovacuum: VACUUM public.messages
+      1 active|Timeout/VacuumDelay|autovacuum: VACUUM ANALYZE public.jobs
+      1 active|Timeout/VacuumDelay|autovacuum: ANALYZE public.flow_entries
+      1 active|LWLock/WALWrite|INSERT INTO delivery_attempts (id, workspace_id, destination_id, subject_kind, subject_id, attempt, 
+      1 active|IO/WALWrite|UPDATE messages SET status = 'sending', attempts = $3, address_hash = COALESCE($6, address_hash), ga
+      1 active|Client/ClientRead|WITH inserted AS ( INSERT INTO jobs (id, workspace_id, kind, payload, priority, run_at, max_attempts
+      1 active|Client/ClientRead|UPDATE enrollments SET state = $4, node = $5, state_version = $6, wake_at = $7, exit_reason = $8, er
+      1 active|Client/ClientRead|SELECT v.version, v.rules, v.published_by, v.published_at FROM consent_policies p JOIN consent_polic
+      1 active|Client/ClientRead|SELECT scope FROM suppressions WHERE identifier_hash = $2 AND ((scope = 'workspace' AND workspace_id
+      1 active|Client/ClientRead|SELECT purpose, key_id, wrapped_key, nonce, ciphertext FROM encrypted_secrets WHERE workspace_id = $
+      1 active|Client/ClientRead|SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE
+      1 active|Client/ClientRead|SELECT key FROM trait_definitions WHERE workspace_id = $1 AND channel_address AND NOT archived ORDER
+      1 active|Client/ClientRead|SELECT id, kind, name, config, credential_id, credential_secret_of(workspace_id, credential_id) AS c
+      1 active|Client/ClientRead|SELECT id, domain, selector, dkim_secret_id, dkim_public_key, status, verified_at, last_checked_at, 
+      1 active|Client/ClientRead|SELECT id AS identity_id, domain_id, from_name, from_address, reply_to, archived_at IS NOT NULL AS a
+      1 active|Client/ClientRead|SELECT f.id, f.current_version, t.person_id, t.event_id FROM unnest($2::uuid[], $3::uuid[], $4::text
+      1 active|Client/ClientRead|SELECT e.id, e.person_id, t.event_id, t.name, COALESCE(v.settings -> 'goal' ->> 'type' = 'event' AND
+      1 active|Client/ClientRead|SELECT domain_id FROM sender_identities WHERE workspace_id = $1 AND id = $2
+      1 active|Client/ClientRead|SELECT clock_timestamp()
+      1 active|Client/ClientRead|SELECT 1 FROM jobs WHERE id = $1 AND lease_token = $2 FOR KEY SHARE
+      1 active|Client/ClientRead|INSERT INTO message_links (workspace_id, message_id, link_index, url) SELECT $1, $2, t.link_index, t
+      1 active|Client/ClientRead|INSERT INTO delivery_attempts (id, workspace_id, destination_id, subject_kind, subject_id, attempt, 
+      1 active|Client/ClientRead|DELETE FROM jobs WHERE id = $1 AND lease_token = $2
+      1 active|-/-|UPDATE messages SET status = 'sending', attempts = $3, address_hash = COALESCE($6, address_hash), ga
+      1 active|-/-|SELECT value FROM identities WHERE workspace_id = $1 AND person_id = $2 AND kind = 'email' ORDER BY 
+      1 active|-/-|SELECT key FROM trait_definitions WHERE workspace_id = $1 AND channel_address AND NOT archived ORDER
+      1 active|-/-|SELECT id, domain, selector, dkim_secret_id, dkim_public_key, status, verified_at, last_checked_at, 
+      1 active|-/-|SELECT id FROM segments WHERE workspace_id = $1 AND archived_at IS NULL
+      1 active|-/-|SELECT d.key, v.key FROM consent_dimensions d JOIN consent_dimension_values v ON v.workspace_id = d.
+      1 active|-/-|INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome, error, attempts) VAL
+      1 active|-/-|autovacuum: ANALYZE public.messages

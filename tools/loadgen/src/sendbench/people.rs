@@ -10,12 +10,12 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 /// The address of person `n`. Lower case, on a reserved test domain.
-pub fn address(prefix: &str, domain: &str, n: u64) -> String {
+pub(crate) fn address(prefix: &str, domain: &str, n: u64) -> String {
     format!("{prefix}-{n}@{domain}")
 }
 
 /// The body of one batch request: people `first..first + count`.
-pub fn batch_body(prefix: &str, domain: &str, first: u64, count: u64) -> Value {
+pub(crate) fn batch_body(prefix: &str, domain: &str, first: u64, count: u64) -> Value {
     let items: Vec<Value> = (first..first + count)
         .map(|n| {
             json!({
@@ -30,25 +30,25 @@ pub fn batch_body(prefix: &str, domain: &str, first: u64, count: u64) -> Value {
 }
 
 /// The batch ranges that cover `count` people: `(first, size)`.
-pub fn ranges(count: u64, batch_size: u64) -> Vec<(u64, u64)> {
+pub(crate) fn ranges(count: u64, batch_size: u64) -> Vec<(u64, u64)> {
     let size = batch_size.max(1);
     (0..count.div_ceil(size))
         .map(|i| (i * size, size.min(count - i * size)))
         .collect()
 }
 
-pub struct Seed {
-    pub url: String,
-    pub key: String,
-    pub prefix: String,
-    pub domain: String,
-    pub count: u64,
-    pub batch_size: u64,
-    pub concurrency: usize,
+pub(crate) struct Seed {
+    pub(crate) url: String,
+    pub(crate) key: String,
+    pub(crate) prefix: String,
+    pub(crate) domain: String,
+    pub(crate) count: u64,
+    pub(crate) batch_size: u64,
+    pub(crate) concurrency: usize,
 }
 
 /// Sends every batch; returns the number of people accepted.
-pub async fn run(seed: Seed) -> Result<u64, String> {
+pub(crate) async fn run(seed: Seed) -> Result<u64, String> {
     crate::init_tls();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))

@@ -5,10 +5,10 @@
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Sample {
-    pub name: String,
-    pub labels: Vec<(String, String)>,
-    pub value: f64,
+pub(crate) struct Sample {
+    pub(crate) name: String,
+    pub(crate) labels: Vec<(String, String)>,
+    pub(crate) value: f64,
 }
 
 impl Sample {
@@ -27,7 +27,7 @@ impl Sample {
 }
 
 /// Parses the exposition text; comments and unreadable lines are skipped.
-pub fn parse(text: &str) -> Vec<Sample> {
+pub(crate) fn parse(text: &str) -> Vec<Sample> {
     text.lines().filter_map(parse_line).collect()
 }
 
@@ -70,13 +70,13 @@ fn parse_labels(text: &str) -> Option<Vec<(String, String)>> {
 
 /// A histogram summed over every sample set that matches: cumulative buckets by upper bound.
 #[derive(Debug, Default, PartialEq)]
-pub struct Histogram {
-    pub buckets: Vec<(f64, f64)>,
-    pub sum: f64,
-    pub count: f64,
+pub(crate) struct Histogram {
+    pub(crate) buckets: Vec<(f64, f64)>,
+    pub(crate) sum: f64,
+    pub(crate) count: f64,
 }
 
-pub fn histogram(samples: &[Sample], base: &str, filter: &[(&str, &str)]) -> Histogram {
+pub(crate) fn histogram(samples: &[Sample], base: &str, filter: &[(&str, &str)]) -> Histogram {
     let bucket_name = format!("{base}_bucket");
     let sum_name = format!("{base}_sum");
     let count_name = format!("{base}_count");
@@ -110,7 +110,7 @@ pub fn histogram(samples: &[Sample], base: &str, filter: &[(&str, &str)]) -> His
 impl Histogram {
     /// The `q` quantile (0 to 1) as Prometheus estimates it: linear inside the bucket. A value
     /// past the last finite bound reports that bound. `None` with no observations.
-    pub fn quantile(&self, q: f64) -> Option<f64> {
+    pub(crate) fn quantile(&self, q: f64) -> Option<f64> {
         let total = self.buckets.last()?.1;
         if total <= 0.0 {
             return None;
@@ -148,7 +148,7 @@ impl Histogram {
 }
 
 /// The sum of a counter or gauge over matching samples.
-pub fn total(samples: &[Sample], name: &str, filter: &[(&str, &str)]) -> f64 {
+pub(crate) fn total(samples: &[Sample], name: &str, filter: &[(&str, &str)]) -> f64 {
     samples
         .iter()
         .filter(|s| s.name == name && s.matches(filter))
@@ -161,7 +161,7 @@ pub fn total(samples: &[Sample], name: &str, filter: &[(&str, &str)]) -> f64 {
 /// sampled by the run script). There is no dedicated
 /// rate-bucket wait metric in the product; the bucket shows as the destination queue and, in the
 /// duration of `delivery.send`, as deferrals.
-pub fn summarize(samples: &[Sample]) -> Value {
+pub(crate) fn summarize(samples: &[Sample]) -> Value {
     let send = [("kind", "delivery.send")];
     let mut outcomes = serde_json::Map::new();
     for sample in samples

@@ -309,7 +309,10 @@ project's network, so the workers reach it as `zirv-m6-sink:2525` inside the egr
 `compose.m6.yaml` (the Docker private ranges; override with `BENCH_EGRESS_ALLOW`). A sink on the host reached
 through `host.docker.internal` was tried and rejected: Docker Desktop's host path stalled new connections
 for 10 s or more at 2 parallel connections. The container runs a Linux build of `sendbench` (`sink.sh
-build` compiles it in the local `rust:1-bookworm` image; nothing is pulled). The released image refuses
+build` compiles it in the `rust:1-bookworm` image, which docker pulls if it is not local, `cargo build
+--locked` downloads the crates, and the build cache is the docker volume `m6-sendbench-target`; remove it
+afterwards with `docker volume rm m6-sendbench-target`). The sink container carries the label
+`zirv.bench=m6-sink` and `sink.sh` removes only a container with it. The released image refuses
 plaintext SMTP, so the sink offers STARTTLS with a generated authority; `sink.sh` writes its PEM to
 `$M6_OUT/sink/ca.pem` and `setup.sh`/`run.sh` put it in the destination's `ca_certificate` (restarting the
 sink makes a new authority: run `setup.sh` again or let `run.sh` patch it). The sink accepts any login and
@@ -375,7 +378,7 @@ by address) and prints, one line each, `Target`, `Result` and `Verdict`, then de
   scheduler leader, not the workers, so `run.sh` samples the scheduler (`:9101`) every second into
   `queue.csv`; the report gives the max depth and max oldest age inside the steady window (a queue
   standing there means the destination or the workers were the limit; `variant.txt` records it).
-- Database CPU: `docker stats` of the PostgreSQL container every 3 s, cut to the steady window by
+- Database CPU: `docker stats` of the PostgreSQL container every few seconds (about 6 s), cut to the steady window by
   the report (mean and max percent of one core, with the sample count).
 - `messages.txt` holds the outcome counts of the flow's messages and any dead jobs.
 

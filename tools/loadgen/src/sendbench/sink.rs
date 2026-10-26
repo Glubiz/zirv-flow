@@ -23,7 +23,7 @@ use tokio_rustls::TlsAcceptor;
 
 /// How the sink secures its connections.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TlsMode {
+pub(crate) enum TlsMode {
     /// No TLS. Only a test build or a `test-support` build of the product talks to this.
     Plain,
     /// `STARTTLS` is offered; `AUTH` and `MAIL` are refused until it was used.
@@ -33,7 +33,7 @@ pub enum TlsMode {
 }
 
 impl TlsMode {
-    pub fn parse(text: &str) -> Option<Self> {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
         match text {
             "plain" | "none" => Some(Self::Plain),
             "starttls" => Some(Self::StartTls),
@@ -43,25 +43,25 @@ impl TlsMode {
     }
 }
 
-pub struct SinkConfig {
-    pub tls: TlsMode,
+pub(crate) struct SinkConfig {
+    pub(crate) tls: TlsMode,
     /// Host names the certificate is valid for, besides `localhost` and 127.0.0.1.
-    pub names: Vec<String>,
+    pub(crate) names: Vec<String>,
     /// Added to every message's final reply: a provider that takes this long to accept.
-    pub response_delay: Duration,
+    pub(crate) response_delay: Duration,
     /// Where to append one JSON line per accepted message.
-    pub log: Option<std::path::PathBuf>,
+    pub(crate) log: Option<std::path::PathBuf>,
     /// Keep the arrivals in memory too (tests).
-    pub keep: bool,
+    pub(crate) keep: bool,
 }
 
 /// One accepted message.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Arrival {
+pub(crate) struct Arrival {
     /// Unix microseconds when the final dot was received.
-    pub at_us: u64,
+    pub(crate) at_us: u64,
     /// The first recipient.
-    pub rcpt: String,
+    pub(crate) rcpt: String,
 }
 
 struct State {
@@ -94,7 +94,7 @@ impl State {
 }
 
 /// A running sink. Dropping it stops it.
-pub struct Sink {
+pub(crate) struct Sink {
     address: SocketAddr,
     ca_pem: String,
     state: Arc<State>,
@@ -103,7 +103,7 @@ pub struct Sink {
 
 impl Sink {
     /// Binds `listen` (port 0 picks a free one) and starts accepting.
-    pub async fn start(listen: SocketAddr, config: SinkConfig) -> Result<Self, String> {
+    pub(crate) async fn start(listen: SocketAddr, config: SinkConfig) -> Result<Self, String> {
         let listener = TcpListener::bind(listen)
             .await
             .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
@@ -153,26 +153,26 @@ impl Sink {
         })
     }
 
-    pub fn port(&self) -> u16 {
+    pub(crate) fn port(&self) -> u16 {
         self.address.port()
     }
 
     /// The authority that signed the sink's certificate, as PEM.
-    pub fn ca_pem(&self) -> &str {
+    pub(crate) fn ca_pem(&self) -> &str {
         &self.ca_pem
     }
 
-    pub fn accepted(&self) -> u64 {
+    pub(crate) fn accepted(&self) -> u64 {
         self.state.accepted.load(Ordering::Relaxed)
     }
 
-    pub fn connections(&self) -> u64 {
+    pub(crate) fn connections(&self) -> u64 {
         self.state.connections.load(Ordering::Relaxed)
     }
 
     /// The arrivals kept in memory (empty unless `keep` was set).
     #[cfg(test)]
-    pub fn arrivals(&self) -> Vec<Arrival> {
+    pub(crate) fn arrivals(&self) -> Vec<Arrival> {
         self.state
             .kept
             .lock()
@@ -188,7 +188,7 @@ impl Drop for Sink {
 }
 
 /// Writes the authority's PEM where the bench scripts read it.
-pub fn write_ca(dir: &Path, pem: &str) -> Result<(), String> {
+pub(crate) fn write_ca(dir: &Path, pem: &str) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     std::fs::write(dir.join("ca.pem"), pem).map_err(|error| error.to_string())
 }

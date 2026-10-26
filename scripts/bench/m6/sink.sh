@@ -6,8 +6,10 @@
 # new connections stalled for 10 s or more at concurrency 2 and above (see
 # docs/benchmarks/m6-send.md), which would have measured the host path, not the product.
 #
-# The container runs a Linux build of sendbench (no image is pulled or built: the local
-# rust:1-bookworm image compiles it, debian:bookworm-slim runs it). Build it once:
+# The container runs a Linux build of sendbench. `build` runs the rust:1-bookworm image (docker pulls it
+# if it is not local), `cargo build --locked` downloads the crates, and the build cache is the docker
+# volume m6-sendbench-target (remove it afterwards: docker volume rm m6-sendbench-target);
+# debian:bookworm-slim runs the result. Build it once:
 #
 #   MSYS_NO_PATHCONV=1 docker run --rm -v '<worktree>:/src:ro' -v m6-sendbench-target:/target \
 #     -e CARGO_TARGET_DIR=/target -w /src rust:1-bookworm \
@@ -30,6 +32,15 @@
 name="$M6_SINK_CONTAINER"
 linux_dir="$M6_OUT/linux"
 win() { cygpath -w "$1" 2>/dev/null || echo "$1"; }
+# Removes the sink container, but only one this script made (label zirv.bench=m6-sink): a container
+# that merely has the same name is left alone and the script stops.
+remove_sink() {
+  local label
+  docker inspect "$name" >/dev/null 2>&1 || return 0
+  label="$(docker inspect -f '{{index .Config.Labels "zirv.bench"}}' "$name" 2>/dev/null)"
+  [ "$label" = m6-sink ] || die "container $name exists but is not the M6 sink (no label zirv.bench=m6-sink); not removing it"
+  docker rm -f "$name" >/dev/null
+}
 
 case "${1:-}" in
   build)
@@ -42,10 +53,10 @@ case "${1:-}" in
   start)
     [ -s "$linux_dir/sendbench" ] || die "no Linux sendbench in $linux_dir; run sink.sh build"
     if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ]; then log "sink already running"; exit 0; fi
-    docker rm -f "$name" >/dev/null 2>&1 || true
+    remove_sink
     rm -f "$M6_SINK_DIR/ca.pem"
     MSYS_NO_PATHCONV=1 docker run -d --name "$name" --network "${M4_PROJECT}_default" \
-      --cpuset-cpus "${M6_SINK_CPUSET:-4-7}" -v "$(win "$linux_dir"):/opt/sink:ro" -v "$(win "$M6_SINK_DIR"):/data" \
+      --label zirv.bench=m6-sink --cpuset-cpus "${M6_SINK_CPUSET:-4-7}" -v "$(win "$linux_dir"):/opt/sink:ro" -v "$(win "$M6_SINK_DIR"):/data" \
       debian:bookworm-slim /opt/sink/sendbench sink --listen "0.0.0.0:$M6_SINK_PORT" --dir /data \
       --log /var/arrivals.ndjson --name "$M6_SINK_HOST" --name mail.bench.test \
       --response-delay-ms "${M6_SINK_DELAY_MS:-0}" >/dev/null
@@ -53,7 +64,7 @@ case "${1:-}" in
     [ -s "$M6_SINK_DIR/ca.pem" ] || die "the sink did not start; docker logs $name"
     log "sink up as $name:$M6_SINK_PORT" ;;
   stop)
-    docker rm -f "$name" >/dev/null 2>&1 || true ;;
+    remove_sink ;;
   status)
     if [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ]; then
       echo "running, $(MSYS_NO_PATHCONV=1 docker exec "$name" wc -l /var/arrivals.ndjson 2>/dev/null | awk '{print $1}') arrivals logged"

@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::sink::Arrival;
 
 /// Nearest-rank percentile of an ascending slice.
-pub fn percentile<T: Copy + Default>(sorted: &[T], p: f64) -> T {
+pub(crate) fn percentile<T: Copy + Default>(sorted: &[T], p: f64) -> T {
     if sorted.is_empty() {
         return T::default();
     }
@@ -22,17 +22,17 @@ pub fn percentile<T: Copy + Default>(sorted: &[T], p: f64) -> T {
 /// Seconds at the percentiles; `None` when there are no samples (never 0, which would read as a
 /// real result).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct Percentiles {
-    pub count: u64,
-    pub p50_s: Option<f64>,
-    pub p95_s: Option<f64>,
-    pub p99_s: Option<f64>,
-    pub max_s: Option<f64>,
+pub(crate) struct Percentiles {
+    pub(crate) count: u64,
+    pub(crate) p50_s: Option<f64>,
+    pub(crate) p95_s: Option<f64>,
+    pub(crate) p99_s: Option<f64>,
+    pub(crate) max_s: Option<f64>,
 }
 
 impl Percentiles {
     /// From signed microseconds, in any order.
-    pub fn from_micros(mut micros: Vec<i64>) -> Self {
+    pub(crate) fn from_micros(mut micros: Vec<i64>) -> Self {
         if micros.is_empty() {
             return Self::default();
         }
@@ -51,17 +51,17 @@ impl Percentiles {
 /// The steady window: from the arrival of the message at rank `trim` percent to the one at rank
 /// `100 - trim` percent, which leaves the ramp-up and the tail out of the rate.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct Window {
-    pub messages: u64,
-    pub start_us: u64,
-    pub end_us: u64,
-    pub seconds: f64,
-    pub rate: f64,
+pub(crate) struct Window {
+    pub(crate) messages: u64,
+    pub(crate) start_us: u64,
+    pub(crate) end_us: u64,
+    pub(crate) seconds: f64,
+    pub(crate) rate: f64,
 }
 
 /// `at_us` ascending. The messages after the first edge message, up to and including the last
 /// edge message, are counted over the time between the two.
-pub fn steady_window(at_us: &[u64], trim_percent: f64) -> Window {
+pub(crate) fn steady_window(at_us: &[u64], trim_percent: f64) -> Window {
     if at_us.len() < 3 {
         return Window::default();
     }
@@ -88,7 +88,7 @@ pub fn steady_window(at_us: &[u64], trim_percent: f64) -> Window {
 }
 
 /// The busiest one-second span: the most arrivals in any `[t, t + 1 s)`. `at_us` ascending.
-pub fn peak_per_second(at_us: &[u64]) -> u64 {
+pub(crate) fn peak_per_second(at_us: &[u64]) -> u64 {
     let mut best = 0;
     let mut tail = 0;
     for head in 0..at_us.len() {
@@ -103,11 +103,11 @@ pub fn peak_per_second(at_us: &[u64]) -> u64 {
 /// The database clock against the host clock, measured right before and right after the run:
 /// `offset = database - host`, each from the midpoint of a host-time bracket around the query.
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct Clocks {
-    pub offset_before_us: i64,
-    pub offset_after_us: i64,
+pub(crate) struct Clocks {
+    pub(crate) offset_before_us: i64,
+    pub(crate) offset_after_us: i64,
     /// The wider of the two brackets: how far a midpoint can be from the truth.
-    pub uncertainty_us: u64,
+    pub(crate) uncertainty_us: u64,
 }
 
 impl Clocks {
@@ -118,89 +118,93 @@ impl Clocks {
 
 /// The destination's own token bucket, when it is what holds the run to the target.
 #[derive(Clone, Debug, Serialize)]
-pub struct Bucket {
-    pub rate: f64,
-    pub burst: f64,
+pub(crate) struct Bucket {
+    pub(crate) rate: f64,
+    pub(crate) burst: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Inputs {
-    pub label: String,
-    pub target_rate: f64,
+pub(crate) struct Inputs {
+    pub(crate) label: String,
+    pub(crate) target_rate: f64,
     /// Fraction under the target that still counts as met and, with a bucket, over the bucket's
     /// rate that is still believable.
-    pub tolerance: f64,
-    pub expected: u64,
-    pub trim_percent: f64,
-    pub clocks: Clocks,
-    pub bucket: Option<Bucket>,
+    pub(crate) tolerance: f64,
+    pub(crate) expected: u64,
+    pub(crate) trim_percent: f64,
+    pub(crate) clocks: Clocks,
+    pub(crate) bucket: Option<Bucket>,
 }
 
 /// The upper bound of a bucket-limited run: the window rate may not exceed
 /// `rate * (1 + tolerance) + burst / window seconds` (the burst's tokens spent in the window), nor
 /// the busiest second `rate * (1 + tolerance) + burst`.
 #[derive(Clone, Debug, Serialize)]
-pub struct BucketCheck {
-    pub rate: f64,
-    pub burst_slack_messages: f64,
-    pub tolerance: f64,
-    pub window_rate_limit: f64,
-    pub peak_limit: f64,
-    pub within: bool,
+pub(crate) struct BucketCheck {
+    pub(crate) rate: f64,
+    pub(crate) burst_slack_messages: f64,
+    pub(crate) tolerance: f64,
+    pub(crate) window_rate_limit: f64,
+    pub(crate) peak_limit: f64,
+    pub(crate) within: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct QueueStats {
-    pub samples: u64,
-    pub max_depth: f64,
-    pub max_oldest_s: f64,
+pub(crate) struct QueueStats {
+    pub(crate) samples: u64,
+    pub(crate) max_depth: f64,
+    pub(crate) max_oldest_s: f64,
     /// Scrapes of the scheduler that failed or found no gauge of the destination: no sample.
-    pub missed_scrapes: u64,
+    pub(crate) missed_scrapes: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub struct CpuStats {
-    pub samples: u64,
-    pub mean_pct: Option<f64>,
-    pub max_pct: Option<f64>,
+pub(crate) struct CpuStats {
+    pub(crate) samples: u64,
+    pub(crate) mean_pct: Option<f64>,
+    pub(crate) max_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Verdict {
-    pub met: bool,
+pub(crate) struct Verdict {
+    pub(crate) met: bool,
     /// Every enrolled person has exactly one delivery, and nothing else arrived.
-    pub complete: bool,
+    pub(crate) complete: bool,
     /// False when the run proves nothing: no matched delivery, or clocks that contradict.
-    pub valid: bool,
-    pub problems: Vec<String>,
+    pub(crate) valid: bool,
+    pub(crate) problems: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct Report {
-    pub inputs: Inputs,
+pub(crate) struct Report {
+    pub(crate) inputs: Inputs,
     /// Every arrival in the log.
-    pub arrivals: u64,
+    pub(crate) arrivals: u64,
     /// Distinct addresses of this run's enrollments that got a message: what the rate counts.
-    pub unique_delivered: u64,
-    pub duplicates: u64,
-    pub unmatched_arrivals: u64,
-    pub overall_rate: f64,
-    pub peak_per_second: u64,
-    pub window: Window,
-    pub delay: Percentiles,
-    pub negative_delays: u64,
+    pub(crate) unique_delivered: u64,
+    pub(crate) duplicates: u64,
+    pub(crate) unmatched_arrivals: u64,
+    pub(crate) overall_rate: f64,
+    pub(crate) peak_per_second: u64,
+    pub(crate) window: Window,
+    pub(crate) delay: Percentiles,
+    pub(crate) negative_delays: u64,
     /// Delays below minus the clock uncertainty: impossible, so the clocks or the join are wrong.
-    pub clock_violations: u64,
-    pub bucket_check: Option<BucketCheck>,
-    pub queue: Option<QueueStats>,
+    pub(crate) clock_violations: u64,
+    pub(crate) bucket_check: Option<BucketCheck>,
+    pub(crate) queue: Option<QueueStats>,
     /// CPU of named containers inside the steady window, percent of one core.
-    pub cpu: std::collections::BTreeMap<String, CpuStats>,
-    pub verdict: Verdict,
+    pub(crate) cpu: std::collections::BTreeMap<String, CpuStats>,
+    pub(crate) verdict: Verdict,
 }
 
 /// `enrolled`: address (lower case) to enrollment time in unix microseconds of the DATABASE
 /// clock.
-pub fn build(inputs: Inputs, arrivals: &[Arrival], enrolled: &HashMap<String, u64>) -> Report {
+pub(crate) fn build(
+    inputs: Inputs,
+    arrivals: &[Arrival],
+    enrolled: &HashMap<String, u64>,
+) -> Report {
     let mut sorted: Vec<&Arrival> = arrivals.iter().collect();
     sorted.sort_by_key(|a| a.at_us);
     let offset = inputs.clocks.offset_us();
@@ -313,7 +317,7 @@ pub fn build(inputs: Inputs, arrivals: &[Arrival], enrolled: &HashMap<String, u6
 
 impl Report {
     /// Adds the destination queue samples (`t_us,depth,oldest_s`) that fall in the steady window.
-    pub fn with_queue(mut self, samples: &[(u64, f64, f64)], missed_scrapes: u64) -> Self {
+    pub(crate) fn with_queue(mut self, samples: &[(u64, f64, f64)], missed_scrapes: u64) -> Self {
         let inside = samples
             .iter()
             .filter(|(t, _, _)| *t >= self.window.start_us && *t <= self.window.end_us);
@@ -332,7 +336,7 @@ impl Report {
 
     /// Adds the CPU samples (`t_us`, percent of one core) of one container inside the steady
     /// window, under `label`.
-    pub fn with_cpu(mut self, label: &str, samples: &[(u64, f64)]) -> Self {
+    pub(crate) fn with_cpu(mut self, label: &str, samples: &[(u64, f64)]) -> Self {
         let values: Vec<f64> = samples
             .iter()
             .filter(|(t, _)| *t >= self.window.start_us && *t <= self.window.end_us)
@@ -349,7 +353,7 @@ impl Report {
     }
 
     /// The text form: target, result and verdict, one line each, then the detail.
-    pub fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         let i = &self.inputs;
         let w = &self.window;
         let secs =
@@ -449,7 +453,7 @@ impl Report {
 }
 
 /// Reads the sink log: one `{"t_us":..,"rcpt":".."}` object per line. Bad lines are counted.
-pub fn parse_arrivals(text: &str) -> (Vec<Arrival>, u64) {
+pub(crate) fn parse_arrivals(text: &str) -> (Vec<Arrival>, u64) {
     let mut arrivals = Vec::new();
     let mut bad = 0;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
@@ -470,7 +474,7 @@ pub fn parse_arrivals(text: &str) -> (Vec<Arrival>, u64) {
 }
 
 /// Reads `address,epoch_microseconds` lines (the enrollment export, database clock).
-pub fn parse_enrollments(text: &str) -> HashMap<String, u64> {
+pub(crate) fn parse_enrollments(text: &str) -> HashMap<String, u64> {
     let mut map = HashMap::new();
     for line in text.lines() {
         if let Some((address, micros)) = line.rsplit_once(',')
@@ -483,7 +487,7 @@ pub fn parse_enrollments(text: &str) -> HashMap<String, u64> {
 }
 
 /// Reads `t_us,depth,oldest_s` lines (the scheduler's destination queue gauges).
-pub fn parse_queue(text: &str) -> Vec<(u64, f64, f64)> {
+pub(crate) fn parse_queue(text: &str) -> Vec<(u64, f64, f64)> {
     text.lines()
         .filter_map(|line| {
             let mut parts = line.trim().split(',');
@@ -497,7 +501,7 @@ pub fn parse_queue(text: &str) -> Vec<(u64, f64, f64)> {
 }
 
 /// Unix microseconds of `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`.
-pub fn parse_iso_us(text: &str) -> Option<u64> {
+pub(crate) fn parse_iso_us(text: &str) -> Option<u64> {
     let text = text.strip_suffix('Z')?;
     let (date, time) = text.split_once('T')?;
     let mut d = date.split('-');
@@ -529,7 +533,7 @@ pub fn parse_iso_us(text: &str) -> Option<u64> {
 
 /// The `docker stats` samples of one container: `(t_us, cpu percent)`. Lines are the JSON objects
 /// the run script writes (`Name`, `CPUPerc` like `123.45%`, and `t`).
-pub fn parse_docker_cpu(text: &str, container: &str) -> Vec<(u64, f64)> {
+pub(crate) fn parse_docker_cpu(text: &str, container: &str) -> Vec<(u64, f64)> {
     text.lines()
         .filter_map(|line| {
             let v: serde_json::Value = serde_json::from_str(line).ok()?;
