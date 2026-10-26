@@ -818,6 +818,10 @@ else's data.
   egress policy (16.1). Values are JSON only in v1; Avro and Protobuf with a
   schema registry come post-1.0 (OQ-31). The `rskafka` TLS and compression
   features are validated on both musl release architectures (amd64, arm64).
+  Its zstd feature is off: `rskafka` 0.6 pins `zstd` 0.13, which has
+  RUSTSEC-2026-0391, 0398, 0403 and 0410, and 0403 is reachable from broker
+  bytes. Gzip, Snappy and LZ4 batches read; a zstd batch fails the read. It
+  returns once `rskafka` moves to `zstd` 0.14.3 or later (#338).
 
 As built (M3, Kafka): `kafka` is one module and one registry line in `zirv-flow-connectors`; a stream
 is a topic, in the new `stream` sync mode, and the record key is the message key (virtual field

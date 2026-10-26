@@ -233,7 +233,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs a Kafka broker: scripts/kafka-fixture.sh"]
-    async fn gzip_snappy_lz4_and_zstd_batches_all_decode() {
+    async fn gzip_snappy_and_lz4_batches_all_decode() {
         let broker = env("ZIRV_KAFKA_BROKER");
         let ctx = local();
         let session = admin(&ctx, &broker, None).await;
@@ -244,7 +244,6 @@ mod tests {
             Compression::Gzip,
             Compression::Snappy,
             Compression::Lz4,
-            Compression::Zstd,
         ];
         for (index, codec) in codecs.into_iter().enumerate() {
             let records = (0..3)
@@ -271,14 +270,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(read.records.len(), 15);
+        assert_eq!(read.records.len(), 12);
         for (index, chunk) in read.records.chunks(3).enumerate() {
             for (n, found) in chunk.iter().enumerate() {
                 assert_eq!(found.key, format!("k{index}-{n}"));
                 assert_eq!(found.data["codec"], index);
             }
         }
-        assert_eq!(read.positions.get(0).unwrap().next, 15);
+        assert_eq!(read.positions.get(0).unwrap().next, 12);
     }
 
     #[tokio::test]
