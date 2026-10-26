@@ -5,13 +5,16 @@ use zirv_flow_core::segment::pointer_push;
 
 use crate::callables::{Kind, unknown_callables};
 use crate::content::mjml::{MjmlError, compile, has_include};
-use crate::context::{MESSAGE_FIELDS, RenderContext, SAMPLE_UNSUBSCRIBE_URL, SYSTEM_FIELDS};
+use crate::context::{
+    MESSAGE_FIELDS, RenderContext, RenderExtras, SAMPLE_UNSUBSCRIBE_URL, SYSTEM_FIELDS,
+};
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
 };
 use crate::issue::{FieldCatalog, Issue, code};
 use crate::links::{href_mentions, link_urls, links_to};
 use crate::render::{has_template_syntax, one_line};
+use crate::reserved::{validate_in_app, validate_push, validate_sms};
 use crate::sandbox::{
     GLOBAL_FUNCTIONS, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
     MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, environment,
@@ -28,6 +31,16 @@ pub(crate) const HTML_WARN_BYTES: usize = 90_000;
 /// Blocking issues stop publishing; warnings do not (see [`Issue::is_blocking`]). The result is
 /// in a fixed order, so equal inputs give equal issues.
 pub fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
+    validate_with(doc, catalog, &RenderExtras::default())
+}
+
+/// [`validate`] with the resolved inputs of a block email, so the references it names (assets,
+/// the theme logo) are checked against what the caller could resolve.
+pub fn validate_with(
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+    extras: &RenderExtras,
+) -> Vec<Issue> {
     let mut issues = Vec::new();
     if doc.schema != SCHEMA_VERSION {
         issues.push(Issue::new(code::UNSUPPORTED_SCHEMA, "/schema"));
@@ -40,12 +53,18 @@ pub fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
     match doc.channel {
         Channel::Email | Channel::Webhook => {}
         Channel::Sms | Channel::Push | Channel::InApp => {
+            issues.extend(match (doc.channel, &doc.sms, &doc.push, &doc.in_app) {
+                (Channel::Sms, Some(sms), _, _) => validate_sms(sms),
+                (Channel::Push, _, Some(push), _) => validate_push(push),
+                (Channel::InApp, _, _, Some(message)) => validate_in_app(message),
+                _ => Vec::new(),
+            });
             issues.push(Issue::new(code::UNSUPPORTED_CHANNEL, "/channel"));
             return issues;
         }
     }
     if doc.channel == Channel::Email && doc.mode == Mode::Blocks && doc.blocks.is_some() {
-        return crate::content::blocks::validate(doc, catalog);
+        return crate::content::blocks::validate(doc, catalog, extras);
     }
     if doc.mode != Mode::Code {
         issues.push(Issue::new(code::UNSUPPORTED_MODE, "/mode"));
@@ -546,7 +565,7 @@ mod tests {
     #[test]
     fn unsupported_schema() {
         let mut doc = TemplateDocument::email_code(good_email());
-        doc.schema = 2;
+        doc.schema = 3;
         assert_eq!(
             codes(&validate(&doc, &catalog())),
             [code::UNSUPPORTED_SCHEMA]
@@ -960,6 +979,61 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 37);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 48);
+    }
+
+    #[test]
+    fn reserved_contents_are_validated_and_never_publishable() {
+        let mut sms = TemplateDocument::email_code(good_email());
+        sms.channel = Channel::Sms;
+        sms.email = None;
+        sms.sms = Some(crate::SmsContent {
+            text: "x".repeat(1601),
+            sender_id: "Shop".into(),
+        });
+        assert_eq!(
+            codes(&validate(&sms, &catalog())),
+            [
+                code::CONTENT_TOO_LARGE,
+                code::SMS_MANY_SEGMENTS,
+                code::UNSUPPORTED_CHANNEL
+            ]
+        );
+        sms.sms = Some(crate::SmsContent {
+            text: "hello".into(),
+            sender_id: "Shop".into(),
+        });
+        assert_eq!(
+            codes(&validate(&sms, &catalog())),
+            [code::UNSUPPORTED_CHANNEL]
+        );
+
+        let mut push = sms.clone();
+        push.channel = Channel::Push;
+        push.sms = None;
+        push.push = Some(crate::PushContent {
+            title: String::new(),
+            body: "b".into(),
+            image: None,
+            deep_link: None,
+            data: Default::default(),
+        });
+        assert_eq!(
+            codes(&validate(&push, &catalog())),
+            [code::MISSING_CONTENT, code::UNSUPPORTED_CHANNEL]
+        );
+        let mut in_app = sms;
+        in_app.channel = Channel::InApp;
+        in_app.sms = None;
+        in_app.in_app = Some(crate::InAppContent {
+            title: "t".into(),
+            body: "b".into(),
+            image: None,
+            cta_label: None,
+            cta_url: None,
+        });
+        let issues = validate(&in_app, &catalog());
+        assert_eq!(codes(&issues), [code::UNSUPPORTED_CHANNEL]);
+        assert!(issues[0].is_blocking());
     }
 }

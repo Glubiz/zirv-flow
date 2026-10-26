@@ -1,7 +1,7 @@
 //! The template document: a versioned, channel-aware envelope (architecture 11.1).
 //!
 //! M6 renders `mode: code` for the `email` and `webhook` channels, and `mode: blocks` for `email`
-//! (the block document v1, in `content::blocks`). The reserved channels are part of the schema so
+//! (the block document, in `content::blocks`). The reserved channels are part of the schema so
 //! documents keep their shape, but they are validated as unsupported and never rendered here.
 
 use std::collections::BTreeMap;
@@ -9,10 +9,11 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use crate::content::blocks::BlocksContent;
+pub use crate::reserved::{InAppContent, PushContent, SmsContent};
 
 /// The document schema this crate reads. A newer schema is refused; older ones are migrated in
-/// M7 (architecture 11.8).
-pub const SCHEMA_VERSION: u32 = 1;
+/// memory when they are read (architecture 11.8, [`crate::migrate_to_current`]).
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// The channel a document is written for.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -112,14 +113,25 @@ pub struct TemplateDocument {
     /// reads and writes exactly as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<BlocksContent>,
+    /// Reserved channel contents: validated, never publishable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sms: Option<SmsContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<PushContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_app: Option<InAppContent>,
 }
 
 impl TemplateDocument {
-    /// How many of `email`, `blocks` and `webhook` the document carries.
+    /// How many contents (`email`, `blocks`, `webhook`, `sms`, `push`, `in_app`) the document
+    /// carries.
     pub fn content_count(&self) -> usize {
         usize::from(self.email.is_some())
             + usize::from(self.blocks.is_some())
             + usize::from(self.webhook.is_some())
+            + usize::from(self.sms.is_some())
+            + usize::from(self.push.is_some())
+            + usize::from(self.in_app.is_some())
     }
 
     /// Whether the document carries more than one content.
@@ -136,6 +148,9 @@ impl TemplateDocument {
             email: Some(content),
             webhook: None,
             blocks: None,
+            sms: None,
+            push: None,
+            in_app: None,
         }
     }
 
@@ -148,6 +163,9 @@ impl TemplateDocument {
             email: None,
             webhook: None,
             blocks: Some(content),
+            sms: None,
+            push: None,
+            in_app: None,
         }
     }
 
@@ -160,6 +178,9 @@ impl TemplateDocument {
             email: None,
             webhook: Some(content),
             blocks: None,
+            sms: None,
+            push: None,
+            in_app: None,
         }
     }
 }
@@ -171,7 +192,7 @@ mod tests {
     #[test]
     fn email_document_reads_with_defaults() {
         let doc: TemplateDocument = serde_json::from_str(
-            r#"{"schema":1,"channel":"email","mode":"code",
+            r#"{"schema":2,"channel":"email","mode":"code",
                 "email":{"subject":"Hi","html":"<p>x</p>"}}"#,
         )
         .unwrap();
@@ -185,7 +206,7 @@ mod tests {
     #[test]
     fn an_unknown_syntax_is_refused_with_a_serde_error() {
         let error = serde_json::from_str::<TemplateDocument>(
-            r#"{"schema":1,"channel":"email","mode":"code",
+            r#"{"schema":2,"channel":"email","mode":"code",
                 "email":{"subject":"Hi","html":"x","syntax":"markdown"}}"#,
         )
         .unwrap_err()
@@ -200,7 +221,7 @@ mod tests {
     #[test]
     fn reserved_channels_parse() {
         let doc: TemplateDocument =
-            serde_json::from_str(r#"{"schema":1,"channel":"in_app","mode":"blocks"}"#).unwrap();
+            serde_json::from_str(r#"{"schema":2,"channel":"in_app","mode":"blocks"}"#).unwrap();
         assert_eq!(doc.channel, Channel::InApp);
         assert_eq!(doc.mode, Mode::Blocks);
     }

@@ -27,8 +27,11 @@ function summary(block: Block): string {
       const text = block.content.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
       return text === "" ? "Empty text" : text;
     }
-    case "image":
-      return block.src === "" ? "Image with no address yet" : `${block.alt === "" ? "Image" : block.alt}: ${block.src}`;
+    case "image": {
+      const name = block.alt === "" ? "Image" : block.alt;
+      if ("url" in block.src) return block.src.url === "" ? "Image with no address yet" : `${name}: ${block.src.url}`;
+      return "asset" in block.src ? `${name}: an uploaded image` : `${name}: the theme logo`;
+    }
     case "button":
       return `${block.label === "" ? "Button" : block.label} to ${block.url === "" ? "no address yet" : block.url}`;
     case "divider":
@@ -37,6 +40,8 @@ function summary(block: Block): string {
       return `${block.height} pixels of space`;
     case "raw_html":
       return block.html === "" ? "Empty HTML" : `${block.html.length} characters of your own HTML`;
+    case "snippet":
+      return `Snippet ${block.snippet_id} (locked)`;
   }
 }
 

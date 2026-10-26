@@ -4,7 +4,7 @@ use minijinja::{Environment, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::content::mjml::{MjmlError, compile, has_include};
-use crate::context::RenderContext;
+use crate::context::{RenderContext, RenderExtras};
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
 };
@@ -26,6 +26,15 @@ pub struct Rendered {
     pub text: String,
     /// Extra message headers, in a fixed order: the `List-Unsubscribe` pair for marketing mail.
     pub headers: Vec<(String, String)>,
+    /// The sections and blocks a false `visible_if` dropped, in document order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<HiddenBlock>,
+}
+
+/// A section or block a render left out because its `visible_if` was false.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HiddenBlock {
+    pub id: String,
 }
 
 /// A rendered webhook payload.
@@ -94,13 +103,30 @@ pub fn render_email(
     context: &RenderContext,
     hooks: &Hooks<'_>,
 ) -> Result<Rendered, RenderError> {
+    render_email_with(doc, context, hooks, &RenderExtras::default())
+}
+
+/// [`render_email`] with the resolved inputs of a block email: condition results, asset URLs,
+/// the theme and snippets. A code-mode email reads none of them.
+pub fn render_email_with(
+    doc: &TemplateDocument,
+    context: &RenderContext,
+    hooks: &Hooks<'_>,
+    extras: &RenderExtras,
+) -> Result<Rendered, RenderError> {
     if doc.mode == Mode::Blocks && doc.blocks.is_some() {
-        let parts = crate::content::blocks::render(doc, context)?;
+        let parts = crate::content::blocks::render(doc, context, extras)?;
+        let hidden = parts
+            .hidden
+            .into_iter()
+            .map(|id| HiddenBlock { id })
+            .collect();
         return finish_email(
             parts.subject,
             parts.html,
             parts.text,
             parts.category,
+            hidden,
             context,
             hooks,
         );
@@ -140,7 +166,15 @@ pub fn render_email(
         MAX_TEXT_BYTES,
     )?;
 
-    finish_email(subject, html, text, email.category, context, hooks)
+    finish_email(
+        subject,
+        html,
+        text,
+        email.category,
+        Vec::new(),
+        context,
+        hooks,
+    )
 }
 
 /// The post-render steps every email gets: marketing mail must link to the message's
@@ -150,6 +184,7 @@ fn finish_email(
     html: String,
     text: String,
     category: Category,
+    hidden: Vec<HiddenBlock>,
     context: &RenderContext,
     hooks: &Hooks<'_>,
 ) -> Result<Rendered, RenderError> {
@@ -170,6 +205,7 @@ fn finish_email(
             html,
             text,
             headers,
+            hidden,
         },
         context,
         hooks,
@@ -364,6 +400,7 @@ impl BodyRenderer<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::migrate::read_doc;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::PathBuf;
@@ -441,7 +478,7 @@ mod tests {
     fn golden_email(name: &str) {
         let dir = fixtures();
         let read = |suffix: &str| fs::read_to_string(dir.join(format!("{name}.{suffix}"))).unwrap();
-        let doc: TemplateDocument = serde_json::from_str(&read("doc.json")).unwrap();
+        let doc = read_doc(&read("doc.json"));
         let context: RenderContext = serde_json::from_str(&read("context.json")).unwrap();
         let rendered = render_email(&doc, &context, &live()).unwrap();
         check(&dir.join(format!("{name}.expected.html")), &rendered.html);
@@ -456,7 +493,7 @@ mod tests {
     fn golden_webhook(name: &str) {
         let dir = fixtures();
         let read = |suffix: &str| fs::read_to_string(dir.join(format!("{name}.{suffix}"))).unwrap();
-        let doc: TemplateDocument = serde_json::from_str(&read("doc.json")).unwrap();
+        let doc = read_doc(&read("doc.json"));
         let context: RenderContext = serde_json::from_str(&read("context.json")).unwrap();
         let rendered = render_webhook(&doc, &context).unwrap();
         check(
@@ -590,7 +627,7 @@ mod tests {
     #[test]
     fn wrong_documents_are_refused() {
         let mut doc = email(Category::Marketing, FOOTER);
-        doc.schema = 2;
+        doc.schema = 3;
         assert_eq!(
             render_email(&doc, &context(), &live()),
             Err(RenderError::UnsupportedSchema)
