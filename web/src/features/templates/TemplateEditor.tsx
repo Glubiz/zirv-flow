@@ -3,7 +3,6 @@ import { Link } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
-import { useAssistantAccess } from "../assistant";
 import { useLeaveGuard } from "../segments";
 import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
@@ -72,7 +71,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
   const archived = template.archived_at !== null && template.archived_at !== undefined;
   const editable = canWrite && !archived;
-  const { enabled: assistantOn, reload: reloadAssistant } = useAssistantAccess(workspaceId, canAdmin);
+  /** Only an admin may draft with the assistant; when it is off the panel says so. */
+  const assistantEligible = editable && canAdmin && template.channel === "email" && assistable(doc);
   const docRef = useRef(doc);
   const personRef = useRef<string | null>(null);
   const dirty = useRef(false);
@@ -294,7 +294,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             <span className="muted">Draft saved</span>
           )}
         </div>
-        {editable && assistantOn && template.channel === "email" && assistable(doc) ? (
+        {assistantEligible ? (
           <Button aria-pressed={assistantOpen} onClick={() => setAssistantOpen((open) => !open)}>
             Assistant
           </Button>
@@ -332,7 +332,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          {assistantOpen && editable && assistantOn && assistable(doc) ? (
+          {assistantOpen && assistantEligible ? (
             <TemplateAssistant
               workspaceId={workspaceId}
               templateId={template.id}
@@ -344,7 +344,6 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               onAccepted={adopt}
               onReconcile={reconcile}
               onReload={reload}
-              onGone={reloadAssistant}
               onClose={() => setAssistantOpen(false)}
             />
           ) : (

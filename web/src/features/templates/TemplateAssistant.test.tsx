@@ -214,8 +214,17 @@ describe("the template assistant", () => {
     );
   });
 
-  it("shows the notice and no button when the assistant is off", async () => {
+  it("opens to the usual notice, with nothing to draft, when no provider is configured", async () => {
     mockApi({ ...templateRoutes(), [`GET ${WS}/ai/settings`]: () => json(settings(false)) });
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
+    await open();
+
+    expect(await screen.findByText("The assistant is off")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Draft" })).not.toBeInTheDocument();
+  });
+
+  it("offers the assistant to an admin only", async () => {
+    mockApi(templateRoutes({ role: "member" }));
     renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
 
     await screen.findByRole("textbox", { name: /source/ });
@@ -252,7 +261,6 @@ describe("the assistant and the editor's saves", () => {
       onAccepted: vi.fn(),
       onReconcile: () => Promise.resolve(false),
       onReload: () => Promise.resolve(),
-      onGone: vi.fn(),
       onClose: vi.fn(),
       ...overrides,
     };

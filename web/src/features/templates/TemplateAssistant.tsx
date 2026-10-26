@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { ApiError } from "../../api";
 import { Button, Dialog } from "../../ui";
-import { AssistantPanel, DraftChanges, assistantGone, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
+import { AssistantPanel, DraftChanges, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
 import type { Editable, TemplateDetail } from "./model";
 
 type Width = "desktop" | "mobile";
@@ -35,12 +35,11 @@ interface Props {
   onReconcile: (subject: string | null) => Promise<boolean>;
   /** Replaces the editor's copy with the server's draft. */
   onReload: () => Promise<void>;
-  onGone: () => void;
   onClose: () => void;
 }
 
 /** The left column of the template editor while the assistant is open. */
-export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush, hold, release, onAccepted, onReconcile, onReload, onGone, onClose }: Props) {
+export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush, hold, release, onAccepted, onReconcile, onReload, onClose }: Props) {
   const [replacing, setReplacing] = useState<((replace: boolean) => void) | null>(null);
   const [picked, setPicked] = useState<{ id: string; subject: string } | null>(null);
   const [epoch, setEpoch] = useState(0);
@@ -106,9 +105,6 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
         onAccept={accepted}
         confirmAccept={confirmAccept}
         onAcceptFailed={acceptFailed}
-        onFailure={(error) => {
-          if (assistantGone(error)) onGone();
-        }}
         renderChanges={(changes, draft) => <DraftReview changes={changes} draft={draft} onPick={(subject) => setPicked({ id: draft.id, subject })} />}
         renderAcceptAction={(code) =>
           code === "template_draft_changed" ? (
