@@ -298,18 +298,18 @@ the asset store, visibility conditions, the assistant, the webhook payload edito
 document migrations (M7).
 
 **Exit criteria.**
-- [ ] End to end: track call, then segment entry, then flow, then an email captured by a local SMTP sink with `List-Unsubscribe` headers. The tracked click records `email.clicked`; one-click unsubscribe updates consent, and the next send is skipped with `no_consent`.
-- [ ] A sending domain stays unverified until its SPF, DKIM and DMARC records resolve (fixture resolver); SMTP mail from a verified domain carries a DKIM signature that verifies against the published key, and a send from an unverified domain is refused.
-- [ ] A hard-bounce webhook adds a suppression; later sends are skipped with `suppressed`.
-- [ ] A consent policy built in the UI decides sends. It combines recorded consent with a cooldown since the last message and an account-state trait, and an unsubscribe scoped to one product vertical blocks only that vertical. Each skipped send names the deciding rule.
-- [ ] Concurrent sends from two flows to one person never exceed the frequency cap (concurrency test).
-- [ ] Quiet hours defer a send to the next allowed local time, including across a DST change (injected clock test).
-- [ ] N workers together stay within the configured destination rate, within a stated tolerance.
-- [ ] A retried delivery job reuses its idempotency key; providers that honour keys show zero duplicates in fixture tests.
-- [ ] A trace from a track call shows event, segment entry, enrollment, steps, a message and delivery feedback, plus a later skipped send with its exact gate reason; the API tree and UI agree.
-- [ ] A forwarding fixture filters and maps the expected event, reuses its idempotency key across retries, exposes lag and a dead letter, re-drives successfully without triggering a flow, and receives its declared erase call.
-- [ ] A marketer builds an email from the v1 block set in the WYSIWYG editor, and preview and send give the same bytes through `mrml`; HTML and MJML code templates publish and preview the same way; a template that exceeds the render memory limit fails its render without stopping the worker.
-- [ ] The representative layout set (1, 2 and 3 columns, hero image, button, footer with unsubscribe) renders through `mrml` as golden tests and passes the client-matrix check before the v1 block set is frozen; results attached (OQ-25).
+- [x] End to end: track call, then segment entry, then flow, then an email captured by a local SMTP sink with `List-Unsubscribe` headers. The tracked click records `email.clicked`; one-click unsubscribe updates consent, and the next send is skipped with `no_consent`.
+- [x] A sending domain stays unverified until its SPF, DKIM and DMARC records resolve (fixture resolver); SMTP mail from a verified domain carries a DKIM signature that verifies against the published key, and a send from an unverified domain is refused.
+- [x] A hard-bounce webhook adds a suppression; later sends are skipped with `suppressed`.
+- [x] A consent policy built in the UI decides sends. It combines recorded consent with a cooldown since the last message and an account-state trait, and an unsubscribe scoped to one product vertical blocks only that vertical. Each skipped send names the deciding rule.
+- [x] Concurrent sends from two flows to one person never exceed the frequency cap (concurrency test).
+- [x] Quiet hours defer a send to the next allowed local time, including across a DST change (injected clock test).
+- [x] N workers together stay within the configured destination rate, within a stated tolerance.
+- [x] A retried delivery job reuses its idempotency key; providers that honour keys show zero duplicates in fixture tests.
+- [x] A trace from a track call shows event, segment entry, enrollment, steps, a message and delivery feedback, plus a later skipped send with its exact gate reason; the API tree and UI agree.
+- [x] A forwarding fixture filters and maps the expected event, reuses its idempotency key across retries, exposes lag and a dead letter, re-drives successfully without triggering a flow, and receives its declared erase call.
+- [x] A marketer builds an email from the v1 block set in the WYSIWYG editor, and preview and send give the same bytes through `mrml`; HTML and MJML code templates publish and preview the same way; a template that exceeds the render memory limit fails its render without stopping the worker.
+- [ ] The representative layout set (1, 2 and 3 columns, hero image, button, footer with unsubscribe) renders through `mrml` as golden tests and passes the client-matrix check before the v1 block set is frozen; results attached (OQ-25). (golden set: `zirv-flow-templates` `content::mjml::tests::the_golden_corpus_renders_to_its_expected_bytes_twice` over `tests/fixtures/mjml`; the client-matrix check is deferred to #253)
 - [x] Send throughput benchmark attached against the section 19 target ([`m6-send.md`](benchmarks/m6-send.md): 184 messages/s at best, missed; causes #296, #297, #298).
 
 **Dependencies.** M5 (flow actions) and M3 (connector runtime, manifests, secrets).
