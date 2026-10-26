@@ -44,8 +44,9 @@ pub async fn record_references(
             return Err(AssetReferenceError::Missing(*asset));
         }
         sqlx::query(
-            "INSERT INTO asset_references (asset_id, owner_kind, owner_id, version) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            "INSERT INTO asset_references (workspace_id, asset_id, owner_kind, owner_id, version) \
+             SELECT workspace_id, id, $2, $3, $4 FROM assets WHERE id = $1 \
+             ON CONFLICT DO NOTHING",
         )
         .bind(asset.as_uuid())
         .bind(owner_kind.as_str())

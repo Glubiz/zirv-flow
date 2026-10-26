@@ -22,7 +22,8 @@ CREATE TABLE assets (
     name         text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 200),
     created_by   uuid REFERENCES users (id),
     created_at   timestamptz NOT NULL DEFAULT now(),
-    deleted_at   timestamptz
+    deleted_at   timestamptz,
+    UNIQUE (workspace_id, id)
 );
 
 -- The same bytes uploaded twice in one workspace are one live row.
@@ -38,9 +39,11 @@ CREATE INDEX assets_workspace_idx ON assets (workspace_id, id DESC);
 -- The published versions that use an asset. Written in the publish transaction of the owner; an
 -- asset with any row here cannot be deleted.
 CREATE TABLE asset_references (
-    asset_id   uuid NOT NULL REFERENCES assets (id),
+    workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    asset_id   uuid NOT NULL,
     owner_kind text NOT NULL CHECK (owner_kind IN ('template', 'theme', 'snippet')),
     owner_id   uuid NOT NULL,
     version    integer NOT NULL CHECK (version > 0),
-    PRIMARY KEY (asset_id, owner_kind, owner_id, version)
+    PRIMARY KEY (asset_id, owner_kind, owner_id, version),
+    FOREIGN KEY (workspace_id, asset_id) REFERENCES assets (workspace_id, id)
 );
