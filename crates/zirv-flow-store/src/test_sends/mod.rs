@@ -16,9 +16,10 @@ pub use allowlist::{
     find_allowlist_entry, list_allowlist, masked_hint, open_allowlist_address,
 };
 pub use log::{
-    ABANDONED, MEMBER_HOURLY_LIMIT, NewTestSend, TEST_SEND_JOB_KIND, TEST_SEND_RETENTION_MONTHS,
-    TestSend, TestSendCursor, TestSendOutcome, TestSendReservation, WORKSPACE_HOURLY_LIMIT,
-    abandon_orphaned_test_sends, delete_test_sends_before, delete_test_sends_by_hash,
-    find_test_send, finish_test_send, is_test_send, list_test_sends, reserve_test_send,
-    test_send_may_go,
+    ABANDONED, ListedTestSend, MEMBER_HOURLY_LIMIT, NewTestSend, QuotaUsage, REMOVED_ADDRESS,
+    TEST_SEND_JOB_KIND, TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome,
+    TestSendQuota, TestSendReservation, WORKSPACE_HOURLY_LIMIT, abandon_orphaned_test_sends,
+    delete_test_sends_before, delete_test_sends_by_hash, find_test_send, finish_test_send,
+    is_test_send, list_test_sends, reserve_test_send, set_test_send_draft_revision,
+    test_send_may_go, test_send_quota,
 };

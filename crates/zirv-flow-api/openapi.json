@@ -23268,6 +23268,16 @@
             }
           },
           {
+            "name": "draft_revision",
+            "in": "query",
+            "description": "Only the tests that rendered this draft revision",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Rows per page, 1 to 200; default 50",
@@ -23300,11 +23310,82 @@
             }
           },
           "400": {
-            "description": "limit or template_id is out of range or malformed, or before is not a cursor",
+            "description": "limit, template_id or draft_revision is out of range or malformed, or before is not a cursor",
             "content": {
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/test-sends/quota": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "What the caller may still send this hour: their own count and the workspace's, against the\nlimits `POST .../test-send` enforces, counted in the same window.",
+        "operationId": "test_send_quota",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The hourly counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaBody"
                 }
               }
             }
@@ -34908,6 +34989,48 @@
           }
         }
       },
+      "QuotaBody": {
+        "type": "object",
+        "required": [
+          "member",
+          "workspace"
+        ],
+        "properties": {
+          "member": {
+            "$ref": "#/components/schemas/QuotaUsageBody",
+            "description": "The caller's own sends; an API key has none."
+          },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the oldest counted send leaves the hour window, freeing a slot; null when none is\ncounted."
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/QuotaUsageBody"
+          }
+        }
+      },
+      "QuotaUsageBody": {
+        "type": "object",
+        "description": "Test sends counted in the rolling hour against a limit.",
+        "required": [
+          "used",
+          "limit"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "used": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "ReadBody": {
         "type": "object",
         "required": [
@@ -39087,6 +39210,7 @@
           "template_id",
           "destination_id",
           "sender_identity_id",
+          "recipient_display",
           "render_context",
           "outcome",
           "created_at"
@@ -39106,6 +39230,14 @@
           "destination_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "draft_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision a draft test rendered; null for a version test."
           },
           "id": {
             "type": "string",
@@ -39132,6 +39264,10 @@
             ],
             "description": "A fixed code that says why a test did not go out."
           },
+          "recipient_display": {
+            "type": "string",
+            "description": "A member's email, or the hint of the allowlist entry the test went to; `removed address`\nonce the entry is gone. Never an allowlisted address."
+          },
           "recipient_member_id": {
             "type": [
               "string",
@@ -39148,6 +39284,13 @@
           "sender_identity_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "sent_by_email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The email of the member who asked; null for an API key or a removed member."
           },
           "template_id": {
             "type": "string",

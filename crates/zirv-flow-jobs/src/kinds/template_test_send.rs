@@ -51,7 +51,8 @@ use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, NewJob, SOFT_BOUNCE, TEST_SEND_JOB_KIND, TestSend,
     TestSendOutcome, find_destination, find_person, find_template, find_template_draft,
     find_template_version, find_user, finish_test_send, list_identities, membership_role,
-    open_allowlist_address, read_template_field_catalog, suppressing_scope, test_send_may_go,
+    open_allowlist_address, read_template_field_catalog, set_test_send_draft_revision,
+    suppressing_scope, test_send_may_go,
 };
 use zirv_flow_templates::FieldCatalog;
 
@@ -197,9 +198,14 @@ async fn decide(
             .await?
             .map(|version| version.document)
     } else {
-        find_template_draft(ctx.conn(), workspace, row.template_id)
-            .await?
-            .map(|draft| draft.document)
+        // The row ends up holding the revision this run renders, not the one the request saw.
+        let draft = find_template_draft(ctx.conn(), workspace, row.template_id).await?;
+        if let Some(draft) = &draft
+            && row.draft_revision != Some(draft.revision)
+        {
+            set_test_send_draft_revision(ctx.conn(), workspace, row.id, draft.revision).await?;
+        }
+        draft.map(|draft| draft.document)
     };
     let Some(document) = document else {
         return end(TestSendOutcome::Failed, "template_unavailable");
@@ -754,6 +760,7 @@ mod tests {
                     workspace: self.ws,
                     template,
                     template_version: version,
+                    draft_revision: None,
                     member: None,
                     destination: self.destination,
                     sender_identity: sender,
@@ -1004,6 +1011,53 @@ mod tests {
             .collect();
         subjects.sort();
         assert_eq!(subjects, ["[TEST] Blocks", "[TEST] Html", "[TEST] Mjml"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_row_ends_up_with_the_draft_revision_the_job_rendered(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let document = json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+            "subject": "S", "sender": env.sender, "lang": "en", "category": "marketing",
+            "html": "<a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+            "text": "t {{ system.unsubscribe_url }}"
+        }});
+        let template = env.template(document.clone()).await;
+        let mut connection = env.pool.acquire().await.unwrap();
+        let saved = zirv_flow_store::save_template_draft(
+            &mut connection,
+            env.ws,
+            template,
+            &document,
+            None,
+        )
+        .await
+        .unwrap();
+        // The request saw an older revision; a save landed before the job ran.
+        let stale = env
+            .reserve_with(template, "qa@example.org", None, None, env.sender, None)
+            .await;
+        let versioned = env
+            .reserve_with(template, "qa@example.org", None, None, env.sender, Some(1))
+            .await;
+
+        env.attempt().await.unwrap();
+        env.attempt().await.unwrap();
+
+        let revision_of = |id: Uuid| {
+            let pool = env.pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<i32>>(
+                    "SELECT draft_revision FROM test_sends WHERE id = $1",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(revision_of(stale).await, Some(saved.revision));
+        assert_eq!(revision_of(versioned).await, None);
     }
 
     #[sqlx::test]

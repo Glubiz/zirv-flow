@@ -955,4 +955,186 @@ mod tests {
         assert_eq!(destinations.body[0]["archived"], true);
         assert_eq!(senders.body[0]["archived"], true);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_quota_is_per_caller_needs_read_and_agrees_with_the_refusal(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let url = f.test_send_url();
+        let body = f.request(json!({"member": f.member_id}));
+        for minute in 0..10 {
+            f.clock
+                .set(datetime!(2031-05-06 07:00 UTC) + time::Duration::minutes(minute));
+            f.call("POST", &url, Some(body.clone()), Auth::Session(&f.member))
+                .await;
+        }
+        f.call("POST", &url, Some(body.clone()), Auth::Session(&f.lead))
+            .await;
+        f.clock.set(datetime!(2031-05-06 07:30 UTC));
+
+        let anonymous = f
+            .call("GET", "/test-sends/quota", None, Auth::Anonymous)
+            .await;
+        let foreign = f
+            .call("GET", "/test-sends/quota", None, Auth::Key(&f.other_admin))
+            .await;
+        let mine = f
+            .call("GET", "/test-sends/quota", None, Auth::Session(&f.member))
+            .await;
+        let lead = f
+            .call("GET", "/test-sends/quota", None, Auth::Session(&f.lead))
+            .await;
+        let key = f
+            .call("GET", "/test-sends/quota", None, Auth::Key(&f.read))
+            .await;
+        let refused = f
+            .call("POST", &url, Some(body), Auth::Session(&f.member))
+            .await;
+
+        assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            mine.body,
+            json!({
+                "member": {"used": 10, "limit": 10},
+                "workspace": {"used": 11, "limit": 100},
+                "resets_at": "2031-05-06T08:00:00Z",
+            })
+        );
+        assert_eq!(lead.body["member"]["used"], 1);
+        assert_eq!(lead.body["resets_at"], "2031-05-06T08:09:00Z");
+        assert_eq!(key.status, StatusCode::OK);
+        assert_eq!(key.body["member"]["used"], 0, "a key has no member count");
+        // The reset time is the moment the refusal's Retry-After points at.
+        assert_eq!(refused.retry_after.as_deref(), Some("1800"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_log_shows_who_it_went_to_and_who_sent_it_without_an_address(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let url = f.test_send_url();
+        f.allow("qa.person@example.org").await;
+        let to_member = f
+            .call(
+                "POST",
+                &url,
+                Some(f.request(json!({"member": f.member_id}))),
+                Auth::Session(&f.lead),
+            )
+            .await;
+        f.clock.advance(time::Duration::minutes(1));
+        let to_entry = f
+            .call(
+                "POST",
+                &url,
+                Some(f.request(json!({"address": "qa.person@example.org"}))),
+                Auth::Key(&f.write),
+            )
+            .await;
+
+        let shown = |reply: &Reply| {
+            (
+                reply.body["recipient_display"].clone(),
+                reply.body["sent_by_email"].clone(),
+            )
+        };
+        assert_eq!(
+            shown(&to_member),
+            (json!("member@example.com"), json!("lead@example.com"))
+        );
+        assert_eq!(
+            shown(&to_entry),
+            (json!("q***@example.org"), Value::Null),
+            "an API key sent it"
+        );
+        let listed = f.call("GET", "/test-sends", None, Auth::Key(&f.read)).await;
+        let rows = listed.body["test_sends"].as_array().unwrap();
+        assert_eq!(rows[0]["recipient_display"], "q***@example.org");
+        assert_eq!(rows[1]["recipient_display"], "member@example.com");
+        assert_eq!(rows[1]["sent_by_email"], "lead@example.com");
+        let entry = f
+            .call("GET", "/test-send-allowlist", None, Auth::Key(&f.admin))
+            .await
+            .body["entries"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.call(
+            "DELETE",
+            &format!("/test-send-allowlist/{entry}"),
+            None,
+            Auth::Key(&f.admin),
+        )
+        .await;
+
+        let after = f.call("GET", "/test-sends", None, Auth::Key(&f.read)).await;
+
+        assert_eq!(
+            after.body["test_sends"][0]["recipient_display"],
+            "removed address"
+        );
+        assert!(!after.body.to_string().contains("qa.person@example.org"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_test_records_the_draft_revision_a_version_test_does_not_and_the_list_filters(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let url = f.test_send_url();
+        let draft = f.request(json!({"member": f.member_id}));
+        let mut version = draft.clone();
+        version["version"] = json!(1);
+        let revision: i32 = sqlx::query_scalar(
+            "SELECT revision FROM template_drafts WHERE workspace_id = $1 AND template_id = $2",
+        )
+        .bind(f.ws.as_uuid())
+        .bind(f.template)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let drafted = f.call("POST", &url, Some(draft), Auth::Key(&f.write)).await;
+        let versioned = f
+            .call("POST", &url, Some(version), Auth::Key(&f.write))
+            .await;
+        let this = f
+            .call(
+                "GET",
+                &format!("/test-sends?draft_revision={revision}"),
+                None,
+                Auth::Key(&f.read),
+            )
+            .await;
+        let other = f
+            .call(
+                "GET",
+                &format!("/test-sends?draft_revision={}", revision + 1),
+                None,
+                Auth::Key(&f.read),
+            )
+            .await;
+        let bad = f
+            .call(
+                "GET",
+                "/test-sends?draft_revision=x",
+                None,
+                Auth::Key(&f.read),
+            )
+            .await;
+
+        assert_eq!(drafted.body["draft_revision"], json!(revision));
+        assert_eq!(versioned.body["draft_revision"], Value::Null);
+        let ids: Vec<_> = this.body["test_sends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect();
+        assert_eq!(ids, [drafted.body["id"].clone()]);
+        assert!(other.body["test_sends"].as_array().unwrap().is_empty());
+        assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+    }
 }

@@ -16,13 +16,16 @@ pub(crate) use allowlist::{
     AllowlistAddRequest, AllowlistBody, AllowlistEntryBody, AllowlistOptionBody, allowlist_add,
     allowlist_delete, allowlist_list, allowlist_options,
 };
-pub(crate) use send::{TestSendRecipient, TestSendRequest, TestSendsBody, list, test_send};
+pub(crate) use send::{
+    QuotaBody, QuotaUsageBody, TestSendRecipient, TestSendRequest, TestSendsBody, list, quota,
+    test_send,
+};
 
 use serde::Serialize;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_store::TestSend;
+use zirv_flow_store::ListedTestSend;
 
 /// A test send as the log shows it. It holds no address, no hash and no person.
 #[derive(Serialize, ToSchema)]
@@ -32,12 +35,19 @@ pub(crate) struct TestSendBody {
     template_id: Uuid,
     /// The published version sent; null for the draft.
     template_version: Option<i32>,
+    /// The draft revision a draft test rendered; null for a version test.
+    draft_revision: Option<i32>,
     /// The user who asked; null for an API key.
     member_id: Option<Uuid>,
+    /// The email of the member who asked; null for an API key or a removed member.
+    sent_by_email: Option<String>,
     destination_id: Uuid,
     sender_identity_id: Uuid,
     /// The workspace member the test went to; null for an allowlisted address.
     recipient_member_id: Option<Uuid>,
+    /// A member's email, or the hint of the allowlist entry the test went to; `removed address`
+    /// once the entry is gone. Never an allowlisted address.
+    recipient_display: String,
     /// `person` when a person's values rendered the template, else `sample`.
     #[schema(example = "sample")]
     render_context: String,
@@ -55,16 +65,24 @@ pub(crate) struct TestSendBody {
     completed_at: Option<OffsetDateTime>,
 }
 
-impl From<TestSend> for TestSendBody {
-    fn from(send: TestSend) -> Self {
+impl From<ListedTestSend> for TestSendBody {
+    fn from(listed: ListedTestSend) -> Self {
+        let ListedTestSend {
+            send,
+            recipient_display,
+            sent_by_email,
+        } = listed;
         Self {
             id: send.id,
             template_id: send.template_id,
             template_version: send.template_version,
+            draft_revision: send.draft_revision,
             member_id: send.member_id,
+            sent_by_email,
             destination_id: send.destination_id,
             sender_identity_id: send.sender_identity_id,
             recipient_member_id: send.recipient_member_id,
+            recipient_display,
             render_context: send.render_context,
             outcome: send.outcome.as_str().to_owned(),
             reason: send.reason,
@@ -79,26 +97,31 @@ mod acceptance;
 
 #[cfg(test)]
 mod tests {
-    use zirv_flow_store::TestSendOutcome;
+    use zirv_flow_store::{TestSend, TestSendOutcome};
 
     use super::*;
 
     #[test]
     fn a_log_row_is_shown_with_its_outcome_and_without_addresses() {
-        let body = TestSendBody::from(TestSend {
-            id: Uuid::nil(),
-            template_id: Uuid::nil(),
-            template_version: None,
-            member_id: None,
-            destination_id: Uuid::nil(),
-            sender_identity_id: Uuid::nil(),
-            recipient_hash: vec![9; 32],
-            recipient_member_id: None,
-            render_context: "sample".into(),
-            outcome: TestSendOutcome::Suppressed,
-            reason: Some("suppressed".into()),
-            created_at: OffsetDateTime::UNIX_EPOCH,
-            completed_at: None,
+        let body = TestSendBody::from(ListedTestSend {
+            recipient_display: "removed address".into(),
+            sent_by_email: None,
+            send: TestSend {
+                id: Uuid::nil(),
+                template_id: Uuid::nil(),
+                template_version: None,
+                member_id: None,
+                destination_id: Uuid::nil(),
+                sender_identity_id: Uuid::nil(),
+                recipient_hash: vec![9; 32],
+                recipient_member_id: None,
+                render_context: "sample".into(),
+                outcome: TestSendOutcome::Suppressed,
+                reason: Some("suppressed".into()),
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                completed_at: None,
+                draft_revision: None,
+            },
         });
 
         let json = serde_json::to_value(&body).unwrap();

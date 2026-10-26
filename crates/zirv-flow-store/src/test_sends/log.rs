@@ -84,6 +84,8 @@ pub struct TestSend {
     pub recipient_member_id: Option<Uuid>,
     /// `person` or `sample`.
     pub render_context: String,
+    /// The draft revision a draft test rendered; none for a version test.
+    pub draft_revision: Option<i32>,
     pub outcome: TestSendOutcome,
     pub reason: Option<String>,
     pub created_at: OffsetDateTime,
@@ -101,6 +103,7 @@ struct Row {
     recipient_hash: Vec<u8>,
     recipient_member_id: Option<Uuid>,
     render_context: String,
+    draft_revision: Option<i32>,
     outcome: String,
     reason: Option<String>,
     created_at: OffsetDateTime,
@@ -119,6 +122,7 @@ impl Row {
             recipient_hash: self.recipient_hash,
             recipient_member_id: self.recipient_member_id,
             render_context: self.render_context,
+            draft_revision: self.draft_revision,
             outcome: TestSendOutcome::parse(&self.outcome)?,
             reason: self.reason,
             created_at: self.created_at,
@@ -128,7 +132,7 @@ impl Row {
 }
 
 const COLUMNS: &str = "id, template_id, template_version, member_id, destination_id, \
-    sender_identity_id, recipient_hash, recipient_member_id, render_context, outcome, reason, created_at, \
+    sender_identity_id, recipient_hash, recipient_member_id, render_context, draft_revision, outcome, reason, created_at, \
     completed_at";
 
 /// A test send to reserve a slot for. It carries no address: the job finds the recipient by the
@@ -144,6 +148,8 @@ pub struct NewTestSend<'a> {
     pub sender_identity: Uuid,
     pub recipient_hash: [u8; 32],
     pub recipient_member: Option<Uuid>,
+    /// The draft revision a draft test renders; none for a version test.
+    pub draft_revision: Option<i32>,
     /// The person whose values render the template; none for the sample. Travels in the job
     /// payload only, so the log names no person.
     pub person: Option<Uuid>,
@@ -173,29 +179,8 @@ pub async fn reserve_test_send(
         .execute(&mut *connection)
         .await
         .map_err(StoreError::query)?;
-    let since = new.now - WINDOW;
-    let in_workspace: Vec<OffsetDateTime> = sqlx::query_scalar(
-        "SELECT created_at FROM test_sends WHERE workspace_id = $1 AND created_at > $2 \
-         ORDER BY created_at",
-    )
-    .bind(new.workspace.as_uuid())
-    .bind(since)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
-    let by_member: Vec<OffsetDateTime> = match new.member {
-        Some(member) => sqlx::query_scalar(
-            "SELECT created_at FROM test_sends \
-             WHERE workspace_id = $1 AND member_id = $2 AND created_at > $3 ORDER BY created_at",
-        )
-        .bind(new.workspace.as_uuid())
-        .bind(member)
-        .bind(since)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(StoreError::query)?,
-        None => Vec::new(),
-    };
+    let (in_workspace, by_member) =
+        counted_in_window(&mut *connection, new.workspace, new.member, new.now).await?;
     let waits = [
         wait_for(&by_member, MEMBER_HOURLY_LIMIT, new.now),
         wait_for(&in_workspace, WORKSPACE_HOURLY_LIMIT, new.now),
@@ -207,8 +192,8 @@ pub async fn reserve_test_send(
     let row: Row = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "INSERT INTO test_sends (id, workspace_id, template_id, template_version, member_id, \
             destination_id, sender_identity_id, recipient_hash, recipient_member_id, \
-            render_context, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING {COLUMNS}"
+            render_context, draft_revision, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING {COLUMNS}"
     )))
     .bind(new.id)
     .bind(new.workspace.as_uuid())
@@ -224,6 +209,7 @@ pub async fn reserve_test_send(
     } else {
         "sample"
     })
+    .bind(new.draft_revision)
     .bind(new.now)
     .fetch_one(&mut *connection)
     .await
@@ -239,6 +225,84 @@ pub async fn reserve_test_send(
     enqueue(&mut *connection, &job).await?;
     row.into_send()
         .map(|send| TestSendReservation::Reserved(Box::new(send)))
+}
+
+/// The creation times, oldest first, of the sends inside the rolling hour before `now`: the
+/// workspace's, then the member's (empty without a member). Enforcement and the quota both count
+/// with this, so they cannot disagree.
+async fn counted_in_window(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    member: Option<Uuid>,
+    now: OffsetDateTime,
+) -> Result<(Vec<OffsetDateTime>, Vec<OffsetDateTime>), StoreError> {
+    let since = now - WINDOW;
+    let in_workspace: Vec<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT created_at FROM test_sends WHERE workspace_id = $1 AND created_at > $2 \
+         ORDER BY created_at",
+    )
+    .bind(workspace.as_uuid())
+    .bind(since)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let by_member: Vec<OffsetDateTime> = match member {
+        Some(member) => sqlx::query_scalar(
+            "SELECT created_at FROM test_sends \
+             WHERE workspace_id = $1 AND member_id = $2 AND created_at > $3 ORDER BY created_at",
+        )
+        .bind(workspace.as_uuid())
+        .bind(member)
+        .bind(since)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::query)?,
+        None => Vec::new(),
+    };
+    Ok((in_workspace, by_member))
+}
+
+/// Test sends counted in the rolling hour against a limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QuotaUsage {
+    pub used: usize,
+    pub limit: usize,
+}
+
+/// What a caller may still send this hour.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestSendQuota {
+    pub member: QuotaUsage,
+    pub workspace: QuotaUsage,
+    /// When the oldest counted send leaves the window: the caller's own, or the workspace's for a
+    /// caller with no member (an API key). None when nothing is counted.
+    pub resets_at: Option<OffsetDateTime>,
+}
+
+/// The caller's and the workspace's hourly counts as of `now`.
+pub async fn test_send_quota(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    member: Option<Uuid>,
+    now: OffsetDateTime,
+) -> Result<TestSendQuota, StoreError> {
+    let (in_workspace, by_member) = counted_in_window(connection, workspace, member, now).await?;
+    let oldest = if member.is_some() {
+        by_member.first()
+    } else {
+        in_workspace.first()
+    };
+    Ok(TestSendQuota {
+        member: QuotaUsage {
+            used: by_member.len(),
+            limit: MEMBER_HOURLY_LIMIT,
+        },
+        workspace: QuotaUsage {
+            used: in_workspace.len(),
+            limit: WORKSPACE_HOURLY_LIMIT,
+        },
+        resets_at: oldest.map(|at| *at + WINDOW),
+    })
 }
 
 /// Seconds until a slot frees, when `counted` (oldest first, all inside the window) fills `limit`:
@@ -307,23 +371,61 @@ pub async fn is_test_send(pool: &PgPool, id: Uuid) -> Result<bool, StoreError> {
 /// Where the next page starts: strictly before this `(created_at, id)`.
 pub type TestSendCursor = (OffsetDateTime, Uuid);
 
+/// A log row with the two names the log shows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListedTestSend {
+    pub send: TestSend,
+    /// A member's email, an allowlist entry's hint, or [`REMOVED_ADDRESS`].
+    pub recipient_display: String,
+    /// The sender member's email; none for an API key or a removed member.
+    pub sent_by_email: Option<String>,
+}
+
+/// What the log shows for a recipient that is no member and matches no allowlist entry.
+pub const REMOVED_ADDRESS: &str = "removed address";
+
+#[derive(FromRow)]
+struct ListedRow {
+    #[sqlx(flatten)]
+    row: Row,
+    recipient_display: String,
+    sent_by_email: Option<String>,
+}
+
 /// A page of the workspace's log, newest first, at most `limit`, after the `before` cursor,
-/// optionally of one template. The flag is true when more exist.
+/// optionally of one template and of the draft revision a draft test rendered. The flag is true
+/// when more exist. The recipient shown is derived now: the member's email, else the hint of the
+/// allowlist entry with the row's hash, else [`REMOVED_ADDRESS`].
 pub async fn list_test_sends(
     pool: &PgPool,
     workspace: WorkspaceId,
     template: Option<Uuid>,
+    draft_revision: Option<i32>,
     limit: u32,
     before: Option<TestSendCursor>,
-) -> Result<(Vec<TestSend>, bool), StoreError> {
-    let mut rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {COLUMNS} FROM test_sends \
-         WHERE workspace_id = $1 AND ($2::uuid IS NULL OR template_id = $2) \
-           AND ($3::timestamptz IS NULL OR (created_at, id) < ($3, $4)) \
-         ORDER BY created_at DESC, id DESC LIMIT $5"
+) -> Result<(Vec<ListedTestSend>, bool), StoreError> {
+    let columns = COLUMNS
+        .split(',')
+        .map(|column| format!("t.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rows: Vec<ListedRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {columns}, \
+            COALESCE(rm.email, a.display_hint, '{REMOVED_ADDRESS}') AS recipient_display, \
+            sm.email AS sent_by_email \
+         FROM test_sends t \
+         LEFT JOIN users rm ON rm.id = t.recipient_member_id \
+         LEFT JOIN test_send_allowlist a \
+            ON a.workspace_id = t.workspace_id AND a.address_hash = t.recipient_hash \
+         LEFT JOIN users sm ON sm.id = t.member_id \
+         WHERE t.workspace_id = $1 AND ($2::uuid IS NULL OR t.template_id = $2) \
+           AND ($3::int IS NULL OR t.draft_revision = $3) \
+           AND ($4::timestamptz IS NULL OR (t.created_at, t.id) < ($4, $5)) \
+         ORDER BY t.created_at DESC, t.id DESC LIMIT $6"
     )))
     .bind(workspace.as_uuid())
     .bind(template)
+    .bind(draft_revision)
     .bind(before.map(|(at, _)| at))
     .bind(before.map(|(_, id)| id))
     .bind(i64::from(limit) + 1)
@@ -334,9 +436,37 @@ pub async fn list_test_sends(
     rows.truncate(limit as usize);
     let sends = rows
         .into_iter()
-        .map(Row::into_send)
-        .collect::<Result<_, _>>()?;
+        .map(|listed| {
+            Ok(ListedTestSend {
+                send: listed.row.into_send()?,
+                recipient_display: listed.recipient_display,
+                sent_by_email: listed.sent_by_email,
+            })
+        })
+        .collect::<Result<_, StoreError>>()?;
     Ok((sends, more))
+}
+
+/// Records the draft revision a job rendered, on its `queued` draft row. A draft saved between
+/// the request and the job makes it differ from the one the request saw.
+pub async fn set_test_send_draft_revision(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    revision: i32,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE test_sends SET draft_revision = $3 \
+         WHERE workspace_id = $1 AND id = $2 AND outcome = 'queued' \
+           AND template_version IS NULL",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(revision)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
 }
 
 /// Ends a `queued` row. False when the row is not `queued` any more (an earlier run ended it).
@@ -450,10 +580,13 @@ pub async fn delete_test_sends_by_hash(
 #[cfg(test)]
 mod tests {
     use time::macros::datetime;
-    use zirv_flow_core::{Cause, Slug, WorkspaceName};
+    use zirv_flow_core::{
+        Cause, Keyring, MasterKey, SecretId, SecretPurpose, Slug, WorkspaceName, seal, secret_aad,
+    };
 
     use super::*;
-    use crate::{begin, commit};
+    use crate::test_sends::allowlist::{add_allowlist_entry, delete_allowlist_entry, masked_hint};
+    use crate::{begin, commit, secrets};
 
     #[test]
     fn an_outcome_round_trips_and_an_unknown_one_is_refused() {
@@ -506,6 +639,7 @@ mod tests {
             workspace: ws,
             template: Uuid::now_v7(),
             template_version: None,
+            draft_revision: None,
             member,
             destination: Uuid::now_v7(),
             sender_identity: Uuid::now_v7(),
@@ -663,15 +797,17 @@ mod tests {
             .unwrap(),
             "an ended row is not ended twice"
         );
-        let (page, more) = list_test_sends(&pool, ws, None, 2, None).await.unwrap();
+        let (page, more) = list_test_sends(&pool, ws, None, None, 2, None)
+            .await
+            .unwrap();
         assert_eq!(
-            page.iter().map(|send| send.id).collect::<Vec<_>>(),
+            page.iter().map(|listed| listed.send.id).collect::<Vec<_>>(),
             [other_hash.id, recent.id]
         );
         assert!(more);
-        assert_eq!(page[1].outcome, TestSendOutcome::Sent);
+        assert_eq!(page[1].send.outcome, TestSendOutcome::Sent);
         assert!(
-            list_test_sends(&pool, ws, Some(Uuid::now_v7()), 10, None)
+            list_test_sends(&pool, ws, Some(Uuid::now_v7()), None, 10, None)
                 .await
                 .unwrap()
                 .0
@@ -809,5 +945,201 @@ mod tests {
             .await
             .unwrap();
         assert!(again.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_quota_counts_the_same_hour_per_member_and_per_workspace(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let (mine, theirs) = (
+            user(&pool, "m@example.test").await,
+            user(&pool, "o@example.test").await,
+        );
+        let trace = TraceContext::root(Cause::api("t"));
+        let now = datetime!(2031-05-06 07:00 UTC);
+        let oldest = now - Duration::minutes(40);
+        for (member, at) in [
+            (mine, oldest),
+            (mine, now - Duration::minutes(5)),
+            (theirs, now - Duration::minutes(10)),
+            // Outside the hour: not counted.
+            (mine, now - Duration::minutes(61)),
+        ] {
+            reserve(&pool, &new(ws, Some(member), at, &trace)).await;
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let quota = test_send_quota(&mut connection, ws, Some(mine), now)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            quota.member,
+            QuotaUsage {
+                used: 2,
+                limit: MEMBER_HOURLY_LIMIT
+            }
+        );
+        assert_eq!(
+            quota.workspace,
+            QuotaUsage {
+                used: 3,
+                limit: WORKSPACE_HOURLY_LIMIT
+            }
+        );
+        assert_eq!(quota.resets_at, Some(oldest + WINDOW));
+        let keyless = test_send_quota(&mut connection, ws, None, now)
+            .await
+            .unwrap();
+        assert_eq!(keyless.member.used, 0);
+        assert_eq!(keyless.resets_at, Some(oldest + WINDOW));
+        let idle = test_send_quota(&mut connection, ws, Some(mine), now + Duration::hours(3))
+            .await
+            .unwrap();
+        assert_eq!((idle.workspace.used, idle.resets_at), (0, None));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_quota_and_the_reservation_agree_at_the_limit(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let member = user(&pool, "m@example.test").await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = datetime!(2031-05-06 07:00 UTC);
+        for _ in 0..MEMBER_HOURLY_LIMIT {
+            reserve(&pool, &new(ws, Some(member), start, &trace)).await;
+        }
+        let now = start + Duration::minutes(30);
+        let mut connection = pool.acquire().await.unwrap();
+
+        let quota = test_send_quota(&mut connection, ws, Some(member), now)
+            .await
+            .unwrap();
+
+        assert_eq!(quota.member.used, quota.member.limit);
+        let refused = reserve(&pool, &new(ws, Some(member), now, &trace)).await;
+        let retry_after = (quota.resets_at.unwrap() - now).whole_seconds() as u64;
+        assert_eq!(refused, TestSendReservation::Limited { retry_after });
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_log_shows_a_member_email_an_allowlist_hint_and_removed_address(pool: PgPool) {
+        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+        let ws = workspace(&pool).await;
+        secrets::insert_hmac_root_if_absent(&pool, &seal(&keys, b"root", b"aad"))
+            .await
+            .unwrap();
+        let (asker, recipient) = (
+            user(&pool, "asker@example.test").await,
+            user(&pool, "recipient@example.test").await,
+        );
+        let trace = TraceContext::root(Cause::api("t"));
+        let now = datetime!(2031-05-06 07:00 UTC);
+        let entry = Uuid::now_v7();
+        let sealed = seal(
+            &keys,
+            b"qa@example.test",
+            &secret_aad(
+                ws,
+                SecretId::from_uuid(entry),
+                SecretPurpose::TestSendAddress,
+            ),
+        );
+        let mut tx = begin(&pool).await.unwrap();
+        add_allowlist_entry(
+            &mut tx,
+            &keys.key_ids(),
+            ws,
+            entry,
+            &[7; 32],
+            &masked_hint("qa@example.test"),
+            &sealed,
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        let mut to_member = new(ws, Some(asker), now - Duration::minutes(3), &trace);
+        to_member.recipient_member = Some(recipient);
+        let mut to_entry = new(ws, None, now - Duration::minutes(2), &trace);
+        to_entry.recipient_hash = [7; 32];
+        for send in [&to_member, &to_entry] {
+            reserve(&pool, send).await;
+        }
+
+        let (rows, _) = list_test_sends(&pool, ws, None, None, 10, None)
+            .await
+            .unwrap();
+        let shown: Vec<_> = rows
+            .into_iter()
+            .map(|row| (row.recipient_display, row.sent_by_email))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("q***@example.test".to_owned(), None),
+                (
+                    "recipient@example.test".to_owned(),
+                    Some("asker@example.test".to_owned())
+                ),
+            ]
+        );
+
+        let mut connection = pool.acquire().await.unwrap();
+        delete_allowlist_entry(&mut connection, ws, entry)
+            .await
+            .unwrap();
+        let (rows, _) = list_test_sends(&pool, ws, None, None, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(rows[0].recipient_display, "removed address");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_revision_is_stored_filters_the_list_and_follows_the_job(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let now = datetime!(2031-05-06 07:00 UTC);
+        let mut draft = new(ws, None, now - Duration::minutes(3), &trace);
+        draft.draft_revision = Some(4);
+        let mut other_draft = new(ws, None, now - Duration::minutes(2), &trace);
+        other_draft.draft_revision = Some(5);
+        let mut version = new(ws, None, now - Duration::minutes(1), &trace);
+        version.template_version = Some(2);
+        for send in [&draft, &other_draft, &version] {
+            reserve(&pool, send).await;
+        }
+        let revisions = |rows: Vec<ListedTestSend>| {
+            rows.into_iter()
+                .map(|row| row.send.draft_revision)
+                .collect::<Vec<_>>()
+        };
+
+        let (all, _) = list_test_sends(&pool, ws, None, None, 10, None)
+            .await
+            .unwrap();
+        let (only_four, _) = list_test_sends(&pool, ws, None, Some(4), 10, None)
+            .await
+            .unwrap();
+
+        assert_eq!(revisions(all), [None, Some(5), Some(4)]);
+        assert_eq!(revisions(only_four), [Some(4)]);
+
+        let mut connection = pool.acquire().await.unwrap();
+        set_test_send_draft_revision(&mut connection, ws, draft.id, 6)
+            .await
+            .unwrap();
+        set_test_send_draft_revision(&mut connection, ws, version.id, 6)
+            .await
+            .unwrap();
+        let (after, _) = list_test_sends(&pool, ws, None, None, 10, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            revisions(after),
+            [None, Some(5), Some(6)],
+            "a version test keeps no revision"
+        );
     }
 }
