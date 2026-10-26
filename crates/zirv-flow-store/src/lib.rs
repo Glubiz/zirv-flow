@@ -301,11 +301,13 @@ pub use sync_runs::{
     sweep_unreached,
 };
 pub use templates::{
-    LockedTemplate, NewTemplate, Template, TemplateDraft, TemplateError, TemplateFieldCatalog,
-    TemplatePatch, TemplateUse, TemplateVersion, TemplateVersionSummary, archive_template,
-    create_template, document_sender, find_template, find_template_draft, find_template_version,
-    list_template_versions, list_templates, lock_template, publish_template,
-    read_template_field_catalog, save_template_draft, template_where_used, update_template,
+    LockedTemplate, MAX_PREVIEW_PEOPLE, NewTemplate, PreviewPerson, PreviewPersonError, Template,
+    TemplateDraft, TemplateError, TemplateFieldCatalog, TemplatePatch, TemplateUse,
+    TemplateVersion, TemplateVersionSummary, add_preview_person, archive_template, create_template,
+    document_sender, find_template, find_template_draft, find_template_version,
+    list_preview_people, list_template_versions, list_templates, lock_template, publish_template,
+    read_template_field_catalog, remove_preview_person, save_template_draft, template_where_used,
+    update_template,
 };
 pub use test_sends::{
     ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,

@@ -838,6 +838,20 @@ impl ApiError {
         }
     }
 
+    /// A template that already keeps the most saved preview people.
+    pub(crate) fn preview_people_limit() -> Self {
+        Self {
+            code: Some("preview_people_limit"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "a template keeps at most {} preview people",
+                    zirv_flow_store::MAX_PREVIEW_PEOPLE
+                ),
+            )
+        }
+    }
+
     /// A preview as a real person by a caller who may not see personal values.
     pub(crate) fn template_preview_values_forbidden() -> Self {
         Self {

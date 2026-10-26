@@ -1829,6 +1829,157 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_preview_people_routes_are_for_admins_only(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let template = f.create("Welcome", email_doc("Hi", "x")).await;
+        let person = f.person(json!({}), Some("ann@example.com")).await;
+        let tail = format!("/{template}/preview-people");
+        let routes: [(&str, String, Option<Value>); 3] = [
+            ("GET", tail.clone(), None),
+            ("POST", tail.clone(), Some(json!({"person_id": person}))),
+            ("DELETE", format!("{tail}/{person}"), None),
+        ];
+        let refused: [(&str, Auth<'_>, StatusCode); 5] = [
+            ("anonymous", Auth::Anonymous, StatusCode::UNAUTHORIZED),
+            ("read key", Auth::Key(&f.read), StatusCode::FORBIDDEN),
+            ("write key", Auth::Key(&f.write), StatusCode::FORBIDDEN),
+            ("member", Auth::Session(&f.member), StatusCode::FORBIDDEN),
+            (
+                "other workspace's admin key",
+                Auth::Key(&f.other_admin),
+                StatusCode::NOT_FOUND,
+            ),
+        ];
+
+        for (method, uri, body) in &routes {
+            for (who, auth, status) in &refused {
+                let auth = match auth {
+                    Auth::Anonymous => Auth::Anonymous,
+                    Auth::Key(key) => Auth::Key(key),
+                    Auth::Session(login) => Auth::Session(login),
+                };
+                let reply = f.call(method, &f.templates(uri), body.clone(), auth).await;
+                assert_eq!(reply.status, *status, "{method} {uri} as {who}");
+            }
+        }
+        assert_eq!(
+            f.count("SELECT count(*) FROM template_preview_people")
+                .await,
+            0
+        );
+
+        let key = f
+            .call(
+                "POST",
+                &f.templates(&tail),
+                Some(json!({"person_id": person})),
+                Auth::Key(&f.admin),
+            )
+            .await;
+        assert_eq!(key.status, StatusCode::CREATED, "{:?}", key.body);
+        let listed = f.lead("GET", &tail, None).await;
+        assert_eq!(listed.status, StatusCode::OK, "{:?}", listed.body);
+        assert_eq!(listed.body[0]["person_id"], json!(person));
+        assert_eq!(listed.body[0]["display"]["value"], "ann@example.com");
+        assert_eq!(listed.body[0]["display"]["masked"], false);
+        let removed = f.lead("DELETE", &format!("{tail}/{person}"), None).await;
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+        let again = f.lead("DELETE", &format!("{tail}/{person}"), None).await;
+        assert_eq!(again.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unknown_template_or_person_is_a_404_and_the_same_person_twice_is_one_row(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let template = f.create("Welcome", email_doc("Hi", "x")).await;
+        let person = f.person(json!({}), None).await;
+        let tail = format!("/{template}/preview-people");
+        let body = Some(json!({"person_id": person}));
+
+        let unknown_person = f
+            .lead("POST", &tail, Some(json!({"person_id": Uuid::now_v7()})))
+            .await;
+        let unknown_template = f
+            .lead(
+                "POST",
+                &format!("/{}/preview-people", Uuid::now_v7()),
+                body.clone(),
+            )
+            .await;
+        let list_unknown = f
+            .lead("GET", &format!("/{}/preview-people", Uuid::now_v7()), None)
+            .await;
+        let first = f.lead("POST", &tail, body.clone()).await;
+        let second = f.lead("POST", &tail, body).await;
+
+        assert_eq!(unknown_person.status, StatusCode::NOT_FOUND);
+        assert_eq!(unknown_template.status, StatusCode::NOT_FOUND);
+        assert_eq!(list_unknown.status, StatusCode::NOT_FOUND);
+        assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.body);
+        assert_eq!(second.status, StatusCode::OK, "{:?}", second.body);
+        assert_eq!(first.body, second.body);
+        assert_eq!(
+            f.count("SELECT count(*) FROM template_preview_people")
+                .await,
+            1
+        );
+        assert_eq!(
+            f.count(
+                "SELECT count(*) FROM audit_log WHERE action = 'template.preview_person_added'"
+            )
+            .await,
+            1,
+            "only the new row is audited"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_twenty_first_preview_person_is_refused_and_the_audit_holds_ids_only(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let template = f.create("Welcome", email_doc("Hi", "x")).await;
+        let tail = format!("/{template}/preview-people");
+        let mut last = Uuid::nil();
+        for index in 0..20 {
+            last = f
+                .person(json!({}), Some(&format!("p{index}@example.com")))
+                .await;
+            let added = f
+                .lead("POST", &tail, Some(json!({"person_id": last})))
+                .await;
+            assert_eq!(added.status, StatusCode::CREATED, "{:?}", added.body);
+        }
+        let extra = f.person(json!({}), Some("extra@example.com")).await;
+
+        let over = f
+            .lead("POST", &tail, Some(json!({"person_id": extra})))
+            .await;
+        let removed = f.lead("DELETE", &format!("{tail}/{last}"), None).await;
+
+        assert_eq!(over.status, StatusCode::CONFLICT, "{:?}", over.body);
+        assert_eq!(over.body["code"], "preview_people_limit");
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+        let audits: Vec<(String, Option<Uuid>, String)> = sqlx::query_as(
+            "SELECT action, object_id, summary::text FROM audit_log \
+             WHERE action LIKE 'template.preview_person_%' ORDER BY id",
+        )
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(audits.len(), 21);
+        assert_eq!(audits[20].0, "template.preview_person_removed");
+        for (_, object, summary) in &audits {
+            assert_eq!(*object, Some(template.parse().unwrap()));
+            assert!(!summary.contains("example.com"), "{summary}");
+            assert!(summary.contains("person_id"), "{summary}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_preview_reports_blocking_issues_and_renders_nothing(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f

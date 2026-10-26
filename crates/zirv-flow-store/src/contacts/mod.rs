@@ -1260,6 +1260,71 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_patch_keeps_an_unlisted_identifier_until_a_put_retracts_it(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        let created = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Create(object(json!({"email": "A@example.com"}))),
+            None,
+        )
+        .await
+        .unwrap();
+        let person = created.contact.unwrap().person_id;
+        let mut tx = begin(&pool).await.unwrap();
+        put_contact_definition(&mut tx, ws, &[field("age", false, None)], None)
+            .await
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        let patched = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Patch(object(json!({"age": 4}))),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            patched.contact.unwrap().fields,
+            object(json!({"email": "A@example.com", "age": 4}))
+        );
+        assert_eq!(
+            person_of_email(&pool, ws, "a@example.com").await,
+            Some(person)
+        );
+        let mut connection = pool.acquire().await.unwrap();
+        let found = search_contacts(
+            &mut connection,
+            ws,
+            &ContactSearch::Identifier {
+                kind: "email".into(),
+                value: "a@example.com".into(),
+            },
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].person_id, person);
+
+        let replaced = write(
+            &pool,
+            ws,
+            "c-1",
+            ContactChange::Replace(object(json!({"age": 5}))),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replaced.contact.unwrap().fields, object(json!({"age": 5})));
+        assert_eq!(person_of_email(&pool, ws, "a@example.com").await, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_archived_identifier_field_keeps_its_identity_while_its_value_stays(pool: PgPool) {
         let ws = defined(&pool, "one").await;
         let created = write(

@@ -28,6 +28,7 @@ fn definition_schema() -> RefOr<Schema> {
 }
 
 #[derive(Deserialize, ToSchema)]
+#[schema(as = SegmentPreviewRequest)]
 pub(crate) struct PreviewRequest {
     /// The definition to preview, saved or not.
     #[schema(schema_with = definition_schema)]
@@ -37,6 +38,7 @@ pub(crate) struct PreviewRequest {
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(as = SegmentSampleBody)]
 pub(crate) struct SampleBody {
     id: Uuid,
     /// The strongest identifier; null for a person with none. The value is masked for callers
@@ -88,6 +90,7 @@ impl From<DataAge> for DataAgeBody {
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(as = SegmentPreviewBody)]
 pub(crate) struct PreviewBody {
     /// How many people match.
     count: i64,
