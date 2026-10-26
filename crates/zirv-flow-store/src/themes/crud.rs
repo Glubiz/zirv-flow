@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use hashbrown::HashMap;
 use serde_json::Value;
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
@@ -188,6 +189,27 @@ pub async fn list_themes<'e>(
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)
+}
+
+/// The tokens each theme shows in a list: the current version's, or the draft's before the first
+/// publish. One read for all themes.
+pub async fn list_theme_tokens<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    include_archived: bool,
+) -> Result<HashMap<Uuid, Value>, StoreError> {
+    let rows: Vec<(Uuid, Value)> = sqlx::query_as(
+        "SELECT t.id, COALESCE(v.tokens, d.tokens) FROM themes t \
+            JOIN theme_drafts d ON d.theme_id = t.id \
+            LEFT JOIN theme_versions v ON v.theme_id = t.id AND v.version = t.current_version \
+         WHERE t.workspace_id = $1 AND ($2 OR t.archived_at IS NULL)",
+    )
+    .bind(workspace.as_uuid())
+    .bind(include_archived)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows.into_iter().collect())
 }
 
 /// The draft of a theme of the workspace.

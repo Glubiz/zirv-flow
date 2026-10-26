@@ -5,6 +5,9 @@ export interface MenuEntry {
   label: string;
   onSelect: () => void;
   checked?: boolean;
+  /** Shown but not selectable; `reason` says why, under the label. */
+  disabled?: boolean;
+  reason?: string;
 }
 
 interface MenuButtonProps {
@@ -130,8 +133,10 @@ export function MenuButton({
               className="menu-item"
               role={entry.checked === undefined ? "menuitem" : "menuitemradio"}
               aria-checked={entry.checked}
+              aria-disabled={entry.disabled || undefined}
               tabIndex={-1}
               onClick={() => {
+                if (entry.disabled) return;
                 entry.onSelect();
                 closeToButton();
               }}
@@ -141,7 +146,14 @@ export function MenuButton({
                   {entry.checked ? "✓" : ""}
                 </span>
               )}
-              {entry.label}
+              {entry.reason ? (
+                <span className="menu-label">
+                  {entry.label}
+                  <span className="menu-reason">{entry.reason}</span>
+                </span>
+              ) : (
+                entry.label
+              )}
             </button>
           ))}
         </div>

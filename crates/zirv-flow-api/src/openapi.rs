@@ -558,6 +558,7 @@ use crate::workspaces::{
         snippets::preview::SnippetPreviewRequest,
         snippets::preview::SnippetPreviewBody,
         themes::crud::ThemeBody,
+        themes::crud::ThemeListItemBody,
         themes::crud::ThemeDraftBody,
         themes::crud::ThemeDetailBody,
         themes::crud::CreateThemeRequest,
