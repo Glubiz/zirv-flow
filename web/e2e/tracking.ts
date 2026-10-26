@@ -43,9 +43,9 @@ export function normaliseTracking(message: string, forms: TrackingForms): string
   return out;
 }
 
-/** A message part with its line ends as the web reads them, and no trailing blank lines. */
+/** A message part with its line ends as the web reads them, and no trailing line ends. Spaces and tabs stay. */
 export function asLines(part: string): string {
-  return part.replace(/\r\n/g, "\n").trimEnd();
+  return part.replace(/\r\n/g, "\n").replace(/\n+$/, "");
 }
 
 /** One tag per line, so a diff of minified markup points at the tag that differs. */

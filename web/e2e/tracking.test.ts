@@ -46,6 +46,10 @@ describe("asLines", () => {
   it("reads CRLF as LF and drops trailing blank lines", () => {
     expect(asLines("a\r\nb\r\n\r\n")).toBe("a\nb");
   });
+
+  it("keeps the spaces and tabs on the last content line", () => {
+    expect(asLines("a\nb \t\r\n")).toBe("a\nb \t");
+  });
 });
 
 describe("unifiedDiff", () => {
