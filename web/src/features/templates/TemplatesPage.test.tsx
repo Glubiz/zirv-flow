@@ -137,6 +137,7 @@ describe("the template library", () => {
     const calls = mockApi(libraryRoutes());
     const { router } = mount();
     await screen.findByRole("list", { name: "Templates of this workspace" });
+    await screen.findByRole("button", { name: "All 4" });
     const before = listCalls(calls).length;
     const box = screen.getByRole("searchbox", { name: "Search templates" });
 
