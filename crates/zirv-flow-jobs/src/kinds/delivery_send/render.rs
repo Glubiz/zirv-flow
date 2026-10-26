@@ -19,7 +19,9 @@ use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::tracking::{TokenKind, sign};
 use zirv_flow_render::{Hooks, RenderContext, RenderFailure, RenderPool, Rendered, Tracking};
 use zirv_flow_store::{StoreError, Template, VerifiedSender, find_workspace};
-use zirv_flow_templates::{UtmPlan, UtmValues, parse_template_document};
+use zirv_flow_templates::{
+    RenderExtras, TemplateDocument, UtmPlan, UtmValues, parse_template_document,
+};
 
 use super::payload::SendJob;
 
@@ -168,14 +170,23 @@ pub(crate) async fn utm_plan<'e>(
     )))
 }
 
+/// The stored document as the renderer reads it, or the reason it cannot be rendered.
+pub(crate) fn document_of(document: &Value) -> Result<TemplateDocument, &'static str> {
+    parse_template_document(document).map_err(|_| {
+        warn!("email not rendered: the stored document is not a template document");
+        RENDER_ERROR
+    })
+}
+
 /// Renders `document` for `context`, or says why it could not. With a `tracker` the links are
 /// rewritten to the click route and the open pixel is added; the links come back to be recorded.
 /// Without one the message is left as rendered. `recorded` is what the message's earlier attempts
 /// recorded: a URL keeps its recorded index, so a token never leads anywhere but to its own link.
 pub(crate) async fn render(
     pool: Option<&RenderPool>,
-    document: Value,
+    document: &TemplateDocument,
     context: &RenderContext,
+    extras: &RenderExtras,
     tracker: Option<&Tracker>,
     recorded: &[(u16, String)],
     utm: Option<&UtmPlan>,
@@ -184,19 +195,16 @@ pub(crate) async fn render(
         warn!("email not rendered: the worker has no render pool");
         return Err(RENDER_ERROR);
     };
-    let Ok(document) = parse_template_document(&document) else {
-        warn!("email not rendered: the stored document is not a template document");
-        return Err(RENDER_ERROR);
-    };
     let Some(tracker) = tracker else {
         let rendered = pool
-            .render_email(
-                &document,
+            .render_email_with(
+                document,
                 context,
                 &Hooks {
                     utm: utm.map(UtmPlan::tags),
                     ..Hooks::untracked()
                 },
+                extras,
             )
             .await
             .map_err(failed)?;
@@ -225,7 +233,7 @@ pub(crate) async fn render(
         utm: utm.map(UtmPlan::tags),
     };
     let mut rendered = pool
-        .render_email(&document, context, &hooks)
+        .render_email_with(document, context, &hooks, extras)
         .await
         .map_err(failed)?;
     let Ok(assigner) = assigner.into_inner() else {
@@ -483,12 +491,23 @@ mod tests {
     #[tokio::test]
     async fn without_a_pool_or_a_document_the_message_fails_as_a_render_error() {
         let context = RenderContext::default();
+        let document =
+            document_of(&json!({"schema": 1, "channel": "email", "mode": "code"})).unwrap();
 
         assert_eq!(
-            render(None, json!({}), &context, None, &[], None)
-                .await
-                .unwrap_err(),
+            render(
+                None,
+                &document,
+                &context,
+                &RenderExtras::default(),
+                None,
+                &[],
+                None
+            )
+            .await
+            .unwrap_err(),
             RENDER_ERROR
         );
+        assert_eq!(document_of(&json!({})).unwrap_err(), RENDER_ERROR);
     }
 }

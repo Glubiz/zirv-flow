@@ -327,7 +327,7 @@ pub use test_sends::{
     delete_allowlist_by_hash, delete_allowlist_entry, delete_test_sends_before,
     delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
     is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
-    reserve_test_send, test_send_may_go,
+    record_test_send_versions, reserve_test_send, test_send_may_go,
 };
 pub use themes::{
     EffectiveTheme, LockedTheme, NewTheme, Theme, ThemeChoice, ThemeDraft, ThemeError, ThemePatch,

@@ -51,12 +51,14 @@ use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, NewJob, SOFT_BOUNCE, TEST_SEND_JOB_KIND, TestSend,
     TestSendOutcome, find_destination, find_person, find_template, find_template_draft,
     find_template_version, find_user, finish_test_send, list_identities, membership_role,
-    open_allowlist_address, read_template_field_catalog, suppressing_scope, test_send_may_go,
+    open_allowlist_address, read_template_field_catalog, record_test_send_versions,
+    suppressing_scope, test_send_may_go,
 };
 use zirv_flow_templates::FieldCatalog;
 
 use super::delivery_send::deliver::{self, Call};
 use super::delivery_send::gates;
+use super::delivery_send::inputs;
 use super::delivery_send::render::{self, Tracker};
 use super::delivery_send::slow_down;
 use crate::delivery::Verdict;
@@ -283,10 +285,31 @@ async fn decide(
         }
         None => None,
     };
+    let Ok(parsed) = render::document_of(&document) else {
+        return end(TestSendOutcome::RenderFailed, render::RENDER_ERROR);
+    };
+    let subject = match job.person {
+        Some(person) => inputs::Subject::Person(person),
+        None => inputs::Subject::Sample(&context),
+    };
+    let resolved = match inputs::resolve(
+        ctx.conn(),
+        workspace,
+        &parsed,
+        subject,
+        tracker.as_ref().map(|tracker| tracker.base.as_str()),
+        now,
+    )
+    .await?
+    {
+        Ok(resolved) => resolved,
+        Err(reason) => return end(TestSendOutcome::RenderFailed, reason),
+    };
     let tracked = match render::render(
         render_pool.as_ref(),
-        document,
+        &parsed,
         &context,
+        &resolved.extras,
         None,
         &[],
         utm.as_ref(),
@@ -296,6 +319,14 @@ async fn decide(
         Ok(tracked) => tracked,
         Err(reason) => return end(TestSendOutcome::RenderFailed, reason),
     };
+    record_test_send_versions(
+        ctx.conn(),
+        workspace,
+        row.id,
+        resolved.theme,
+        &resolved.snippet_versions,
+    )
+    .await?;
     let mut rendered = tracked.rendered;
     rendered.subject = format!("{SUBJECT_PREFIX}{}", rendered.subject);
     let email = render::email_payload(&sender, &rendered);
@@ -1004,6 +1035,101 @@ mod tests {
             .collect();
         subjects.sort();
         assert_eq!(subjects, ["[TEST] Blocks", "[TEST] Html", "[TEST] Mjml"]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_test_send_records_the_theme_and_snippet_versions_it_rendered_with(pool: PgPool) {
+        let env = Env::new(pool, json!({"mode": "ok"})).await;
+        let link = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let snippet = Uuid::now_v7();
+        let theme = Uuid::now_v7();
+        let mut connection = env.pool.acquire().await.unwrap();
+        zirv_flow_store::create_snippet(
+            &mut connection,
+            env.ws,
+            &zirv_flow_store::NewSnippet {
+                id: snippet,
+                name: "Legal".into(),
+                content: json!({"blocks": [{"type": "text", "id": "t", "content": link}]}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::create_theme(
+            &mut connection,
+            env.ws,
+            &zirv_flow_store::NewTheme {
+                id: theme,
+                name: "Brand".into(),
+                tokens: json!({"primary": "#112233"}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let locked = zirv_flow_store::lock_snippet(&mut tx, env.ws, snippet)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_snippet(
+            &mut tx,
+            env.ws,
+            &locked,
+            &json!([]),
+            None,
+            &TraceContext::root(Cause::api("publish")),
+        )
+        .await
+        .unwrap();
+        let locked = zirv_flow_store::lock_theme(&mut tx, env.ws, theme)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_theme(
+            &mut tx,
+            env.ws,
+            &locked,
+            &json!([]),
+            None,
+            &TraceContext::root(Cause::api("publish")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        drop(connection);
+        let template = env
+            .template(json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+                "subject": "Blocks", "sender": env.sender, "lang": "en", "category": "marketing",
+                "theme": {"id": theme},
+                "sections": [{"id": "main", "columns": [[
+                    {"type": "snippet", "id": "legal", "snippet_id": snippet}
+                ]]}]
+            }}))
+            .await;
+        let id = env.reserve(template, "qa@example.org", None).await;
+        let bare = env.html_template().await;
+        let plain = env.reserve(bare, "qa@example.org", None).await;
+
+        env.attempt().await.unwrap();
+        env.attempt().await.unwrap();
+
+        let themed = env.row(id).await;
+        assert_eq!(themed.outcome, TestSendOutcome::Sent);
+        assert_eq!(
+            (themed.theme_id, themed.theme_version),
+            (Some(theme), Some(1))
+        );
+        assert_eq!(
+            themed.snippet_versions,
+            Some(json!({ snippet.to_string(): 1 }))
+        );
+        let code = env.row(plain).await;
+        assert_eq!(code.outcome, TestSendOutcome::Sent);
+        assert_eq!(
+            (code.theme_id, code.snippet_versions),
+            (None, Some(json!({})))
+        );
     }
 
     #[sqlx::test]
