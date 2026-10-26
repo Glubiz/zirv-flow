@@ -2,7 +2,7 @@
 
 use sqlx::PgConnection;
 use uuid::Uuid;
-use zirv_flow_core::AssetId;
+use zirv_flow_core::{AssetId, WorkspaceId};
 
 use super::AssetOwnerKind;
 use crate::StoreError;
@@ -21,12 +21,14 @@ impl From<StoreError> for AssetReferenceError {
     }
 }
 
-/// Records that the published `version` of the owner uses these assets. The publish paths of
+/// Records that the published `version` of the owner, which lives in `workspace`, uses these
+/// assets. An asset of another workspace, or a deleted one, is `Missing`. The publish paths of
 /// templates, themes and snippets call it inside their publish transaction. It holds each asset
 /// row until that transaction ends, so a delete cannot slip in between; recording the same
 /// reference twice changes nothing.
 pub async fn record_references(
     connection: &mut PgConnection,
+    workspace: WorkspaceId,
     owner_kind: AssetOwnerKind,
     owner_id: Uuid,
     version: i32,
@@ -34,8 +36,9 @@ pub async fn record_references(
 ) -> Result<(), AssetReferenceError> {
     for asset in assets {
         let live: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM assets WHERE id = $1 AND deleted_at IS NULL FOR SHARE",
+            "SELECT id FROM assets \n             WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR SHARE",
         )
+        .bind(workspace.as_uuid())
         .bind(asset.as_uuid())
         .fetch_optional(&mut *connection)
         .await
@@ -79,6 +82,7 @@ mod tests {
         for _ in 0..2 {
             record_references(
                 &mut connection,
+                ws,
                 AssetOwnerKind::Template,
                 owner,
                 1,
@@ -89,6 +93,7 @@ mod tests {
         }
         record_references(
             &mut connection,
+            ws,
             AssetOwnerKind::Template,
             owner,
             2,
@@ -104,6 +109,7 @@ mod tests {
         delete_asset(&mut connection, ws, gone.id).await.unwrap();
         let refused = record_references(
             &mut connection,
+            ws,
             AssetOwnerKind::Snippet,
             owner,
             1,
@@ -111,5 +117,27 @@ mod tests {
         )
         .await;
         assert!(matches!(refused, Err(AssetReferenceError::Missing(_))));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_asset_of_another_workspace_is_refused_and_writes_no_row(pool: PgPool) {
+        let ours = workspace(&pool, "one").await;
+        let theirs = workspace(&pool, "two").await;
+        let foreign = upload(&pool, theirs, "a", b"bytes").await.asset;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let refused = record_references(
+            &mut connection,
+            ours,
+            AssetOwnerKind::Template,
+            Uuid::now_v7(),
+            1,
+            &[AssetId::from_uuid(foreign.id)],
+        )
+        .await;
+
+        assert!(matches!(refused, Err(AssetReferenceError::Missing(_))));
+        assert!(asset_owners(&pool, foreign.id).await.unwrap().is_empty());
     }
 }

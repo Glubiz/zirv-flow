@@ -585,6 +585,7 @@ mod tests {
         let mut connection = pool.acquire().await.unwrap();
         record_references(
             &mut connection,
+            f.ws,
             AssetOwnerKind::Template,
             owner,
             4,
@@ -632,6 +633,7 @@ mod tests {
         let mut connection = pool.acquire().await.unwrap();
         record_references(
             &mut connection,
+            f.ws,
             AssetOwnerKind::Snippet,
             owner,
             1,

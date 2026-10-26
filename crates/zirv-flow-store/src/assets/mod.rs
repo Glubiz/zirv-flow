@@ -333,6 +333,7 @@ mod tests {
         let mut connection = pool.acquire().await.unwrap();
         record_references(
             &mut connection,
+            ws,
             AssetOwnerKind::Template,
             owner,
             3,
@@ -369,6 +370,7 @@ mod tests {
         ));
         let missing = record_references(
             &mut connection,
+            ws,
             AssetOwnerKind::Theme,
             owner,
             1,
@@ -388,6 +390,7 @@ mod tests {
         let mut connection = pool.acquire().await.unwrap();
         record_references(
             &mut connection,
+            ws,
             AssetOwnerKind::Snippet,
             Uuid::now_v7(),
             1,

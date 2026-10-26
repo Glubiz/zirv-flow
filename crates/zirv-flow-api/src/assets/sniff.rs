@@ -143,6 +143,11 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
         at += 1;
         match marker {
             0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                // The declared length covers itself, the precision, height, width and the
+                // component count.
+                if be16(bytes, at)? < 8 {
+                    return None;
+                }
                 let height = be16(bytes, at.checked_add(3)?)?;
                 let width = be16(bytes, at.checked_add(5)?)?;
                 return Some((width, height));
@@ -163,23 +168,36 @@ fn jpeg_size(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// `RIFF`, the size, `WEBP`, then the first chunk: lossy `VP8 `, lossless `VP8L` or extended
-/// `VP8X`.
+/// `VP8X`. The chunk's declared size must cover the bytes read from it and lie inside the buffer.
 fn webp_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    const DATA: usize = 20;
+    let declared = usize::try_from(le32(bytes, 16)?).ok()?;
+    let chunk_fits = |needed: usize| {
+        declared >= needed
+            && DATA
+                .checked_add(declared)
+                .is_some_and(|end| end <= bytes.len())
+    };
     match slice(bytes, 12, 4)? {
         b"VP8 " => {
-            if slice(bytes, 23, 3)? != [0x9D, 0x01, 0x2A] {
+            if !chunk_fits(10) || slice(bytes, 23, 3)? != [0x9D, 0x01, 0x2A] {
                 return None;
             }
             Some((le16(bytes, 26)? & 0x3FFF, le16(bytes, 28)? & 0x3FFF))
         }
         b"VP8L" => {
-            if *bytes.get(20)? != 0x2F {
+            if !chunk_fits(5) || *bytes.get(20)? != 0x2F {
                 return None;
             }
             let bits = le32(bytes, 21)?;
             Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
         }
-        b"VP8X" => Some((le24(bytes, 24)? + 1, le24(bytes, 27)? + 1)),
+        b"VP8X" => {
+            if !chunk_fits(10) {
+                return None;
+            }
+            Some((le24(bytes, 24)? + 1, le24(bytes, 27)? + 1))
+        }
         _ => None,
     }
 }
@@ -306,6 +324,47 @@ mod tests {
             b"GIF",
         ] {
             assert_eq!(sniff(body), Err(SniffError::NotAnImage), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_jpeg_frame_header_that_declares_too_short_a_length_is_unreadable() {
+        // Length 2 claims an empty segment; the bytes after it are not a frame header.
+        let bytes = [
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x02, 8, 0, 9, 0, 7, 1, 1, 0x11, 0,
+        ];
+        let seven = [
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x07, 8, 0, 9, 0, 7, 1, 1, 0x11, 0,
+        ];
+
+        assert_eq!(sniff(&bytes), Err(SniffError::Unreadable));
+        assert_eq!(sniff(&seven), Err(SniffError::Unreadable));
+    }
+
+    #[test]
+    fn a_webp_chunk_that_declares_too_small_a_size_or_runs_past_the_buffer_is_unreadable() {
+        let with_size = |mut bytes: Vec<u8>, size: u32| {
+            bytes[16..20].copy_from_slice(&size.to_le_bytes());
+            bytes
+        };
+        for full in [webp_lossy(8, 8), webp_lossless(8, 8), webp_extended(8, 8)] {
+            assert!(sniff(&full).is_ok());
+            assert_eq!(
+                sniff(&with_size(full.clone(), 0)),
+                Err(SniffError::Unreadable)
+            );
+            assert_eq!(
+                sniff(&with_size(full.clone(), 4)),
+                Err(SniffError::Unreadable)
+            );
+            assert_eq!(
+                sniff(&with_size(full.clone(), 1000)),
+                Err(SniffError::Unreadable)
+            );
+            assert_eq!(
+                sniff(&with_size(full, u32::MAX)),
+                Err(SniffError::Unreadable)
+            );
         }
     }
 
