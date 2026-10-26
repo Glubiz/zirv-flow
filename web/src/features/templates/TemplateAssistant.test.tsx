@@ -391,3 +391,25 @@ describe("a lost accept reply", () => {
     await waitFor(() => expect(drafts(calls).some((doc) => (doc as { email?: { subject?: string } }).email?.subject === "Second")).toBe(true), WAIT);
   });
 });
+
+describe("an assistant that is turned off while the panel is open", () => {
+  it("shows the off notice after a refusal", async () => {
+    let on = true;
+    mount(
+      templateRoutes({
+        extra: {
+          [`GET ${WS}/ai/settings`]: () => json(settings(on)),
+          [DRAFTS]: () => {
+            on = false;
+            return problem(409, "The AI assistant is off", "off", undefined, "ai_disabled");
+          },
+        },
+      }),
+    );
+    const user = await open();
+    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+
+    expect(await screen.findByText("The assistant is off")).toBeInTheDocument();
+  });
+});

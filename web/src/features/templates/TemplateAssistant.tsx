@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { ApiError } from "../../api";
 import { Button, Dialog, InlineError } from "../../ui";
-import { AssistantPanel, DraftChanges, failureText, type Failure, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
+import { AssistantPanel, DraftChanges, assistantGone, failureText, type Failure, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
 import type { Editable, TemplateDetail } from "./model";
 
 type Width = "desktop" | "mobile";
@@ -106,6 +106,10 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
         kind="template"
         templateId={templateId}
         templateTasks={tasksOf(doc)}
+        onFailure={(error) => {
+          // The assistant was turned off, or is no longer this person's: the panel reads its setting again.
+          if (assistantGone(error)) setEpoch((value) => value + 1);
+        }}
         prepare={flush}
         onAccept={accepted}
         confirmAccept={confirmAccept}
