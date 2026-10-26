@@ -2478,6 +2478,28 @@ For UI work, run the server (`cargo run -- all`), then in `web/` run `npm ci` on
 and `npm run gen:api:check` fails when it is stale. The Docker image and the release
 build compile the app first, so released binaries always carry it.
 
+### Browser tests
+
+Playwright drives Chromium against a test server that runs the end-to-end harness (architecture
+section 18). The server is the `zirv-flow-browser-test` binary of the `browser-test` cargo feature,
+which refuses to compile unless `ZIRV_FLOW_BROWSER_TEST_BUILD` is set; it is never part of the
+release build or the Docker image. It needs a PostgreSQL server (`DATABASE_URL`), on which it
+makes and drops its own scratch database.
+
+```sh
+npm --prefix web ci
+npm --prefix web run build            # the binary embeds web/dist
+ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo build --features browser-test --bin zirv-flow-browser-test
+npm --prefix web run e2e:install      # Chromium, once
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres npm --prefix web run e2e
+```
+
+Playwright starts the binary, waits for its `READY` line and generates a password for the run. The
+tests are in `web/e2e/`; `ZIRV_FLOW_BROWSER_TEST_PORT` (default 47700) and
+`ZIRV_FLOW_BROWSER_TEST_BIN` (the binary, default under `target/debug`) change where it runs.
+The run cleans up after itself: a global teardown asks the server to stop (`POST /__test/shutdown`)
+which answers once it has dropped its scratch database. CI runs the same steps in the `browser` job.
+
 ## Benchmarks
 
 The ingestion and trait-storage benchmarks (architecture section 19 and OQ-1) live in

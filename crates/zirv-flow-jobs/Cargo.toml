@@ -27,6 +27,10 @@ zirv-flow-segments.workspace = true
 zirv-flow-store.workspace = true
 zirv-flow-templates.workspace = true
 
+[features]
+# The connectors' test doubles, re-exported as `test_support`.
+test-support = ["zirv-flow-connectors/test-support"]
+
 [dev-dependencies]
 zirv-flow-connectors = { workspace = true, features = ["test-support"] }
 zirv-flow-engine = { workspace = true, features = ["test-support"] }
