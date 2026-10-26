@@ -25,6 +25,24 @@ pub(super) fn header(data: &[u8], name: &str) -> Option<String> {
     found
 }
 
+/// Every header of `data` in order, unfolded, as name and value.
+pub(super) fn headers(data: &[u8]) -> Vec<(String, String)> {
+    let text = String::from_utf8_lossy(data);
+    let head = text.split("\r\n\r\n").next().unwrap_or_default();
+    let mut found: Vec<(String, String)> = Vec::new();
+    for line in head.split("\r\n") {
+        if line.starts_with([' ', '\t']) {
+            if let Some((_, value)) = found.last_mut() {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+        } else if let Some((name, value)) = line.split_once(':') {
+            found.push((name.to_owned(), value.trim().to_owned()));
+        }
+    }
+    found
+}
+
 /// Decodes quoted-printable text (RFC 2045 6.7).
 fn quoted_printable(text: &str) -> String {
     let mut out = Vec::new();
@@ -83,6 +101,7 @@ pub(super) fn part(data: &[u8], content_type: &str) -> Option<String> {
 }
 
 /// Every `http` or `https` URL in `html` that contains `needle`, in order.
+#[cfg(test)]
 pub(super) fn urls_containing(html: &str, needle: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut rest = html;
@@ -110,6 +129,16 @@ mod tests {
 
     #[test]
     fn headers_unfold_and_parts_decode() {
+        assert_eq!(
+            headers(MESSAGE)[..2],
+            [
+                ("Subject".to_owned(), "Hi".to_owned()),
+                (
+                    "List-Unsubscribe".to_owned(),
+                    "<https://x.test/u/abc>, <mailto:u@x.test>".to_owned()
+                ),
+            ]
+        );
         assert_eq!(header(MESSAGE, "subject").as_deref(), Some("Hi"));
         assert_eq!(
             header(MESSAGE, "List-Unsubscribe").as_deref(),
