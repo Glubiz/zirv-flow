@@ -1842,20 +1842,20 @@ endpoint = \"http://collector:4318/\""
     }
 
     #[tokio::test]
-    async fn the_server_binary_has_no_test_sink_route() {
+    async fn the_server_binary_has_no_test_routes() {
         use tower::ServiceExt;
 
         let app = zirv_flow_api::router(zirv_flow_api::AppState::new(
             lazy_pool(),
             Arc::new(String::new),
         ));
-        let send = |method: &'static str| {
+        let send = |method: &'static str, uri: &'static str| {
             let app = app.clone();
             async move {
                 app.oneshot(
                     axum::http::Request::builder()
                         .method(method)
-                        .uri("/__test/sink")
+                        .uri(uri)
                         .body(axum::body::Body::empty())
                         .unwrap(),
                 )
@@ -1864,8 +1864,9 @@ endpoint = \"http://collector:4318/\""
             }
         };
 
-        let read = send("GET").await;
-        let clear = send("DELETE").await;
+        let read = send("GET", "/__test/sink").await;
+        let clear = send("DELETE", "/__test/sink").await;
+        let shutdown = send("POST", "/__test/shutdown").await;
 
         // Only the web app's history fallback answers a GET, and it answers a DELETE with 405.
         let content_type = read.headers()[axum::http::header::CONTENT_TYPE]
@@ -1873,6 +1874,10 @@ endpoint = \"http://collector:4318/\""
             .unwrap();
         assert!(content_type.starts_with("text/html"), "{content_type}");
         assert_eq!(clear.status(), axum::http::StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            shutdown.status(),
+            axum::http::StatusCode::METHOD_NOT_ALLOWED
+        );
     }
 
     #[tokio::test]

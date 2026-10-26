@@ -2490,8 +2490,8 @@ DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres npm --prefix w
 Playwright starts the binary, waits for its `READY` line and generates a password for the run. The
 tests are in `web/e2e/`; `ZIRV_FLOW_BROWSER_TEST_PORT` (default 47700) and
 `ZIRV_FLOW_BROWSER_TEST_BIN` (the binary, default under `target/debug`) change where it runs.
-Stopping the server without a signal (on Windows Playwright ends it forcibly) leaves its
-`zf_browser_*` database behind; drop it by hand. CI runs the same steps in the `browser` job.
+The run cleans up after itself: a global teardown asks the server to stop (`POST /__test/shutdown`)
+and waits for it to drop its scratch database and exit. CI runs the same steps in the `browser` job.
 
 ## Benchmarks
 

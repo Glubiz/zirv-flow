@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool};
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use uuid::Uuid;
 use zirv_flow_api::admin::{self, Context};
 use zirv_flow_core::Role;
@@ -37,11 +38,45 @@ fn required(name: &str) -> Result<String, String> {
 }
 
 fn port() -> Result<u16, String> {
-    match std::env::var("ZIRV_FLOW_BROWSER_TEST_PORT") {
+    let port = match std::env::var("ZIRV_FLOW_BROWSER_TEST_PORT") {
         Ok(value) => value
             .parse()
-            .map_err(|_| "ZIRV_FLOW_BROWSER_TEST_PORT must be a port number".to_owned()),
-        Err(_) => Ok(DEFAULT_PORT),
+            .map_err(|_| "ZIRV_FLOW_BROWSER_TEST_PORT must be a port number".to_owned())?,
+        Err(_) => DEFAULT_PORT,
+    };
+    if port == 0 {
+        return Err(
+            "ZIRV_FLOW_BROWSER_TEST_PORT must not be 0: the tests need to know the port".to_owned(),
+        );
+    }
+    Ok(port)
+}
+
+/// The request to stop: a signal (SIGINT, SIGTERM, Ctrl-C) or `POST /__test/shutdown`.
+#[derive(Clone)]
+struct Stop(Arc<watch::Sender<bool>>);
+
+impl Stop {
+    /// Starts listening for the stop signals. Called first, so a signal at any later point is
+    /// seen.
+    fn install() -> Self {
+        let stop = Self(Arc::new(watch::channel(false).0));
+        let signalled = stop.clone();
+        tokio::spawn(async move {
+            stop_signal().await;
+            signalled.request();
+        });
+        stop
+    }
+
+    fn request(&self) {
+        self.0.send_replace(true);
+    }
+
+    /// Resolves once a stop was requested.
+    async fn requested(&self) {
+        let mut receiver = self.0.subscribe();
+        let _ = receiver.wait_for(|requested| *requested).await;
     }
 }
 
@@ -69,81 +104,107 @@ impl Scratch {
             .await
             .map_err(|error| format!("could not create the scratch database: {error}"))?;
         admin.close().await;
-        let pool = PgPoolOptions::new()
+        let connected = PgPoolOptions::new()
             .max_connections(10)
             .connect_with(maintenance.clone().database(&name))
-            .await
-            .map_err(|error| format!("could not connect to the scratch database: {error}"))?;
-        Ok(Self {
-            maintenance,
-            name,
-            pool,
-        })
+            .await;
+        match connected {
+            Ok(pool) => Ok(Self {
+                maintenance,
+                name,
+                pool,
+            }),
+            Err(error) => {
+                drop_database(maintenance, &name).await;
+                Err(format!(
+                    "could not connect to the scratch database: {error}"
+                ))
+            }
+        }
     }
 
-    /// Drops the database, cutting any connection still open. Only this run's own name is ever
-    /// dropped.
     async fn drop_database(self) {
         self.pool.close().await;
-        let dropped = async {
-            let admin = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(self.maintenance)
-                .await?;
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-                self.name
-            )))
-            .execute(&admin)
+        drop_database(self.maintenance, &self.name).await;
+    }
+}
+
+/// Drops the database `name`, cutting any connection still open. Only this run's own name is
+/// ever passed.
+async fn drop_database(maintenance: PgConnectOptions, name: &str) {
+    let dropped = async {
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(maintenance)
             .await?;
-            admin.close().await;
-            Ok::<(), sqlx::Error>(())
-        }
-        .await;
-        if let Err(error) = dropped {
-            eprintln!(
-                "warning: could not drop the scratch database {}: {error}",
-                self.name
-            );
-        }
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await?;
+        admin.close().await;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    if let Err(error) = dropped {
+        eprintln!("warning: could not drop the scratch database {name}: {error}");
     }
 }
 
 pub(crate) async fn run() -> Result<(), String> {
+    let stop = Stop::install();
     let password = required("ZIRV_FLOW_BROWSER_TEST_PASSWORD")?;
     let database_url = required("DATABASE_URL")?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port()?))
         .await
         .map_err(|error| format!("could not listen on 127.0.0.1: {error}"))?;
     let scratch = Scratch::create(&database_url).await?;
-    let served = tokio::spawn(serve(scratch.pool.clone(), listener, password)).await;
+    let served = tokio::spawn(serve(scratch.pool.clone(), listener, password, stop)).await;
     scratch.drop_database().await;
     served.unwrap_or_else(|error| Err(format!("the server stopped unexpectedly: {error}")))
 }
 
-async fn serve(pool: PgPool, listener: TcpListener, password: String) -> Result<(), String> {
+async fn serve(
+    pool: PgPool,
+    listener: TcpListener,
+    password: String,
+    stop: Stop,
+) -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|error| format!("no local address: {error}"))?;
     let base = format!("http://{address}");
-    let world = Arc::new(World::start(pool, &base).await);
-    seed(&world, &password).await?;
+    let startup = async {
+        let world = Arc::new(World::start(pool, &base).await);
+        seed(&world, &password).await?;
+        Ok::<_, String>(world)
+    };
+    // A stop during startup abandons it; dropping the pool's children kills them.
+    let world = tokio::select! {
+        started = startup => started?,
+        () = stop.requested() => return Ok(()),
+    };
 
     let app = Router::new()
         .route("/__test/sink", get(sink_list).delete(sink_clear))
         .with_state(Arc::clone(&world))
+        .merge(
+            Router::new()
+                .route("/__test/shutdown", post(shutdown))
+                .with_state(stop.clone()),
+        )
         .merge(world.router.clone());
     println!("READY {base}");
     let _ = std::io::stdout().flush();
 
-    let (stopping, stop) = tokio::sync::oneshot::channel::<()>();
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
     let server = axum::serve(listener, app).with_graceful_shutdown(async {
-        let _ = stop.await;
+        let _ = stopped.await;
     });
     let mut server = tokio::spawn(async move { server.await });
     let outcome = tokio::select! {
         done = &mut server => done,
-        () = stop_signal() => {
+        () = stop.requested() => {
             let _ = stopping.send(());
             match tokio::time::timeout(DRAIN, &mut server).await {
                 Ok(done) => done,
@@ -237,4 +298,10 @@ async fn stop_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+}
+
+/// Stops the server the way a signal does, so it drops its database and exits.
+async fn shutdown(State(stop): State<Stop>) -> StatusCode {
+    stop.request();
+    StatusCode::ACCEPTED
 }

@@ -16,6 +16,7 @@ const binary =
 export default defineConfig({
   testDir: ".",
   testMatch: "**/*.spec.ts",
+  globalTeardown: "./global-teardown.ts",
   fullyParallel: false,
   workers: 1,
   forbidOnly: Boolean(process.env.CI),
@@ -24,6 +25,8 @@ export default defineConfig({
   outputDir: "test-results",
   use: {
     baseURL: `http://127.0.0.1:${port}`,
+    // A failure trace or report can contain the per-run password, which is valid only for that
+    // run's scratch database.
     trace: "on-first-retry",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],

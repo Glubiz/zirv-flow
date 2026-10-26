@@ -12,7 +12,7 @@
 #      any workflow but ci.yaml, a Dockerfile, a compose file, cargo config (.cargo/config.toml,
 #      .cargo/config), or a script those invoke (any scripts/... path, whatever its suffix);
 #   3. no Cargo.toml lists `browser-test` among its default features;
-#   4. the server binary of a default build has no `/__test/sink` route in it.
+#   4. the server binary of a default build has no `/__test/` route in it.
 #
 # Usage: check-bench-features.sh [ROOT]   |   check-bench-features.sh --self-test
 # Exits 1 listing the offences, 2 on a setup error. Requires bash, grep, awk and (for 1 and 4) cargo.
@@ -111,8 +111,8 @@ run_route_check() {
     echo "test-feature gate: the default build left no zirv-flow binary under $target/debug" >&2
     return 2
   fi
-  if grep -aqF '/__test/sink' "$binary"; then
-    echo "test-feature gate: the default zirv-flow binary contains the /__test/sink route" >&2
+  if grep -aqF '/__test/' "$binary"; then
+    echo "test-feature gate: the default zirv-flow binary contains a /__test/ route" >&2
     return 1
   fi
 }
