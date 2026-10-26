@@ -797,6 +797,18 @@ describe("the image source", () => {
     expect(screen.getByRole("textbox", { name: "Image source" })).toHaveValue(`Uploaded image ${assetBody(1).id}`);
   });
 
+  it("keeps a merge tag as the image address through Insert field", async () => {
+    const calls = mockApi(templateRoutes({ detail: withImage(), extra: library() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Image block 1" }));
+    await user.click(await screen.findByRole("textbox", { name: "Image address" }));
+    await user.click(await screen.findByRole("button", { name: "Insert system.preferences_url" }));
+
+    await waitFor(() => expect(sourceOf(calls)).toEqual({ url: "{{ system.preferences_url }}" }), WAIT);
+  });
+
   it("sets the https address as a url", async () => {
     const calls = mockApi(templateRoutes({ detail: withImage(), extra: library() }));
     const user = userEvent.setup();

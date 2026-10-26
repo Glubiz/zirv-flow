@@ -106,10 +106,10 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
               <Button onClick={onPickImage}>Choose image…</Button>
             </div>
           ) : null}
-          {"url" in block.src && !tucked ? (
+          {"url" in block.src ? (
             <TextField
               label="Image address"
-              hint="An https address."
+              hint="An https address, or a merge tag that gives one."
               value={block.src.url}
               readOnly={readOnly}
               autoComplete="off"
@@ -120,7 +120,7 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
             <TextField
               label="Image source"
               hint={onPickImage && !readOnly ? "Choose another image to replace it." : "Set outside this editor; kept as it is."}
-              value={"asset" in block.src ? `Uploaded image ${block.src.asset}` : "theme" in block.src ? "The theme logo" : block.src.url === "" ? "No image chosen yet" : block.src.url}
+              value={"asset" in block.src ? `Uploaded image ${block.src.asset}` : "The theme logo"}
               readOnly
               autoComplete="off"
               onChange={() => undefined}
