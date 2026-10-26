@@ -1,6 +1,7 @@
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, Http, HttpAuthScheme, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
+use crate::assets;
 use crate::assistant;
 use crate::consent::{dimensions, person, policy, suppressions, topics, transfer};
 use crate::contacts;
@@ -245,6 +246,10 @@ use crate::workspaces::{
         sources::runs::cancel,
         sources::runs::list,
         sources::runs::get,
+        assets::upload::upload,
+        assets::crud::list,
+        assets::crud::get,
+        assets::crud::remove,
         imports::upload::upload,
         imports::crud::list,
         imports::crud::get,
@@ -626,6 +631,10 @@ use crate::workspaces::{
         sources::runs::RunRejectReasonBody,
         sources::runs::StartRunRequest,
         sources::runs::RunKindBody,
+        assets::AssetBody,
+        assets::AssetDetailBody,
+        assets::AssetOwnerBody,
+        assets::AssetsBody,
         imports::CsvImportBody,
         imports::CsvImportDetailBody,
         imports::crud::CsvImportsBody,

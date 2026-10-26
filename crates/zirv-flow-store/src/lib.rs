@@ -3,6 +3,7 @@
 mod accounts;
 mod ai;
 mod api_keys;
+mod assets;
 mod audit;
 mod bounded;
 mod changes;
@@ -61,6 +62,12 @@ pub use ai::{
 pub use api_keys::{
     ApiKey, StoredApiKey, create_api_key, find_api_key_for_auth, list_api_keys, revoke_api_key,
     touch_api_key,
+};
+pub use assets::{
+    Asset, AssetError, AssetListing, AssetOwner, AssetOwnerKind, AssetReferenceError,
+    DeleteAssetError, NewAsset, ServedAsset, StoredAsset, asset_owners, asset_url, delete_asset,
+    find_asset, find_served_asset, list_assets, parse_sha256_hex, record_references, sha256_hex,
+    store_asset, workspace_asset_bytes,
 };
 pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
 pub use changes::{
