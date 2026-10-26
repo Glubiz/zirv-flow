@@ -93,10 +93,12 @@ interface Options {
   preview?: (document: Doc, asked: number, body: Record<string, unknown>) => Record<string, unknown> | Response;
   uses?: unknown[];
   versions?: unknown[];
+  /** The people saved on the template, as the preview-people list answers them. */
+  saved?: unknown[];
 }
 
 /** The session, the catalog, the template and its draft, preview, publish, versions and where-used endpoints. */
-export function templateRoutes({ role = "admin", detail, preview, uses = [], versions = [] }: Options = {}): Record<string, Handler> {
+export function templateRoutes({ role = "admin", detail, preview, uses = [], versions = [], saved = [] }: Options = {}): Record<string, Handler> {
   let current: Record<string, unknown> = detail ?? templateDetail();
   let asked = 0;
   const base = `${WS}/templates/${TEMPLATE_ID}`;
@@ -139,6 +141,9 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     },
     [`GET ${base}/versions`]: () => json(versions),
     [`GET ${base}/where-used`]: () => json(uses),
+    [`GET ${base}/preview-people`]: () => json(saved),
+    [`POST ${base}/preview-people`]: async (request) => json(await request.json(), 201),
+    [`DELETE ${base}/preview-people/p-1`]: () => new Response(null, { status: 204 }),
     [`GET ${WS}/sender-identities/options`]: () => json(SENDER_OPTIONS),
     [`GET ${WS}/destinations/options`]: () => json(DESTINATION_OPTIONS),
     [`GET ${WS}/test-send-allowlist/options`]: () => json([{ id: "a1", name: "q***@example.com" }]),

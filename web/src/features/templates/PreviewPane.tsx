@@ -1,6 +1,6 @@
 import { useState, type SyntheticEvent } from "react";
 
-import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import { Button, ErrorState, InlineError, LoadingState, SelectField, TextField } from "../../ui";
 import type { TemplatePreview } from "./model";
 
@@ -19,6 +19,7 @@ type View = "html" | "text";
 
 interface Props {
   workspaceId: string;
+  templateId: string;
   state: PreviewState;
   refreshing: boolean;
   onRetry: () => void;
@@ -28,29 +29,20 @@ interface Props {
 }
 
 /** The server-rendered preview. The HTML goes into an iframe with every sandbox permission off; the SPA never renders it. */
-export function PreviewPane({ workspaceId, state, refreshing, onRetry, canAdmin, person, onPerson }: Props) {
+export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetry, canAdmin, person, onPerson }: Props) {
   const [width, setWidth] = useState<Width>("desktop");
   const [view, setView] = useState<View>("html");
-  const [asking, setAsking] = useState(false);
 
   return (
     <section className="tp-preview" aria-label="Preview" aria-busy={refreshing || undefined}>
       <div className="row">
-        <SelectField
-          label="Preview as"
-          value={person || asking ? "person" : "sample"}
-          onChange={(event) => {
-            if (event.target.value === "person") {
-              setAsking(true);
-            } else {
-              setAsking(false);
-              onPerson(null);
-            }
-          }}
-        >
-          <option value="sample">Sample person</option>
-          {canAdmin ? <option value="person">A real person</option> : null}
-        </SelectField>
+        {canAdmin ? (
+          <AdminPreviewAs workspaceId={workspaceId} templateId={templateId} person={person} onPerson={onPerson} />
+        ) : (
+          <SelectField label="Preview as" value="sample" onChange={() => onPerson(null)}>
+            <option value="sample">Sample person</option>
+          </SelectField>
+        )}
         <div className="seg-tabs" role="group" aria-label="Preview width">
           {(["desktop", "mobile"] as const).map((entry) => (
             <button key={entry} type="button" className={width === entry ? "seg seg-on" : "seg"} aria-pressed={width === entry} onClick={() => setWidth(entry)}>
@@ -60,7 +52,6 @@ export function PreviewPane({ workspaceId, state, refreshing, onRetry, canAdmin,
         </div>
       </div>
       {!canAdmin ? <p className="faint">Only admins can preview as a real person.</p> : null}
-      {canAdmin && (asking || person) ? <PersonPicker workspaceId={workspaceId} chosen={person} onChoose={onPerson} /> : null}
       {refreshing ? (
         <p className="faint" role="status">
           Updating the preview
@@ -73,6 +64,96 @@ export function PreviewPane({ workspaceId, state, refreshing, onRetry, canAdmin,
       {state.status === "ready" ? <Rendered data={state.data} width={width} view={view} onView={setView} /> : null}
       <p className="faint">Rendered on the server by the renderer a send uses. Links are inert in the preview.</p>
     </section>
+  );
+}
+
+const SAMPLE = "sample";
+const OTHER = "other";
+
+function labelOf(id: string, display: { value?: string | null } | null | undefined): string {
+  return display?.value ? display.value : `Person ${id.slice(0, 8)}`;
+}
+
+/** The admin's "Preview as" select: the sample person, the people saved on the template, and anyone else through the picker. */
+function AdminPreviewAs({ workspaceId, templateId, person, onPerson }: { workspaceId: string; templateId: string; person: PersonChoice | null; onPerson: (person: PersonChoice | null) => void }) {
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const path = { ws: workspaceId, id: templateId };
+  const saved = useResource(
+    () => unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/preview-people", { params: { path } })),
+    [workspaceId, templateId],
+  );
+  const people: PersonChoice[] = saved.status === "ready" ? saved.data.map((entry) => ({ id: entry.person_id, label: labelOf(entry.person_id, entry.display) })) : [];
+  const isSaved = person !== null && people.some((entry) => entry.id === person.id);
+
+  async function change(action: () => Promise<void>) {
+    if (busy) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      await action();
+      saved.reload();
+    } catch (error) {
+      setFailure(describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const save = () =>
+    change(async () => {
+      if (person) await unwrap(client.POST("/api/v1/workspaces/{ws}/templates/{id}/preview-people", { params: { path }, body: { person_id: person.id } }));
+    });
+  const remove = () =>
+    change(async () => {
+      if (person) await unwrapEmpty(client.DELETE("/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}", { params: { path: { ...path, person_id: person.id } } }));
+    });
+
+  return (
+    <div className="stack">
+      <div className="row">
+      <SelectField
+        label="Preview as"
+        value={asking ? OTHER : person ? person.id : SAMPLE}
+        onChange={(event) => {
+          const value = event.target.value;
+          if (value === OTHER) {
+            setAsking(true);
+          } else {
+            setAsking(false);
+            onPerson(value === SAMPLE ? null : (people.find((entry) => entry.id === value) ?? null));
+          }
+        }}
+      >
+        <option value={SAMPLE}>Sample person</option>
+        {person && !isSaved ? <option value={person.id}>{person.label}</option> : null}
+        {people.map((entry) => (
+          <option key={entry.id} value={entry.id}>
+            {entry.label}
+          </option>
+        ))}
+        <option value={OTHER}>Pick another person…</option>
+      </SelectField>
+      {person && !asking ? (
+        <Button aria-disabled={busy || undefined} onClick={() => void (isSaved ? remove() : save())}>
+          {isSaved ? "Remove" : "Save"}
+        </Button>
+      ) : null}
+      </div>
+      {saved.status === "error" ? <InlineError {...describeError(saved.error)} /> : null}
+      {failure ? <InlineError {...failure} /> : null}
+      {asking ? (
+        <PersonPicker
+          workspaceId={workspaceId}
+          chosen={person}
+          onChoose={(choice) => {
+            setAsking(false);
+            onPerson(choice);
+          }}
+        />
+      ) : null}
+    </div>
   );
 }
 

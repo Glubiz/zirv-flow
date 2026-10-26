@@ -264,6 +264,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
           {canWrite ? (
             <PreviewPane
+              templateId={template.id}
               workspaceId={workspaceId}
               state={preview}
               refreshing={refreshing}
