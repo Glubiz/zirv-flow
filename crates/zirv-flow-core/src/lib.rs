@@ -31,7 +31,7 @@ mod workspace;
 
 pub use email::Email;
 pub use freshness::{Freshness, FreshnessInput, Threshold, effective_threshold, freshness};
-pub use ids::{ApiKeyId, SecretId, UserId, WorkspaceId};
+pub use ids::{ApiKeyId, AssetId, SecretId, UserId, WorkspaceId};
 pub use role::Role;
 pub use scope::Scope;
 pub use secrets::{
