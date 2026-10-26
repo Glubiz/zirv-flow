@@ -17878,7 +17878,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/SnippetBody"
+                    "$ref": "#/components/schemas/SnippetListItemBody"
                   }
                 }
               }
@@ -23386,7 +23386,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/ThemeBody"
+                    "$ref": "#/components/schemas/ThemeListItemBody"
                   }
                 }
               }
@@ -39057,6 +39057,27 @@
           }
         }
       },
+      "SnippetListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SnippetBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "used_by_templates"
+            ],
+            "properties": {
+              "used_by_templates": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many templates, not archived, hold a block for it in their draft or current version."
+              }
+            }
+          }
+        ],
+        "description": "A snippet in the list, with how many templates hold it."
+      },
       "SnippetPreviewBody": {
         "type": "object",
         "description": "The rendered snippet and its validation results.",
@@ -40695,6 +40716,32 @@
             "description": "The templates of the flow that use the theme."
           }
         }
+      },
+      "ThemeListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ThemeBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "tokens",
+              "used_by_templates"
+            ],
+            "properties": {
+              "tokens": {
+                "type": "object",
+                "description": "The current version's tokens, or the draft's while the theme has never been published."
+              },
+              "used_by_templates": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many templates, not archived, use the theme: their draft or current version names it,\nand, for the default theme, they follow the default."
+              }
+            }
+          }
+        ],
+        "description": "A theme in the list, with what a card shows."
       },
       "ThemePreviewBody": {
         "type": "object",

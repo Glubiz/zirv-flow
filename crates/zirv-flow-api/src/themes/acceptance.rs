@@ -650,6 +650,47 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_list_carries_the_tokens_and_the_template_counts(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let brand = f.published("Brand", tokens("#111111")).await;
+        f.create("Draft", tokens("#333333")).await;
+        let other = f.published("Other", tokens("#222222")).await;
+        f.set_default(&brand).await;
+        f.template_with("Named", Some(json!({"id": brand}))).await;
+        f.template_with("Follows", Some(json!("default"))).await;
+        f.template_with("Elsewhere", Some(json!({"id": other})))
+            .await;
+        let gone = f.template_with("Gone", Some(json!({"id": other}))).await;
+        let archived = f.admin("DELETE", &format!("/templates/{gone}"), None).await;
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+
+        let list = f.admin("GET", "/themes", None).await;
+
+        let cards: Vec<(&str, &str, i64)> = list
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["name"].as_str().unwrap(),
+                    item["tokens"]["primary"].as_str().unwrap(),
+                    item["used_by_templates"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            cards,
+            [
+                ("Brand", "#111111", 2),
+                ("Draft", "#333333", 0),
+                ("Other", "#222222", 1)
+            ]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn where_used_separates_follow_default_from_named_and_lists_active_flows(pool: PgPool) {
         let f = fixture(&pool).await;
         let brand = f.published("Brand", tokens("#111111")).await;
