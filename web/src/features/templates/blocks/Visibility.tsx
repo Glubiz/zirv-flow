@@ -1,7 +1,8 @@
 import { ConditionEditor, type ConditionNode } from "../../segments";
 import { FieldIssues } from "../IssueList";
 import type { TemplateIssue } from "../model";
-import type { VisibleIf } from "./document";
+import { Button } from "../../../ui";
+import { isEditableCondition, type VisibleIf } from "./document";
 
 interface Props {
   workspaceId: string;
@@ -23,7 +24,8 @@ function conditionPointer(issue: TemplateIssue): string | null {
 
 /** The "Show: Always | Only when" row of a block or section, with the condition below it. */
 export function Visibility({ workspaceId, value, onChange, readOnly, issues }: Props) {
-  const conditional = value !== undefined;
+  const conditional = value != null;
+  const shown = isEditableCondition(value);
   const own = issues.filter((issue) => conditionPointer(issue) !== null);
   const whole = own.filter((issue) => conditionPointer(issue) === "");
   const inside = own.flatMap((issue) => {
@@ -46,7 +48,19 @@ export function Visibility({ workspaceId, value, onChange, readOnly, issues }: P
         </div>
       </div>
       <FieldIssues issues={whole} />
-      {conditional ? <ConditionEditor workspaceId={workspaceId} value={value} onChange={onChange} readOnly={readOnly} issues={inside} /> : null}
+      {conditional && shown ? <ConditionEditor workspaceId={workspaceId} value={value} onChange={onChange} readOnly={readOnly} issues={inside} /> : null}
+      {conditional && !shown ? (
+        <div className="stack">
+          <p className="notice" role="status">
+            This condition can't be shown here.
+          </p>
+          {readOnly ? null : (
+            <div>
+              <Button onClick={() => onChange(EMPTY)}>Replace with a new condition</Button>
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

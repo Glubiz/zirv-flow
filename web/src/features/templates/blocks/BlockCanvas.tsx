@@ -5,7 +5,7 @@ import { Button, EmptyState, MenuButton, Pill } from "../../../ui";
 import { describeCondition } from "../../segments";
 import { FieldIssues } from "../IssueList";
 import type { TemplateIssue } from "../model";
-import { blockLabel, canDrop, issuesOf, moveBlock, type Block, type BlocksContent, type Drag, type Drop, type Section, type VisibleIf } from "./document";
+import { blockLabel, canDrop, isEditableCondition, issuesOf, moveBlock, type Block, type BlocksContent, type Drag, type Drop, type Section, type VisibleIf } from "./document";
 
 /** What the canvas knows of the snippets a document holds, by id. */
 export type SnippetNames = ReadonlyMap<string, { name: string; version: number | null }>;
@@ -44,9 +44,9 @@ interface Props {
 
 /** The badge a conditional block or section carries: short, with the whole condition on hover. */
 function ConditionBadge({ condition }: { condition: VisibleIf | undefined }) {
-  if (condition === undefined) return null;
+  if (condition == null) return null;
   return (
-    <span className="be-badge" title={describeCondition(condition)}>
+    <span className="be-badge" title={isEditableCondition(condition) ? describeCondition(condition) : "A condition this editor cannot show"}>
       Only when…
     </span>
   );

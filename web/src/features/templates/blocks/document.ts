@@ -166,8 +166,23 @@ function record(value: unknown): Record<string, unknown> {
 /** A schema 1 image has its address as a string in `src`; the editor works on the schema 2 shape. */
 function readBlock(block: Block): Block {
   const raw = block as unknown as Record<string, unknown>;
-  if (raw["type"] === "image" && typeof raw["src"] === "string") return { ...raw, src: { url: raw["src"] } } as unknown as Block;
-  return block;
+  const read = raw["visible_if"] === null ? omit(raw, "visible_if") : raw;
+  if (read["type"] === "image" && typeof read["src"] === "string") return { ...read, src: { url: read["src"] } } as unknown as Block;
+  return read as unknown as Block;
+}
+
+const CONDITION_KEYS = ["all", "any", "not", "trait", "event", "list", "segment", "consent", "messages", "identifier"];
+
+/** Whether the condition editor can show `value`: a plain object with exactly one known operator key, checked down the tree. */
+export function isEditableCondition(value: unknown): value is VisibleIf {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value).filter((key) => CONDITION_KEYS.includes(key));
+  const node = value as Record<string, unknown>;
+  const key = keys[0];
+  if (keys.length !== 1 || key === undefined) return false;
+  if (key === "all" || key === "any") return Array.isArray(node[key]) && (node[key] as unknown[]).every(isEditableCondition);
+  if (key === "not") return isEditableCondition(node[key]);
+  return key === "event" ? typeof node[key] === "string" : true;
 }
 
 /** Reads the `blocks` object of a stored document. A value that is not shaped like the document gives what can be read; the server decides what is valid. */
@@ -198,7 +213,7 @@ export function readContent(value: unknown): BlocksContent {
       };
       if (typeof entry["background_color"] === "string") read.background_color = entry["background_color"];
       if (typeof entry["padding"] === "string") read.padding = entry["padding"];
-      if (entry["visible_if"] !== undefined) read.visible_if = entry["visible_if"] as VisibleIf;
+      if (entry["visible_if"] == null) delete read.visible_if;
       return read;
     }),
   };

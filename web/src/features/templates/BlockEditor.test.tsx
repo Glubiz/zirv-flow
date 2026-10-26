@@ -344,7 +344,7 @@ describe("a schema 2 document", () => {
           visible_if: { all: [] },
           columns: [
             [
-              { type: "heading", id: "h", level: 2, text: "Hi", visible_if: { any: [{ trait: "city", op: "eq", value: "Aarhus" }] } },
+              { type: "heading", id: "h", level: 2, text: "Hi", visible_if: { any: [1] } },
               { type: "image", id: "i", src: { asset: "0192b1a4-7c3e-7000-8000-00000000b001" }, alt: "Logo" },
               { type: "snippet", id: "n", snippet_id: "0192b1a4-7c3e-7000-8000-00000000c001" },
             ],
@@ -376,7 +376,7 @@ describe("a schema 2 document", () => {
     expect(saved.blocks["footer"]).toBe("none");
     expect(saved.blocks.sections[0]?.visible_if).toEqual({ all: [] });
     const blocks = saved.blocks.sections[0]?.columns[0] ?? [];
-    expect(blocks[0]?.["visible_if"]).toEqual({ any: [{ trait: "city", op: "eq", value: "Aarhus" }] });
+    expect(blocks[0]?.["visible_if"]).toEqual({ any: [1] });
     expect(blocks[1]?.["src"]).toEqual({ asset: "0192b1a4-7c3e-7000-8000-00000000b001" });
     expect(blocks[2]).toEqual({ type: "snippet", id: "n", snippet_id: "0192b1a4-7c3e-7000-8000-00000000c001" });
   });
@@ -789,6 +789,37 @@ describe("visibility", () => {
 
     await user.click(within(row).getByRole("button", { name: "Always" }));
     await waitFor(() => expect(savedBlocks(calls).sections[0]?.columns[0]?.[0]).not.toHaveProperty("visible_if"), WAIT);
+  });
+
+  it("shows a notice instead of crashing for a condition the editor cannot show, and replaces it", async () => {
+    const calls = mockApi(
+      templateRoutes({
+        detail: withHeading({ any: [1] }),
+        preview: () => previewBody({ issues: [blocking("invalid_condition", "/blocks/block/h/visible_if")] }),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const block = await screen.findByRole("group", { name: "Heading block 1" });
+    expect(within(block).getByText("Only when…")).toBeInTheDocument();
+    await user.click(block);
+    const row = await screen.findByRole("group", { name: "Visibility" });
+    expect(within(row).getByText("This condition can't be shown here.")).toBeInTheDocument();
+    expect(within(row).getByText(/Blocks publishing/)).toBeInTheDocument();
+    await user.click(within(row).getByRole("button", { name: "Replace with a new condition" }));
+    await waitFor(() => expect(savedBlocks(calls).sections[0]?.columns[0]?.[0]?.["visible_if"]).toEqual({ all: [] }), WAIT);
+    expect(within(screen.getByRole("group", { name: "Visibility" })).queryByText("This condition can't be shown here.")).toBeNull();
+  });
+
+  it("treats a null visible_if as no condition", async () => {
+    const stored = blocksDocument([{ id: "s", visible_if: null, columns: [[{ ...heading("h", "Hi"), visible_if: null }]] }], {}, 2, { theme: "none", footer: "none" });
+    mockApi(templateRoutes({ detail: detailOf(stored) }));
+    mount();
+
+    const block = await screen.findByRole("group", { name: "Heading block 1" });
+    expect(within(block).queryByText("Only when…")).toBeNull();
+    expect(within(screen.getByRole("group", { name: "Section 1, 1 column" })).queryByText("Only when…")).toBeNull();
   });
 
   it("is offered on a section as well", async () => {
