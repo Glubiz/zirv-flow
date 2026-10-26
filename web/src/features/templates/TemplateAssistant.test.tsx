@@ -299,3 +299,37 @@ describe("the assistant and the editor's saves", () => {
     await waitFor(() => expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(true));
   });
 });
+
+describe("a lost accept reply", () => {
+  it("keeps the subject line that was picked", async () => {
+    const calls = mockApi({
+      ...templateRoutes({ extra: { [DRAFTS]: () => json(valid({ subject_variants: ["First", "Second"] })) } }),
+      [`GET ${WS}/ai/settings`]: () => json(settings()),
+    });
+    // The server wrote the draft whose reply was lost: the next read returns it.
+    const stored = templateDetail({}, emailDocument({}, { subject: "First" }));
+    (stored.draft as { revision: number }).revision = 7;
+    const original = globalThis.fetch;
+    let accepted = false;
+    vi.stubGlobal("fetch", async (input: Request | string | URL) => {
+      const request = input instanceof Request ? input : new Request(input);
+      if (request.method === "POST" && request.url.endsWith("/accept")) {
+        accepted = true;
+        throw new TypeError("network down");
+      }
+      if (accepted && request.method === "GET" && request.url.endsWith(`/templates/${TEMPLATE_ID}`)) return json(stored);
+      return original(input);
+    });
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Assistant" }));
+    await user.type(await screen.findByLabelText("What do you want?"), "Short");
+    await user.selectOptions(screen.getByLabelText("Task"), "Subject lines");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("radio", { name: "Second" }));
+    await user.click(screen.getByRole("button", { name: "Accept into draft" }));
+
+    await screen.findAllByText(/reply was lost/, undefined, WAIT);
+    await waitFor(() => expect(drafts(calls).some((doc) => (doc as { email?: { subject?: string } }).email?.subject === "Second")).toBe(true), WAIT);
+  });
+});

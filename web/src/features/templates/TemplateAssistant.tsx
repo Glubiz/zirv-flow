@@ -32,7 +32,7 @@ interface Props {
   /** The server wrote the draft: the editor shows it, with the chosen subject line when it is not the first. */
   onAccepted: (detail: TemplateDetail, subject: string | null) => void;
   /** After a lost reply: reads the template again and adopts its draft when the accept landed. */
-  onReconcile: () => Promise<boolean>;
+  onReconcile: (subject: string | null) => Promise<boolean>;
   /** Replaces the editor's copy with the server's draft. */
   onReload: () => Promise<void>;
   onGone: () => void;
@@ -46,6 +46,9 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
   const [epoch, setEpoch] = useState(0);
   const [reloading, setReloading] = useState(false);
 
+  /** The subject line chosen from the variants of this draft, when it is not the first. */
+  const pickedFor = (id: string) => (picked?.id === id ? picked.subject : null);
+
   async function confirmAccept(): Promise<boolean> {
     if (unsaved) {
       const replace = await new Promise<boolean>((resolve) => setReplacing(() => resolve));
@@ -55,9 +58,9 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
     return true;
   }
 
-  async function acceptFailed(error: unknown): Promise<boolean> {
+  async function acceptFailed(error: unknown, draft: Draft): Promise<boolean> {
     // An answer from the server means nothing was written; only a lost reply can hide an accept.
-    const landed = error instanceof ApiError ? false : await onReconcile();
+    const landed = error instanceof ApiError ? false : await onReconcile(pickedFor(draft.id));
     if (!landed) release();
     return landed;
   }
@@ -67,7 +70,7 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
       void onReload();
       return;
     }
-    onAccepted(body.template, picked?.id === body.id ? picked.subject : null);
+    onAccepted(body.template, pickedFor(body.id));
   }
 
   async function reload() {

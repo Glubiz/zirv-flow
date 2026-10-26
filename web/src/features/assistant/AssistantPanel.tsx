@@ -63,7 +63,7 @@ interface AssistantPanelProps {
    * Called when the accept request failed after `confirmAccept` agreed, so the host can undo what it prepared.
    * It may answer true when it found that the draft was accepted after all and its reply was lost.
    */
-  onAcceptFailed?: (error: unknown) => unknown;
+  onAcceptFailed?: (error: unknown, draft: Draft) => unknown;
   /** Offered beside a failed accept, by the failure's code, such as a reload when the draft moved. */
   renderAcceptAction?: (code: string | null) => ReactNode;
   /**
@@ -247,7 +247,7 @@ function Drafting({
       setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null, acceptCode: null });
       setAnnouncement("Loaded into the editor");
     } catch (error) {
-      if ((await onAcceptFailed?.(error)) === true) {
+      if ((await onAcceptFailed?.(error, current)) === true) {
         setRun({ status: "done", draft: current, accepting: false, accepted: true, acceptFailure: null, acceptCode: null });
         setLateReply(true);
         setAnnouncement("The draft was accepted, but the reply was lost. It is loaded into the editor.");

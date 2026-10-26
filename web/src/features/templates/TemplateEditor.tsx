@@ -241,11 +241,11 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   }
 
   /** After a lost reply: the draft the server holds is adopted when it is not the one the editor knows. */
-  async function reconcile(): Promise<boolean> {
+  async function reconcile(subject: string | null): Promise<boolean> {
     try {
       const detail = await readTemplate();
       if (detail.draft.revision === draftRevision.current) return false;
-      adopt(detail, null);
+      adopt(detail, subject);
       return true;
     } catch {
       return false;
