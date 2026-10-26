@@ -793,6 +793,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clearing_the_sink_forgets_the_messages_it_captured() {
+        let sink = SmtpSink::start(SinkOptions::default()).await;
+        plain_send(&sink, &payload(), "msg-clear", Some(&signer("example.com")))
+            .await
+            .unwrap();
+        assert_eq!(sink.messages().len(), 1);
+
+        sink.clear();
+
+        assert!(sink.messages().is_empty());
+        assert!(sink.offered().is_empty());
+    }
+
+    #[tokio::test]
     async fn the_unsubscribe_pair_the_message_id_and_the_idempotency_key_are_on_the_wire() {
         let sink = SmtpSink::start(SinkOptions::default()).await;
 

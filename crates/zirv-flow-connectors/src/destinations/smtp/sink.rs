@@ -175,6 +175,13 @@ impl SmtpSink {
             .collect()
     }
 
+    /// Forgets the messages received so far, accepted or not. Counters and chosen replies stay.
+    pub fn clear(&self) {
+        let mut state = self.state.lock().expect("sink state");
+        state.messages.clear();
+        state.offered.clear();
+    }
+
     /// How many connections were opened.
     pub fn connections(&self) -> usize {
         self.state.lock().expect("sink state").connections
