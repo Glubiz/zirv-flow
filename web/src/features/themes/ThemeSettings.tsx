@@ -100,7 +100,7 @@ function LogoSection({ workspaceId, logo, readOnly, onChange }: { workspaceId: s
         {readOnly ? null : (
           <>
             <Button onClick={() => setPicking(true)}>Change</Button>
-            {logo ? <Button variant="quiet" onClick={() => onChange({ logo: null })}>Remove</Button> : null}
+            {logo ? <Button onClick={() => onChange({ logo: null })}>Remove</Button> : null}
           </>
         )}
       </div>
