@@ -6,9 +6,11 @@ use minijinja::{Environment, Value};
 
 use super::check::{check_sources, fields};
 use super::emit::{Fields, Plain, UrlKind, emit};
+use super::look::{Broken, Look};
 use super::sanitize::{
     Cleaned, enforce, has_mjml_tag, html_to_text, sanitize_source, scheme_allowed,
 };
+use super::snippet::SnippetContent;
 use super::tags::escape_literals;
 use crate::content::mjml::{MjmlError, compile};
 use crate::context::{RenderContext, RenderExtras};
@@ -60,8 +62,12 @@ pub(crate) struct Built {
 pub(crate) const DOCUMENT_FUEL: u64 = 5 * FUEL;
 
 /// The sandbox environment for one block document, with its share of the document fuel.
-pub(crate) fn document_environment(content: &BlocksContent) -> Environment<'static> {
-    let tagged = fields(content)
+pub(crate) fn document_environment(
+    content: &BlocksContent,
+    extras: &RenderExtras,
+    footer: Option<&SnippetContent>,
+) -> Environment<'static> {
+    let tagged = fields(content, extras, footer)
         .iter()
         .filter(|field| has_template_syntax(field.source))
         .count()
@@ -174,11 +180,20 @@ impl Fields for Rendered<'_> {
             None => Ok(true),
         }
     }
+
+    fn snippet(&mut self, snippet_id: &str) -> Result<SnippetContent, RenderError> {
+        self.extras
+            .snippets
+            .get(snippet_id)
+            .cloned()
+            .ok_or(RenderError::BrokenSnippetReference)
+    }
 }
 
 /// Render the tree and turn it into HTML: fields, MJML, `mrml`, then the caps on the result.
 pub(crate) fn build(
     content: &BlocksContent,
+    look: &Look<'_>,
     env: &Environment<'static>,
     values: &Value,
     extras: &RenderExtras,
@@ -191,7 +206,7 @@ pub(crate) fn build(
         check_urls,
         spent: 0,
     };
-    let emitted = emit(content, &mut fields)?;
+    let emitted = emit(content, look, &mut fields)?;
     // The rendered fields hold at most `MAX_HTML_BYTES` together; the MJML around them and the
     // text part are held to the same cap before `mrml` runs.
     if emitted.mjml.len() + emitted.text.len() > MAX_HTML_BYTES {
@@ -233,14 +248,20 @@ pub(crate) fn render(
         (Some(content), Channel::Email, Mode::Blocks) if !doc.is_ambiguous() => content,
         _ => return Err(RenderError::WrongDocument),
     };
-    if check_sources(content)
+    if check_sources(content, extras)
         .iter()
         .any(|issue| issue.is_blocking())
     {
         return Err(RenderError::InvalidBlocks);
     }
-    let env = document_environment(content);
-    let values = Value::from_serialize(context);
+    let (look, broken) = Look::resolve(content, extras);
+    match broken {
+        Some(Broken::Theme) => return Err(RenderError::BrokenThemeReference),
+        Some(Broken::Footer) => return Err(RenderError::BrokenSnippetReference),
+        None => {}
+    }
+    let env = document_environment(content, extras, look.footer);
+    let values = look.values(context, extras);
     let subject = one_line(&render_string(
         &env,
         "subject.txt",
@@ -249,10 +270,11 @@ pub(crate) fn render(
         &values,
         MAX_SUBJECT_BYTES,
     )?);
-    let built = build(content, &env, &values, extras, true).map_err(|error| match error {
-        BuildError::Render(error) => error,
-        BuildError::Mjml(error) => map_mjml_error(error),
-    })?;
+    let built =
+        build(content, &look, &env, &values, extras, true).map_err(|error| match error {
+            BuildError::Render(error) => error,
+            BuildError::Mjml(error) => map_mjml_error(error),
+        })?;
     Ok(Parts {
         subject,
         html: built.html,
@@ -933,6 +955,382 @@ mod tests {
                         .to_owned();
                     let extras = extras_of(&[(id.as_str(), shown)]);
                     prop_assert_eq!(render_with(&doc, &extras), render_with(&doc, &extras));
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    const FOOTER: &str = "0192b1a4-7c3e-7000-8000-00000000c001";
+    const PROMO: &str = "0192b1a4-7c3e-7000-8000-00000000c002";
+    const FONT_COUNT: usize = super::super::FONT_STACKS.len();
+
+    fn theme_fixture(name: &str) -> crate::theme::ThemeTokens {
+        serde_json::from_str(&read(&format!("themes/{name}.theme.json"))).unwrap()
+    }
+
+    fn snippet_fixture(name: &str) -> SnippetContent {
+        serde_json::from_str(&read(&format!("themes/{name}.snippet.json"))).unwrap()
+    }
+
+    fn themed(theme: crate::theme::ThemeTokens, name: &str) -> crate::context::RenderExtras {
+        let mut extras = crate::context::RenderExtras {
+            theme: Some(theme),
+            theme_name: Some(name.to_owned()),
+            ..Default::default()
+        };
+        extras
+            .snippets
+            .insert(FOOTER.into(), snippet_fixture("footer"));
+        extras
+            .snippets
+            .insert(PROMO.into(), snippet_fixture("promo"));
+        extras
+    }
+
+    /// The themes document, with `edit` applied to its `blocks` value.
+    fn themes_doc_with(edit: impl FnOnce(&mut serde_json::Value)) -> TemplateDocument {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&read("themes/document.doc.json")).unwrap();
+        edit(&mut value["blocks"]);
+        read_doc(&value.to_string())
+    }
+
+    fn themes_doc() -> TemplateDocument {
+        themes_doc_with(|_| {})
+    }
+
+    /// The themes document without `theme.*` tags, so it renders with no theme in effect.
+    fn plain_doc(edit: impl FnOnce(&mut serde_json::Value)) -> TemplateDocument {
+        themes_doc_with(|blocks| {
+            blocks["preheader"] = json!("");
+            blocks["sections"][0]["columns"][0][1]["content"] = json!("<p>Plain</p>");
+            edit(blocks);
+        })
+    }
+
+    fn marketing_doc() -> TemplateDocument {
+        plain_doc(|blocks| blocks["category"] = json!("marketing"))
+    }
+
+    fn footer_theme() -> crate::theme::ThemeTokens {
+        let mut theme = theme_fixture("a");
+        theme.footer_snippet = Some(FOOTER.into());
+        theme
+    }
+
+    #[test]
+    fn two_themes_render_the_golden_pair_and_differ_only_in_their_token_values() {
+        let doc = themes_doc();
+        let a = render_with(&doc, &themed(theme_fixture("a"), "Alpha")).unwrap();
+        let b = render_with(&doc, &themed(theme_fixture("b"), "Beta")).unwrap();
+        check("themes/a.html", &a.html);
+        check("themes/a.txt", &a.text);
+        check("themes/b.html", &b.html);
+        check("themes/b.txt", &b.text);
+
+        let swap = |text: &str| {
+            let mut out = text.to_owned();
+            for (from, to) in [
+                ("#a10001", "#b10101"),
+                ("#a20002", "#b20202"),
+                ("#a30003", "#b30303"),
+                ("#a40004", "#b40404"),
+                ("#a50005", "#b50505"),
+                ("#a60006", "#b60606"),
+                ("560", "720"),
+                ("510px", "670px"),
+                (
+                    "Georgia, 'Times New Roman', serif",
+                    "Verdana, Geneva, sans-serif",
+                ),
+                ("border-radius:6px", "border-radius:14px"),
+                ("Alpha", "Beta"),
+            ] {
+                out = out.replace(from, to);
+            }
+            out
+        };
+        assert_eq!(swap(&a.html), b.html);
+        assert_eq!(swap(&a.text), b.text);
+        assert_eq!(swap(&a.subject), b.subject);
+        assert_ne!(a.html, b.html);
+        for token in ["#a10001", "#a30003", "#a50005", "max-width:560px"] {
+            assert!(a.html.contains(token), "{token}");
+        }
+    }
+
+    #[test]
+    fn the_theme_replaces_the_settings_for_colours_width_font_buttons_links_and_headings() {
+        let mut theme = theme_fixture("a");
+        theme.link_underline = false;
+        let html = render_with(&themes_doc(), &themed(theme, "Alpha"))
+            .unwrap()
+            .html;
+        assert!(html.contains("max-width:560px"), "{html}");
+        for part in [
+            "#a30003",
+            "#a20002",
+            "#a10001",
+            "#a50005",
+            "#a60006",
+            "border-radius:6px",
+            "Georgia",
+            "a{color:#a40004;text-decoration:none}",
+        ] {
+            assert!(html.contains(part), "{part}");
+        }
+        assert!(!html.contains("#1a5fb4"), "no setting is left");
+    }
+
+    #[test]
+    fn a_section_background_and_a_divider_colour_still_apply_over_the_theme() {
+        let doc = themes_doc_with(|blocks| {
+            blocks["sections"][0]["background_color"] = json!("#c0ffee");
+            blocks["sections"][0]["columns"][0][3]["color"] = json!("#facade");
+        });
+        let html = render_with(&doc, &themed(theme_fixture("a"), "Alpha"))
+            .unwrap()
+            .html;
+        assert!(
+            html.contains("#c0ffee") && html.contains("#facade"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_web_font_is_an_mj_font_with_the_stack_as_the_fallback() {
+        let mut theme = theme_fixture("a");
+        theme.web_font_url = Some("https://fonts.example/css?family=Georgia&display=swap".into());
+        let html = render_with(&themes_doc(), &themed(theme, "Alpha"))
+            .unwrap()
+            .html;
+        assert!(
+            html.contains("https://fonts.example/css?family=Georgia&amp;display=swap"),
+            "{html}"
+        );
+        assert!(html.contains("Georgia, 'Times New Roman', serif"), "{html}");
+        let plain = render_with(&themes_doc(), &themed(theme_fixture("a"), "Alpha"))
+            .unwrap()
+            .html;
+        assert!(!plain.contains("fonts.example"));
+    }
+
+    #[test]
+    fn a_document_with_no_theme_renders_the_same_bytes_whatever_the_extras_hold() {
+        for name in CORPUS {
+            let document = doc(name);
+            let with = render_with(&document, &themed(theme_fixture("a"), "Alpha")).unwrap();
+            assert_eq!(with, render_doc(&document).unwrap(), "{name}");
+        }
+        let none = plain_doc(|blocks| blocks["theme"] = json!("none"));
+        assert_eq!(
+            render_with(&none, &themed(theme_fixture("a"), "Alpha")),
+            render_with(&none, &Default::default())
+        );
+    }
+
+    #[test]
+    fn a_document_that_follows_the_default_with_no_theme_renders_its_settings_with_no_footer() {
+        let rendered = render_with(&plain_doc(|_| {}), &Default::default()).unwrap();
+        assert!(rendered.html.contains("max-width:600px"));
+        assert!(rendered.html.contains("#1a5fb4"));
+        assert!(!rendered.html.contains("Unsubscribe"));
+    }
+
+    #[test]
+    fn a_named_theme_that_was_not_passed_is_a_typed_render_error() {
+        let doc = plain_doc(|blocks| {
+            blocks["theme"] = json!({"id": "0192b1a4-7c3e-7000-8000-00000000d001"});
+        });
+        assert_eq!(
+            render_with(&doc, &Default::default()),
+            Err(RenderError::BrokenThemeReference)
+        );
+    }
+
+    #[test]
+    fn the_theme_values_are_merge_values_only_where_a_theme_is_in_effect() {
+        let rendered = render_with(&themes_doc(), &themed(theme_fixture("a"), "Alpha")).unwrap();
+        assert!(rendered.text.contains("Brand colour #a10001 from Alpha"));
+        let none = themes_doc_with(|blocks| blocks["theme"] = json!("none"));
+        assert_eq!(
+            render_with(&none, &themed(theme_fixture("a"), "Alpha")),
+            Err(RenderError::Undefined { field: "html" })
+        );
+    }
+
+    #[test]
+    fn the_theme_footer_closes_the_email_once_and_is_golden() {
+        let rendered = render_with(&marketing_doc(), &themed(footer_theme(), "Alpha")).unwrap();
+        check("themes/footer.html", &rendered.html);
+        check("themes/footer.txt", &rendered.text);
+        assert_eq!(rendered.html.matches("You get this because").count(), 1);
+        assert!(
+            rendered
+                .text
+                .trim_end()
+                .ends_with("Unsubscribe: https://u.example/u/1?s=a&t=b."),
+            "{}",
+            rendered.text
+        );
+    }
+
+    #[test]
+    fn the_footer_is_absent_with_footer_none_a_bare_theme_or_no_theme() {
+        let extras = themed(footer_theme(), "Alpha");
+        let shows = |doc: &TemplateDocument, extras| {
+            render_with(doc, extras)
+                .unwrap()
+                .html
+                .contains("You get this")
+        };
+        assert!(shows(&marketing_doc(), &extras));
+        assert!(!shows(
+            &plain_doc(|blocks| blocks["footer"] = json!("none")),
+            &extras
+        ));
+        let bare = themed(theme_fixture("a"), "Alpha");
+        assert!(!shows(&plain_doc(|_| {}), &bare));
+        assert!(!shows(
+            &plain_doc(|blocks| blocks["theme"] = json!("none")),
+            &extras
+        ));
+    }
+
+    #[test]
+    fn a_footer_snippet_with_no_content_is_a_typed_render_error() {
+        let mut extras = themed(footer_theme(), "Alpha");
+        extras.snippets.clear();
+        assert_eq!(
+            render_with(&marketing_doc(), &extras),
+            Err(RenderError::BrokenSnippetReference)
+        );
+    }
+
+    #[test]
+    fn a_document_cannot_use_the_reserved_footer_id() {
+        let doc = plain_doc(|blocks| blocks["sections"][0]["id"] = json!("theme-footer"));
+        assert_eq!(
+            render_with(&doc, &themed(theme_fixture("a"), "Alpha")),
+            Err(RenderError::InvalidBlocks)
+        );
+    }
+
+    fn snippet_doc(in_section_column: bool) -> TemplateDocument {
+        plain_doc(|blocks| {
+            blocks["theme"] = json!("none");
+            blocks["footer"] = json!("none");
+            let reference = json!({"type": "snippet", "id": "promo", "snippet_id": PROMO});
+            if in_section_column {
+                if let Some(column) = blocks["sections"][0]["columns"][0].as_array_mut() {
+                    column.insert(1, reference);
+                }
+            } else if let Some(sections) = blocks["sections"].as_array_mut() {
+                sections.push(json!({"id": "after", "columns": [[reference]]}));
+            }
+        })
+    }
+
+    #[test]
+    fn a_snippet_block_renders_its_blocks_in_its_place_and_is_golden() {
+        let extras = themed(theme_fixture("a"), "Alpha");
+        let rendered = render_with(&snippet_doc(true), &extras).unwrap();
+        check("themes/snippet.html", &rendered.html);
+        check("themes/snippet.txt", &rendered.text);
+        let title = rendered.text.find("Spring sale for Ann").unwrap();
+        assert!(title > rendered.text.find("Welcome").unwrap());
+        assert!(title < rendered.text.find("Shop now").unwrap());
+        let alone = render_with(&snippet_doc(false), &extras).unwrap();
+        assert!(
+            alone
+                .text
+                .contains("See the sale: https://shop.example/sale")
+        );
+    }
+
+    #[test]
+    fn a_snippet_block_without_content_is_a_typed_render_error() {
+        assert_eq!(
+            render_with(&snippet_doc(true), &Default::default()),
+            Err(RenderError::BrokenSnippetReference)
+        );
+    }
+
+    #[test]
+    fn a_snippet_blocks_own_condition_decides_whether_it_renders() {
+        let doc = plain_doc(|blocks| {
+            blocks["theme"] = json!("none");
+            blocks["footer"] = json!("none");
+            if let Some(column) = blocks["sections"][0]["columns"][0].as_array_mut() {
+                column.push(json!({
+                    "type": "snippet",
+                    "id": "promo",
+                    "snippet_id": PROMO,
+                    "visible_if": {"x": 1}
+                }));
+            }
+        });
+        let mut extras = themed(theme_fixture("a"), "Alpha");
+        extras.conditions.insert("promo".into(), false);
+        let hidden = render_with(&doc, &extras).unwrap();
+        assert!(!hidden.text.contains("Spring sale"));
+        assert_eq!(hidden.hidden.len(), 1);
+        extras.conditions.insert("promo".into(), true);
+        assert!(
+            render_with(&doc, &extras)
+                .unwrap()
+                .text
+                .contains("Spring sale")
+        );
+    }
+
+    #[test]
+    fn a_snippet_that_holds_a_snippet_block_is_refused_at_render() {
+        let mut extras = themed(theme_fixture("a"), "Alpha");
+        let nested: SnippetContent = serde_json::from_value(
+            json!({"blocks": [{"type": "snippet", "id": "inner", "snippet_id": PROMO}]}),
+        )
+        .unwrap();
+        extras.snippets.insert(PROMO.into(), nested);
+        assert_eq!(
+            render_with(&snippet_doc(true), &extras),
+            Err(RenderError::InvalidBlocks)
+        );
+    }
+
+    #[test]
+    fn the_same_tokens_and_snippets_render_the_same_bytes_twice() {
+        use proptest::prelude::*;
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(
+                &(
+                    proptest::collection::vec("#[0-9a-f]{6}", 6),
+                    480u32..=800,
+                    0usize..FONT_COUNT,
+                    0u32..=40,
+                    any::<bool>(),
+                    any::<bool>(),
+                    any::<bool>(),
+                ),
+                |(colours, width, font, radius, underline, in_column, footer)| {
+                    let mut theme = theme_fixture("a");
+                    theme.primary = colours[0].clone();
+                    theme.text = colours[1].clone();
+                    theme.background = colours[2].clone();
+                    theme.link = colours[3].clone();
+                    theme.button = colours[4].clone();
+                    theme.button_text = colours[5].clone();
+                    theme.content_width = width;
+                    theme.font = super::super::FONT_STACKS[font].0.to_owned();
+                    theme.button_radius = radius;
+                    theme.link_underline = underline;
+                    theme.footer_snippet = footer.then(|| FOOTER.to_owned());
+                    let extras = themed(theme, "Alpha");
+                    for doc in [snippet_doc(in_column), marketing_doc()] {
+                        prop_assert_eq!(render_with(&doc, &extras), render_with(&doc, &extras));
+                    }
                     Ok(())
                 },
             )

@@ -1,0 +1,9 @@
+Welcome, Ann <b>O'Neil</b>
+
+Plain
+
+Shop now: https://shop.example/offer
+
+----------
+
+You get this because you signed up. Unsubscribe: https://u.example/u/1?s=a&t=b.

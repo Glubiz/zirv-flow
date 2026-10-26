@@ -8,6 +8,7 @@
 
 mod check;
 mod emit;
+mod look;
 mod model;
 mod render;
 mod sanitize;
@@ -107,7 +108,7 @@ impl std::error::Error for ConvertError {}
 /// MJML code has no place for a condition, an asset, a theme image or a snippet, so a document
 /// that uses one is refused with `not_convertible`.
 pub fn blocks_to_mjml(content: &BlocksContent) -> Result<Converted, ConvertError> {
-    let mut issues: Vec<Issue> = check::check_sources(content)
+    let mut issues: Vec<Issue> = check::check_sources(content, &RenderExtras::default())
         .into_iter()
         .filter(Issue::is_blocking)
         .collect();
@@ -115,7 +116,8 @@ pub fn blocks_to_mjml(content: &BlocksContent) -> Result<Converted, ConvertError
     if !issues.is_empty() {
         return Err(ConvertError { issues });
     }
-    let Ok(emitted) = emit::emit(content, &mut emit::Sources);
+    let look = look::Look::of_settings(&content.settings);
+    let Ok(emitted) = emit::emit(content, &look, &mut emit::Sources);
     Ok(Converted {
         mjml: emitted.mjml,
         text: emitted.text,
