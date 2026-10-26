@@ -261,6 +261,14 @@ jobs:
       - name: Build Test Server
         run: ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo build --features browser-test --bin zirv-flow-browser-test
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2.87.20
+        with:
+          tool: cargo-nextest@0.9.143
+
+      - name: Test The Test Server
+        run: ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo nextest run --features browser-test --bin zirv-flow-browser-test
+
       - name: Install Chromium
         run: npm run e2e:install
         working-directory: web

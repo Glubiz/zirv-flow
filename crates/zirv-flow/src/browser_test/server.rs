@@ -17,6 +17,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use uuid::Uuid;
 use zirv_flow_api::admin::{self, Context};
+use zirv_flow_connectors::destinations::SmtpCaptured;
 use zirv_flow_core::Role;
 
 use crate::harness::World;
@@ -37,12 +38,13 @@ fn required(name: &str) -> Result<String, String> {
     }
 }
 
-fn port() -> Result<u16, String> {
-    let port = match std::env::var("ZIRV_FLOW_BROWSER_TEST_PORT") {
-        Ok(value) => value
+/// The port from the value of `ZIRV_FLOW_BROWSER_TEST_PORT`, or the default when it is not set.
+fn parse_port(value: Option<&str>) -> Result<u16, String> {
+    let port = match value {
+        Some(value) => value
             .parse()
             .map_err(|_| "ZIRV_FLOW_BROWSER_TEST_PORT must be a port number".to_owned())?,
-        Err(_) => DEFAULT_PORT,
+        None => DEFAULT_PORT,
     };
     if port == 0 {
         return Err(
@@ -50,6 +52,28 @@ fn port() -> Result<u16, String> {
         );
     }
     Ok(port)
+}
+
+fn port() -> Result<u16, String> {
+    parse_port(std::env::var("ZIRV_FLOW_BROWSER_TEST_PORT").ok().as_deref())
+}
+
+/// The name of this run's database: the process and 12 hex digits of `id`.
+fn scratch_name(process: u32, id: Uuid) -> String {
+    format!("zf_browser_{process}_{}", &id.simple().to_string()[..12])
+}
+
+/// `name` as a quoted SQL identifier.
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+fn create_sql(name: &str) -> String {
+    format!("CREATE DATABASE {}", quoted(name))
+}
+
+fn drop_sql(name: &str) -> String {
+    format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", quoted(name))
 }
 
 /// The request to stop: a signal (SIGINT, SIGTERM, Ctrl-C) or `POST /__test/shutdown`.
@@ -92,14 +116,13 @@ impl Scratch {
     async fn create(database_url: &str) -> Result<Self, String> {
         let maintenance = PgConnectOptions::from_str(database_url)
             .map_err(|_| "DATABASE_URL is not a PostgreSQL URL".to_owned())?;
-        let random = Uuid::new_v4().simple().to_string();
-        let name = format!("zf_browser_{}_{}", std::process::id(), &random[..12]);
+        let name = scratch_name(std::process::id(), Uuid::new_v4());
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(maintenance.clone())
             .await
             .map_err(|error| format!("could not connect to PostgreSQL: {error}"))?;
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+        sqlx::query(AssertSqlSafe(create_sql(&name)))
             .execute(&admin)
             .await
             .map_err(|error| format!("could not create the scratch database: {error}"))?;
@@ -138,11 +161,9 @@ async fn drop_database(maintenance: PgConnectOptions, name: &str) -> Result<(), 
             .max_connections(1)
             .connect_with(maintenance)
             .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await?;
+        sqlx::query(AssertSqlSafe(drop_sql(name)))
+            .execute(&admin)
+            .await?;
         admin.close().await;
         Ok::<(), sqlx::Error>(())
     }
@@ -286,28 +307,25 @@ async fn seed(world: &World, password: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The messages the sink accepted: the envelope recipients, every header, and the HTML and text
-/// parts decoded.
+/// One captured message as the sink route shows it: the envelope recipients, every header, and
+/// the HTML and text parts decoded.
+fn message_json(message: &SmtpCaptured) -> Value {
+    let headers: Vec<Value> = mail::headers(&message.data)
+        .into_iter()
+        .map(|(name, value)| json!({"name": name, "value": value}))
+        .collect();
+    json!({
+        "recipients": message.recipients,
+        "headers": headers,
+        "html": mail::part(&message.data, "text/html"),
+        "text": mail::part(&message.data, "text/plain"),
+    })
+}
+
 async fn sink_list(State(shared): State<Arc<Shared>>) -> Result<Json<Value>, StatusCode> {
     let guard = shared.world.lock().unwrap_or_else(PoisonError::into_inner);
     let world = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let messages: Vec<Value> = world
-        .sink
-        .messages()
-        .iter()
-        .map(|message| {
-            let headers: Vec<Value> = mail::headers(&message.data)
-                .into_iter()
-                .map(|(name, value)| json!({"name": name, "value": value}))
-                .collect();
-            json!({
-                "recipients": message.recipients,
-                "headers": headers,
-                "html": mail::part(&message.data, "text/html"),
-                "text": mail::part(&message.data, "text/plain"),
-            })
-        })
-        .collect();
+    let messages: Vec<Value> = world.sink.messages().iter().map(message_json).collect();
     Ok(Json(Value::Array(messages)))
 }
 
@@ -322,17 +340,23 @@ async fn sink_clear(State(shared): State<Arc<Shared>>) -> StatusCode {
     }
 }
 
+/// The answer to a shutdown request: 200 once the cleanup succeeded, else 500 with the reason.
+fn shutdown_reply(cleaned: &Result<(), String>) -> (StatusCode, String) {
+    match cleaned {
+        Ok(()) => (StatusCode::OK, String::new()),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.clone()),
+    }
+}
+
 /// Cleans up while the server still serves, answers 200 once the scratch database is dropped (500
 /// with the reason when it could not be), and only then stops the server. A forced stop of the
 /// process, as on Windows, can then no longer leave the database behind.
 async fn shutdown(State(shared): State<Arc<Shared>>) -> (StatusCode, String) {
-    match shared.clean_up().await {
-        Ok(()) => {
-            shared.stop.request();
-            (StatusCode::OK, String::new())
-        }
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
+    let cleaned = shared.clean_up().await;
+    if cleaned.is_ok() {
+        shared.stop.request();
     }
+    shutdown_reply(&cleaned)
 }
 
 /// Resolves on SIGINT, on SIGTERM (Unix), or on Ctrl-C (Windows).
@@ -355,5 +379,110 @@ async fn stop_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_port_defaults_and_can_be_overridden() {
+        assert_eq!(parse_port(None), Ok(47700));
+        assert_eq!(parse_port(Some("48123")), Ok(48123));
+    }
+
+    #[test]
+    fn port_zero_and_junk_are_refused() {
+        for value in ["0", "", "http", "-1", "65536", " 80"] {
+            assert!(parse_port(Some(value)).is_err(), "{value:?}");
+        }
+        assert!(parse_port(Some("0")).unwrap_err().contains("must not be 0"));
+    }
+
+    #[test]
+    fn a_scratch_name_is_the_process_and_twelve_hex_digits() {
+        let name = scratch_name(
+            4242,
+            Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef),
+        );
+
+        assert_eq!(name, "zf_browser_4242_0123456789ab");
+    }
+
+    #[test]
+    fn the_sql_names_only_the_quoted_database() {
+        let name = scratch_name(1, Uuid::new_v4());
+
+        assert_eq!(create_sql(&name), format!("CREATE DATABASE \"{name}\""));
+        assert_eq!(
+            drop_sql(&name),
+            format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)")
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_name_cannot_end_the_identifier() {
+        assert_eq!(
+            quoted("a\"; DROP DATABASE postgres; --"),
+            "\"a\"\"; DROP DATABASE postgres; --\""
+        );
+    }
+
+    #[test]
+    fn a_captured_message_shows_its_recipients_headers_and_parts() {
+        let data = b"Subject: Hi\r\nContent-Type: multipart/alternative; boundary=\"b1\"\r\n\r\n--b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nplain\r\n--b1\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html</p>\r\n--b1--\r\n";
+        let message = SmtpCaptured {
+            mail_from: "from@example.com".to_owned(),
+            recipients: vec!["to@example.com".to_owned()],
+            data: data.to_vec(),
+        };
+
+        let shown = message_json(&message);
+
+        assert_eq!(shown["recipients"], json!(["to@example.com"]));
+        assert_eq!(
+            shown["headers"][0],
+            json!({"name": "Subject", "value": "Hi"})
+        );
+        assert_eq!(shown["html"], "<p>html</p>");
+        assert_eq!(shown["text"], "plain");
+    }
+
+    #[test]
+    fn shutdown_answers_200_after_a_cleanup_and_500_with_the_reason_after_a_failure() {
+        assert_eq!(shutdown_reply(&Ok(())), (StatusCode::OK, String::new()));
+        assert_eq!(
+            shutdown_reply(&Err("could not drop".to_owned())),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not drop".to_owned()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_request_resolves_every_waiter_now_and_later() {
+        let stop = Stop(Arc::new(watch::channel(false).0));
+        let early = stop.clone();
+        let waiting = tokio::spawn(async move { early.requested().await });
+
+        stop.request();
+
+        waiting.await.unwrap();
+        stop.requested().await;
+    }
+
+    #[tokio::test]
+    async fn cleaning_up_twice_does_nothing_the_second_time() {
+        let shared = Shared {
+            world: Mutex::new(None),
+            scratch: Mutex::new(None),
+            cleaning: tokio::sync::Mutex::new(()),
+            stop: Stop(Arc::new(watch::channel(false).0)),
+        };
+
+        assert_eq!(shared.clean_up().await, Ok(()));
+        assert_eq!(shared.clean_up().await, Ok(()));
     }
 }

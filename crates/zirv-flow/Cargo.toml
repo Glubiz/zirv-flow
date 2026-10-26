@@ -59,7 +59,6 @@ path = "src/main.rs"
 [[bin]]
 name = "zirv-flow-browser-test"
 path = "src/browser_test/main.rs"
-test = false
 required-features = ["browser-test"]
 
 [dev-dependencies]
