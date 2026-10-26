@@ -1,6 +1,6 @@
 /** The block document, schema 2, as the editor builds it (architecture 11.2). The shape is the server's; nothing here adds a field. */
 
-import type { ConditionNode } from "../../segments";
+import { AGG_FNS, type ConditionNode } from "../../segments";
 
 export const BLOCKS_SCHEMA = 2;
 export const MAX_SECTIONS = 50;
@@ -197,13 +197,13 @@ export function isEditableCondition(value: unknown): value is VisibleIf {
         (node["window"] === undefined || isWindow(node["window"]))
       );
     case "consent":
-      return isPlainObject(inner);
+      return isPlainObject(inner) && typeof inner["status"] === "string" && isOptionalText(inner["channel"]) && isOptionalText(inner["topic"]);
     case "messages":
       return (
         isPlainObject(inner) &&
         typeof inner["channel"] === "string" &&
         isAggregate(inner["agg"]) &&
-        (inner["dimensions"] === undefined || isPlainObject(inner["dimensions"])) &&
+        (inner["dimensions"] === undefined || (isPlainObject(inner["dimensions"]) && Object.values(inner["dimensions"]).every((entry) => typeof entry === "string"))) &&
         (inner["window"] === undefined || isWindow(inner["window"]))
       );
     default:
@@ -215,12 +215,16 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isOptionalText(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
 function isPropertyFilter(value: unknown): boolean {
   return isPlainObject(value) && typeof value["prop"] === "string" && typeof value["op"] === "string";
 }
 
 function isAggregate(value: unknown): boolean {
-  return isPlainObject(value) && typeof value["fn"] === "string" && typeof value["op"] === "string" && (value["prop"] === undefined || typeof value["prop"] === "string");
+  return isPlainObject(value) && AGG_FNS.some((fn) => fn === value["fn"]) && typeof value["op"] === "string" && (value["prop"] === undefined || typeof value["prop"] === "string");
 }
 
 function isWindow(value: unknown): boolean {

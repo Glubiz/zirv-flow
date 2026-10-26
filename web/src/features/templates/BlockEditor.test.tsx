@@ -899,6 +899,9 @@ describe("visibility", () => {
     ["an event with a where that is not a list", { event: "purchase", where: {} }],
     ["a messages node with no aggregate", { messages: { channel: "email" } }],
     ["an event with a window of the wrong type", { all: [{ event: "purchase", window: "last 7d" }] }],
+    ["a consent node whose status is not text", { consent: { channel: "email", status: {} } }],
+    ["an aggregate with an unknown function", { event: "purchase", agg: { fn: "invalid", op: "gte" } }],
+    ["a messages dimension that is not text", { messages: { channel: "email", agg: { fn: "count", op: "gte" }, dimensions: { campaign: {} } } }],
   ])("shows the notice and keeps the editor up for %s", async (_name, condition) => {
     mockApi(templateRoutes({ detail: withHeading(condition) }));
     const user = userEvent.setup();
