@@ -93,13 +93,14 @@ pub(crate) struct Checked {
 }
 
 /// The checks only the API can make, because they read the workspace or know the caller: a snippet
-/// holds at least one block, each `{"asset"}` image names a live asset of the workspace, and no
-/// image takes the theme logo, because a snippet has no theme of its own until the template that
-/// holds it is rendered (#307 may relax this).
+/// holds at least one block, and each `{"asset"}` image names a live asset of the workspace. A
+/// theme logo image is not refused: the template or theme that holds the snippet owns that check.
+/// A preview has no theme (`theme_is_set` false), so there it is an issue, as a missing asset is.
 pub(crate) async fn check_references(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     content: &SnippetContent,
+    theme_is_set: bool,
 ) -> Result<Checked, ApiError> {
     let mut checked = Checked {
         issues: Vec::new(),
@@ -119,11 +120,12 @@ pub(crate) async fn check_references(
         let at = format!("/blocks/block/{}/src", image.id);
         match &image.src {
             ImageSrc::Url(_) => {}
-            ImageSrc::Theme(_) => checked.issues.push(issue(
+            ImageSrc::Theme(_) if !theme_is_set => checked.issues.push(issue(
                 code::BROKEN_THEME_REFERENCE,
                 at,
-                "a snippet has no theme of its own, so it cannot show the theme logo",
+                "the preview has no theme, so it cannot show the theme logo",
             )),
+            ImageSrc::Theme(_) => {}
             ImageSrc::Asset(named) => {
                 let live = match named.parse::<Uuid>() {
                     Ok(id) => zirv_flow_store::find_asset(&mut *connection, workspace, id).await?,

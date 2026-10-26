@@ -412,7 +412,7 @@ mod tests {
     async fn invalid_content_is_refused_at_publish_and_writes_nothing(pool: PgPool) {
         let f = fixture(&pool).await;
         let gone = Uuid::now_v7().to_string();
-        let cases: [(&str, Value, &str); 7] = [
+        let cases: [(&str, Value, &str); 6] = [
             (
                 "a section",
                 json!({"blocks": [{"type": "divider", "id": "d"}],
@@ -441,12 +441,6 @@ mod tests {
                                    "src": {"asset": gone}}]}),
                 "broken_asset_reference",
             ),
-            (
-                "the theme logo",
-                json!({"blocks": [{"type": "image", "id": "i", "alt": "x",
-                                   "src": {"theme": "logo"}}]}),
-                "broken_theme_reference",
-            ),
             ("no block at all", json!({"blocks": []}), "missing_content"),
         ];
 
@@ -473,6 +467,34 @@ mod tests {
                 .await,
             0
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_theme_logo_image_publishes_and_the_themeless_preview_reports_it(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f
+            .create(
+                "Logo note",
+                json!({"blocks": [{"type": "image", "id": "i", "alt": "x",
+                                   "src": {"theme": "logo"}}]}),
+            )
+            .await;
+
+        let preview = f
+            .admin("POST", &format!("/snippets/{id}/preview"), Some(json!({})))
+            .await;
+        let published = f.publish(&id).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
+        assert_eq!(preview.body["rendered"], false);
+        assert_eq!(preview.body["issues"][0]["code"], "broken_theme_reference");
     }
 
     #[sqlx::test]

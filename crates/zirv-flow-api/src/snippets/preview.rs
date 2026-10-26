@@ -149,7 +149,7 @@ pub(crate) async fn preview(
         let catalog = field_catalog(
             zirv_flow_store::read_template_field_catalog(&mut connection, workspace.id).await?,
         );
-        let checked = check_references(&mut connection, workspace.id, &content).await?;
+        let checked = check_references(&mut connection, workspace.id, &content, false).await?;
         (content, source, checked, catalog)
     };
     let pool = state
