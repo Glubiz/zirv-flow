@@ -15,7 +15,7 @@ use zirv_flow_store::{
 };
 use zirv_flow_templates::{
     Category, Channel, EmailContent, Mode, Syntax, TemplateDocument, blocks_to_mjml,
-    content_type_of,
+    content_type_of, migrate_to_current,
 };
 
 use super::{
@@ -143,8 +143,11 @@ impl From<&TemplateDraft> for TemplateDraftBody {
             .ok()
             .and_then(|doc| content_type_of(&doc).ok())
             .map(|content| content.id());
+        // A draft is served at the current schema, whatever schema it was stored at.
+        let document =
+            migrate_to_current(draft.document.clone()).unwrap_or_else(|_| draft.document.clone());
         Self {
-            document: draft.document.clone(),
+            document,
             content_type,
             revision: draft.revision,
             updated_by: draft.updated_by,
@@ -237,11 +240,14 @@ fn check_name(name: &str) -> Result<&str, ApiError> {
 /// A document that may be saved as `template`'s draft: a template document of the template's
 /// channel and category, of a content type that is registered. Whether it is complete is for the
 /// publish to say.
-fn check_draft(template: &Template, document: &Value) -> Result<(), ApiError> {
+///
+/// The result is the document at the current schema, which is what a draft is stored as: an
+/// older document is migrated on the way in.
+fn check_draft(template: &Template, document: &Value) -> Result<Value, ApiError> {
     let doc = parse_document(document)?;
     check_matches(template, &doc)?;
     content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
-    Ok(())
+    migrate_to_current(document.clone()).map_err(|_| ApiError::template_unsupported_schema())
 }
 
 /// Creates a template with its first draft and audits it as `template.created`.
@@ -262,7 +268,7 @@ pub(crate) async fn create_template(
         None => serde_json::to_value(skeleton(request.channel.channel(), category.category()))
             .map_err(|_| ApiError::internal())?,
     };
-    let new = NewTemplate {
+    let mut new = NewTemplate {
         id: Uuid::now_v7(),
         name,
         channel: request.channel.as_str().to_owned(),
@@ -283,7 +289,7 @@ pub(crate) async fn create_template(
         created_at: OffsetDateTime::UNIX_EPOCH,
         updated_at: OffsetDateTime::UNIX_EPOCH,
     };
-    check_draft(&prospective, &new.document)?;
+    new.document = check_draft(&prospective, &new.document)?;
     let mut tx = zirv_flow_store::begin(pool).await?;
     let (template, draft) = store_create(&mut tx, workspace, &new, created_by)
         .await
@@ -362,11 +368,10 @@ pub(crate) async fn save_draft(
     let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
         .await
         .map_err(template_error)?;
-    check_draft(locked.template(), &request.document)?;
-    let draft =
-        zirv_flow_store::save_template_draft(&mut tx, workspace, id, &request.document, updated_by)
-            .await
-            .map_err(template_error)?;
+    let document = check_draft(locked.template(), &request.document)?;
+    let draft = zirv_flow_store::save_template_draft(&mut tx, workspace, id, &document, updated_by)
+        .await
+        .map_err(template_error)?;
     let template = locked.template().clone();
     admin::audit(
         &mut tx,
@@ -419,7 +424,7 @@ pub(crate) async fn convert_draft_to_mjml(
         text: converted.text,
     });
     let document = serde_json::to_value(&code).map_err(|_| ApiError::internal())?;
-    check_draft(locked.template(), &document)?;
+    let document = check_draft(locked.template(), &document)?;
     let draft = zirv_flow_store::save_template_draft(&mut tx, workspace, id, &document, updated_by)
         .await
         .map_err(template_error)?;
@@ -806,15 +811,17 @@ mod tests {
             updated_at: OffsetDateTime::UNIX_EPOCH,
         };
         let blocks = |change: &dyn Fn(&mut Value)| {
-            let mut doc = json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
+            let mut doc = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
                 "subject": "Hi", "sections": [{"id": "s", "columns": [[
                     {"type": "divider", "id": "d"}]]}]}});
             change(&mut doc);
-            check_draft(&template, &doc).map_err(|error| error.code())
+            check_draft(&template, &doc)
+                .map(|_| ())
+                .map_err(|error| error.code())
         };
         assert_eq!(blocks(&|_| {}), Ok(()));
         assert_eq!(
-            blocks(&|doc| doc["schema"] = json!(2)),
+            blocks(&|doc| doc["schema"] = json!(3)),
             Err(Some("template_unsupported_schema"))
         );
         assert_eq!(
@@ -828,7 +835,7 @@ mod tests {
             Err(Some("template_unknown_field"))
         );
         assert_eq!(
-            blocks(&|doc| doc["theme"] = json!("dark")),
+            blocks(&|doc| doc["palette"] = json!("dark")),
             Err(Some("template_unknown_field"))
         );
         // A bad enum value is not an unknown block.
