@@ -461,6 +461,33 @@ pub(crate) fn mask_many(definitions: &[Value], clear: &ClearKeys) -> (Vec<Value>
     (masked_all, table)
 }
 
+/// Whether a condition is within what the walks above cover: the nodes and the depth, counted as
+/// they count them. A condition that is not could hide a literal past their reach, so it is
+/// never masked and never sent.
+pub(crate) fn within_walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
+    if depth > WALK_DEPTH {
+        return false;
+    }
+    let Some(map) = value.as_object() else {
+        return true;
+    };
+    *nodes += 1;
+    if *nodes > MAX_NODES {
+        return false;
+    }
+    for key in ["all", "any"] {
+        if let Some(children) = map.get(key).and_then(Value::as_array) {
+            for child in children {
+                if !within_walk(child, depth + 1, nodes) {
+                    return false;
+                }
+            }
+        }
+    }
+    map.get("not")
+        .is_none_or(|child| within_walk(child, depth + 1, nodes))
+}
+
 /// The catalog as request content: names, types and descriptions, each list capped with a note
 /// of what was left out. `own` is the segment being drafted, which is left out of the segments a
 /// definition may refer to.

@@ -4768,4 +4768,95 @@ mod tests {
             LITERAL
         );
     }
+
+    /// A block email whose block is shown by a condition beyond what the masking walk covers:
+    /// 25 nested `not`s, or (with `wide`) a list of more than 200 conditions.
+    fn deeply_conditioned_doc(wide: bool) -> Value {
+        let mut condition = json!({"trait": "contact", "op": "eq", "value": LITERAL});
+        for _ in 0..25 {
+            condition = json!({"not": condition});
+        }
+        if wide {
+            condition = json!({"all": (0..201)
+                .map(|n| json!({"trait": "contact", "op": "eq",
+                    "value": format!("a{n}@example.org")}))
+                .collect::<Vec<_>>()});
+        }
+        let mut document = conditioned_blocks_doc();
+        document["blocks"]["sections"][0]["visible_if"] = Value::Null;
+        document["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = condition;
+        document
+    }
+
+    async fn deeply_conditioned_template(fx: &Fixture, wide: bool) -> String {
+        let id = conditioned_template(fx).await;
+        let put = fx
+            .path_as(
+                &fx.admin,
+                "PUT",
+                &format!("/templates/{id}/draft"),
+                Some(json!({"document": deeply_conditioned_doc(wide)})),
+            )
+            .await;
+        assert_eq!(put.status, StatusCode::OK, "{:?}", put.body);
+        id
+    }
+
+    async fn refused_and_sent_nothing(pool: PgPool, wide: bool) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = deeply_conditioned_template(&fx, wide).await;
+        let sent = fx.fake.call_count();
+
+        let reply = fx.draft(template_run(&id, "copy")).await;
+
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "ai_template_unsupported");
+        assert!(
+            reply.body["detail"]
+                .as_str()
+                .unwrap()
+                .contains("/blocks/sections/0/columns/0/0/visible_if"),
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
+        assert_eq!(fx.count("ai_drafts").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn schema_only_refuses_a_condition_nested_beyond_the_mask_walk(pool: PgPool) {
+        refused_and_sent_nothing(pool, false).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn schema_only_refuses_a_condition_with_more_nodes_than_the_mask_walk(pool: PgPool) {
+        refused_and_sent_nothing(pool, true).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_the_opt_in_a_condition_beyond_the_mask_walk_is_sent(pool: PgPool) {
+        let fx = Fixture::with_templates(&pool, true, 100_000_000).await;
+        let id = deeply_conditioned_template(&fx, false).await;
+        let sent = fx.fake.call_count();
+        fx.fake.push(answer(
+            "draft_template",
+            json!({"fragment": {"subject": "Our latest news"}}),
+        ));
+
+        // The condition itself is not valid (it is too deep to save as a condition), so the run
+        // may end in the validator's hands; what counts is that the request went out.
+        fx.draft(template_run(&id, "copy")).await;
+
+        let requests = fx.requests_after(sent);
+        assert!(!requests.is_empty(), "the request was sent");
+        assert_only_fenced(&requests[0], LITERAL);
+    }
 }

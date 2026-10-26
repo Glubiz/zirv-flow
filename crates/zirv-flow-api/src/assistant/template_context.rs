@@ -20,7 +20,7 @@ use uuid::Uuid;
 use zirv_flow_ai::{Content, Privacy};
 
 use super::prompt::omitted;
-use super::segment_context::{ClearKeys, Placeholders, mask_many};
+use super::segment_context::{ClearKeys, Placeholders, mask_many, within_walk};
 use super::tools::draft_template::TemplateTask;
 use crate::problem::ApiError;
 
@@ -154,9 +154,20 @@ fn condition_pointers(sections: Option<&Value>, base: &str) -> Vec<String> {
 }
 
 /// The document with the personal literals of its conditions replaced by placeholders, and the
-/// table to put them back.
-fn mask_document(document: &Value, clear: &ClearKeys) -> (Value, Placeholders) {
+/// table to put them back. A condition deeper or larger than the masking walk covers is refused:
+/// its literals could not all be found.
+fn mask_document(document: &Value, clear: &ClearKeys) -> Result<(Value, Placeholders), ApiError> {
     let pointers = condition_pointers(document.pointer("/blocks/sections"), "/blocks/sections");
+    for pointer in &pointers {
+        if document
+            .pointer(pointer)
+            .is_some_and(|condition| !within_walk(condition, 1, &mut 0))
+        {
+            return Err(ApiError::ai_template_unsupported(format!(
+                "the condition at {pointer} is too deep or too large for the assistant;                  simplify that condition first"
+            )));
+        }
+    }
     let conditions: Vec<Value> = pointers
         .iter()
         .filter_map(|pointer| document.pointer(pointer).cloned())
@@ -168,7 +179,7 @@ fn mask_document(document: &Value, clear: &ClearKeys) -> (Value, Placeholders) {
             *target = condition;
         }
     }
-    (out, table)
+    Ok((out, table))
 }
 
 /// Puts the literals the model was not shown back into its `fragment`, wherever its conditions
@@ -205,7 +216,7 @@ pub(crate) fn render_template_context(
         return Err(ApiError::ai_template_too_large());
     }
     let (document, table) = match privacy {
-        Privacy::SchemaOnly => mask_document(context.document, clear),
+        Privacy::SchemaOnly => mask_document(context.document, clear)?,
         Privacy::PersonalAllowed => (context.document.clone(), Placeholders::default()),
     };
     let mut notes = Vec::new();
@@ -420,5 +431,72 @@ mod tests {
             .iter()
             .find(|part| part.render().contains("jane@example.org"));
         assert!(matches!(literal, Some(Content::Personal(_))));
+    }
+
+    fn nested_nots(depth: usize) -> Value {
+        let mut condition = json!({"trait": "email", "op": "eq", "value": "jane@example.org"});
+        for _ in 0..depth {
+            condition = json!({"not": condition});
+        }
+        condition
+    }
+
+    fn with_condition(condition: Value) -> Value {
+        json!({"schema": 2, "mode": "blocks", "blocks": {"sections": [
+            {"id": "s1", "columns": [[
+                {"type": "text", "id": "t1", "content": "<p>Hello</p>", "visible_if": condition}
+            ]]}
+        ]}})
+    }
+
+    #[test]
+    fn schema_only_refuses_a_condition_the_mask_walk_cannot_cover() {
+        let wide = json!({"all": (0..=200)
+            .map(|n| json!({"trait": "email", "op": "eq", "value": format!("a{n}@example.org")}))
+            .collect::<Vec<_>>()});
+        for (condition, covered) in [
+            (nested_nots(23), true),
+            (nested_nots(24), false),
+            (wide, false),
+        ] {
+            let document = with_condition(condition);
+            let result = render_template_context(
+                &context(&document, TemplateTask::Copy),
+                &ClearKeys::default(),
+                Privacy::SchemaOnly,
+            );
+            match (covered, result) {
+                (true, Ok(_)) => {}
+                (false, Err(error)) => {
+                    assert_eq!(error.code(), Some("ai_template_unsupported"));
+                    assert!(
+                        error
+                            .detail()
+                            .contains("/blocks/sections/0/columns/0/0/visible_if"),
+                        "{}",
+                        error.detail()
+                    );
+                }
+                (covered, other) => panic!("covered {covered}: {:?}", other.is_ok()),
+            }
+        }
+    }
+
+    #[test]
+    fn the_opt_in_sends_a_condition_beyond_the_walk() {
+        let document = with_condition(nested_nots(30));
+
+        let (parts, _) = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::PersonalAllowed,
+        )
+        .unwrap();
+
+        assert!(
+            parts
+                .iter()
+                .any(|part| part.render().contains("jane@example.org"))
+        );
     }
 }

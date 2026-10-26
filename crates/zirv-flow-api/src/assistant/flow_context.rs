@@ -22,7 +22,7 @@ use zirv_flow_store::{CatalogDetails, Decision};
 
 use super::prompt::MAX_OUTPUT_TOKENS;
 use super::segment_context::{
-    ClearKeys, Placeholders, SEGMENT_REFERENCE, WALK_DEPTH, mask_many, render_catalog,
+    ClearKeys, Placeholders, SEGMENT_REFERENCE, mask_many, render_catalog, within_walk,
 };
 
 /// The most decision records an explanation is shown and must cite.
@@ -274,32 +274,6 @@ fn carriers(doc: &Value) -> Vec<Carrier> {
         }
     }
     found
-}
-
-/// The nodes of a condition and its depth, counted as the segment walks count them. None when it
-/// is beyond what the walks cover, so a literal could hide past their reach.
-fn within_walk(value: &Value, depth: usize, nodes: &mut usize) -> bool {
-    if depth > WALK_DEPTH {
-        return false;
-    }
-    let Some(map) = value.as_object() else {
-        return true;
-    };
-    *nodes += 1;
-    if *nodes > MAX_NODES {
-        return false;
-    }
-    for key in ["all", "any"] {
-        if let Some(children) = map.get(key).and_then(Value::as_array) {
-            for child in children {
-                if !within_walk(child, depth + 1, nodes) {
-                    return false;
-                }
-            }
-        }
-    }
-    map.get("not")
-        .is_none_or(|child| within_walk(child, depth + 1, nodes))
 }
 
 /// Why a document cannot be sent: it has more nodes than a flow may, or a condition larger than
