@@ -20,6 +20,7 @@ import { DimensionsPage, PolicyPage, SuppressionsPage, TopicsPage } from "../fea
 import { SendingSettingsPage } from "../features/sending-settings";
 import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
 import { PrivacyPage } from "../features/privacy";
+import { SnippetPage, SnippetsPage } from "../features/snippets";
 import { TemplatePage, TemplatesPage } from "../features/templates";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
@@ -149,7 +150,8 @@ export function AppRoutes() {
           <Route path="w/:ws/templates/:id" element={<TemplatePage />} />
           <Route path="w/:ws/images" element={<AssetLibraryPage />} />
           <Route path="w/:ws/themes" element={<LibraryPlaceholder title="Themes" />} />
-          <Route path="w/:ws/snippets" element={<LibraryPlaceholder title="Snippets" />} />
+          <Route path="w/:ws/snippets" element={<SnippetsPage />} />
+          <Route path="w/:ws/snippets/:id" element={<SnippetPage />} />
           <Route path="w/:ws/contacts" element={<ContactsPage />} />
           <Route path="w/:ws/contacts/:key" element={<ContactPage />} />
           <Route path="w/:ws/contact-definition" element={<ContactDefinitionPage />} />
