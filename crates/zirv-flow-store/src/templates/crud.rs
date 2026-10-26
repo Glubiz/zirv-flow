@@ -229,6 +229,27 @@ pub(super) async fn lock_live_template(
     Ok(held)
 }
 
+/// Share-locks the templates of the workspace among `ids`, in id order, until the transaction ends.
+/// A flow publish takes them before it checks that the templates it names are usable: an archive
+/// in progress (which holds the row exclusively) makes the publish wait and then see the template
+/// archived, and a publish in progress makes an archive wait and then see the flow. An id that
+/// names no template is skipped.
+pub async fn lock_templates_shared(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "SELECT id FROM templates WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Changes the given settings of a template that is not archived.
 pub async fn update_template(
     connection: &mut PgConnection,
@@ -596,5 +617,34 @@ mod tests {
             archive_template(&mut connection, two, template.id).await,
             Err(TemplateError::NotFound)
         ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn shared_locks_coexist_skip_unknown_ids_and_hold_back_an_archive(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = create(&pool, ws, "First").await;
+        let second = create(&pool, ws, "Second").await;
+        let ids = [second.id, Uuid::now_v7(), first.id];
+        let mut one = pool.acquire().await.unwrap();
+        let mut two = pool.acquire().await.unwrap();
+        let mut sharing = crate::begin(&pool).await.unwrap();
+        lock_templates_shared(&mut sharing, ws, &ids).await.unwrap();
+
+        // Another share lock does not wait.
+        let mut also = crate::begin(&pool).await.unwrap();
+        lock_templates_shared(&mut also, ws, &ids).await.unwrap();
+        // An exclusive lock does: it times out while the share locks are held.
+        sqlx::query("SET lock_timeout = '200ms'")
+            .execute(&mut *one)
+            .await
+            .unwrap();
+        let blocked = archive_template(&mut one, ws, first.id).await;
+        assert!(blocked.is_err());
+        crate::commit(sharing).await.unwrap();
+        crate::commit(also).await.unwrap();
+        let archived = archive_template(&mut two, ws, first.id).await;
+
+        assert!(archived.is_ok());
     }
 }

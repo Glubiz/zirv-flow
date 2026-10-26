@@ -318,9 +318,10 @@ pub use templates::{
     TemplateVersion, TemplateVersionSummary, ThemeRequest, active_flows_using,
     active_published_flows, add_preview_person, archive_template, create_template, document_sender,
     find_template, find_template_draft, find_template_version, list_preview_people,
-    list_template_versions, list_templates, load_render_inputs, lock_template, publish_template,
-    read_template_field_catalog, remove_preview_person, save_template_draft,
-    set_template_draft_checks, template_active_flow_counts, template_where_used, update_template,
+    list_template_versions, list_templates, load_render_inputs, lock_template,
+    lock_templates_shared, publish_template, read_template_field_catalog, remove_preview_person,
+    save_template_draft, set_template_draft_checks, template_active_flow_counts,
+    template_where_used, update_template,
 };
 pub use test_sends::{
     ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
