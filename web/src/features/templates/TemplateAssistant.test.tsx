@@ -193,11 +193,18 @@ describe("the template assistant", () => {
   });
 
   it("offers a reload when the draft changed since", async () => {
+    const moved = templateDetail({}, emailDocument({}, { html: "<p>Saved by someone else</p>" }));
+    (moved.draft as { revision: number }).revision = 4;
+    let refused = false;
     const calls = mount(
       templateRoutes({
         extra: {
           [DRAFTS]: () => json(valid()),
-          [ACCEPT]: () => problem(409, "Draft changed", "moved", undefined, "template_draft_changed"),
+          [ACCEPT]: () => {
+            refused = true;
+            return problem(409, "Draft changed", "moved", undefined, "template_draft_changed");
+          },
+          [`GET ${WS}/templates/${TEMPLATE_ID}`]: () => json(refused ? moved : templateDetail()),
         },
       }),
     );
@@ -212,6 +219,32 @@ describe("the template assistant", () => {
     await waitFor(() =>
       expect(calls.filter((call) => call.method === "GET" && call.path === `${WS}/templates/${TEMPLATE_ID}`).length).toBeGreaterThan(before),
     );
+    // The editor holds the draft that was reloaded.
+    await user.click(screen.getByRole("button", { name: "Close the assistant" }));
+    expect((await screen.findByRole<HTMLTextAreaElement>("textbox", { name: /source/ })).value).toBe("<p>Saved by someone else</p>");
+  });
+
+  it("shows why a reload failed", async () => {
+    let refused = false;
+    mount(
+      templateRoutes({
+        extra: {
+          [DRAFTS]: () => json(valid()),
+          [ACCEPT]: () => {
+            refused = true;
+            return problem(409, "Draft changed", "moved", undefined, "template_draft_changed");
+          },
+          [`GET ${WS}/templates/${TEMPLATE_ID}`]: () => (refused ? problem(500, "Could not read the template", "try later") : json(templateDetail())),
+        },
+      }),
+    );
+    const user = await open();
+    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Accept into draft" }));
+    await user.click(await screen.findByRole("button", { name: "Reload the draft" }));
+
+    expect(await screen.findByText("Could not read the template")).toBeInTheDocument();
   });
 
   it("opens to the usual notice, with nothing to draft, when no provider is configured", async () => {

@@ -1,8 +1,8 @@
 import { useState } from "react";
 
 import { ApiError } from "../../api";
-import { Button, Dialog } from "../../ui";
-import { AssistantPanel, DraftChanges, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
+import { Button, Dialog, InlineError } from "../../ui";
+import { AssistantPanel, DraftChanges, failureText, type Failure, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
 import type { Editable, TemplateDetail } from "./model";
 
 type Width = "desktop" | "mobile";
@@ -44,6 +44,7 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
   const [picked, setPicked] = useState<{ id: string; subject: string } | null>(null);
   const [epoch, setEpoch] = useState(0);
   const [reloading, setReloading] = useState(false);
+  const [reloadFailure, setReloadFailure] = useState<Failure | null>(null);
 
   /** The subject line chosen from the variants of this draft, when it is not the first. */
   const pickedFor = (id: string) => (picked?.id === id ? picked.subject : null);
@@ -66,7 +67,7 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
 
   function accepted(_content: unknown, body: AcceptedDraft) {
     if (!body.template) {
-      void onReload();
+      void reload();
       return;
     }
     onAccepted(body.template, pickedFor(body.id));
@@ -74,9 +75,13 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
 
   async function reload() {
     setReloading(true);
+    setReloadFailure(null);
     try {
       await onReload();
       setEpoch((value) => value + 1);
+    } catch (error) {
+      release();
+      setReloadFailure(failureText(error));
     } finally {
       setReloading(false);
     }
@@ -108,9 +113,12 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush
         renderChanges={(changes, draft) => <DraftReview changes={changes} draft={draft} onPick={(subject) => setPicked({ id: draft.id, subject })} />}
         renderAcceptAction={(code) =>
           code === "template_draft_changed" ? (
-            <Button onClick={() => void reload()} disabled={reloading}>
-              {reloading ? "Reloading" : "Reload the draft"}
-            </Button>
+            <>
+              <Button onClick={() => void reload()} disabled={reloading}>
+                {reloading ? "Reloading" : "Reload the draft"}
+              </Button>
+              {reloadFailure ? <InlineError {...reloadFailure} /> : null}
+            </>
           ) : null
         }
       />
