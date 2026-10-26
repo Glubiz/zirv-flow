@@ -17842,6 +17842,1066 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/snippets": {
+      "get": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "The workspace's live snippets by name; archived ones with `archived=true`.",
+        "operationId": "list_snippets",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "archived",
+            "in": "query",
+            "description": "Include archived snippets; default false",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snippets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SnippetBody"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "archived is not true or false",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "Creates a snippet with its first draft. Audited as `snippet.created`.",
+        "operationId": "create_snippet",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSnippetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new snippet with its draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A live snippet has that name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name, or content that is not a block list (`snippet_malformed`, `template_unknown_block`, `template_unknown_field`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}": {
+      "get": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "One snippet with its draft.",
+        "operationId": "get_snippet",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The snippet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "Renames a snippet.",
+        "operationId": "update_snippet",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSnippetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated snippet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another live snippet has that name, or the snippet is archived (`snippet_archived`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An invalid name",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused\nwhile the draft of a template holds a block for it. Audited as `snippet.archived`.",
+        "operationId": "archive_snippet",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The archived snippet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The snippet is already archived (`snippet_archived`), or template drafts hold it (`snippet_in_use`, with `snippet_templates`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}/draft": {
+      "put": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "Replaces the snippet's draft. The draft is not validated beyond being a block list of known\nblocks: a snippet is edited in steps, and the publish checks it. Audited as\n`snippet.draft_saved`.",
+        "operationId": "save_snippet_draft",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveSnippetDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The snippet with its saved draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetDetailBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The snippet is archived (`snippet_archived`), or the draft is not at the `revision` named (`snippet_revision_mismatch`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Content that is not a block list (`snippet_malformed`, `template_unknown_block`, `template_unknown_field`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}/preview": {
+      "post": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "Renders the draft or a version of a snippet for the sample person. A snippet with blocking\nissues is not rendered: the response lists the issues and `rendered` is false. A theme logo\nimage, which the preview has no theme for, and an image of a missing or deleted asset are shown\nas stand-in images, each with a warning (`broken_theme_reference`, `broken_asset_reference`) at\nthe block's path. A render that fails its limits (memory, deadline) or whose host dies is a\nproblem document, and the next preview works.",
+        "operationId": "preview_snippet",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnippetPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rendered snippet and its validation results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetPreviewBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the write scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, snippet or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The renderer refused the content (`template_render_failed`), or it used too much memory or time (`render_memory_limit`, `render_deadline`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The render host answered unusably (`render_protocol`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}/publish": {
+      "post": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; a snippet with no block\nis refused as `missing_content`. A theme logo image is accepted: the template or theme that\nholds the snippet checks it. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
+        "operationId": "publish_snippet",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The snippet, its new version and what uses it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetPublishedBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The snippet is archived (`snippet_archived`), or its draft was saved while it was being validated (`snippet_draft_changed`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The draft has blocking issues (`snippet_invalid`, with `template_issues`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}/versions": {
+      "get": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "The versions of a snippet, newest first.",
+        "operationId": "list_snippet_versions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The versions without their content, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SnippetVersionSummaryBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}/versions/{n}": {
+      "get": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "One version of a snippet.",
+        "operationId": "get_snippet_version",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, snippet or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/snippets/{id}/where-used": {
+      "get": {
+        "tags": [
+          "snippets"
+        ],
+        "summary": "The templates, themes and active flows that use a snippet.",
+        "operationId": "snippet_where_used",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Snippet id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What uses the snippet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnippetUsedByBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or snippet, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
       "post": {
         "tags": [
@@ -26377,6 +27437,26 @@
           }
         }
       },
+      "CreateSnippetRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "content": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The first draft. Absent: an empty block list."
+          },
+          "name": {
+            "type": "string",
+            "description": "1 to 100 characters after trimming; unique among the workspace's live snippets, ignoring\ncase.",
+            "example": "Free shipping note"
+          }
+        }
+      },
       "CreateSourceRequest": {
         "type": "object",
         "required": [
@@ -33328,6 +34408,16 @@
             ],
             "description": "The `x-request-id` of the failed request."
           },
+          "snippet_templates": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SegmentRefProblem"
+            },
+            "description": "The templates whose drafts hold a block for a snippet (`snippet_in_use`)."
+          },
           "status": {
             "type": "integer",
             "format": "int32",
@@ -34596,6 +35686,26 @@
               "$ref": "#/components/schemas/PropertyBody"
             },
             "description": "Replaces the draft."
+          }
+        }
+      },
+      "SaveSnippetDraftRequest": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "object",
+            "description": "The content: `{\"blocks\": [...]}`."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The revision the caller read. When it is not the draft's current revision the save is a\n409 `snippet_revision_mismatch` and nothing is written. Absent: save regardless."
           }
         }
       },
@@ -36517,6 +37627,363 @@
           }
         },
         "additionalProperties": false
+      },
+      "SnippetBody": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archived_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The user who created it; null when an API key did."
+          },
+          "current_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The newest published version; null before the first publish."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string",
+            "example": "Free shipping note"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SnippetDetailBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SnippetBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "draft"
+            ],
+            "properties": {
+              "draft": {
+                "$ref": "#/components/schemas/SnippetDraftBody"
+              }
+            }
+          }
+        ],
+        "description": "A snippet with its draft."
+      },
+      "SnippetDraftBody": {
+        "type": "object",
+        "description": "The one editable copy of a snippet's content.",
+        "required": [
+          "content",
+          "revision",
+          "updated_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "object",
+            "description": "The content: `{\"blocks\": [...]}`. It may be incomplete; only a publish validates it."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times the draft has been saved; the first save is 1. Send it back as `revision`\nto save only if nobody saved in between."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "SnippetFlowBody": {
+        "type": "object",
+        "description": "An active flow that sends a template holding the snippet.",
+        "required": [
+          "flow_id",
+          "flow_name",
+          "flow_state",
+          "template_ids"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          },
+          "flow_state": {
+            "type": "string",
+            "description": "`published` or `paused`."
+          },
+          "template_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The templates of the flow that hold the snippet."
+          }
+        }
+      },
+      "SnippetPreviewBody": {
+        "type": "object",
+        "description": "The rendered snippet and its validation results.",
+        "required": [
+          "source",
+          "rendered",
+          "issues"
+        ],
+        "properties": {
+          "html": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sample document's HTML, with inert tracking links."
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "The same checks a publish makes, against the workspace's fields and assets now."
+          },
+          "rendered": {
+            "type": "boolean",
+            "description": "False when the snippet has blocking issues, so nothing was rendered."
+          },
+          "source": {
+            "type": "string",
+            "description": "`draft` or `version`."
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sample document's text part."
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "SnippetPreviewRequest": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Preview this published version. Absent: the draft."
+          }
+        }
+      },
+      "SnippetPublishedBody": {
+        "type": "object",
+        "description": "The new version, the snippet after the publish, and what uses the snippet.",
+        "required": [
+          "snippet",
+          "version",
+          "used_by"
+        ],
+        "properties": {
+          "snippet": {
+            "$ref": "#/components/schemas/SnippetBody"
+          },
+          "used_by": {
+            "$ref": "#/components/schemas/SnippetUsedByBody",
+            "description": "What picks the new version up: later sends use it without a template being republished."
+          },
+          "version": {
+            "$ref": "#/components/schemas/SnippetVersionBody"
+          }
+        }
+      },
+      "SnippetTemplateBody": {
+        "type": "object",
+        "description": "A template that holds a block for the snippet.",
+        "required": [
+          "id",
+          "name",
+          "in_draft",
+          "in_current"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "in_current": {
+            "type": "boolean",
+            "description": "Whether the template's current version holds the block."
+          },
+          "in_draft": {
+            "type": "boolean",
+            "description": "Whether the template's draft holds the block."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SnippetThemeBody": {
+        "type": "object",
+        "description": "A theme that uses the snippet as its footer.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SnippetUsedByBody": {
+        "type": "object",
+        "description": "Everything that uses a snippet.",
+        "required": [
+          "templates",
+          "themes",
+          "active_flows"
+        ],
+        "properties": {
+          "active_flows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnippetFlowBody"
+            },
+            "description": "Flows whose running version names one of those templates. A flow that does not run it now,\nand an archived flow, is not listed."
+          },
+          "templates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnippetTemplateBody"
+            },
+            "description": "Templates, not archived, whose draft or current version holds a snippet block for it,\nin a section column."
+          },
+          "themes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnippetThemeBody"
+            },
+            "description": "Themes that use it as their footer. Always empty until themes exist (#304)."
+          }
+        }
+      },
+      "SnippetVersionBody": {
+        "type": "object",
+        "description": "One immutable published version.",
+        "required": [
+          "version",
+          "content",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "object",
+            "description": "The content as it was published."
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateIssueProblem"
+            },
+            "description": "The warnings found when it was published; a blocking issue refuses the publish."
+          }
+        }
+      },
+      "SnippetVersionSummaryBody": {
+        "type": "object",
+        "description": "One published version in the history list: no content, which `GET .../versions/{n}` returns.",
+        "required": [
+          "version",
+          "warnings",
+          "published_at"
+        ],
+        "properties": {
+          "published_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "published_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The warnings stored with the version."
+          }
+        }
       },
       "SourceBody": {
         "type": "object",
@@ -38596,6 +40063,17 @@
               "null"
             ],
             "description": "A new reply-to address; `null` clears it."
+          }
+        }
+      },
+      "UpdateSnippetRequest": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
           }
         }
       },
