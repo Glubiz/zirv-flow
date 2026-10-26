@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { client, unwrap, useResource } from "../../api";
-import { Button, EmptyState, PageHeader, Panel, Pill, ResourceView } from "../../ui";
+import { Button, EmptyState, LibraryNav, PageHeader, Panel, Pill, ResourceView } from "../../ui";
 import { formatDate } from "../../ui/format";
 import { useTemplateAccess } from "./access";
 import { NewTemplateDialog } from "./NewTemplateDialog";
@@ -29,6 +29,7 @@ function TemplateList({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="page">
+      <LibraryNav workspaceId={workspaceId} />
       <PageHeader
         title="Templates"
         lede="The messages your flows send. Write one as HTML or MJML, see it rendered by the server as you type, then publish it for a send step to use."
