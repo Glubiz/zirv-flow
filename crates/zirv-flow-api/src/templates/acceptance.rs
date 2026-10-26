@@ -2745,4 +2745,147 @@ mod tests {
                 .all(|(_, summary)| !summary.contains("Secret"))
         );
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_publish_note_is_stored_and_listed_and_501_characters_are_a_400_naming_note(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+
+        let too_long = f
+            .lead(
+                "POST",
+                &format!("/{id}/publish"),
+                Some(json!({"note": "x".repeat(501)})),
+            )
+            .await;
+        let published = f
+            .lead(
+                "POST",
+                &format!("/{id}/publish"),
+                Some(json!({"note": "  Fixed the footer  "})),
+            )
+            .await;
+        let list = f.lead("GET", &format!("/{id}/versions"), None).await;
+        let one = f.lead("GET", &format!("/{id}/versions/1"), None).await;
+
+        assert_eq!(
+            too_long.status,
+            StatusCode::BAD_REQUEST,
+            "{:?}",
+            too_long.body
+        );
+        assert_eq!(too_long.body["errors"][0]["field"], "note");
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(published.body["version"]["version"], 1);
+        assert_eq!(published.body["version"]["note"], "Fixed the footer");
+        assert_eq!(list.body[0]["note"], "Fixed the footer");
+        assert_eq!(one.body["note"], "Fixed the footer");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_marks_blocks_only_when_asked(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Promo", blocks_doc("Hi", LINK)).await;
+
+        let plain = f.preview_of(&id, json!({})).await;
+        let marked = f.preview_of(&id, json!({"annotate": true})).await;
+
+        let html = |reply: &Reply| reply.body["html"].as_str().unwrap().to_owned();
+        assert!(!html(&plain).contains("zf-block-"));
+        for class in [
+            "zf-block-intro",
+            "zf-block-title",
+            "zf-block-cta",
+            "zf-block-legal",
+        ] {
+            assert!(html(&marked).contains(class), "{class}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn send_volume_lists_an_active_flow_with_its_daily_average_for_a_reader(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let flow = Uuid::now_v7();
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "send", "type": "action.send", "template": id},
+            {"id": "end", "type": "exit"}], "edges": []});
+        let settings = json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}});
+        let mut connection = f.pool.acquire().await.unwrap();
+        zirv_flow_store::create_flow(
+            &mut connection,
+            f.ws,
+            &zirv_flow_store::NewFlow {
+                id: flow,
+                name: "Welcome flow".into(),
+                graph,
+                settings,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let mut tx = zirv_flow_store::begin(&f.pool).await.unwrap();
+        let locked = zirv_flow_store::lock_flow(&mut tx, f.ws, flow)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_flow(
+            &mut tx,
+            &zirv_flow_store::Clock::default(),
+            f.ws,
+            &locked,
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let person = f.person(json!({}), None).await;
+        for test in [false, false, false, false, false, false, false, true] {
+            sqlx::query(
+                "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, \
+                    node_id, template_id, destination_id, status, test, completed_at) \
+                 VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), $3, 'send', $4, \
+                    gen_random_uuid(), 'sent', $5, now())",
+            )
+            .bind(f.ws.as_uuid())
+            .bind(person)
+            .bind(flow)
+            .bind(id.parse::<Uuid>().unwrap())
+            .bind(test)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        }
+
+        let by_reader = f
+            .call(
+                "GET",
+                &f.templates(&format!("/{id}/send-volume")),
+                None,
+                Auth::Key(&f.read),
+            )
+            .await;
+        let missing = f
+            .lead("GET", &format!("/{}/send-volume", Uuid::now_v7()), None)
+            .await;
+
+        assert_eq!(by_reader.status, StatusCode::OK, "{:?}", by_reader.body);
+        assert_eq!(
+            by_reader.body,
+            json!([{"flow_id": flow, "flow_name": "Welcome flow", "per_day": 1.0}])
+        );
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    }
 }

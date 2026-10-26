@@ -121,6 +121,10 @@ pub struct RenderExtras {
     pub conditions: BTreeMap<String, bool>,
     /// The URL of each asset by asset id.
     pub assets: BTreeMap<String, String>,
+    /// Give each section and block the class `zf-block-<id>`. Only the marked preview sets it;
+    /// without it the MJML is unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub annotate: bool,
 }
 
 impl RenderExtras {

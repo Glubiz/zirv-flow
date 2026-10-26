@@ -22425,7 +22425,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAudited as `template.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAn optional body `{ \"note\" }` adds a note of at most 500 characters to the version.\nAudited as `template.published`.",
         "operationId": "publish_template",
         "parameters": [
           {
@@ -22449,6 +22449,22 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TemplatePublishRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "The template and its new version",
@@ -22456,6 +22472,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TemplatePublishedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -22502,6 +22528,90 @@
           },
           "422": {
             "description": "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/send-volume": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The active flows that send this template, each with the average non-test messages a day over\nthe last 7 days. A flow is active when it is published and its running version names the\ntemplate. By flow name.",
+        "operationId": "template_send_volume",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The active flows that send the template, with their daily volume",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateSendVolumeBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -40334,6 +40444,10 @@
       "TemplatePreviewRequest": {
         "type": "object",
         "properties": {
+          "annotate": {
+            "type": "boolean",
+            "description": "Give each section and block the class `zf-block-<id>` in the HTML, so a page can mark\nthem. Only the preview does this; a send, a test send and a publish never do."
+          },
           "person_id": {
             "type": [
               "string",
@@ -40349,6 +40463,19 @@
             ],
             "format": "int32",
             "description": "Preview this published version. Absent: the draft."
+          }
+        }
+      },
+      "TemplatePublishRequest": {
+        "type": "object",
+        "description": "The optional body of a publish.",
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A note for the version history, at most 500 characters. Blank is no note."
           }
         }
       },
@@ -40373,6 +40500,29 @@
           },
           "version": {
             "$ref": "#/components/schemas/TemplateVersionBody"
+          }
+        }
+      },
+      "TemplateSendVolumeBody": {
+        "type": "object",
+        "description": "How much one active flow sends the template.",
+        "required": [
+          "flow_id",
+          "flow_name",
+          "per_day"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          },
+          "per_day": {
+            "type": "number",
+            "format": "double",
+            "description": "The average non-test messages a day over the last 7 days."
           }
         }
       },
@@ -40434,6 +40584,13 @@
             "type": "object",
             "description": "The document as it was published."
           },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The note written when it was published."
+          },
           "published_at": {
             "type": "string",
             "format": "date-time"
@@ -40472,6 +40629,13 @@
             "type": "integer",
             "format": "int64",
             "description": "The blocking issues stored with the version; always 0, because a blocking issue refuses the\npublish."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The note written when it was published."
           },
           "published_at": {
             "type": "string",

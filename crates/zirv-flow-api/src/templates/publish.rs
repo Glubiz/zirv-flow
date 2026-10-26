@@ -2,9 +2,10 @@
 //! needs the workspace admin role (ruling 43163028).
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -12,8 +13,8 @@ use uuid::Uuid;
 use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    AssetOwnerKind, AssetReferenceError, SenderError, Template, TemplateUse, TemplateVersion,
-    TemplateVersionSummary, require_verified_sender,
+    AssetOwnerKind, AssetReferenceError, SenderError, TEMPLATE_NOTE_MAX_CHARS, Template,
+    TemplateUse, TemplateVersion, TemplateVersionSummary, require_verified_sender,
 };
 use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
 
@@ -24,7 +25,7 @@ use super::{field_catalog, issue_problems, stored_document, template_error};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::problem::{ApiError, Problem, TemplateIssueProblem};
+use crate::problem::{ApiError, ItemProblem, Problem, TemplateIssueProblem};
 use crate::sending::sender_error;
 use crate::trace::request_trace;
 
@@ -38,6 +39,8 @@ pub(crate) struct TemplateVersionBody {
     /// The warnings found when it was published; a blocking issue refuses the publish.
     warnings: Vec<TemplateIssueProblem>,
     published_by: Option<Uuid>,
+    /// The note written when it was published.
+    note: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     published_at: OffsetDateTime,
@@ -52,6 +55,7 @@ impl From<&TemplateVersion> for TemplateVersionBody {
                 .unwrap_or_else(|_| version.document.clone()),
             warnings: stored_warnings(&version.validation),
             published_by: version.published_by,
+            note: version.note.clone(),
             published_at: version.published_at,
         }
     }
@@ -67,6 +71,8 @@ pub(crate) struct TemplateVersionSummaryBody {
     /// The warnings stored with the version.
     warnings: i64,
     published_by: Option<Uuid>,
+    /// The note written when it was published.
+    note: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     published_at: OffsetDateTime,
@@ -79,6 +85,7 @@ impl From<&TemplateVersionSummary> for TemplateVersionSummaryBody {
             blocking: summary.blocking,
             warnings: summary.warnings,
             published_by: summary.published_by,
+            note: summary.note.clone(),
             published_at: summary.published_at,
         }
     }
@@ -104,6 +111,37 @@ fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
         .collect()
 }
 
+/// The optional body of a publish.
+#[derive(Default, Deserialize, ToSchema)]
+pub(crate) struct TemplatePublishRequest {
+    /// A note for the version history, at most 500 characters. Blank is no note.
+    note: Option<String>,
+}
+
+/// The note of a publish request: an absent body or a blank note is none, and more than
+/// [`TEMPLATE_NOTE_MAX_CHARS`] characters is a 400 naming `note`.
+fn note_of(body: &[u8]) -> Result<Option<String>, ApiError> {
+    let request: TemplatePublishRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        TemplatePublishRequest::default()
+    } else {
+        serde_json::from_slice(body)
+            .map_err(|_| ApiError::bad_request("request body is not valid JSON"))?
+    };
+    let note = request.note.map(|note| note.trim().to_owned());
+    match note {
+        Some(note) if note.chars().count() > TEMPLATE_NOTE_MAX_CHARS => Err(ApiError::bad_request(
+            "note is too long",
+        )
+        .with_errors(vec![ItemProblem {
+            index: 0,
+            field: "note".to_owned(),
+            reason: "too_long".to_owned(),
+        }])),
+        Some(note) if !note.is_empty() => Ok(Some(note)),
+        _ => Ok(None),
+    }
+}
+
 /// The new version and the template after the publish.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct TemplatePublishedBody {
@@ -127,6 +165,7 @@ pub(crate) async fn publish_template(
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
+    note: Option<&str>,
 ) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
     let (draft, catalog, inputs) = {
         let mut connection = state
@@ -208,6 +247,7 @@ pub(crate) async fn publish_template(
         &locked,
         &validation,
         published_by,
+        note,
         &trace,
     )
     .await
@@ -266,6 +306,7 @@ pub(crate) async fn publish_template(
 /// is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
 /// successful publish are in the response and stored with the version. The document's sender must
 /// be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
+/// An optional body `{ "note" }` adds a note of at most 500 characters to the version.
 /// Audited as `template.published`.
 #[utoipa::path(
     post,
@@ -276,9 +317,11 @@ pub(crate) async fn publish_template(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Template id")
     ),
+    request_body = Option<TemplatePublishRequest>,
     responses(
         (status = 201, description = "The template and its new version", body = TemplatePublishedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
@@ -290,8 +333,10 @@ pub(crate) async fn publish(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
+    body: Bytes,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let note = note_of(&body)?;
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
@@ -302,6 +347,7 @@ pub(crate) async fn publish(
         workspace.id,
         path_id(&id)?,
         principal.user_id(),
+        note.as_deref(),
     )
     .await?;
     Ok((

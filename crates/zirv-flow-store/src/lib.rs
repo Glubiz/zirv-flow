@@ -311,13 +311,14 @@ pub use sync_runs::{
     sweep_unreached,
 };
 pub use templates::{
-    ExtrasRequest, LoadedInputs, LoadedSnippet, LockedTemplate, MAX_PREVIEW_PEOPLE, NewTemplate,
-    PreviewPerson, PreviewPersonError, Template, TemplateDraft, TemplateError,
-    TemplateFieldCatalog, TemplateFlowUse, TemplatePatch, TemplateUse, TemplateVersion,
-    TemplateVersionSummary, ThemeRequest, active_flows_using, add_preview_person, archive_template,
-    create_template, document_sender, find_template, find_template_draft, find_template_version,
-    list_preview_people, list_template_versions, list_templates, load_render_inputs, lock_template,
-    publish_template, read_template_field_catalog, remove_preview_person, save_template_draft,
+    ExtrasRequest, LoadedInputs, LoadedSnippet, LockedTemplate, MAX_PREVIEW_PEOPLE,
+    NOTE_MAX_CHARS as TEMPLATE_NOTE_MAX_CHARS, NewTemplate, PreviewPerson, PreviewPersonError,
+    Template, TemplateDraft, TemplateError, TemplateFieldCatalog, TemplateFlowUse, TemplatePatch,
+    TemplateSendVolume, TemplateUse, TemplateVersion, TemplateVersionSummary, ThemeRequest,
+    active_flows_using, add_preview_person, archive_template, create_template, document_sender,
+    find_template, find_template_draft, find_template_version, list_preview_people,
+    list_template_versions, list_templates, load_render_inputs, lock_template, publish_template,
+    read_template_field_catalog, remove_preview_person, save_template_draft, template_send_volume,
     template_where_used, update_template,
 };
 pub use test_sends::{

@@ -50,6 +50,10 @@ pub(crate) trait Fields {
     fn visible(&mut self, id: &str) -> Result<bool, Self::Error>;
     /// The content of the snippet a snippet block names.
     fn snippet(&mut self, snippet_id: &str) -> Result<SnippetContent, Self::Error>;
+    /// Whether each section and block gets the class `zf-block-<id>` (the marked preview).
+    fn annotate(&self) -> bool {
+        false
+    }
 }
 
 /// The result of an emit: the MJML and the text part.
@@ -209,6 +213,7 @@ fn emit_section<F: Fields>(
     hidden: &mut Vec<String>,
 ) -> Result<(), F::Error> {
     mjml.push_str("<mj-section");
+    mjml.push_str(&css_class(fields, &section.id));
     if let Some(color) = &section.background_color {
         mjml.push_str(&format!(" background-color=\"{color}\""));
     }
@@ -223,7 +228,7 @@ fn emit_section<F: Fields>(
                 hidden.push(block.id().to_owned());
                 continue;
             }
-            emit_block(block, look, fields, mjml, text)?;
+            emit_block(block, block.id(), look, fields, mjml, text)?;
         }
         mjml.push_str("</mj-column>\n");
     }
@@ -235,13 +240,31 @@ fn align_of(align: Option<Align>) -> &'static str {
     align.unwrap_or_default().css()
 }
 
+/// The attribute that gives an element the class `zf-block-<id>`, only for a marked preview.
+/// An id that is not `[A-Za-z0-9_-]` gets none, so it can never break out of the attribute.
+fn css_class<F: Fields>(fields: &F, id: &str) -> String {
+    let safe = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if fields.annotate() && safe {
+        format!(" css-class=\"zf-block-{id}\"")
+    } else {
+        String::new()
+    }
+}
+
+/// Emit one block. `class_id` names the class it carries: the blocks of a snippet carry the id of
+/// the snippet block.
 fn emit_block<F: Fields>(
     block: &Block,
+    class_id: &str,
     look: &Look<'_>,
     fields: &mut F,
     mjml: &mut String,
     text: &mut Vec<String>,
 ) -> Result<(), F::Error> {
+    let class = css_class(fields, class_id);
     match block {
         Block::Heading(Heading {
             level,
@@ -256,7 +279,7 @@ fn emit_block<F: Fields>(
                 .map(|color| format!(" color=\"{color}\""))
                 .unwrap_or_default();
             mjml.push_str(&format!(
-                "<mj-text{color} align=\"{}\" font-size=\"{size}px\" font-weight=\"bold\" line-height=\"1.3\"><h{level} style=\"margin:0;font-size:{size}px;font-weight:bold\">{}</h{level}></mj-text>\n",
+                "<mj-text{class}{color} align=\"{}\" font-size=\"{size}px\" font-weight=\"bold\" line-height=\"1.3\"><h{level} style=\"margin:0;font-size:{size}px;font-weight:bold\">{}</h{level}></mj-text>\n",
                 align_of(*align),
                 value.html
             ));
@@ -265,7 +288,7 @@ fn emit_block<F: Fields>(
         Block::Text(rich) => {
             let value = fields.rich(&rich.content)?;
             mjml.push_str(&format!(
-                "<mj-text align=\"{}\">{}</mj-text>\n",
+                "<mj-text{class} align=\"{}\">{}</mj-text>\n",
                 align_of(rich.align),
                 value.html
             ));
@@ -281,7 +304,7 @@ fn emit_block<F: Fields>(
             let source = fields.image_source(src)?;
             let alt = fields.plain(alt)?;
             mjml.push_str(&format!(
-                "<mj-image src=\"{}\" alt=\"{}\"",
+                "<mj-image{class} src=\"{}\" alt=\"{}\"",
                 source.html, alt.html
             ));
             let link = href
@@ -312,7 +335,7 @@ fn emit_block<F: Fields>(
                 .map(|radius| format!(" border-radius=\"{radius}px\""))
                 .unwrap_or_default();
             mjml.push_str(&format!(
-                "<mj-button href=\"{}\" align=\"{}\" background-color=\"{}\" color=\"{}\"{radius}>{}</mj-button>\n",
+                "<mj-button{class} href=\"{}\" align=\"{}\" background-color=\"{}\" color=\"{}\"{radius}>{}</mj-button>\n",
                 url.html,
                 align.css(),
                 look.button,
@@ -327,23 +350,33 @@ fn emit_block<F: Fields>(
             let content = fields.snippet(&snippet.snippet_id)?;
             for inner in &content.blocks {
                 if !matches!(inner, Block::Snippet(_)) {
-                    emit_block(inner, look, fields, mjml, text)?;
+                    emit_block(inner, class_id, look, fields, mjml, text)?;
                 }
             }
         }
         Block::Divider(divider) => {
             mjml.push_str(&format!(
-                "<mj-divider border-width=\"1px\" border-color=\"{}\" />\n",
+                "<mj-divider{class} border-width=\"1px\" border-color=\"{}\" />\n",
                 divider.color.as_deref().unwrap_or("#cccccc")
             ));
             push_text(text, "----------");
         }
         Block::Spacer(spacer) => {
-            mjml.push_str(&format!("<mj-spacer height=\"{}px\" />\n", spacer.height));
+            mjml.push_str(&format!(
+                "<mj-spacer{class} height=\"{}px\" />\n",
+                spacer.height
+            ));
         }
         Block::RawHtml(RawHtml { html, .. }) => {
             let value = fields.raw(html)?;
-            mjml.push_str(&format!("<mj-raw>{value}</mj-raw>\n"));
+            if class.is_empty() {
+                mjml.push_str(&format!("<mj-raw>{value}</mj-raw>\n"));
+            } else {
+                // `mj-raw` takes no `css-class`, so a marked preview wraps it.
+                mjml.push_str(&format!(
+                    "<mj-raw><div class=\"zf-block-{class_id}\">{value}</div></mj-raw>\n"
+                ));
+            }
         }
     }
     Ok(())
@@ -621,5 +654,73 @@ mod tests {
             1,
             "{mjml}"
         );
+    }
+
+    /// The conversion's fields with the marked preview switched on.
+    struct Marked;
+
+    impl Fields for Marked {
+        type Error = Infallible;
+        fn plain(&mut self, source: &str) -> Result<Plain, Infallible> {
+            Sources.plain(source)
+        }
+        fn url(&mut self, source: &str, kind: UrlKind) -> Result<Plain, Infallible> {
+            Sources.url(source, kind)
+        }
+        fn rich(&mut self, source: &str) -> Result<Cleaned, Infallible> {
+            Sources.rich(source)
+        }
+        fn raw(&mut self, source: &str) -> Result<String, Infallible> {
+            Sources.raw(source)
+        }
+        fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, Infallible> {
+            Sources.image_source(src)
+        }
+        fn visible(&mut self, id: &str) -> Result<bool, Infallible> {
+            Sources.visible(id)
+        }
+        fn snippet(&mut self, id: &str) -> Result<SnippetContent, Infallible> {
+            Sources.snippet(id)
+        }
+        fn annotate(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_marked_emit_classes_every_element_and_an_unsafe_id_gets_no_class() {
+        let spacer = |id: &str| {
+            Block::Spacer(Spacer {
+                id: id.into(),
+                height: 10,
+                visible_if: None,
+            })
+        };
+        let raw = Block::RawHtml(RawHtml {
+            id: "r".into(),
+            html: "<b>x</b>".into(),
+            visible_if: None,
+        });
+        let doc = content(vec![spacer("a-1"), raw, spacer("x\" onload=\"{")]);
+        let look = Look::of_settings(&doc.settings);
+
+        let marked = emit(&doc, &look, &mut Marked).unwrap().mjml;
+        let plain = emit(&doc, &look, &mut Sources).unwrap().mjml;
+
+        assert!(
+            marked.contains("<mj-section css-class=\"zf-block-s\""),
+            "{marked}"
+        );
+        assert!(
+            marked.contains("<mj-spacer css-class=\"zf-block-a-1\""),
+            "{marked}"
+        );
+        assert!(
+            marked.contains("<div class=\"zf-block-r\"><b>x</b></div>"),
+            "{marked}"
+        );
+        assert_eq!(marked.matches("css-class").count(), 2);
+        assert!(!marked.contains("onload"));
+        assert!(!plain.contains("zf-block-"), "{plain}");
     }
 }
