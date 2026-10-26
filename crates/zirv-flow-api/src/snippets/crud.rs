@@ -404,7 +404,8 @@ pub(crate) async fn update(
 }
 
 /// Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused
-/// while the draft of a template holds a block for it. Audited as `snippet.archived`.
+/// while the draft of a template holds a block for it, or the published version of a theme uses it
+/// as its footer. Audited as `snippet.archived`.
 #[utoipa::path(
     delete,
     operation_id = "archive_snippet",
@@ -419,7 +420,7 @@ pub(crate) async fn update(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or snippet, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The snippet is already archived (`snippet_archived`), or template drafts hold it (`snippet_in_use`, with `snippet_templates`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The snippet is already archived (`snippet_archived`), or template drafts or published theme footers use it (`snippet_in_use`, with `snippet_templates` and `snippet_themes`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

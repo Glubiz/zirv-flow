@@ -4,15 +4,21 @@
 //! A snippet block is `{"type": "snippet", "snippet_id": <id>}` at the top level of a section
 //! column of a block document. The read looks for it in the stored JSON, so the store never learns
 //! the block types.
+//!
+//! A theme's footer is appended to every email that follows the theme, so when the default theme
+//! uses the snippet, the templates that follow the default count as using it too.
 
 use hashbrown::HashMap;
+
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
 use super::crud::SnippetTemplate;
-use crate::{StoreError, template_where_used};
+use crate::StoreError;
+use crate::templates::{TemplateFlowUse, active_flows_using};
+use crate::themes::{default_following_templates, is_default_theme};
 
 /// The path of a snippet block for `$id` in a block document.
 macro_rules! block_path {
@@ -28,23 +34,12 @@ pub struct SnippetThemeUse {
     pub name: String,
 }
 
-/// An active flow that sends a template holding the snippet.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SnippetFlowUse {
-    pub flow_id: Uuid,
-    pub flow_name: String,
-    /// The flow's lifecycle state.
-    pub flow_state: String,
-    /// The templates of the flow that hold the snippet, by id.
-    pub template_ids: Vec<Uuid>,
-}
-
 /// Everything that uses a snippet.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SnippetUse {
     pub templates: Vec<SnippetTemplate>,
     pub themes: Vec<SnippetThemeUse>,
-    pub active_flows: Vec<SnippetFlowUse>,
+    pub active_flows: Vec<TemplateFlowUse>,
 }
 
 /// The templates of the workspace, not archived, whose draft or current version holds a block for
@@ -118,47 +113,65 @@ pub async fn snippet_template_counts<'e>(
         .collect())
 }
 
-/// The themes that use the snippet as their footer. No themes exist yet: #304 adds the table and
-/// this read, and the templates that follow a default theme which uses the snippet.
-async fn themes_using(
-    _connection: &mut PgConnection,
-    _workspace: WorkspaceId,
-    _snippet: Uuid,
+/// The themes of the workspace, not archived, that name the snippet as their footer, by name. With
+/// `published_only`, only a theme whose current version does; else a draft naming it counts too.
+pub(super) async fn themes_using<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    snippet: Uuid,
+    published_only: bool,
 ) -> Result<Vec<SnippetThemeUse>, StoreError> {
-    Ok(Vec::new())
+    sqlx::query_as(
+        "SELECT t.id, t.name FROM themes t \
+         WHERE t.workspace_id = $1 AND t.archived_at IS NULL AND ( \
+            (NOT $3 AND EXISTS (SELECT 1 FROM theme_drafts d WHERE d.theme_id = t.id \
+                AND d.tokens ->> 'footer_snippet' = $2)) \
+            OR EXISTS (SELECT 1 FROM theme_versions v WHERE v.theme_id = t.id \
+                AND v.version = t.current_version AND v.tokens ->> 'footer_snippet' = $2)) \
+         ORDER BY lower(t.name), t.id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(snippet.to_string())
+    .bind(published_only)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)
 }
 
-/// Where the snippet is used. An active flow is one whose running version names a template that
-/// holds the snippet, by the rule of [`template_where_used`]; an archived flow is not.
+/// Where the snippet is used. When the default theme uses it as its footer, the templates that
+/// follow the default are listed among the templates. An active flow is one whose running version
+/// names one of the templates, by the rule of [`crate::template_where_used`]; an archived flow is
+/// not.
 pub async fn snippet_where_used(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     snippet: Uuid,
 ) -> Result<SnippetUse, StoreError> {
-    let templates = templates_holding(&mut *connection, workspace, snippet).await?;
-    let themes = themes_using(connection, workspace, snippet).await?;
-    let mut flows: HashMap<Uuid, SnippetFlowUse> = HashMap::new();
-    for template in &templates {
-        for used in template_where_used(&mut *connection, workspace, template.id).await? {
-            if !used.active || used.flow_state == "archived" {
-                continue;
-            }
-            flows
-                .entry(used.flow_id)
-                .or_insert_with(|| SnippetFlowUse {
-                    flow_id: used.flow_id,
-                    flow_name: used.flow_name.clone(),
-                    flow_state: used.flow_state.clone(),
-                    template_ids: Vec::new(),
-                })
-                .template_ids
-                .push(template.id);
-        }
+    let mut templates = templates_holding(&mut *connection, workspace, snippet).await?;
+    let themes = themes_using(&mut *connection, workspace, snippet, false).await?;
+    let mut default_in_use = false;
+    for theme in &themes {
+        default_in_use |= is_default_theme(&mut *connection, workspace, theme.id).await?;
     }
-    let mut active_flows: Vec<SnippetFlowUse> = flows.into_values().collect();
-    active_flows.sort_by(|a, b| {
-        (a.flow_name.to_lowercase(), a.flow_id).cmp(&(b.flow_name.to_lowercase(), b.flow_id))
-    });
+    if default_in_use {
+        for follower in default_following_templates(&mut *connection, workspace).await? {
+            match templates.iter_mut().find(|held| held.id == follower.id) {
+                Some(held) => {
+                    held.in_draft |= follower.in_draft;
+                    held.in_current |= follower.in_current;
+                }
+                None => templates.push(SnippetTemplate {
+                    id: follower.id,
+                    name: follower.name,
+                    in_draft: follower.in_draft,
+                    in_current: follower.in_current,
+                }),
+            }
+        }
+        templates.sort_by_key(|template| (template.name.to_lowercase(), template.id));
+    }
+    let ids: Vec<Uuid> = templates.iter().map(|template| template.id).collect();
+    let active_flows = active_flows_using(connection, workspace, &ids).await?;
     Ok(SnippetUse {
         templates,
         themes,
@@ -373,7 +386,10 @@ mod tests {
         let mut connection = pool.acquire().await.unwrap();
 
         let refused = archive_snippet(&mut connection, ws, snippet.id).await;
-        let Err(SnippetError::InUse(list)) = refused else {
+        let Err(SnippetError::InUse {
+            templates: list, ..
+        }) = refused
+        else {
             panic!("expected InUse");
         };
         assert_eq!(list.iter().map(|t| t.id).collect::<Vec<_>>(), [template.id]);
@@ -410,5 +426,121 @@ mod tests {
         .unwrap();
 
         assert!(columns.is_empty(), "{columns:?}");
+    }
+
+    /// A snippet with a published version, used as the footer of a published theme.
+    async fn theme_with_footer(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        name: &str,
+        snippet: Uuid,
+        publish_it: bool,
+    ) -> crate::Theme {
+        use crate::themes::tests_support::{create as create_theme, publish as publish_theme};
+        let theme = create_theme(pool, ws, name).await;
+        let mut connection = pool.acquire().await.unwrap();
+        crate::save_theme_draft(
+            &mut connection,
+            ws,
+            theme.id,
+            &json!({"footer_snippet": snippet.to_string()}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        if publish_it {
+            publish_theme(pool, ws, theme.id).await;
+        }
+        theme
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_published_theme_footer_blocks_the_archive_and_a_draft_one_does_not(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let footer = create(&pool, ws, "Footer").await;
+        let spare = create(&pool, ws, "Spare").await;
+        let published = theme_with_footer(&pool, ws, "Live", footer.id, true).await;
+        theme_with_footer(&pool, ws, "Draft only", spare.id, false).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let refused = archive_snippet(&mut connection, ws, footer.id).await;
+        let allowed = archive_snippet(&mut connection, ws, spare.id).await;
+
+        let Err(SnippetError::InUse { templates, themes }) = refused else {
+            panic!("expected InUse");
+        };
+        assert!(templates.is_empty());
+        assert_eq!(
+            themes.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [published.id]
+        );
+        assert!(allowed.is_ok());
+        crate::archive_theme(&mut connection, ws, published.id)
+            .await
+            .unwrap();
+        assert!(
+            archive_snippet(&mut connection, ws, footer.id)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_default_themes_followers_use_the_footer_and_their_flows_are_active(pool: PgPool) {
+        use crate::flows::tests_support as flows;
+        let ws = flows::workspace(&pool, "one").await;
+        let footer = create(&pool, ws, "Footer").await;
+        let theme = theme_with_footer(&pool, ws, "Brand", footer.id, false).await;
+        let follower = create_template(&pool, ws, "Follower").await;
+        let named = create_template(&pool, ws, "Named").await;
+        let mut document = json!({"schema": 2, "channel": "email", "mode": "blocks",
+            "blocks": {"subject": "Hi", "sections": []}});
+        set_draft(&pool, ws, follower.id, &document).await;
+        document["blocks"]["theme"] = json!({"id": theme.id});
+        set_draft(&pool, ws, named.id, &document).await;
+        let flow = flows::create(&pool, ws, "Sends").await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "send", "type": "action.send", "template": follower.id.to_string()},
+            {"id": "end", "type": "exit"}], "edges": []});
+        let mut connection = pool.acquire().await.unwrap();
+        let patch = FlowPatch {
+            graph: Some(graph),
+            ..FlowPatch::default()
+        };
+        update_flow_draft(&mut connection, ws, flow.id, &patch)
+            .await
+            .unwrap();
+        drop(connection);
+        flows::publish(&pool, ws, flow.id).await.unwrap();
+        // Not the default yet: the theme is listed, its followers are not.
+        let before = used(&pool, ws, footer.id).await;
+        crate::themes::tests_support::publish(&pool, ws, theme.id).await;
+        crate::set_default_theme(&mut pool.acquire().await.unwrap(), ws, theme.id)
+            .await
+            .unwrap();
+
+        let after = used(&pool, ws, footer.id).await;
+
+        assert_eq!(
+            before.themes.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [theme.id]
+        );
+        assert!(before.templates.is_empty() && before.active_flows.is_empty());
+        assert_eq!(
+            after.templates.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [follower.id]
+        );
+        assert_eq!(
+            after
+                .active_flows
+                .iter()
+                .map(|f| f.flow_id)
+                .collect::<Vec<_>>(),
+            [flow.id]
+        );
     }
 }

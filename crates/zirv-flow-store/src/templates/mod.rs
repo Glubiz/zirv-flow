@@ -31,7 +31,7 @@ pub use publish::{
     LockedTemplate, TemplateVersion, TemplateVersionSummary, find_template_version,
     list_template_versions, lock_template, publish_template,
 };
-pub use where_used::{TemplateUse, template_where_used};
+pub use where_used::{TemplateFlowUse, TemplateUse, active_flows_using, template_where_used};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]

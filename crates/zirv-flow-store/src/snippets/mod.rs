@@ -21,9 +21,7 @@ pub use publish::{
     LockedSnippet, SnippetVersion, SnippetVersionSummary, find_snippet_version,
     list_snippet_versions, lock_snippet, publish_snippet,
 };
-pub use where_used::{
-    SnippetFlowUse, SnippetThemeUse, SnippetUse, snippet_template_counts, snippet_where_used,
-};
+pub use where_used::{SnippetThemeUse, SnippetUse, snippet_template_counts, snippet_where_used};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]

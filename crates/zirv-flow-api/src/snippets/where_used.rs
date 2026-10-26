@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_store::{SnippetFlowUse, SnippetTemplate, SnippetThemeUse, SnippetUse};
+use zirv_flow_store::{SnippetTemplate, SnippetThemeUse, SnippetUse, TemplateFlowUse};
 
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -46,7 +46,9 @@ pub(crate) struct SnippetUsedByBody {
     /// Templates, not archived, whose draft or current version holds a snippet block for it,
     /// in a section column.
     templates: Vec<SnippetTemplateBody>,
-    /// Themes that use it as their footer. Always empty until themes exist (#304).
+    /// Themes, not archived, whose draft or current version names it as their footer. When the
+    /// default theme is one of them, the templates that follow the default are listed in
+    /// `templates` too.
     themes: Vec<SnippetThemeBody>,
     /// Flows whose running version names one of those templates. A flow that does not run it now,
     /// and an archived flow, is not listed.
@@ -73,8 +75,8 @@ impl From<&SnippetThemeUse> for SnippetThemeBody {
     }
 }
 
-impl From<&SnippetFlowUse> for SnippetFlowBody {
-    fn from(flow: &SnippetFlowUse) -> Self {
+impl From<&TemplateFlowUse> for SnippetFlowBody {
+    fn from(flow: &TemplateFlowUse) -> Self {
         Self {
             flow_id: flow.flow_id,
             flow_name: flow.flow_name.clone(),
@@ -149,7 +151,7 @@ mod tests {
                 in_current: false,
             }],
             themes: Vec::new(),
-            active_flows: vec![SnippetFlowUse {
+            active_flows: vec![TemplateFlowUse {
                 flow_id: flow,
                 flow_name: "Onboarding".into(),
                 flow_state: "published".into(),
