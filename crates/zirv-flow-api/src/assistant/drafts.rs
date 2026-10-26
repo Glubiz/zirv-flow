@@ -300,6 +300,10 @@ pub(crate) struct DraftIssue {
     code: String,
     /// A column name or a JSON pointer; absent when the problem is on the whole draft.
     at: Option<String>,
+    /// For `unknown_merge_field`: the merge field the document names, a key of the schema and
+    /// never a person's value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
     /// The line shown to the model as feedback.
     #[serde(skip)]
     line: String,
@@ -328,9 +332,14 @@ impl DraftIssue {
         } else {
             (head, None)
         };
+        let field = (code == "unknown_merge_field")
+            .then(|| line.split_once(" | field "))
+            .flatten()
+            .map(|(_, name)| name.to_owned());
         Self {
             code: code.to_owned(),
             at,
+            field,
             line: line.to_owned(),
         }
     }
@@ -431,6 +440,10 @@ pub(crate) struct DraftBody {
     /// tracking, so the client can show them at desktop and mobile widths. Absent for the other
     /// kinds and for an invalid draft.
     renders: Option<TemplateRendersBody>,
+    /// For a template draft that needed more than one attempt: the places in the document that an
+    /// earlier attempt got wrong and a later one fixed, as JSON pointers. Absent otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    repaired: Vec<String>,
 }
 
 /// One rendered email: the parts of a preview.
@@ -575,6 +588,21 @@ fn turn<'a>(
 ) -> BoxFuture<'a, Verdict<Value, DraftIssue, ApiError>> {
     // The future owns the context: it may not borrow what lives shorter than the response.
     Box::pin(async move { validate_turn(&context, kind, &restore, response).await })
+}
+
+/// Adds the places of `issues` to `noted`, once each, in the order they came.
+fn note_places(noted: &std::sync::Mutex<Vec<String>>, issues: &[DraftIssue]) {
+    let Ok(mut noted) = noted.lock() else { return };
+    for at in issues.iter().filter_map(DraftIssue::at) {
+        if !noted.iter().any(|seen| seen == at) {
+            noted.push(at.to_owned());
+        }
+    }
+}
+
+/// The places noted so far.
+fn places(noted: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    noted.lock().map(|noted| noted.clone()).unwrap_or_default()
 }
 
 /// The SHA-256 of a saved artifact's JSON.
@@ -938,11 +966,25 @@ pub(crate) async fn create(
         (DraftKind::Template, _) => Restore::Template(placeholders),
         _ => Restore::Nothing,
     });
+    // The places of a template that earlier attempts got wrong, for the ones that fixed them.
+    let earlier: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let noted = Arc::clone(&earlier);
     let outcome = zirv_flow_ai::repair(
         state.ai.config.max_repair_attempts,
         &chat,
         &dispatcher,
-        move |response| turn(Arc::clone(&owned), kind, Arc::clone(&restorable), response),
+        move |response| {
+            let verdict = turn(Arc::clone(&owned), kind, Arc::clone(&restorable), response);
+            let noted = Arc::clone(&noted);
+            let track = kind == DraftKind::Template;
+            Box::pin(async move {
+                let verdict = verdict.await;
+                if let (true, Verdict::Invalid(issues)) = (track, &verdict) {
+                    note_places(&noted, issues);
+                }
+                verdict
+            }) as BoxFuture<'_, Verdict<Value, DraftIssue, ApiError>>
+        },
     )
     .await;
 
@@ -1011,6 +1053,11 @@ pub(crate) async fn create(
                 _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
             };
             run_outcome(kind, "valid");
+            let repaired = if attempts > 1 {
+                places(&earlier)
+            } else {
+                Vec::new()
+            };
             DraftBody {
                 id,
                 kind: request.kind,
@@ -1023,6 +1070,7 @@ pub(crate) async fn create(
                 simulation,
                 subject_variants,
                 renders,
+                repaired,
             }
         }
         Ok(RepairOutcome::Exhausted(issues, attempts)) => {
@@ -1060,6 +1108,7 @@ pub(crate) async fn create(
                 simulation: None,
                 subject_variants: Vec::new(),
                 renders: None,
+                repaired: Vec::new(),
             }
         }
         Err(RepairError::Dispatch(error)) => {
@@ -1817,7 +1866,7 @@ mod tests {
         );
         let plain = DraftIssue::from_line("no_identifier");
         assert_eq!((plain.code.as_str(), plain.at), ("no_identifier", None));
-        // Only the code and the place reach the response.
+        // Only the code and the place reach the response, and for a merge field its name.
         assert_eq!(
             serde_json::to_value(&column).unwrap(),
             json!({"code": "unknown_column", "at": "Ghost"})
@@ -1838,7 +1887,12 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&issue).unwrap(),
-            json!({"code": "unknown_merge_field", "at": "/email/html"})
+            json!({"code": "unknown_merge_field", "at": "/email/html", "field": "person.nope"})
+        );
+        let other = DraftIssue::from_line("unknown_column (column \"x\") | field y");
+        assert_eq!(
+            serde_json::to_value(&other).unwrap(),
+            json!({"code": "unknown_column", "at": "x"})
         );
     }
 

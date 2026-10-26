@@ -30266,6 +30266,13 @@
               }
             ]
           },
+          "repaired": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For a template draft that needed more than one attempt: the places in the document that an\nearlier attempt got wrong and a later one fixed, as JSON pointers. Absent otherwise."
+          },
           "simulation": {
             "oneOf": [
               {
@@ -30307,6 +30314,13 @@
           "code": {
             "type": "string",
             "description": "A stable code such as `unknown_column`, `unknown_list` or `path_invalid`."
+          },
+          "field": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For `unknown_merge_field`: the merge field the document names, a key of the schema and\nnever a person's value."
           }
         }
       },

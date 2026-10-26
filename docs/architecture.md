@@ -2387,6 +2387,8 @@ validates again, then locks the template and writes only its draft, including `l
 draft's revision is the one the assistant draft was made from (else 409 `template_draft_changed`);
 it creates no template and no version and publishes nothing.
 
+As built (#314): the template editor opens the draft panel with a task and, for a translation, a target language that goes into the prompt (the model sets `lang`; there is no API field for it). A draft issue of `unknown_merge_field` carries `field`, the merge field the document names, and a valid template draft that took more than one attempt carries `repaired`, the distinct places earlier attempts got wrong, so the editor marks them in the diff.
+
 ### 13.4 Context, audit and limits
 
 Schema-only context is the default: field and event names, types, descriptions
