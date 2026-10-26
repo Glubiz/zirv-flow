@@ -4,7 +4,7 @@ import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState, MenuButton, type MenuEntry } from "../../ui";
 import { plural } from "../../ui/format";
 import type { Theme } from "./model";
-import { useThemeUsedBy } from "./useThemes";
+import { useDefaultFollowers } from "./useThemes";
 
 interface Named {
   id: string;
@@ -50,34 +50,21 @@ export function ThemeMenu({
   );
 }
 
-function Followers({ workspaceId, current }: { workspaceId: string; current: Named }) {
-  const used = useThemeUsedBy(workspaceId, current.id);
-  if (used.status === "loading") return <LoadingState label="Checking which templates follow the default" />;
-  if (used.status === "error") return <ErrorState {...describeError(used.error)} onRetry={used.reload} />;
-  return (
-    <p>
-      {plural(used.data.default_templates.length, "template", "templates")} follow the default today. They use the new default from their next send.
-    </p>
-  );
-}
-
 /** Making a theme the default moves every email that follows the default to it. */
 export function SetDefaultDialog({
   workspaceId,
   theme,
-  current,
   onClose,
   onDone,
 }: {
   workspaceId: string;
   theme: Named;
-  /** The theme that is the default now, if there is one. */
-  current: Named | null;
   onClose: () => void;
   onDone: (theme: Theme) => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const followers = useDefaultFollowers(workspaceId);
 
   async function confirm() {
     setBusy(true);
@@ -93,11 +80,21 @@ export function SetDefaultDialog({
   return (
     <Dialog title={`Make ${theme.name} the default?`} onClose={onClose}>
       <div className="stack">
-        {current ? <Followers workspaceId={workspaceId} current={current} /> : <p>No theme is the default yet.</p>}
+        {followers.status === "loading" ? <LoadingState label="Checking which templates follow the default" /> : null}
+        {followers.status === "error" ? <ErrorState {...describeError(followers.error)} onRetry={followers.reload} /> : null}
+        {followers.status === "ready" ? (
+          followers.data === null ? (
+            <p>No theme is the default yet.</p>
+          ) : (
+            <p>
+              {plural(followers.data, "template", "templates")} follow the default today. They use the new default from their next send.
+            </p>
+          )
+        ) : null}
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={() => void confirm()} disabled={busy}>
+          <Button variant="primary" onClick={() => void confirm()} disabled={busy || followers.status !== "ready"}>
             {busy ? "Saving" : "Make default"}
           </Button>
         </div>

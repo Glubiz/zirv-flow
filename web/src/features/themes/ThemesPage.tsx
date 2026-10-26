@@ -72,7 +72,6 @@ function ThemeList({ workspaceId }: { workspaceId: string }) {
               <SetDefaultDialog
                 workspaceId={workspaceId}
                 theme={defaulting}
-                current={data.find((theme) => theme.is_default) ?? null}
                 onClose={() => setDefaulting(null)}
                 onDone={() => {
                   setDefaulting(null);

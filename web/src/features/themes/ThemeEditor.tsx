@@ -12,7 +12,7 @@ import { ThemePublishDialog } from "./ThemePublishDialog";
 import { ThemeSettings } from "./ThemeSettings";
 import { WhereUsedView } from "./ThemeUsers";
 import { ThemeVersions } from "./ThemeVersions";
-import { useThemes, useThemeUsedBy } from "./useThemes";
+import { useThemeUsedBy } from "./useThemes";
 
 /** How long an edit rests before the draft is saved and the preview is asked for again. */
 export const DEBOUNCE_MS = 400;
@@ -51,7 +51,6 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
   const [published, setPublished] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const usedBy = useThemeUsedBy(workspaceId, theme.id, reloadKey);
-  const themes = useThemes(workspaceId);
 
   const archived = isArchived(theme);
   const editable = canWrite && !archived;
@@ -186,8 +185,6 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
     target?.focus();
   }
 
-  const current = themes.status === "ready" ? (themes.data.find((entry) => entry.is_default) ?? null) : null;
-
   return (
     <div className="tp-page" ref={page}>
       <div className="tp-head">
@@ -288,13 +285,11 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
         <SetDefaultDialog
           workspaceId={workspaceId}
           theme={theme}
-          current={current}
           onClose={() => setDefaulting(false)}
           onDone={(next) => {
             setTheme(next);
             setDefaulting(false);
             setReloadKey((key) => key + 1);
-            themes.reload();
           }}
         />
       ) : null}
