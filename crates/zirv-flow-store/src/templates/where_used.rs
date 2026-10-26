@@ -5,8 +5,9 @@
 //! the stored graph JSON and the store never learns node types. The answer has one entry per
 //! flow, so its size is bounded by the number of flows and not by how often they were published.
 
-use sqlx::PgExecutor;
+use hashbrown::HashMap;
 use sqlx::prelude::FromRow;
+use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
@@ -51,6 +52,49 @@ pub async fn template_where_used<'e>(
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)
+}
+
+/// An active flow that sends one of a set of templates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemplateFlowUse {
+    pub flow_id: Uuid,
+    pub flow_name: String,
+    /// The flow's lifecycle state.
+    pub flow_state: String,
+    /// The templates of the set that the flow sends, by id.
+    pub template_ids: Vec<Uuid>,
+}
+
+/// The active flows that send any of `templates`: flows whose running version names one of them,
+/// by the rule of [`template_where_used`]. An archived flow is not listed. By flow name.
+pub async fn active_flows_using(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    templates: &[Uuid],
+) -> Result<Vec<TemplateFlowUse>, StoreError> {
+    let mut flows: HashMap<Uuid, TemplateFlowUse> = HashMap::new();
+    for &template in templates {
+        for used in template_where_used(&mut *connection, workspace, template).await? {
+            if !used.active || used.flow_state == "archived" {
+                continue;
+            }
+            flows
+                .entry(used.flow_id)
+                .or_insert_with(|| TemplateFlowUse {
+                    flow_id: used.flow_id,
+                    flow_name: used.flow_name.clone(),
+                    flow_state: used.flow_state.clone(),
+                    template_ids: Vec::new(),
+                })
+                .template_ids
+                .push(template);
+        }
+    }
+    let mut active: Vec<TemplateFlowUse> = flows.into_values().collect();
+    active.sort_by(|a, b| {
+        (a.flow_name.to_lowercase(), a.flow_id).cmp(&(b.flow_name.to_lowercase(), b.flow_id))
+    });
+    Ok(active)
 }
 
 #[cfg(test)]
