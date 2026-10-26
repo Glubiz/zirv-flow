@@ -78,7 +78,7 @@ describe("publishing", () => {
 
     await screen.findByTitle("Preview of the message");
     expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Test send" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send a test" })).toBeInTheDocument();
   });
 
   it("waits for the preview before it allows a publish", async () => {

@@ -148,6 +148,7 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     [`GET ${WS}/destinations/options`]: () => json(DESTINATION_OPTIONS),
     [`GET ${WS}/test-send-allowlist/options`]: () => json([{ id: "a1", name: "q***@example.com" }]),
     [`GET ${WS}/test-sends`]: () => json({ test_sends: [], next_before: null }),
+    [`GET ${WS}/test-sends/quota`]: () => json(QUOTA),
   };
 }
 
@@ -161,3 +162,10 @@ export function previews(calls: Call[]): Call[] {
 }
 
 export { problem };
+
+/** The hourly counts of a caller who has sent three of ten tests, in a workspace at sixty-four of a hundred. */
+export const QUOTA = {
+  member: { used: 3, limit: 10 },
+  workspace: { used: 64, limit: 100 },
+  resets_at: "2026-10-11T10:05:00Z",
+};

@@ -70,7 +70,7 @@ export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetr
 const SAMPLE = "sample";
 const OTHER = "other";
 
-function labelOf(id: string, display: { value?: string | null } | null | undefined): string {
+export function labelOf(id: string, display: { value?: string | null } | null | undefined): string {
   return display?.value ? display.value : `Person ${id.slice(0, 8)}`;
 }
 

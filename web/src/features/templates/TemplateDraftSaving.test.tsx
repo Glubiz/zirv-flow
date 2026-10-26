@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { json, mockApi, type Handler } from "../../test/mockApi";
+import { mockApi, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { drafts, templateDetail, templateRoutes, TEMPLATE_ID, WS, type Doc } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
@@ -110,27 +110,20 @@ describe("the other template fixes", () => {
     mount();
 
     await screen.findByRole("button", { name: "Publish…" });
-    expect(screen.queryByRole("button", { name: "Test send" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send a test" })).not.toBeInTheDocument();
   });
 
-  it("leaves archived destinations out of the test-send dialog", async () => {
+  it("saves the draft, then opens the test page", async () => {
+    const calls = mockApi(templateRoutes());
     const user = userEvent.setup();
-    mockApi({
-      ...templateRoutes(),
-      [`GET ${WS}/destinations/options`]: () =>
-        json([
-          { id: "d-live", name: "Live mail", archived: false, capabilities: { send: true, sync: false, erase: false } },
-          { id: "d-old", name: "Old mail", archived: true, capabilities: { send: true, sync: false, erase: false } },
-        ]),
-    });
-    mount();
+    const view = mount();
 
-    await user.click(await screen.findByRole("button", { name: "Test send" }));
-    const dialog = await screen.findByRole("dialog", { name: "Send a test" });
-    const select = await within(dialog).findByLabelText("Destination");
+    await user.click(await screen.findByRole("textbox", { name: /source/ }));
+    await user.paste("<b>fresh</b>");
+    await user.click(await screen.findByRole("button", { name: "Send a test" }));
 
-    expect(within(select).getByRole("option", { name: "Live mail" })).toBeInTheDocument();
-    expect(within(select).queryByRole("option", { name: "Old mail" })).not.toBeInTheDocument();
+    await waitFor(() => expect(view.router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}/test`), WAIT);
+    expect(drafts(calls).map(htmlOf).join()).toContain("fresh");
   });
 
   it("moves between the view tabs with the arrow keys", async () => {
