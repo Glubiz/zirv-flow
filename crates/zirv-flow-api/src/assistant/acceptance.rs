@@ -4648,4 +4648,124 @@ mod tests {
         assert_eq!(reply.body["code"], "ai_template_too_large");
         assert_eq!(fx.fake.call_count(), sent);
     }
+
+    const LITERAL: &str = "jane@example.org";
+
+    /// A transactional block email whose section is shown only to one address.
+    fn conditioned_blocks_doc() -> Value {
+        json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Our news", "sender": SENDER, "lang": "en", "category": "transactional",
+            "theme": "none", "footer": "none",
+            "sections": [{"id": "intro",
+                "visible_if": {"trait": "contact", "op": "eq", "value": LITERAL},
+                "columns": [[{"type": "heading", "id": "h1", "level": 1, "text": "Our news"}]]}]
+        }})
+    }
+
+    /// The same layout with one more block, the condition's value as the model was shown it.
+    fn layout_with(value: &str, trait_key: &str) -> Value {
+        json!({"fragment": {"sections": [{"id": "intro",
+            "visible_if": {"trait": trait_key, "op": "eq", "value": value},
+            "columns": [[
+                {"type": "heading", "id": "h1", "level": 1, "text": "Our news"},
+                {"type": "divider", "id": "d1"}]]}]}})
+    }
+
+    async fn conditioned_template(fx: &Fixture) -> String {
+        zirv_flow_store::create_trait_definition(
+            &fx.pool,
+            fx.ws,
+            &zirv_flow_store::NewTraitDefinition {
+                key: "contact".into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: true,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        fx.make_template("News", "transactional", conditioned_blocks_doc())
+            .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_personal_literal_in_a_visible_if_is_masked_before_the_provider_and_restored_after(
+        pool: PgPool,
+    ) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = conditioned_template(&fx).await;
+        let sent = fx.fake.call_count();
+        // The model first moves the placeholder under another trait, then keeps it in place.
+        fx.fake
+            .push(answer("draft_template", layout_with("(kept:1)", "plan")));
+        fx.fake
+            .push(answer("draft_template", layout_with("(kept:1)", "contact")));
+
+        let reply = fx.draft(template_run(&id, "block_layout")).await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_eq!(reply.body["attempts"], 2);
+        let requests = fx.requests_after(sent);
+        for request in &requests {
+            let text = everything(request);
+            assert!(!text.contains(LITERAL), "the literal reached the provider");
+            assert!(text.contains("(kept:1)"));
+            assert!(text.contains("Our news"), "the authored copy is sent");
+        }
+        assert!(
+            last_feedback(&requests[1])
+                .contains("placeholder_moved at /fragment/sections/0/visible_if/value"),
+            "{}",
+            last_feedback(&requests[1])
+        );
+        // The draft has the literal back, and so has the template after the accept.
+        assert_eq!(
+            reply.body["content"]["blocks"]["sections"][0]["visible_if"]["value"],
+            LITERAL
+        );
+        let accepted = fx
+            .accept(&fx.admin, reply.body["id"].as_str().unwrap())
+            .await;
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        let detail = fx.template_detail(&id).await;
+        let section = &detail["draft"]["document"]["blocks"]["sections"][0];
+        assert_eq!(section["visible_if"]["value"], LITERAL);
+        assert_eq!(section["columns"][0][1]["type"], "divider");
+        // An invented placeholder is feedback too and is never stored.
+        let sent = fx.fake.call_count();
+        fx.fake
+            .push(answer("draft_template", layout_with("(kept:7)", "contact")));
+        fx.fake
+            .push(answer("draft_template", layout_with(LITERAL, "contact")));
+        let invented = fx.draft(template_run(&id, "block_layout")).await;
+        assert!(
+            last_feedback(&fx.requests_after(sent)[1]).contains("placeholder_invented"),
+            "{:?}",
+            invented.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn with_the_opt_in_the_visible_if_literal_is_sent_fenced_as_personal_data(pool: PgPool) {
+        let fx = Fixture::with_templates(&pool, true, 100_000_000).await;
+        let id = conditioned_template(&fx).await;
+        let sent = fx.fake.call_count();
+        fx.fake
+            .push(answer("draft_template", layout_with(LITERAL, "contact")));
+
+        let reply = fx.draft(template_run(&id, "block_layout")).await;
+
+        assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+        assert_only_fenced(&fx.requests_after(sent)[0], LITERAL);
+        assert_eq!(
+            reply.body["content"]["blocks"]["sections"][0]["visible_if"]["value"],
+            LITERAL
+        );
+    }
 }

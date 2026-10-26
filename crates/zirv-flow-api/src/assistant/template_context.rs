@@ -6,12 +6,21 @@
 //! themes and snippets, and the task. It never holds a person, an address or a value of a trait:
 //! a preview of the result is rendered for the sample person on the server, and the model sees
 //! none of it.
+//!
+//! The one place a person's value can hide in a document is a `visible_if`, a segment condition
+//! with the literals a marketer typed ("email is jane@..."). Under schema-only privacy every
+//! `visible_if` goes through the segment assistant's masker (a literal compared against a trait
+//! that is not declared non-personal becomes a numbered placeholder) and the placeholders are put
+//! back into the model's fragment, where one that moved or was made up is an issue to repair. With
+//! the workspace's opt-in the document is sent as it is, fenced as personal data. The authored
+//! copy is the object of the task and is workspace content: it is sent either way.
 
 use serde_json::Value;
 use uuid::Uuid;
-use zirv_flow_ai::Content;
+use zirv_flow_ai::{Content, Privacy};
 
 use super::prompt::omitted;
+use super::segment_context::{ClearKeys, Placeholders, mask_many};
 use super::tools::draft_template::TemplateTask;
 use crate::problem::ApiError;
 
@@ -107,16 +116,98 @@ fn named(title: &str, entries: &[(Uuid, String)], notes: &mut Vec<String>) -> St
     text
 }
 
-/// The context as request content, all of it schema text. A document over
+/// The pointers, below `base`, of every `visible_if` of the sections and of the blocks in their
+/// columns. `sections` is the list of sections at `base`.
+fn condition_pointers(sections: Option<&Value>, base: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (index, section) in sections
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let at = format!("{base}/{index}");
+        if section
+            .get("visible_if")
+            .is_some_and(|value| !value.is_null())
+        {
+            found.push(format!("{at}/visible_if"));
+        }
+        for (column, blocks) in section
+            .get("columns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            for (position, block) in blocks.as_array().into_iter().flatten().enumerate() {
+                if block
+                    .get("visible_if")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    found.push(format!("{at}/columns/{column}/{position}/visible_if"));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The document with the personal literals of its conditions replaced by placeholders, and the
+/// table to put them back.
+fn mask_document(document: &Value, clear: &ClearKeys) -> (Value, Placeholders) {
+    let pointers = condition_pointers(document.pointer("/blocks/sections"), "/blocks/sections");
+    let conditions: Vec<Value> = pointers
+        .iter()
+        .filter_map(|pointer| document.pointer(pointer).cloned())
+        .collect();
+    let (masked, table) = mask_many(&conditions, clear);
+    let mut out = document.clone();
+    for (pointer, condition) in pointers.iter().zip(masked) {
+        if let Some(target) = out.pointer_mut(pointer) {
+            *target = condition;
+        }
+    }
+    (out, table)
+}
+
+/// Puts the literals the model was not shown back into its `fragment`, wherever its conditions
+/// are, and names (as `code at <pointer>`) every placeholder that is not where it was sent or was
+/// made up, so the model repairs it.
+pub(crate) fn restore_fragment(table: &Placeholders, arguments: &mut Value) -> Vec<String> {
+    let Some(fragment) = arguments.get_mut("fragment") else {
+        return Vec::new();
+    };
+    for pointer in condition_pointers(fragment.get("sections"), "/sections") {
+        if let Some(condition) = fragment.pointer_mut(&pointer) {
+            table.restore(condition);
+        }
+    }
+    // What is still a placeholder after that is one the model moved or made up.
+    table
+        .restore(fragment)
+        .into_iter()
+        .map(|line| line.replacen(" at ", " at /fragment", 1))
+        .collect()
+}
+
+/// The context as request content. Under [`Privacy::SchemaOnly`] the document's conditions are
+/// masked and the content is plain schema text, with the table to restore the model's answer;
+/// with the opt-in the document is sent as it is, as personal data. A document over
 /// [`MAX_DOCUMENT_BYTES`] is refused: it is cut nowhere, because a half document is not the one
 /// the change would be merged onto.
 pub(crate) fn render_template_context(
     context: &TemplateContext<'_>,
-) -> Result<Vec<Content>, ApiError> {
-    let document = context.document.to_string();
-    if document.len() > MAX_DOCUMENT_BYTES {
+    clear: &ClearKeys,
+    privacy: Privacy,
+) -> Result<(Vec<Content>, Placeholders), ApiError> {
+    if context.document.to_string().len() > MAX_DOCUMENT_BYTES {
         return Err(ApiError::ai_template_too_large());
     }
+    let (document, table) = match privacy {
+        Privacy::SchemaOnly => mask_document(context.document, clear),
+        Privacy::PersonalAllowed => (context.document.clone(), Placeholders::default()),
+    };
     let mut notes = Vec::new();
     let mut text = format!(
         "The template is named {}. It is a {} message, {}.\n",
@@ -135,8 +226,12 @@ pub(crate) fn render_template_context(
         text.push_str(&note);
         text.push('\n');
     }
-    text.push_str(&format!("The current document: {document}\n"));
-    Ok(vec![Content::Schema(text)])
+    let document = format!("The current document: {document}\n");
+    let document = match privacy {
+        Privacy::SchemaOnly => Content::Schema(document),
+        Privacy::PersonalAllowed => Content::Personal(document),
+    };
+    Ok((vec![Content::Schema(text), document], table))
 }
 
 #[cfg(test)]
@@ -160,8 +255,9 @@ mod tests {
     }
 
     fn rendered(context: &TemplateContext<'_>) -> String {
-        render_template_context(context)
+        render_template_context(context, &ClearKeys::default(), Privacy::SchemaOnly)
             .unwrap()
+            .0
             .iter()
             .map(Content::render)
             .collect()
@@ -189,7 +285,12 @@ mod tests {
     fn every_part_is_schema_text_never_fenced_personal_data() {
         let document = json!({"schema": 2});
 
-        let parts = render_template_context(&context(&document, TemplateTask::Copy)).unwrap();
+        let (parts, _) = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::SchemaOnly,
+        )
+        .unwrap();
 
         assert!(parts.iter().all(|part| matches!(part, Content::Schema(_))));
     }
@@ -198,7 +299,13 @@ mod tests {
     fn a_document_over_the_limit_is_refused_not_cut() {
         let document = json!({"email": {"html": "x".repeat(MAX_DOCUMENT_BYTES)}});
 
-        let error = render_template_context(&context(&document, TemplateTask::Copy)).unwrap_err();
+        let error = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::SchemaOnly,
+        )
+        .err()
+        .unwrap();
 
         assert_eq!(error.code(), Some("ai_template_too_large"));
     }
@@ -227,5 +334,91 @@ mod tests {
         for task in ["copy", "subject_variants", "block_layout", "translation"] {
             assert!(TEMPLATE_REFERENCE.contains(&format!("- {task}:")), "{task}");
         }
+    }
+
+    fn conditioned() -> Value {
+        json!({"schema": 2, "mode": "blocks", "blocks": {"sections": [
+            {"id": "s1", "visible_if": {"trait": "email", "op": "eq", "value": "jane@example.org"},
+             "columns": [[
+                {"type": "text", "id": "t1", "content": "<p>Hello</p>",
+                 "visible_if": {"trait": "country", "op": "eq", "value": "DK"}}
+            ]]}
+        ]}})
+    }
+
+    #[test]
+    fn schema_only_masks_the_conditions_and_the_fragment_gets_them_back() {
+        let document = conditioned();
+        let (parts, table) = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::SchemaOnly,
+        )
+        .unwrap();
+        let text: String = parts.iter().map(Content::render).collect();
+        assert!(
+            !text.contains("jane@example.org") && !text.contains("\"DK\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("(kept:1)") && text.contains("(kept:2)"),
+            "{text}"
+        );
+        assert!(text.contains("<p>Hello</p>"), "the authored copy stays");
+
+        let mut answer = json!({"fragment": {"sections": [
+            {"id": "s1", "visible_if": {"trait": "email", "op": "eq", "value": "(kept:1)"},
+             "columns": [[{"type": "text", "id": "t1", "content": "<p>Hi</p>",
+                "visible_if": {"trait": "country", "op": "eq", "value": "(kept:2)"}}]]}
+        ]}});
+        assert_eq!(restore_fragment(&table, &mut answer), Vec::<String>::new());
+        let section = &answer["fragment"]["sections"][0];
+        assert_eq!(section["visible_if"]["value"], "jane@example.org");
+        assert_eq!(section["columns"][0][0]["visible_if"]["value"], "DK");
+    }
+
+    #[test]
+    fn a_placeholder_that_moved_or_was_made_up_is_named_for_repair() {
+        let document = conditioned();
+        let (_, table) = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::SchemaOnly,
+        )
+        .unwrap();
+        let mut answer = json!({"fragment": {"subject": "(kept:9)", "sections": [
+            {"id": "s1", "visible_if": {"trait": "country", "op": "eq", "value": "(kept:1)"},
+             "columns": [[{"type": "text", "id": "t1", "content": "(kept:2)"}]]}
+        ]}});
+
+        let mut lines = restore_fragment(&table, &mut answer);
+        lines.sort();
+
+        assert_eq!(
+            lines,
+            [
+                "placeholder_invented at /fragment/subject",
+                "placeholder_moved at /fragment/sections/0/columns/0/0/content",
+                "placeholder_moved at /fragment/sections/0/visible_if/value",
+            ]
+        );
+    }
+
+    #[test]
+    fn with_the_opt_in_the_document_is_sent_as_it_is_fenced_as_personal_data() {
+        let document = conditioned();
+
+        let (parts, table) = render_template_context(
+            &context(&document, TemplateTask::Copy),
+            &ClearKeys::default(),
+            Privacy::PersonalAllowed,
+        )
+        .unwrap();
+
+        assert!(table.is_empty());
+        let literal = parts
+            .iter()
+            .find(|part| part.render().contains("jane@example.org"));
+        assert!(matches!(literal, Some(Content::Personal(_))));
     }
 }

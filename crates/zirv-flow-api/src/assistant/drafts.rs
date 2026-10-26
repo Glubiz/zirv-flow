@@ -33,7 +33,8 @@ use time::Duration;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_ai::{
-    BoxFuture, ChatResponse, Content, RepairError, RepairOutcome, ToolError, ToolOutput, Verdict,
+    BoxFuture, ChatResponse, Content, Privacy, RepairError, RepairOutcome, ToolError, ToolOutput,
+    Verdict,
 };
 use zirv_flow_connectors::manifest;
 use zirv_flow_core::mapping::Mapping;
@@ -53,7 +54,7 @@ use super::diff::{
 use super::dispatch::{DispatchError, Dispatcher};
 use super::flow_context;
 use super::prompt::{self, ManifestContext, render_manifest_context};
-use super::segment_context::{self, Placeholders};
+use super::segment_context::{self, ClearKeys, Placeholders};
 use super::template_context::{self, TemplateContext};
 use super::tools::draft_segment::check_definition;
 use super::tools::draft_template::TemplateTask;
@@ -287,6 +288,8 @@ pub(crate) enum Restore {
     Segment(Placeholders),
     /// The literals of a flow's saved draft that were masked.
     Flow(flow_context::FlowTable),
+    /// The literals of a template document's conditions that were masked.
+    Template(Placeholders),
 }
 
 /// One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
@@ -539,6 +542,12 @@ async fn validate_turn(
     }
     if let Restore::Flow(table) = restore {
         let left = flow_context::restore_document(table, &mut restored);
+        if !left.is_empty() {
+            return Verdict::Invalid(DraftIssue::from_lines(&left));
+        }
+    }
+    if let Restore::Template(table) = restore {
+        let left = template_context::restore_fragment(table, &mut restored);
         if !left.is_empty() {
             return Verdict::Invalid(DraftIssue::from_lines(&left));
         }
@@ -884,7 +893,11 @@ pub(crate) async fn create(
         }
         (DraftKind::Template, _) => {
             let held = template.as_ref().ok_or_else(ApiError::internal)?;
-            template_known(&state, workspace.id, held).await?
+            let details = segment_details(&state, workspace.id).await?;
+            let (parts, table) =
+                template_known(&state, workspace.id, held, &details, context.privacy).await?;
+            placeholders = table;
+            parts
         }
         (DraftKind::Manifest, None) => render_manifest_context(&ManifestContext::default()),
         (_, Some(source_id)) => {
@@ -922,6 +935,7 @@ pub(crate) async fn create(
         (DraftKind::Manifest, Some(saved)) => Restore::Manifest(saved.clone()),
         (DraftKind::Segment, _) => Restore::Segment(placeholders),
         (DraftKind::Flow, _) => Restore::Flow(flow_table),
+        (DraftKind::Template, _) => Restore::Template(placeholders),
         _ => Restore::Nothing,
     });
     let outcome = zirv_flow_ai::repair(
@@ -1222,7 +1236,9 @@ async fn template_known(
     state: &AppState,
     workspace: WorkspaceId,
     held: &TemplateTarget,
-) -> Result<Vec<Content>, ApiError> {
+    details: &CatalogDetails,
+    privacy: Privacy,
+) -> Result<(Vec<Content>, Placeholders), ApiError> {
     let mut connection = state
         .pool
         .acquire()
@@ -1232,31 +1248,35 @@ async fn template_known(
     let themes = zirv_flow_store::list_themes(&mut *connection, workspace, false).await?;
     let snippets = zirv_flow_store::list_snippets(&mut *connection, workspace, false).await?;
     drop(connection);
-    template_context::render_template_context(&TemplateContext {
-        name: &held.template.name,
-        channel: &held.template.channel,
-        category: &held.template.category,
-        document: &held.base,
-        traits: read
-            .traits
-            .iter()
-            .map(|(key, kind)| (key.clone(), kind.as_str().to_owned()))
-            .collect(),
-        event_properties: read
-            .event_properties
-            .iter()
-            .map(|(name, kind)| (name.clone(), kind.as_str().to_owned()))
-            .collect(),
-        themes: themes
-            .into_iter()
-            .map(|theme| (theme.id, theme.name))
-            .collect(),
-        snippets: snippets
-            .into_iter()
-            .map(|snippet| (snippet.id, snippet.name))
-            .collect(),
-        task: held.task,
-    })
+    template_context::render_template_context(
+        &TemplateContext {
+            name: &held.template.name,
+            channel: &held.template.channel,
+            category: &held.template.category,
+            document: &held.base,
+            traits: read
+                .traits
+                .iter()
+                .map(|(key, kind)| (key.clone(), kind.as_str().to_owned()))
+                .collect(),
+            event_properties: read
+                .event_properties
+                .iter()
+                .map(|(name, kind)| (name.clone(), kind.as_str().to_owned()))
+                .collect(),
+            themes: themes
+                .into_iter()
+                .map(|theme| (theme.id, theme.name))
+                .collect(),
+            snippets: snippets
+                .into_iter()
+                .map(|snippet| (snippet.id, snippet.name))
+                .collect(),
+            task: held.task,
+        },
+        &ClearKeys::of(details),
+        privacy,
+    )
 }
 
 /// The document and the subjects offered, from the one answer `draft_template` accepted.

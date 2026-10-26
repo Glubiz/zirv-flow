@@ -40,7 +40,7 @@ use super::prompt::{
     render_stream_context,
 };
 use super::segment_context::{self, Placeholders};
-use super::template_context::{TemplateContext, render_template_context};
+use super::template_context::{TemplateContext, render_template_context, restore_fragment};
 use super::tools::draft_template::{self, TemplateTask};
 use super::tools::{self, draft_manifest, draft_mapping, draft_segment, explain_segment};
 use crate::AppState;
@@ -541,6 +541,7 @@ enum Grader {
         task: TemplateTask,
         base: Value,
         catalog: zirv_flow_templates::FieldCatalog,
+        placeholders: Placeholders,
     },
     Explain {
         definition: Value,
@@ -580,7 +581,18 @@ fn grade(
             task,
             base,
             catalog,
-        } => draft_template::apply(*task, base, arguments).and_then(|drafted| {
+            placeholders,
+        } => {
+            // As a draft run does: the literals the model was not shown come back first.
+            let mut restored = arguments.clone();
+            let left = restore_fragment(placeholders, &mut restored);
+            if !left.is_empty() {
+                Err(left)
+            } else {
+                draft_template::apply(*task, base, &restored)
+            }
+        }
+        .and_then(|drafted| {
             // The pure part of the validation a publish applies; the renderer is not run.
             let lines =
                 draft_template::issue_lines(&zirv_flow_templates::validate(&drafted.doc, catalog));
@@ -670,25 +682,29 @@ fn prepare(case: &GoldenCase) -> Result<(Grader, ChatRequest), String> {
                 .task
                 .ok_or_else(|| "a template case needs a task".to_owned())?;
             let catalog = case.field_catalog();
-            let context = render_template_context(&TemplateContext {
-                name: "Golden",
-                channel: "email",
-                category: "marketing",
-                document: &base,
-                traits: catalog
-                    .person
-                    .iter()
-                    .map(|(key, kind)| (key.clone(), kind.as_str().to_owned()))
-                    .collect(),
-                event_properties: catalog
-                    .event
-                    .iter()
-                    .map(|(name, kind)| (name.clone(), kind.as_str().to_owned()))
-                    .collect(),
-                themes: Vec::new(),
-                snippets: Vec::new(),
-                task,
-            })
+            let (context, placeholders) = render_template_context(
+                &TemplateContext {
+                    name: "Golden",
+                    channel: "email",
+                    category: "marketing",
+                    document: &base,
+                    traits: catalog
+                        .person
+                        .iter()
+                        .map(|(key, kind)| (key.clone(), kind.as_str().to_owned()))
+                        .collect(),
+                    event_properties: catalog
+                        .event
+                        .iter()
+                        .map(|(name, kind)| (name.clone(), kind.as_str().to_owned()))
+                        .collect(),
+                    themes: Vec::new(),
+                    snippets: Vec::new(),
+                    task,
+                },
+                &segment_context::ClearKeys::of(&case.details()),
+                privacy,
+            )
             .map_err(|error| error.detail().to_owned())?;
             let request = build_request(
                 DraftKind::Template,
@@ -704,6 +720,7 @@ fn prepare(case: &GoldenCase) -> Result<(Grader, ChatRequest), String> {
                     task,
                     base,
                     catalog,
+                    placeholders,
                 },
                 request,
             ))
