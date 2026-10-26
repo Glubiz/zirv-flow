@@ -1,6 +1,6 @@
 import { expect, test, type ConsoleMessage, type Page } from "@playwright/test";
 
-import { openTemplates, signIn } from "./support";
+import { OWNER_EMAIL, openTemplates, ownerPassword, signIn } from "./support";
 
 const SCRIPT = `<script>parent.postMessage("script-ran", "*"); console.log("script-ran");</script>`;
 const MARKER = "script-ran";
@@ -76,7 +76,20 @@ test("a script in a raw HTML block never runs in the preview, and the detection 
   await expect.poll(() => controlLogged.length).toBeGreaterThan(0);
 });
 
-// The upload half of criterion 6 needs asset uploads, which arrive with #306.
-test.skip("an SVG upload is refused", () => {
-  // Once #306 exists: upload an SVG in the assets library and assert that it is refused.
+// The upload half of criterion 6: an SVG is refused by its content type, before its body is read.
+test("an SVG upload is refused", async ({ request }) => {
+  const session = await request.post("/api/v1/session", { data: { email: OWNER_EMAIL, password: ownerPassword() } });
+  expect(session.ok()).toBe(true);
+  const { csrf_token: csrf } = (await session.json()) as { csrf_token: string };
+  const workspaces = (await (await request.get("/api/v1/workspaces")).json()) as { id: string }[];
+  const workspace = workspaces[0];
+  if (!workspace) throw new Error("the seeded workspace is missing");
+
+  const reply = await request.post(`/api/v1/workspaces/${workspace.id}/assets?name=logo.svg`, {
+    headers: { "content-type": "image/svg+xml", "x-csrf-token": csrf },
+    data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>parent.postMessage("script-ran", "*")</script></svg>'),
+  });
+
+  expect(reply.status()).toBe(415);
+  expect(((await reply.json()) as { code: string }).code).toBe("asset_type_unsupported");
 });
