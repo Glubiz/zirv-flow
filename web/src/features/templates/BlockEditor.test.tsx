@@ -6,7 +6,7 @@ import { assetBody, listBody } from "../../test/assetsApi";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { snippetBody } from "../../test/snippetsApi";
-import { listItem } from "../../test/themesApi";
+import { listItem, tokens } from "../../test/themesApi";
 import { drafts, previewBody, templateDetail, templateRoutes, SENDER_ID, TEMPLATE_ID, WS, type Doc, type Issue } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
 import { DEFAULT_STYLE } from "./blocks/document";
@@ -568,7 +568,7 @@ const THEME_WARM = "0192b1a4-7c3e-7000-8000-00000000d001";
 const THEME_COOL = "0192b1a4-7c3e-7000-8000-00000000d002";
 const SNIPPET = "0192b1a4-7c3e-7000-8000-00000000c001";
 const THEMES = [
-  listItem({ id: THEME_WARM, name: "Warm", current_version: 1, is_default: true }),
+  listItem({ id: THEME_WARM, name: "Warm", current_version: 1, is_default: true }, 0, tokens({ footer_snippet: SNIPPET })),
   listItem({ id: THEME_COOL, name: "Cool", current_version: 2, is_default: false }),
 ];
 const SNIPPETS = [{ ...snippetBody({ id: SNIPPET, name: "Shipping promise", current_version: 3 }), used_by_templates: 0 }];
@@ -696,6 +696,15 @@ describe("the theme footer", () => {
     mount();
     expect(await screen.findByText(/removed from this email/)).toBeInTheDocument();
     expect(screen.queryByText(/needs its own unsubscribe link/)).toBeNull();
+  });
+
+  it("is not on the canvas when the theme names no footer snippet", async () => {
+    const bare = [listItem({ id: THEME_WARM, name: "Warm", current_version: 1, is_default: true })];
+    mockApi(templateRoutes({ detail: footerDoc(), extra: { [`GET ${WS}/themes`]: () => json(bare) } }));
+    mount();
+    await screen.findByRole("tab", { name: "Theme: Warm" });
+    expect(screen.queryByRole("group", { name: "Theme footer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Theme footer actions" })).toBeNull();
   });
 
   it("is not on the canvas for a document with no theme", async () => {

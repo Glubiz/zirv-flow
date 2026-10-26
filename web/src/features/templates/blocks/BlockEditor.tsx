@@ -340,7 +340,7 @@ function Editor(props: Props & { scope: ThemeScope; snippetNames: SnippetNames }
         workspaceId={snippet ? undefined : workspaceId}
         snippets={snippetNames}
         footer={
-          snippet || !scope.inEffect
+          snippet || !scope.hasFooter
             ? undefined
             : {
                 theme: scope.name,

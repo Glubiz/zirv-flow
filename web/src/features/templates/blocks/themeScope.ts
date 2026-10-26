@@ -1,5 +1,5 @@
 import { useSnippets } from "../../snippets";
-import { useThemes, type ThemeListItem } from "../../themes";
+import { readTokens, useThemes, type ThemeListItem } from "../../themes";
 import type { ThemeRef } from "./document";
 
 /** The theme a document is under, as far as the editor can tell. */
@@ -13,23 +13,26 @@ export interface ThemeScope {
   inEffect: boolean;
   /** What the dock tab and the footer call it. */
   name: string;
+  /** Whether the theme in effect names a footer snippet: only then does the email end with a theme footer. */
+  hasFooter: boolean;
 }
 
 /** No theme in play: a snippet, whose look comes from the email that holds it. */
-export const NO_THEME: ThemeScope = { ref: "none", choices: [], current: null, inEffect: false, name: "" };
+export const NO_THEME: ThemeScope = { ref: "none", choices: [], current: null, inEffect: false, name: "", hasFooter: false };
 
 /** The scope of `ref` over the workspace's themes; the list loads in the background. */
 export function useThemeScope(workspaceId: string, ref: ThemeRef): ThemeScope {
   const themes = useThemes(workspaceId);
   const all = themes.status === "ready" ? themes.data : [];
   const choices = all.filter((theme) => theme.current_version !== null && theme.current_version !== undefined);
-  if (ref === "none") return { ref, choices, current: null, inEffect: false, name: "" };
+  const footerOf = (theme: ThemeListItem | null) => theme !== null && Boolean(readTokens(theme.tokens).footer_snippet);
+  if (ref === "none") return { ref, choices, current: null, inEffect: false, name: "", hasFooter: false };
   if (ref === "default") {
     const current = all.find((theme) => theme.is_default) ?? null;
-    return { ref, choices, current, inEffect: current !== null, name: current?.name ?? "Default" };
+    return { ref, choices, current, inEffect: current !== null, name: current?.name ?? "Default", hasFooter: footerOf(current) };
   }
   const current = all.find((theme) => theme.id === ref.id) ?? null;
-  return { ref, choices, current, inEffect: true, name: current?.name ?? "Theme" };
+  return { ref, choices, current, inEffect: true, name: current?.name ?? "Theme", hasFooter: footerOf(current) };
 }
 
 /** What the document can say about the snippets it holds: name and live version by id. */
