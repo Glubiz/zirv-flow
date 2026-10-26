@@ -121,9 +121,16 @@ pub(crate) struct TemplatePublishRequest {
     revision: Option<i32>,
 }
 
+/// What a publish request asks for beyond the draft itself.
+pub(crate) struct PublishInput {
+    note: Option<String>,
+    /// The draft revision the caller reviewed.
+    reviewed: Option<i32>,
+}
+
 /// The note and reviewed revision of a publish request: an absent body or a blank note is no note,
 /// and more than [`TEMPLATE_NOTE_MAX_CHARS`] characters is a 400 naming `note`.
-fn input_of(body: &[u8]) -> Result<(Option<String>, Option<i32>), ApiError> {
+fn input_of(body: &[u8]) -> Result<PublishInput, ApiError> {
     let request: TemplatePublishRequest = if body.iter().all(u8::is_ascii_whitespace) {
         TemplatePublishRequest::default()
     } else {
@@ -141,8 +148,14 @@ fn input_of(body: &[u8]) -> Result<(Option<String>, Option<i32>), ApiError> {
             field: "note".to_owned(),
             reason: "too_long".to_owned(),
         }])),
-        Some(note) if !note.is_empty() => Ok((Some(note), revision)),
-        _ => Ok((None, revision)),
+        Some(note) if !note.is_empty() => Ok(PublishInput {
+            note: Some(note),
+            reviewed: revision,
+        }),
+        _ => Ok(PublishInput {
+            note: None,
+            reviewed: revision,
+        }),
     }
 }
 
@@ -169,8 +182,7 @@ pub(crate) async fn publish_template(
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
-    note: Option<&str>,
-    reviewed: Option<i32>,
+    input: &PublishInput,
 ) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
     let (draft, catalog, inputs) = {
         let mut connection = state
@@ -187,7 +199,10 @@ pub(crate) async fn publish_template(
         let draft = zirv_flow_store::find_template_draft(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::internal)?;
-        if reviewed.is_some_and(|revision| revision != draft.revision) {
+        if input
+            .reviewed
+            .is_some_and(|revision| revision != draft.revision)
+        {
             return Err(ApiError::template_draft_changed());
         }
         let catalog = field_catalog(
@@ -255,7 +270,7 @@ pub(crate) async fn publish_template(
         &locked,
         &validation,
         published_by,
-        note,
+        input.note.as_deref(),
         &trace,
     )
     .await
@@ -345,7 +360,7 @@ pub(crate) async fn publish(
     body: Bytes,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let (note, reviewed) = input_of(&body)?;
+    let input = input_of(&body)?;
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
@@ -356,8 +371,7 @@ pub(crate) async fn publish(
         workspace.id,
         path_id(&id)?,
         principal.user_id(),
-        note.as_deref(),
-        reviewed,
+        &input,
     )
     .await?;
     Ok((
