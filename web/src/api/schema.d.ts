@@ -4589,10 +4589,14 @@ export interface components {
         };
         /** @description A published version that uses an asset. */
         AssetOwnerBody: {
+            /** @description Whether the owner is archived. */
+            archived: boolean;
             /** Format: uuid */
             id: string;
             /** @description `template`, `theme` or `snippet`. */
             kind: string;
+            /** @description The owner's current name; null when the owner no longer exists. */
+            name?: string | null;
             /** Format: int32 */
             version: number;
         };
