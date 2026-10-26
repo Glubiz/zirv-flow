@@ -677,6 +677,25 @@ impl ApiError {
         }
     }
 
+    /// A template document too large to send to the model.
+    pub(crate) fn ai_template_too_large() -> Self {
+        Self {
+            code: Some("ai_template_too_large"),
+            ..Self::unprocessable(
+                "this template is too large to send to the assistant (more than 96 KiB); \
+                 shorten it first",
+            )
+        }
+    }
+
+    /// A template or a task the assistant does not draft.
+    pub(crate) fn ai_template_unsupported(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("ai_template_unsupported"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
     /// A flow too large to send to the model with its personal literals masked.
     pub(crate) fn ai_flow_too_large() -> Self {
         Self {

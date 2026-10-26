@@ -15,10 +15,12 @@ use zirv_flow_store::{
     AssetOwnerKind, AssetReferenceError, SenderError, Template, TemplateUse, TemplateVersion,
     TemplateVersionSummary, require_verified_sender,
 };
-use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
+use zirv_flow_templates::{
+    FieldCatalog, Issue, TemplateDocument, code, content_type_of, extras_needs, migrate_to_current,
+};
 
 use super::crud::TemplateBody;
-use super::inputs::{Subject, resolve};
+use super::inputs::{Inputs, Subject, resolve};
 use super::where_used::TemplateUseBody;
 use super::{field_catalog, issue_problems, stored_document, template_error};
 use crate::AppState;
@@ -113,6 +115,56 @@ pub(crate) struct TemplatePublishedBody {
     used_by: Vec<TemplateUseBody>,
 }
 
+/// What a validation of a document reads: the workspace's field catalog and the render inputs the
+/// document names, loaded for a publish check (no one to evaluate conditions for).
+pub(crate) struct CheckInputs {
+    catalog: FieldCatalog,
+    inputs: Inputs,
+}
+
+/// Loads what [`validate_document`] needs. The connection is free again before the render host is
+/// asked, which can take as long as its deadline.
+pub(crate) async fn load_check_inputs(
+    state: &AppState,
+    connection: &mut zirv_flow_store::PgConnection,
+    workspace: WorkspaceId,
+    doc: &TemplateDocument,
+) -> Result<CheckInputs, ApiError> {
+    let catalog = field_catalog(
+        zirv_flow_store::read_template_field_catalog(&mut *connection, workspace).await?,
+    );
+    let now = state.clock.now(connection).await?;
+    let inputs = resolve(
+        connection,
+        workspace,
+        doc,
+        Subject::Nobody,
+        state.public_url(),
+        now,
+    )
+    .await?;
+    Ok(CheckInputs { catalog, inputs })
+}
+
+/// The issues of `doc`: the renderer's validation of a sample render against the field catalog and
+/// the effective theme, snippets and conditions, plus the conditions that cannot be used. The one
+/// check a publish and an assistant draft of a template both make.
+pub(crate) async fn validate_document(
+    render: &RenderPool,
+    doc: &TemplateDocument,
+    checked: &CheckInputs,
+) -> Result<Vec<Issue>, ApiError> {
+    content_type_of(doc).map_err(|_| ApiError::template_content_unsupported())?;
+    // A template's sample render allocates like any render, so it runs in the render host, never
+    // in this process.
+    let mut issues: Vec<Issue> = render
+        .validate_with(doc, &checked.catalog, &checked.inputs.extras)
+        .await
+        .map_err(|failure| ApiError::render_failed(&failure))?;
+    issues.extend(checked.inputs.issues.iter().cloned());
+    Ok(issues)
+}
+
 /// Validates the draft and publishes it as the next version, or changes nothing. Audited as
 /// `template.published`; records a `template.publish` decision caused by a definition change.
 ///
@@ -128,7 +180,7 @@ pub(crate) async fn publish_template(
     id: Uuid,
     published_by: Option<UserId>,
 ) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
-    let (draft, catalog, inputs) = {
+    let (draft, checked) = {
         let mut connection = state
             .pool
             .acquire()
@@ -143,31 +195,12 @@ pub(crate) async fn publish_template(
         let draft = zirv_flow_store::find_template_draft(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::internal)?;
-        let catalog = field_catalog(
-            zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
-        );
         let doc = stored_document(&draft.document)?;
-        let now = state.clock.now(&mut connection).await?;
-        let inputs = resolve(
-            &mut connection,
-            workspace,
-            &doc,
-            Subject::Nobody,
-            state.public_url(),
-            now,
-        )
-        .await?;
-        (draft, catalog, inputs)
+        let checked = load_check_inputs(state, &mut connection, workspace, &doc).await?;
+        (draft, checked)
     };
     let doc = stored_document(&draft.document)?;
-    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
-    // A template's sample render allocates like any render, so it runs in the render host, never
-    // in this process.
-    let mut issues: Vec<Issue> = render
-        .validate_with(&doc, &catalog, &inputs.extras)
-        .await
-        .map_err(|failure| ApiError::render_failed(&failure))?;
-    issues.extend(inputs.issues.iter().cloned());
+    let issues = validate_document(render, &doc, &checked).await?;
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::template_invalid(issue_problems(&issues)));
     }
@@ -217,7 +250,7 @@ pub(crate) async fn publish_template(
     let mut ids: Vec<Uuid> = extras_needs(&doc)
         .assets
         .iter()
-        .filter(|spelled| inputs.loaded.assets.contains_key(*spelled))
+        .filter(|spelled| checked.inputs.loaded.assets.contains_key(*spelled))
         .filter_map(|spelled| spelled.parse().ok())
         .collect();
     ids.sort_unstable();

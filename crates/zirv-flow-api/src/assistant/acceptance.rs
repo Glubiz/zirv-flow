@@ -203,6 +203,16 @@ mod tests {
     /// Our workspace with the assistant on (the fake behind it), a second workspace, and the
     /// people to ask from either.
     async fn setup(pool: &PgPool, pii_opt_in: bool, budget: i64) -> Fixture {
+        setup_with(pool, pii_opt_in, budget, None).await
+    }
+
+    /// [`setup`], with the render pool a template draft validates and renders through.
+    async fn setup_with(
+        pool: &PgPool,
+        pii_opt_in: bool,
+        budget: i64,
+        render_pool: Option<zirv_flow_render::RenderPool>,
+    ) -> Fixture {
         zirv_flow_store::migrate(pool).await.unwrap();
         let ws = workspace(pool, "ours").await;
         let other_ws = workspace(pool, "theirs").await;
@@ -228,6 +238,9 @@ mod tests {
             ))
             .with_ai_config(ai_config());
         state.ai = state.ai.clone().with_replacement(Arc::clone(&fake) as _);
+        if let Some(render_pool) = render_pool {
+            state = state.with_render_pool(render_pool);
+        }
         let router = router(state.clone());
         let admin_id = member_of(pool, ws, "admin@example.com", Role::Admin).await;
         member_of(pool, ws, "second@example.com", Role::Admin).await;
@@ -3710,5 +3723,908 @@ mod tests {
         for request in fx.requests_after(sent) {
             assert!(!everything(&request).contains("SECRET"));
         }
+    }
+
+    // ---- template drafts (#309) ----
+
+    /// The verified sender identity the fixture plants; the valid documents name it.
+    const SENDER: &str = "0192b1a4-7c3e-7000-8000-00000000a001";
+
+    /// A render pool whose host is this test binary (see `templates::acceptance`).
+    async fn start_render_pool() -> zirv_flow_render::RenderPool {
+        let command = zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "templates::acceptance::tests::render_host_child",
+                "--nocapture",
+            ])
+            .args(["--test-threads", "1", "-q"])
+            .env("ZIRV_FLOW_TEST_TEMPLATE_HOST", "serve")
+            .skip_stdout_until("running 1 test\n");
+        zirv_flow_render::RenderPool::start(
+            command,
+            zirv_flow_render::PoolConfig {
+                size: 1,
+                deadline: std::time::Duration::from_secs(10),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A valid marketing email in code mode.
+    fn code_template_doc() -> Value {
+        json!({"schema": 2, "channel": "email", "mode": "code", "email": {
+            "subject": "Welcome", "sender": SENDER, "lang": "en", "category": "marketing",
+            "html": "<p>Welcome to the shop.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+            "text": "Welcome to the shop. {{ system.unsubscribe_url }}"
+        }})
+    }
+
+    /// A valid transactional block email.
+    fn blocks_template_doc() -> Value {
+        json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Our news", "sender": SENDER, "lang": "en", "category": "transactional",
+            "theme": "none", "footer": "none",
+            "sections": [{"id": "intro", "columns": [[
+                {"type": "heading", "id": "h1", "level": 1, "text": "Our news"},
+                {"type": "text", "id": "t1", "content": "<p>Two things happened this month.</p>"}
+            ]]}]
+        }})
+    }
+
+    fn template_run(template: &str, task: &str) -> Value {
+        json!({"kind": "template", "template_id": template, "task": task,
+            "prompt": "Make it better"})
+    }
+
+    fn unknown_field_html() -> Value {
+        json!({"fragment": {"html": "<p>Hi {{ person.nope }}</p>\
+            <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>"}})
+    }
+
+    fn greeting_html() -> Value {
+        json!({"fragment": {
+            "subject": "Welcome, {{ person.first_name }}!",
+            "html": "<p>Hi {{ person.first_name }}</p>\
+                <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+            "text": "Hi {{ person.first_name }} {{ system.unsubscribe_url }}"}})
+    }
+
+    impl Fixture {
+        /// Our workspace with the assistant on, a render pool, a verified sender and two traits.
+        async fn with_templates(pool: &PgPool, pii_opt_in: bool, budget: i64) -> Self {
+            let fx = setup_with(pool, pii_opt_in, budget, Some(start_render_pool().await)).await;
+            zirv_flow_store::sending_fixtures::plant_verified_sender_as(
+                pool,
+                fx.ws,
+                "example.com",
+                SENDER.parse().unwrap(),
+            )
+            .await
+            .unwrap();
+            for key in ["plan", "first_name"] {
+                zirv_flow_store::create_trait_definition(
+                    pool,
+                    fx.ws,
+                    &zirv_flow_store::NewTraitDefinition {
+                        key: key.into(),
+                        trait_type: zirv_flow_core::people::TraitType::String,
+                        precedence: zirv_flow_core::people::Precedence::Latest,
+                        source_order: Vec::new(),
+                        pii: false,
+                        channel_address: false,
+                        inferred: false,
+                        description: String::new(),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            fx
+        }
+
+        async fn make_template(&self, name: &str, category: &str, document: Value) -> String {
+            let reply = self
+                .path_as(
+                    &self.admin,
+                    "POST",
+                    "/templates",
+                    Some(
+                        json!({"name": name, "channel": "email", "category": category,
+                        "document": document}),
+                    ),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+            reply.body["id"].as_str().unwrap().to_owned()
+        }
+
+        async fn template_detail(&self, id: &str) -> Value {
+            let reply = self
+                .path_as(&self.admin, "GET", &format!("/templates/{id}"), None)
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            reply.body
+        }
+
+        /// The counts of every table a publish, a flow or a send would write.
+        async fn template_writes(&self) -> Vec<i64> {
+            let mut counts = Vec::new();
+            for table in [
+                "templates",
+                "template_versions",
+                "flows",
+                "flow_versions",
+                "enrollments",
+                "messages",
+                "message_links",
+                "test_sends",
+                "jobs",
+                "people",
+            ] {
+                counts.push(self.count(table).await);
+            }
+            counts
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn criterion_7_the_four_template_tasks_each_produce_a_valid_draft_with_both_renders(
+        pool: PgPool,
+    ) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let code = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let layout = fx
+            .make_template("News", "transactional", blocks_template_doc())
+            .await;
+        let (code_before, layout_before) = (
+            fx.template_detail(&code).await,
+            fx.template_detail(&layout).await,
+        );
+        let sent = fx.fake.call_count();
+
+        // copy
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let copy = fx.draft(template_run(&code, "copy")).await;
+        assert_eq!(copy.status, StatusCode::CREATED, "{:?}", copy.body);
+        assert_eq!(copy.body["kind"], "template");
+        assert_eq!(copy.body["status"], "valid", "{:?}", copy.body);
+        assert_eq!(copy.body["attempts"], 1);
+        assert_eq!(
+            copy.body["content"]["email"]["subject"],
+            "Welcome, {{ person.first_name }}!"
+        );
+        assert_eq!(copy.body["content"]["email"]["sender"], SENDER);
+        // The render diff: the draft as it is and the result, for the sample person.
+        let renders = &copy.body["renders"];
+        assert_eq!(renders["before"]["subject"], "Welcome");
+        assert!(
+            renders["before"]["html"]
+                .as_str()
+                .unwrap()
+                .contains("Welcome to the shop")
+        );
+        assert_eq!(renders["after"]["subject"], "Welcome, sample!");
+        assert!(
+            renders["after"]["html"]
+                .as_str()
+                .unwrap()
+                .contains("Hi sample")
+        );
+        assert!(
+            renders["after"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Hi sample")
+        );
+        let changes = copy.body["changes"].as_array().unwrap();
+        for path in ["/email/subject", "/email/html", "/email/text"] {
+            assert!(
+                changes
+                    .iter()
+                    .any(|change| change["path"] == path && change["change"] == "changed"),
+                "{path} missing from {changes:?}"
+            );
+        }
+        assert!(
+            changes
+                .iter()
+                .all(|change| change["path"] != "/email/sender")
+        );
+        assert_eq!(copy.body["subject_variants"], json!([]));
+
+        // subject variants
+        fx.fake.push(answer(
+            "draft_template",
+            json!({"subject_variants": ["Welcome aboard", "Your first steps", "Let us begin"]}),
+        ));
+        let variants = fx.draft(template_run(&code, "subject_variants")).await;
+        assert_eq!(variants.body["status"], "valid", "{:?}", variants.body);
+        assert_eq!(
+            variants.body["subject_variants"],
+            json!(["Welcome aboard", "Your first steps", "Let us begin"])
+        );
+        assert_eq!(
+            variants.body["content"]["email"]["subject"],
+            "Welcome aboard"
+        );
+        assert_eq!(
+            variants.body["renders"]["after"]["subject"],
+            "Welcome aboard"
+        );
+
+        // block layout
+        fx.fake.push(answer(
+            "draft_template",
+            json!({"fragment": {"sections": [
+                {"id": "intro", "columns": [[
+                    {"type": "heading", "id": "h1", "level": 1, "text": "Our news"}]]},
+                {"id": "rule", "columns": [[{"type": "divider", "id": "d1"}]]},
+                {"id": "details", "columns": [
+                    [{"type": "text", "id": "t1", "content": "<p>Two things happened.</p>"}],
+                    [{"type": "text", "id": "t2", "content": "<p>Read on.</p>"}]]}
+            ]}}),
+        ));
+        let blocks = fx.draft(template_run(&layout, "block_layout")).await;
+        assert_eq!(blocks.body["status"], "valid", "{:?}", blocks.body);
+        assert_eq!(
+            blocks.body["content"]["blocks"]["sections"][2]["id"],
+            "details"
+        );
+        assert!(
+            blocks.body["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["path"] == "/blocks/sections/details"
+                    && change["change"] == "added")
+        );
+        assert!(
+            blocks.body["renders"]["after"]["html"]
+                .as_str()
+                .unwrap()
+                .contains("Read on.")
+        );
+        assert!(
+            !blocks.body["renders"]["before"]["html"]
+                .as_str()
+                .unwrap()
+                .contains("Read on.")
+        );
+
+        // translation
+        fx.fake.push(answer(
+            "draft_template",
+            json!({"fragment": {"subject": "Velkommen", "lang": "da",
+                "html": "<p>Velkommen til butikken.</p>\
+                    <a href=\"{{ system.unsubscribe_url }}\">Afmeld</a>",
+                "text": "Velkommen til butikken. {{ system.unsubscribe_url }}"}}),
+        ));
+        let translated = fx.draft(template_run(&code, "translation")).await;
+        assert_eq!(translated.body["status"], "valid", "{:?}", translated.body);
+        assert_eq!(translated.body["content"]["email"]["lang"], "da");
+        assert!(
+            translated.body["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| change["path"] == "/email/lang")
+        );
+
+        // One call each, with the one tool, and nothing was written to the templates.
+        let requests = fx.requests_after(sent);
+        assert_eq!(requests.len(), 4);
+        for request in &requests {
+            assert_eq!(tool_names(request), ["draft_template"]);
+            assert!(everything(request).contains("plan (string)"));
+        }
+        assert_eq!(fx.template_detail(&code).await, code_before);
+        assert_eq!(fx.template_detail(&layout).await, layout_before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unknown_merge_field_is_repaired_within_the_bound_or_returned_as_errors(
+        pool: PgPool,
+    ) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let before = fx.template_detail(&id).await;
+        let sent = fx.fake.call_count();
+
+        // Repaired: the unknown field goes back as a code, a place and the field's name.
+        fx.fake.push(answer("draft_template", unknown_field_html()));
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let repaired = fx.draft(template_run(&id, "copy")).await;
+        assert_eq!(repaired.body["status"], "valid", "{:?}", repaired.body);
+        assert_eq!(repaired.body["attempts"], 2);
+        let requests = fx.requests_after(sent);
+        let feedback = last_feedback(&requests[1]);
+        assert!(
+            feedback.contains("unknown_merge_field at /email/html | field person.nope"),
+            "{feedback}"
+        );
+
+        // Not repaired within the bound (two repairs): the errors come back, nothing is stored.
+        for _ in 0..3 {
+            fx.fake.push(answer("draft_template", unknown_field_html()));
+        }
+        let exhausted = fx.draft(template_run(&id, "copy")).await;
+        assert_eq!(exhausted.body["status"], "invalid", "{:?}", exhausted.body);
+        assert_eq!(exhausted.body["attempts"], 3);
+        assert!(exhausted.body["content"].is_null());
+        assert!(exhausted.body["renders"].is_null());
+        assert!(
+            exhausted.body["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| issue["code"] == "unknown_merge_field" && issue["at"] == "/email/html"),
+            "{:?}",
+            exhausted.body["issues"]
+        );
+        let stored: Option<Value> =
+            sqlx::query_scalar("SELECT content FROM ai_drafts WHERE id = $1::uuid")
+                .bind(exhausted.body["id"].as_str().unwrap())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, None, "raw model output is never kept");
+        let refused = fx
+            .accept(&fx.admin, exhausted.body["id"].as_str().unwrap())
+            .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert_eq!(refused.body["code"], "ai_draft_invalid");
+        assert_eq!(fx.template_detail(&id).await, before);
+
+        // A wrong answer is feedback too, and the provider can only ever ask for the one tool.
+        let sent = fx.fake.call_count();
+        fx.fake
+            .push(answer("publish_template", json!({"template_id": id})));
+        fx.fake.push(answer(
+            "draft_template",
+            json!({"fragment": {"sender": "x"}}),
+        ));
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let guarded = fx.draft(template_run(&id, "copy")).await;
+        assert_eq!(guarded.body["status"], "valid", "{:?}", guarded.body);
+        let requests = fx.requests_after(sent);
+        assert!(
+            last_feedback(&requests[1]).contains("answer by calling draft_template exactly once")
+        );
+        assert!(
+            last_feedback(&requests[2]).contains("fragment_field_not_allowed at /fragment/sender")
+        );
+        for request in &requests {
+            assert_eq!(tool_names(request), ["draft_template"]);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn accepting_a_template_draft_writes_only_the_template_draft_and_publishes_nothing(
+        pool: PgPool,
+    ) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let published = fx
+            .path_as(&fx.admin, "POST", &format!("/templates/{id}/publish"), None)
+            .await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        let before = fx.template_detail(&id).await;
+        let version_before = fx
+            .path_as(
+                &fx.admin,
+                "GET",
+                &format!("/templates/{id}/versions/1"),
+                None,
+            )
+            .await
+            .body;
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let drafted = fx.draft(template_run(&id, "copy")).await;
+        assert_eq!(drafted.body["status"], "valid", "{:?}", drafted.body);
+        // Drafting wrote nothing to the template.
+        assert_eq!(fx.template_detail(&id).await, before);
+        let writes = fx.template_writes().await;
+        let audit_before = fx.count("audit_log").await;
+
+        let draft_id = drafted.body["id"].as_str().unwrap();
+        let accepted = fx.accept(&fx.admin, draft_id).await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        assert_eq!(accepted.body["kind"], "template");
+        assert_eq!(accepted.body["template_id"], id);
+        assert_eq!(accepted.body["content"], drafted.body["content"]);
+        // The template's draft is the drafted document, one revision on.
+        let after = fx.template_detail(&id).await;
+        assert_eq!(after["draft"]["document"], drafted.body["content"]);
+        assert_eq!(
+            after["draft"]["revision"].as_i64().unwrap(),
+            before["draft"]["revision"].as_i64().unwrap() + 1
+        );
+        assert_eq!(accepted.body["template"], after);
+        // The published version, the flows and the sends are as they were.
+        assert_eq!(after["current_version"], before["current_version"]);
+        assert_eq!(after["name"], before["name"]);
+        assert_eq!(after["category"], before["category"]);
+        assert_eq!(fx.template_writes().await, writes);
+        let version_after = fx
+            .path_as(
+                &fx.admin,
+                "GET",
+                &format!("/templates/{id}/versions/1"),
+                None,
+            )
+            .await
+            .body;
+        assert_eq!(version_after, version_before);
+        // Two audit entries, with ids only: the accept and the draft change. No publish.
+        assert_eq!(fx.count("audit_log").await, audit_before + 2);
+        let entries = zirv_flow_store::list_audit(&pool, 100).await.unwrap();
+        let accepted_entry = entries
+            .iter()
+            .find(|entry| entry.action == "ai.draft.accepted")
+            .unwrap();
+        assert_eq!(
+            accepted_entry.summary,
+            json!({"kind": "template", "template_id": id})
+        );
+        let saved_entry = entries
+            .iter()
+            .find(|entry| entry.action == "template.draft_saved")
+            .unwrap();
+        assert_eq!(saved_entry.summary["via"], "ai_draft");
+        assert!(
+            !saved_entry
+                .summary
+                .to_string()
+                .contains("person.first_name")
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.action.contains("publish"))
+                .count(),
+            1,
+            "only the explicit publish before the draft"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM ai_drafts WHERE id = $1::uuid")
+            .bind(draft_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "accepted");
+        // Accepting again is refused: the template's draft moved on.
+        let again = fx.accept(&fx.admin, draft_id).await;
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(again.body["code"], "template_draft_changed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn accept_fails_with_template_draft_changed_when_the_draft_moved_since(pool: PgPool) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let drafted = fx.draft(template_run(&id, "copy")).await;
+        assert_eq!(drafted.body["status"], "valid", "{:?}", drafted.body);
+        // A person saves the template's draft after the assistant's draft was made, even to the
+        // very same text.
+        let saved = fx
+            .path_as(
+                &fx.admin,
+                "PUT",
+                &format!("/templates/{id}/draft"),
+                Some(json!({"document": code_template_doc()})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let moved = fx.template_detail(&id).await;
+        let writes = fx.template_writes().await;
+
+        let refused = fx
+            .accept(&fx.admin, drafted.body["id"].as_str().unwrap())
+            .await;
+
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "template_draft_changed");
+        assert_eq!(
+            fx.template_detail(&id).await,
+            moved,
+            "the person's save stands"
+        );
+        assert_eq!(fx.template_writes().await, writes);
+        let status: String = sqlx::query_scalar("SELECT status FROM ai_drafts WHERE id = $1::uuid")
+            .bind(drafted.body["id"].as_str().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "valid", "the refused accept marked nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_translation_changes_lang_only_through_accept_and_creates_no_template(pool: PgPool) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let templates = fx.count("templates").await;
+        fx.fake.push(answer(
+            "draft_template",
+            json!({"fragment": {"subject": "Velkommen", "lang": "da"}}),
+        ));
+
+        let drafted = fx.draft(template_run(&id, "translation")).await;
+
+        assert_eq!(drafted.body["status"], "valid", "{:?}", drafted.body);
+        assert_eq!(drafted.body["content"]["email"]["lang"], "da");
+        let detail = fx.template_detail(&id).await;
+        assert_eq!(
+            detail["draft"]["document"]["email"]["lang"], "en",
+            "not yet"
+        );
+        assert_eq!(fx.count("templates").await, templates);
+
+        let accepted = fx
+            .accept(&fx.admin, drafted.body["id"].as_str().unwrap())
+            .await;
+
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
+        let detail = fx.template_detail(&id).await;
+        assert_eq!(detail["draft"]["document"]["email"]["lang"], "da");
+        assert_eq!(detail["draft"]["document"]["email"]["subject"], "Velkommen");
+        assert_eq!(
+            accepted.body["template"]["draft"]["document"]["email"]["lang"],
+            "da"
+        );
+        assert_eq!(fx.count("templates").await, templates, "no new template");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn accept_validates_the_stored_document_again_before_it_writes(pool: PgPool) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let drafted = fx.draft(template_run(&id, "copy")).await;
+        let draft_id = drafted.body["id"].as_str().unwrap();
+        // The catalog changed since: the stored document now names a field that does not exist.
+        sqlx::query(
+            "UPDATE ai_drafts SET content = jsonb_set(content, '{email,html}', \
+             '\"<p>{{ person.gone }}</p>\"') WHERE id = $1::uuid",
+        )
+        .bind(draft_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before = fx.template_detail(&id).await;
+
+        let refused = fx.accept(&fx.admin, draft_id).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "template_invalid");
+        assert_eq!(fx.template_detail(&id).await, before);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_draft_is_for_an_admin_with_a_session_and_a_template_of_the_workspace(
+        pool: PgPool,
+    ) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let hook = fx
+            .path_as(
+                &fx.admin,
+                "POST",
+                "/templates",
+                Some(json!({"name": "Hook", "channel": "webhook", "document": {
+                    "schema": 2, "channel": "webhook", "mode": "code",
+                    "webhook": {"headers": {}, "body": "{}"}}})),
+            )
+            .await;
+        assert_eq!(hook.status, StatusCode::CREATED, "{:?}", hook.body);
+        let archived = fx
+            .make_template("Old", "marketing", code_template_doc())
+            .await;
+        let gone = fx
+            .path_as(&fx.admin, "DELETE", &format!("/templates/{archived}"), None)
+            .await;
+        assert_eq!(gone.status, StatusCode::OK, "{:?}", gone.body);
+        let theirs = {
+            let reply = call(
+                &fx.router,
+                "POST",
+                &uri(fx.other_ws, "/templates"),
+                Some(json!({"name": "Theirs", "channel": "email", "category": "marketing"})),
+                Auth::Session(&fx.theirs_admin),
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+            reply.body["id"].as_str().unwrap().to_owned()
+        };
+        let sent = fx.fake.call_count();
+
+        // A member, an API key and an anonymous caller are refused.
+        let member = fx
+            .path_as(
+                &fx.member,
+                "POST",
+                "/ai/drafts",
+                Some(template_run(&id, "copy")),
+            )
+            .await;
+        assert_eq!(member.status, StatusCode::FORBIDDEN);
+        let key = fx
+            .as_key("POST", "/ai/drafts", Some(template_run(&id, "copy")))
+            .await;
+        assert_eq!(key.status, StatusCode::FORBIDDEN);
+        assert_eq!(key.body["code"], "ai_user_required");
+        // A template of another workspace is not found, and nothing is sent.
+        let foreign = fx.draft(template_run(&theirs, "copy")).await;
+        assert_eq!(foreign.status, StatusCode::NOT_FOUND, "{:?}", foreign.body);
+        let unknown = fx
+            .draft(template_run(&Uuid::now_v7().to_string(), "copy"))
+            .await;
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        // An archived template, a webhook template and a layout of a code email are refused.
+        let old = fx.draft(template_run(&archived, "copy")).await;
+        assert_eq!(old.status, StatusCode::CONFLICT, "{:?}", old.body);
+        assert_eq!(old.body["code"], "template_archived");
+        let hook = fx
+            .draft(template_run(hook.body["id"].as_str().unwrap(), "copy"))
+            .await;
+        assert_eq!(
+            hook.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            hook.body
+        );
+        assert_eq!(hook.body["code"], "ai_template_unsupported");
+        let layout = fx.draft(template_run(&id, "block_layout")).await;
+        assert_eq!(
+            layout.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            layout.body
+        );
+        assert_eq!(layout.body["code"], "ai_template_unsupported");
+        // The request's shape: a template needs its id and its task.
+        for body in [
+            json!({"kind": "template", "task": "copy", "prompt": "x"}),
+            json!({"kind": "template", "template_id": id, "prompt": "x"}),
+            json!({"kind": "template", "template_id": id, "task": "publish", "prompt": "x"}),
+        ] {
+            let reply = fx.draft(body).await;
+            assert_eq!(
+                reply.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{:?}",
+                reply.body
+            );
+        }
+        assert_eq!(fx.fake.call_count(), sent, "nothing reached the provider");
+
+        // Another admin of the workspace cannot accept this admin's draft.
+        fx.fake.push(answer("draft_template", greeting_html()));
+        let drafted = fx.draft(template_run(&id, "copy")).await;
+        let other = fx
+            .accept(&fx.second_admin, drafted.body["id"].as_str().unwrap())
+            .await;
+        assert_eq!(other.status, StatusCode::NOT_FOUND);
+        let key = fx
+            .as_key(
+                "POST",
+                &format!("/ai/drafts/{}/accept", drafted.body["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+        assert_eq!(key.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_template_tool_authorizes_again_and_takes_the_target_from_the_request(
+        pool: PgPool,
+    ) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let id = fx
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let detail = fx.template_detail(&id).await;
+        let template = zirv_flow_store::find_template(&pool, fx.ws, id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let user = zirv_flow_store::find_user(&pool, fx.admin_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let context = ToolContext {
+            state: fx.state.clone(),
+            principal: Principal::session_for_tests(user),
+            workspace: fx.ws,
+            privacy: Privacy::SchemaOnly,
+            target: DraftTarget::Template {
+                template: Box::new(template),
+                task: crate::assistant::tools::draft_template::TemplateTask::Copy,
+                base: detail["draft"]["document"].clone(),
+            },
+            sample: None,
+        };
+        let tool = find_tool("draft_template").unwrap();
+
+        assert!(tool.call(&context, &greeting_html()).await.is_ok());
+        // A target of another kind is not a template draft.
+        let flow = ToolContext {
+            target: DraftTarget::Flow,
+            ..context
+        };
+        match tool.call(&flow, &greeting_html()).await {
+            Err(ToolError::Failed(error)) => {
+                assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            other => panic!("not refused: {:?}", other.is_ok()),
+        }
+        // Outside the user's workspace the call is refused before anything is read.
+        let outside = ToolContext {
+            workspace: fx.other_ws,
+            ..flow
+        };
+        match tool.call(&outside, &greeting_html()).await {
+            Err(ToolError::Failed(error)) => {
+                assert_eq!(error.status_code(), StatusCode::NOT_FOUND);
+            }
+            other => panic!("not refused: {:?}", other.is_ok()),
+        }
+    }
+
+    /// A workspace with a real person and a template: a draft run sends the provider and answers
+    /// with nothing of the person.
+    async fn no_person_reaches_the_provider_or_the_response(pool: PgPool, pii_opt_in: bool) {
+        {
+            let fx = Fixture::with_templates(&pool, pii_opt_in, 100_000_000).await;
+            let id = fx
+                .make_template("Welcome", "marketing", code_template_doc())
+                .await;
+            // A real person with values the model must never see.
+            let person = Uuid::now_v7();
+            sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, $3)")
+                .bind(person)
+                .bind(fx.ws.as_uuid())
+                .bind(json!({"plan": "SECRET-PLAN", "first_name": "SECRET-NAME"}))
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO identities (id, workspace_id, person_id, kind, value) \
+                 VALUES ($1, $2, $3, 'email', 'secret.person@example.org')",
+            )
+            .bind(Uuid::now_v7())
+            .bind(fx.ws.as_uuid())
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let sent = fx.fake.call_count();
+            fx.fake.push(answer("draft_template", unknown_field_html()));
+            fx.fake.push(answer("draft_template", greeting_html()));
+
+            let reply = fx.draft(template_run(&id, "copy")).await;
+
+            assert_eq!(reply.body["status"], "valid", "{:?}", reply.body);
+            for request in fx.requests_after(sent) {
+                let text = everything(&request);
+                for secret in ["SECRET-PLAN", "SECRET-NAME", "secret.person"] {
+                    assert!(!text.contains(secret), "{secret} reached the provider");
+                }
+                assert!(text.contains("person.first_name") || text.contains("first_name (string)"));
+            }
+            // The renders are of the sample person, never of a real one.
+            let body = reply.body.to_string();
+            for secret in ["SECRET-PLAN", "SECRET-NAME", "secret.person"] {
+                assert!(!body.contains(secret), "{secret} reached the response");
+            }
+            assert!(
+                reply.body["renders"]["after"]["html"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Hi sample")
+            );
+            // The stored row names no person.
+            let stored: String = sqlx::query_scalar(
+                "SELECT row_to_json(d)::text FROM ai_drafts d WHERE id = $1::uuid",
+            )
+            .bind(reply.body["id"].as_str().unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(!stored.contains("SECRET") && !stored.contains(&person.to_string()));
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_model_context_and_the_response_hold_no_person(pool: PgPool) {
+        no_person_reaches_the_provider_or_the_response(pool, false).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_model_context_and_the_response_hold_no_person_even_with_the_pii_opt_in(
+        pool: PgPool,
+    ) {
+        no_person_reaches_the_provider_or_the_response(pool, true).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_run_over_budget_is_402_and_sends_nothing(pool: PgPool) {
+        let broke = Fixture::with_templates(&pool, false, 1_000).await;
+        let id = broke
+            .make_template("Welcome", "marketing", code_template_doc())
+            .await;
+        let sent = broke.fake.call_count();
+
+        let drafted = broke.draft(template_run(&id, "copy")).await;
+
+        assert_eq!(
+            drafted.status,
+            StatusCode::PAYMENT_REQUIRED,
+            "{:?}",
+            drafted.body
+        );
+        assert_eq!(broke.fake.call_count(), sent);
+        assert_eq!(broke.count("ai_drafts").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_over_the_context_limit_is_refused_before_anything_is_sent(pool: PgPool) {
+        let fx = Fixture::with_templates(&pool, false, 100_000_000).await;
+        let mut document = code_template_doc();
+        document["email"]["html"] = json!(format!(
+            "<p>{}</p><a href=\"{{{{ system.unsubscribe_url }}}}\">u</a>",
+            "x".repeat(crate::assistant::template_context::MAX_DOCUMENT_BYTES)
+        ));
+        let id = fx.make_template("Big", "marketing", document).await;
+        let sent = fx.fake.call_count();
+
+        let reply = fx.draft(template_run(&id, "copy")).await;
+
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "ai_template_too_large");
+        assert_eq!(fx.fake.call_count(), sent);
     }
 }

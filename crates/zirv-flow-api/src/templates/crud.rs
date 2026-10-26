@@ -73,7 +73,7 @@ impl TemplateCategoryRequest {
     }
 }
 
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct TemplateBody {
     id: Uuid,
     #[schema(example = "Order shipped")]
@@ -122,7 +122,7 @@ impl From<&Template> for TemplateBody {
 }
 
 /// The one editable copy of a template's content.
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct TemplateDraftBody {
     /// The content document. It may be incomplete; only a publish validates it.
     #[schema(value_type = Object)]
@@ -157,7 +157,7 @@ impl From<&TemplateDraft> for TemplateDraftBody {
 }
 
 /// A template with its draft.
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(crate) struct TemplateDetailBody {
     #[serde(flatten)]
     template: TemplateBody,
@@ -165,7 +165,7 @@ pub(crate) struct TemplateDetailBody {
 }
 
 impl TemplateDetailBody {
-    fn new(template: &Template, draft: &TemplateDraft) -> Self {
+    pub(crate) fn new(template: &Template, draft: &TemplateDraft) -> Self {
         Self {
             template: TemplateBody::from(template),
             draft: TemplateDraftBody::from(draft),
@@ -243,7 +243,7 @@ pub(crate) fn check_name(name: &str) -> Result<&str, ApiError> {
 ///
 /// The result is the document at the current schema, which is what a draft is stored as: an
 /// older document is migrated on the way in.
-fn check_draft(template: &Template, document: &Value) -> Result<Value, ApiError> {
+pub(crate) fn check_draft(template: &Template, document: &Value) -> Result<Value, ApiError> {
     let doc = parse_document(document)?;
     check_matches(template, &doc)?;
     content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;

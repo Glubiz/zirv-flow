@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use hashbrown::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_ai::{
@@ -40,6 +40,8 @@ use super::prompt::{
     render_stream_context,
 };
 use super::segment_context::{self, Placeholders};
+use super::template_context::{TemplateContext, render_template_context};
+use super::tools::draft_template::{self, TemplateTask};
 use super::tools::{self, draft_manifest, draft_mapping, draft_segment, explain_segment};
 use crate::AppState;
 use crate::problem::ApiError;
@@ -59,6 +61,9 @@ enum CaseKind {
     Mapping,
     Manifest,
     Segment,
+    /// A change to a template's document: the case holds the document and the task, and the
+    /// properties are checked on `{"document", "subject_variants"}`.
+    Template,
     /// An explanation of a saved segment: the case holds its definition, and the properties are
     /// checked on the explanation.
     Explain,
@@ -71,6 +76,7 @@ impl CaseKind {
             Self::Mapping => Some(DraftKind::Mapping),
             Self::Manifest => Some(DraftKind::Manifest),
             Self::Segment => Some(DraftKind::Segment),
+            Self::Template => Some(DraftKind::Template),
             Self::Explain => None,
         }
     }
@@ -88,6 +94,7 @@ impl CaseKind {
             Self::Mapping => "mapping",
             Self::Manifest => "manifest",
             Self::Segment => "segment",
+            Self::Template => "template",
             Self::Explain => "explain",
         }
     }
@@ -270,6 +277,12 @@ pub(crate) struct GoldenCase {
     /// The saved definition: what an explanation explains, and what a segment draft starts from.
     #[serde(default)]
     definition: Option<Value>,
+    /// The template's document, for a template case.
+    #[serde(default)]
+    template: Option<Value>,
+    /// What to do to the template, for a template case.
+    #[serde(default)]
+    task: Option<TemplateTask>,
     expect: Vec<Expect>,
     /// What a good model answered, as the arguments of its tool call, in order. CI answers with
     /// these; an operator's run does not use them.
@@ -390,6 +403,22 @@ impl GoldenCase {
         }
     }
 
+    /// The merge fields a template draft is checked against, built from the case alone.
+    fn field_catalog(&self) -> zirv_flow_templates::FieldCatalog {
+        let mut catalog = zirv_flow_templates::FieldCatalog::default();
+        for entry in &self.traits {
+            catalog.person.insert(entry.key.clone(), entry.trait_type);
+        }
+        for event in &self.events {
+            for property in &event.properties {
+                catalog
+                    .event
+                    .insert(property.name.clone(), property.property_type);
+            }
+        }
+        catalog.with_reserved_email()
+    }
+
     /// What a mapping draft is checked against, built from the case alone.
     fn mapping_check(&self) -> Result<MappingCheck, String> {
         let header = Header::new(self.fields.iter().map(|field| field.name.clone()).collect())
@@ -508,6 +537,11 @@ enum Grader {
         catalog: Catalog,
         placeholders: Placeholders,
     },
+    Template {
+        task: TemplateTask,
+        base: Value,
+        catalog: zirv_flow_templates::FieldCatalog,
+    },
     Explain {
         definition: Value,
     },
@@ -542,6 +576,23 @@ fn grade(
                 Err(left)
             }
         }
+        Grader::Template {
+            task,
+            base,
+            catalog,
+        } => draft_template::apply(*task, base, arguments).and_then(|drafted| {
+            // The pure part of the validation a publish applies; the renderer is not run.
+            let lines =
+                draft_template::issue_lines(&zirv_flow_templates::validate(&drafted.doc, catalog));
+            if lines.is_empty() {
+                Ok(json!({
+                    "document": drafted.document,
+                    "subject_variants": drafted.subject_variants,
+                }))
+            } else {
+                Err(lines)
+            }
+        }),
         Grader::Explain { definition } => explain_segment::check_explanation(arguments, definition),
     };
     match checked {
@@ -606,6 +657,53 @@ fn prepare(case: &GoldenCase) -> Result<(Grader, ChatRequest), String> {
                 Grader::Segment {
                     catalog: case.catalog(),
                     placeholders,
+                },
+                request,
+            ))
+        }
+        CaseKind::Template => {
+            let base = case
+                .template
+                .clone()
+                .ok_or_else(|| "a template case needs a template".to_owned())?;
+            let task = case
+                .task
+                .ok_or_else(|| "a template case needs a task".to_owned())?;
+            let catalog = case.field_catalog();
+            let context = render_template_context(&TemplateContext {
+                name: "Golden",
+                channel: "email",
+                category: "marketing",
+                document: &base,
+                traits: catalog
+                    .person
+                    .iter()
+                    .map(|(key, kind)| (key.clone(), kind.as_str().to_owned()))
+                    .collect(),
+                event_properties: catalog
+                    .event
+                    .iter()
+                    .map(|(name, kind)| (name.clone(), kind.as_str().to_owned()))
+                    .collect(),
+                themes: Vec::new(),
+                snippets: Vec::new(),
+                task,
+            })
+            .map_err(|error| error.detail().to_owned())?;
+            let request = build_request(
+                DraftKind::Template,
+                privacy,
+                context,
+                &case.prompt,
+                None,
+                spec,
+            )
+            .map_err(invalid)?;
+            Ok((
+                Grader::Template {
+                    task,
+                    base,
+                    catalog,
                 },
                 request,
             ))
@@ -792,6 +890,7 @@ mod tests {
         assert!(kinds.iter().filter(|kind| **kind == "mapping").count() >= 2);
         assert!(kinds.iter().filter(|kind| **kind == "manifest").count() >= 2);
         assert!(kinds.iter().filter(|kind| **kind == "segment").count() >= 2);
+        assert!(kinds.iter().filter(|kind| **kind == "template").count() >= 5);
         assert!(kinds.contains(&"explain"));
     }
 
@@ -807,6 +906,25 @@ mod tests {
         assert!(repairing.contains(&CaseKind::Mapping));
         assert!(repairing.contains(&CaseKind::Manifest));
         assert!(repairing.contains(&CaseKind::Segment));
+        assert!(repairing.contains(&CaseKind::Template));
+    }
+
+    #[tokio::test]
+    async fn the_template_cases_cover_the_four_tasks() {
+        let mut tasks = Vec::new();
+        for case in corpus().unwrap() {
+            if case.kind == CaseKind::Template {
+                tasks.push(case.task.unwrap());
+            }
+        }
+        for task in [
+            TemplateTask::Copy,
+            TemplateTask::SubjectVariants,
+            TemplateTask::BlockLayout,
+            TemplateTask::Translation,
+        ] {
+            assert!(tasks.contains(&task), "{task:?}");
+        }
     }
 
     #[tokio::test]
