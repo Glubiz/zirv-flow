@@ -113,9 +113,52 @@ pub async fn list_preview_people(
     ))
 }
 
+/// How many merged-away hops [`lock_current_person`] follows before it gives up.
+const MERGE_HOPS: usize = 3;
+
+/// Resolves `person` to the person they are now and locks that row `FOR KEY SHARE` until the
+/// transaction ends. A merge locks its group `FOR UPDATE` before it moves saved rows, so it waits
+/// for this transaction and then sees the row written under the lock; one that committed first is
+/// found by the re-read after the lock, which follows `merged_into` to the survivor. The foreign
+/// key alone would not do: it takes the same lock only at the insert, after the merge has looked.
+async fn lock_current_person(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    person: Uuid,
+) -> Result<Option<Uuid>, StoreError> {
+    let mut target = person;
+    for _ in 0..MERGE_HOPS {
+        let Some(current) = current_person(&mut *connection, workspace, target).await? else {
+            return Ok(None);
+        };
+        sqlx::query("SELECT id FROM people WHERE workspace_id = $1 AND id = $2 FOR KEY SHARE")
+            .bind(workspace.as_uuid())
+            .bind(current)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+        // A locking read can return the row as it was before a merge that committed during the
+        // wait, so ask again with a plain read.
+        let merged_into: Option<Option<Uuid>> = sqlx::query_scalar(
+            "SELECT merged_into FROM people WHERE workspace_id = $1 AND id = $2",
+        )
+        .bind(workspace.as_uuid())
+        .bind(current)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::query)?;
+        match merged_into {
+            Some(None) => return Ok(Some(current)),
+            Some(Some(survivor)) => target = survivor,
+            None => return Ok(None),
+        }
+    }
+    Err(StoreError::retryable_race())
+}
+
 /// Saves `person` (the survivor, when it was merged away) on the template, in the caller's
-/// transaction. The second value is false when the person was already saved. The template row is
-/// locked first, so two adds cannot both pass the limit.
+/// transaction. The second value is false when the person was already saved. The person is locked
+/// against a concurrent merge, and then the template row, so two adds cannot both pass the limit.
 pub async fn add_preview_person(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -123,10 +166,12 @@ pub async fn add_preview_person(
     person: Uuid,
     added_by: Option<UserId>,
 ) -> Result<(PreviewPerson, bool), PreviewPersonError> {
-    lock_live_template(connection, workspace, template).await?;
-    let person = current_person(&mut *connection, workspace, person)
+    // The person first, then the template: a merge holds the person and then writes rows that
+    // refer to the template, so the other order could deadlock with it.
+    let person = lock_current_person(connection, workspace, person)
         .await?
         .ok_or(PreviewPersonError::NotFound)?;
+    lock_live_template(connection, workspace, template).await?;
     let held: Option<Row> = sqlx::query_as(
         "SELECT person_id, created_at FROM template_preview_people \
          WHERE template_id = $1 AND person_id = $2",
@@ -351,5 +396,70 @@ mod tests {
         assert!(matches!(again, Ok((_, false))));
         assert!(elsewhere.is_ok());
         assert!(matches!(unknown, Err(PreviewPersonError::NotFound)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_add_that_waits_for_a_merge_lands_on_the_survivor(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let template = create(&pool, ws, "Welcome").await;
+        let (survivor, loser) = (person(&pool, ws, "s").await, person(&pool, ws, "l").await);
+
+        // The merge, held open: it locks the group as the real one does, points the loser at the
+        // survivor and moves the saved rows.
+        let mut merge = crate::begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = ANY($1) ORDER BY id FOR UPDATE")
+            .bind(vec![survivor, loser])
+            .fetch_all(&mut *merge)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+            .bind(loser)
+            .bind(survivor)
+            .execute(&mut *merge)
+            .await
+            .unwrap();
+        move_to_survivor(&mut merge, ws, &[loser], survivor)
+            .await
+            .unwrap();
+
+        let adding = {
+            let pool = pool.clone();
+            let template = template.id;
+            tokio::spawn(async move {
+                let mut tx = crate::begin(&pool).await.unwrap();
+                let added = add_preview_person(&mut tx, ws, template, loser, None)
+                    .await
+                    .unwrap();
+                crate::commit(tx).await.unwrap();
+                added
+            })
+        };
+        // Wait until the add is blocked on the merge's lock.
+        for attempt in 0..500 {
+            assert!(attempt < 499, "the add never waited for the merge");
+            let blocked: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if blocked > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        crate::commit(merge).await.unwrap();
+
+        let (saved, created) = adding.await.unwrap();
+
+        assert!(created);
+        assert_eq!(saved.person_id, survivor);
+        let rows: Vec<Uuid> = sqlx::query_scalar("SELECT person_id FROM template_preview_people")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, [survivor]);
     }
 }
