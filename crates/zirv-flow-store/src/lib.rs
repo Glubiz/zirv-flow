@@ -233,19 +233,20 @@ pub use privacy::{
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;
 pub use segments::{
-    CADENCE_MINUTES, CatalogDetails, CatalogSnapshot, ClearFields, DEFAULT_CADENCE_MINUTES,
-    DataAge, DirtyBatch, EXPLAIN_EVENT_CAP, EventDetail, ExplainConsent, ExplainEvent,
-    ExplainEventScope, ExplainPerson, FeedingSource, HistoryCursor, HistoryRow, MemberRow,
-    MembershipCause, NewSegment, NewSegmentVersion, PropertyDetail, REFRESH_JOB_KIND,
+    CADENCE_MINUTES, CatalogDetails, CatalogSnapshot, ClearFields, CompiledCondition,
+    DEFAULT_CADENCE_MINUTES, DataAge, DirtyBatch, EXPLAIN_EVENT_CAP, EventDetail, ExplainConsent,
+    ExplainEvent, ExplainEventScope, ExplainPerson, FeedingSource, HistoryCursor, HistoryRow,
+    MemberRow, MembershipCause, NewSegment, NewSegmentVersion, PropertyDetail, REFRESH_JOB_KIND,
     REFRESH_LOCK_CLASS, ReevaluateApply, RefreshApply, RefreshOutcome, RefreshRequest,
     RefreshTrigger, SampleRow, Segment, SegmentError, SegmentPatch, SegmentRef, SegmentVersion,
     SqlParam, SqlQuery, TopicDetail, TraitDetail, apply_reevaluation, apply_refresh,
     archive_segment, begin_segment_snapshot, create_segment, decision_cause_kind, enqueue_refresh,
-    explain_clear_fields, find_segment, find_segment_version, list_segment_versions, list_segments,
-    load_explain_person, lock_reevaluation, lock_segment_refresh, lock_segments, membership_cause,
-    membership_trace, read_segment_catalog, reconcile_segment_schedules, reevaluation_order,
-    run_person_batch, run_segment_preview, segment_catalog, segment_catalog_details, segment_cron,
-    segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
+    evaluate_conditions, explain_clear_fields, find_segment, find_segment_version,
+    list_segment_versions, list_segments, load_explain_person, lock_reevaluation,
+    lock_segment_refresh, lock_segments, membership_cause, membership_trace, read_segment_catalog,
+    reconcile_segment_schedules, reevaluation_order, run_person_batch, run_segment_preview,
+    segment_catalog, segment_catalog_details, segment_cron, segment_data_age, segment_history_page,
+    segment_members_page, snapshot_now, update_segment,
 };
 pub use send_limits::{
     CAP_LOCK_CLASS, CapMode, CapVerdict, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits,
@@ -270,8 +271,8 @@ pub use snippets::{
     LockedSnippet, NewSnippet, Snippet, SnippetDraft, SnippetError, SnippetPatch, SnippetTemplate,
     SnippetThemeUse, SnippetUse, SnippetVersion, SnippetVersionSummary, archive_snippet,
     create_snippet, find_snippet, find_snippet_draft, find_snippet_version, list_snippet_versions,
-    list_snippets, lock_snippet, publish_snippet, save_snippet_draft, snippet_where_used,
-    update_snippet,
+    list_snippets, lock_snippet, publish_snippet, save_snippet_draft, snippet_template_counts,
+    snippet_where_used, update_snippet,
 };
 pub use sources::{
     DiscoveredStream, NewOAuthState, NewSource, OAuthState, RefreshError, Source, SourceUpdate,
@@ -310,13 +311,14 @@ pub use sync_runs::{
     sweep_unreached,
 };
 pub use templates::{
-    LockedTemplate, MAX_PREVIEW_PEOPLE, NewTemplate, PreviewPerson, PreviewPersonError, Template,
-    TemplateDraft, TemplateError, TemplateFieldCatalog, TemplateFlowUse, TemplatePatch,
-    TemplateUse, TemplateVersion, TemplateVersionSummary, active_flows_using, add_preview_person,
-    archive_template, create_template, document_sender, find_template, find_template_draft,
-    find_template_version, list_preview_people, list_template_versions, list_templates,
-    lock_template, publish_template, read_template_field_catalog, remove_preview_person,
-    save_template_draft, template_where_used, update_template,
+    ExtrasRequest, LoadedInputs, LoadedSnippet, LockedTemplate, MAX_PREVIEW_PEOPLE, NewTemplate,
+    PreviewPerson, PreviewPersonError, Template, TemplateDraft, TemplateError,
+    TemplateFieldCatalog, TemplateFlowUse, TemplatePatch, TemplateUse, TemplateVersion,
+    TemplateVersionSummary, ThemeRequest, active_flows_using, add_preview_person, archive_template,
+    create_template, document_sender, find_template, find_template_draft, find_template_version,
+    list_preview_people, list_template_versions, list_templates, load_render_inputs, lock_template,
+    publish_template, read_template_field_catalog, remove_preview_person, save_template_draft,
+    template_where_used, update_template,
 };
 pub use test_sends::{
     ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
@@ -325,14 +327,14 @@ pub use test_sends::{
     delete_allowlist_by_hash, delete_allowlist_entry, delete_test_sends_before,
     delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
     is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
-    reserve_test_send, test_send_may_go,
+    record_test_send_versions, reserve_test_send, test_send_may_go,
 };
 pub use themes::{
     EffectiveTheme, LockedTheme, NewTheme, Theme, ThemeChoice, ThemeDraft, ThemeError, ThemePatch,
     ThemeTemplate, ThemeUse, ThemeVersion, ThemeVersionSummary, archive_theme, create_theme,
     effective_theme, find_theme, find_theme_draft, find_theme_version, footer_snippet_usable,
-    list_theme_versions, list_themes, lock_theme, publish_theme, save_theme_draft,
-    set_default_theme, theme_where_used, update_theme,
+    list_theme_tokens, list_theme_versions, list_themes, lock_theme, publish_theme,
+    save_theme_draft, set_default_theme, theme_template_counts, theme_where_used, update_theme,
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,

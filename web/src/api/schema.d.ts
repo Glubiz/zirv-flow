@@ -7111,6 +7111,13 @@ export interface components {
              */
             reason: string;
         };
+        /** @description A section or block left out of the render, and why. */
+        HiddenBlockBody: {
+            /** @description The id of the section or block. */
+            id: string;
+            /** @description Which condition was not met, by name; never a value. */
+            reason: string;
+        };
         HistoryBody: {
             /** @description Newest first. */
             entries: components["schemas"]["HistoryEntryBody"][];
@@ -7591,6 +7598,7 @@ export interface components {
              * @example no_consent
              */
             reason?: string | null;
+            rendered_with?: null | components["schemas"]["RenderedWithBody"];
             /**
              * @description `pending`, `sending`, `sent`, `skipped` or `failed`.
              * @example skipped
@@ -8303,6 +8311,22 @@ export interface components {
         RemoveMembersRequest: {
             /** @description At most 1000. */
             person_ids: string[];
+        };
+        /** @description A theme or snippet and the version a message was rendered with. */
+        RenderedVersionBody: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            version: number;
+        };
+        /**
+         * @description What a message was rendered with, beyond its template version. Present once the message was
+         *     rendered.
+         */
+        RenderedWithBody: {
+            /** @description The snippets it used, by id. */
+            snippets: components["schemas"]["RenderedVersionBody"][];
+            theme?: null | components["schemas"]["RenderedVersionBody"];
         };
         ReplayBody: {
             dry_run: boolean;
@@ -9313,6 +9337,14 @@ export interface components {
             /** @description The templates of the flow that hold the snippet. */
             template_ids: string[];
         };
+        /** @description A snippet in the list, with how many templates hold it. */
+        SnippetListItemBody: components["schemas"]["SnippetBody"] & {
+            /**
+             * Format: int64
+             * @description How many templates, not archived, hold a block for it in their draft or current version.
+             */
+            used_by_templates: number;
+        };
         /** @description The rendered snippet and its validation results. */
         SnippetPreviewBody: {
             /** @description The sample document's HTML, with inert tracking links. */
@@ -9749,6 +9781,8 @@ export interface components {
             content_type: string;
             /** @description An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers. */
             headers: components["schemas"]["TemplateHeaderBody"][];
+            /** @description The sections and blocks this person does not see because their `visible_if` was false. */
+            hidden_blocks: components["schemas"]["HiddenBlockBody"][];
             /** @description An email's HTML, with inert tracking links. */
             html?: string | null;
             /** @description The same checks a publish makes, against the workspace's fields now. */
@@ -9786,6 +9820,8 @@ export interface components {
         /** @description The new version and the template after the publish. */
         TemplatePublishedBody: {
             template: components["schemas"]["TemplateBody"];
+            /** @description The active flows that send this template, which now send the new version. */
+            used_by: components["schemas"]["TemplateUseBody"][];
             version: components["schemas"]["TemplateVersionBody"];
         };
         /** @description One flow with a version that names the template. */
@@ -10002,6 +10038,17 @@ export interface components {
             flow_state: string;
             /** @description The templates of the flow that use the theme. */
             template_ids: string[];
+        };
+        /** @description A theme in the list, with what a card shows. */
+        ThemeListItemBody: components["schemas"]["ThemeBody"] & {
+            /** @description The current version's tokens, or the draft's while the theme has never been published. */
+            tokens: Record<string, never>;
+            /**
+             * Format: int64
+             * @description How many templates, not archived, use the theme: their draft or current version names it,
+             *     and, for the default theme, they follow the default.
+             */
+            used_by_templates: number;
         };
         /** @description The rendered sample and the theme's validation results. */
         ThemePreviewBody: {
@@ -22694,7 +22741,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnippetBody"][];
+                    "application/json": components["schemas"]["SnippetListItemBody"][];
                 };
             };
             /** @description archived is not true or false */
@@ -26401,7 +26448,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ThemeBody"][];
+                    "application/json": components["schemas"]["ThemeListItemBody"][];
                 };
             };
             /** @description archived is not true or false */

@@ -28,18 +28,18 @@ use zirv_flow_engine::{
     StepContext, StepInput, Transition, WaitChange, step as engine_step,
 };
 use zirv_flow_segments::{
-    Catalog, Outcome as Verdict, PersonSnapshot, SnapshotEvent, TraitStorage, compile, evaluate,
-    parse_and_validate,
+    Catalog, Outcome as Verdict, PersonSnapshot, SnapshotEvent, TraitStorage, compile_condition,
+    evaluate, parse_and_validate,
 };
 use zirv_flow_store::{
     EffectError, Enrollment, EnrollmentStatus, EnrollmentUpdate, FlowState, FlowTraitWrite,
     GraphPoint, NewDecision, NewJob, NewStepExecution, NewWait, SEND_JOB_KIND, STEP_JOB_KIND,
     SYNC_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, StoredEvent,
     WEBHOOK_JOB_KIND, append_decisions, apply_flow_list, apply_flow_trait, clear_waits, enqueue,
-    find_enrollment, find_event_of_person, find_flow_version, flow_state_for_step, hold_enrollment,
-    lock_enrollment, record_steps, register_wait, release_enrollment, reopen_failed_step,
-    run_person_batch, save_enrollment, segment_catalog, settle_wait_step, step_zones,
-    unhealthy_inputs, wait_filters,
+    evaluate_conditions, find_enrollment, find_event_of_person, find_flow_version,
+    flow_state_for_step, hold_enrollment, lock_enrollment, record_steps, register_wait,
+    release_enrollment, reopen_failed_step, save_enrollment, segment_catalog, settle_wait_step,
+    step_zones, unhealthy_inputs, wait_filters,
 };
 
 use super::delivery_send::Queued;
@@ -924,22 +924,6 @@ fn condition_deps(
     Some(compiled.deps.to_value())
 }
 
-fn compile_condition(
-    condition: &Value,
-    catalog: &Catalog,
-    storage: &TraitStorage,
-    now: OffsetDateTime,
-) -> Result<zirv_flow_segments::CompiledSegment, JobError> {
-    let mut wire = condition
-        .as_object()
-        .cloned()
-        .ok_or_else(|| JobError::new("a branch condition is not an object"))?;
-    wire.insert("v".to_owned(), 1.into());
-    parse_and_validate(&Value::Object(wire), catalog)
-        .and_then(|definition| compile(&definition, catalog, storage, now))
-        .map_err(|_| JobError::new("a branch condition no longer compiles"))
-}
-
 /// Evaluates the conditions of a branch for the enrollment's person, in this transaction, and
 /// records the results (never the values they were computed from).
 async fn branch(
@@ -951,20 +935,20 @@ async fn branch(
     let now = walk.now;
     let person = walk.enrollment.person_id;
     let workspace = walk.workspace;
-    let mut results = Vec::with_capacity(conditions.len());
+    let mut compiled = Vec::with_capacity(conditions.len());
     for condition in conditions {
         let (catalog, storage) = walk
             .catalog(conn)
             .await
             .map_err(|error| StepFailure::at(node, error))?;
-        let compiled = compile_condition(condition, catalog, storage, now)
-            .map_err(|error| StepFailure::at(node, error))?;
-        let query = sql_query(compiled.batch_sql());
-        let members = run_person_batch(&mut *conn, workspace, &query, &[person])
-            .await
-            .map_err(|error| StepFailure::at(node, error))?;
-        results.push(members.contains(&person));
+        let query = compile_condition(condition, catalog, storage, now).map_err(|_| {
+            StepFailure::at(node, JobError::new("a branch condition no longer compiles"))
+        })?;
+        compiled.push(sql_query(query.batch_sql()));
     }
+    let results = evaluate_conditions(&mut *conn, workspace, person, &compiled)
+        .await
+        .map_err(|error| StepFailure::at(node, error))?;
     let taken = results
         .iter()
         .position(|matched| *matched)

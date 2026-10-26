@@ -28,7 +28,7 @@ pub(crate) const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
 
 /// The host asset URLs get when the server has no `https` public URL: the renderer takes `https`
 /// URLs only, so the image is placed but the browser cannot load it.
-const INERT_ASSET_HOST: &str = "https://preview.sample.invalid";
+pub(crate) const INERT_ASSET_HOST: &str = "https://preview.sample.invalid";
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct SnippetPreviewRequest {

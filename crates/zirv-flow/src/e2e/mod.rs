@@ -517,6 +517,121 @@ mod tests {
         world.finish().await;
     }
 
+    /// Creates and publishes a snippet or a theme through the API; returns its id.
+    async fn published(world: &World, kind: &str, name: &str, content: Value) -> String {
+        let (path, field) = match kind {
+            "snippet" => ("snippets", "content"),
+            _ => ("themes", "tokens"),
+        };
+        let created = world
+            .api_ok(
+                "POST",
+                &format!("/{path}"),
+                Some(json!({"name": name, field: content})),
+                StatusCode::CREATED,
+            )
+            .await;
+        let id = created["id"].as_str().expect("an id").to_owned();
+        world
+            .api_ok(
+                "POST",
+                &format!("/{path}/{id}/publish"),
+                None,
+                StatusCode::CREATED,
+            )
+            .await;
+        id
+    }
+
+    /// Preview equals send for the inputs of #307: a named theme with a footer snippet, a snippet
+    /// block, and blocks whose `visible_if` is true and false for the person. The preview route
+    /// and the send job resolve and render through the same loader, conversion and pool call, so
+    /// the HTML the sink captures is the preview apart from the tracking tokens.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_themed_email_with_snippets_and_conditions_is_the_preview_apart_from_tracking(
+        pool: PgPool,
+    ) {
+        let world = World::start(pool, PUBLIC_URL).await;
+        let (sender, _) = world
+            .verified_sender("example.com", "news@example.com")
+            .await;
+        let smtp = world.smtp_destination().await;
+        let legal = published(
+            &world,
+            "snippet",
+            "Legal",
+            json!({"blocks": [
+                {"type": "heading", "id": "legal_title", "level": 3, "text": "FOOTER SNIPPET TEXT"},
+                {"type": "text", "id": "legal_link", "content":
+                    "<p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></p>"}
+            ]}),
+        )
+        .await;
+        let promo = published(
+            &world,
+            "snippet",
+            "Promo",
+            json!({"blocks": [
+                {"type": "heading", "id": "promo_title", "level": 2, "text": "PROMO SNIPPET TEXT"}
+            ]}),
+        )
+        .await;
+        let theme = published(
+            &world,
+            "theme",
+            "Brand",
+            json!({"primary": "#aa0000", "footer_snippet": legal}),
+        )
+        .await;
+        let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Themed", "sender": sender, "lang": "en", "category": "marketing",
+            "theme": {"id": theme},
+            "sections": [{"id": "main", "columns": [[
+                {"type": "snippet", "id": "promo", "snippet_id": promo},
+                {"type": "text", "id": "shown", "content": "<p>CONDITION MET TEXT</p>",
+                 "visible_if": {"identifier": "email"}},
+                {"type": "text", "id": "hidden", "content": "<p>CONDITION UNMET TEXT</p>",
+                 "visible_if": {"identifier": "phone"}}
+            ]]}]
+        }});
+        let template = world.template("Themed", document).await;
+        world.event_schema("order_placed").await;
+        let segment = world
+            .segment("Buyers", json!({"v": 1, "event": "order_placed"}))
+            .await;
+        world
+            .flow(
+                "Themed flow",
+                json!({"v": 1, "nodes": [send_node("themed", &template, &smtp),
+                                         {"id": "end", "type": "exit"}],
+                       "edges": [edge("themed", "end")]}),
+                json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+                       "reentry": {"mode": "once"}}),
+            )
+            .await;
+        let person = world.subscribed_person(ADDRESS).await;
+        world.track_order(ADDRESS).await;
+        world.settle().await;
+
+        let captured = world.sink.messages();
+        assert_eq!(captured.len(), 1, "the themed email was sent");
+        let sent = without_tracking(&mail::part(&captured[0].data, "text/html").expect("html"));
+        let previewed = without_tracking(&preview_html(&world, &template, person).await);
+
+        assert_eq!(sent, previewed);
+        for present in [
+            "PROMO SNIPPET TEXT",
+            "FOOTER SNIPPET TEXT",
+            "CONDITION MET TEXT",
+            "#aa0000",
+        ] {
+            assert!(sent.contains(present), "{present} is in the sent HTML");
+        }
+        assert!(!sent.contains("CONDITION UNMET TEXT"));
+        world.finish().await;
+    }
+
     /// The smoke run of the send benchmark scenario (#233): the same shape the bench scripts
     /// seed (a verified domain, one SMTP destination, a published block template and a published
     /// HTML template, a manual flow with an `action.send` node per template), small N, through
