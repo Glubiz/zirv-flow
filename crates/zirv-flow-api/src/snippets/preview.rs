@@ -24,7 +24,7 @@ use crate::problem::{ApiError, Problem, TemplateIssueProblem};
 use crate::templates::{field_catalog, issue_problems};
 
 /// Where an inert link points: the structure of a real tracked link, none of its meaning.
-const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
+pub(crate) const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
 
 /// The host asset URLs get when the server has no `https` public URL: the renderer takes `https`
 /// URLs only, so the image is placed but the browser cannot load it.
@@ -70,7 +70,7 @@ fn sample_document(blocks: Vec<Block>) -> TemplateDocument {
 }
 
 /// The stand-in for the theme logo in a preview, which has no theme.
-const THEME_LOGO_STAND_IN: &str = "https://preview.sample.invalid/theme-logo.png";
+pub(crate) const THEME_LOGO_STAND_IN: &str = "https://preview.sample.invalid/theme-logo.png";
 
 /// The stand-in for an asset that is missing or deleted.
 const MISSING_ASSET_STAND_IN: &str = "https://preview.sample.invalid/missing-asset.png";
@@ -106,7 +106,7 @@ fn soften_references(content: &mut SnippetContent, live: &[(String, Asset)]) -> 
 }
 
 /// The URL of each named asset, by the id as the block spells it.
-fn asset_urls(assets: &[(String, Asset)], public_url: Option<&str>) -> RenderExtras {
+pub(crate) fn asset_urls(assets: &[(String, Asset)], public_url: Option<&str>) -> RenderExtras {
     let base = public_url
         .filter(|url| url.starts_with("https://"))
         .unwrap_or(INERT_ASSET_HOST);

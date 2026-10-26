@@ -39,6 +39,7 @@ mod suppressions;
 mod sync_runs;
 mod templates;
 mod test_sends;
+mod themes;
 mod tracking;
 mod webhooks;
 mod workspace_credentials;
@@ -266,11 +267,11 @@ pub use sessions::{
     delete_sessions_for_user, find_active_session, touch_session,
 };
 pub use snippets::{
-    LockedSnippet, NewSnippet, Snippet, SnippetDraft, SnippetError, SnippetFlowUse, SnippetPatch,
-    SnippetTemplate, SnippetThemeUse, SnippetUse, SnippetVersion, SnippetVersionSummary,
-    archive_snippet, create_snippet, find_snippet, find_snippet_draft, find_snippet_version,
-    list_snippet_versions, list_snippets, lock_snippet, publish_snippet, save_snippet_draft,
-    snippet_where_used, update_snippet,
+    LockedSnippet, NewSnippet, Snippet, SnippetDraft, SnippetError, SnippetPatch, SnippetTemplate,
+    SnippetThemeUse, SnippetUse, SnippetVersion, SnippetVersionSummary, archive_snippet,
+    create_snippet, find_snippet, find_snippet_draft, find_snippet_version, list_snippet_versions,
+    list_snippets, lock_snippet, publish_snippet, save_snippet_draft, snippet_where_used,
+    update_snippet,
 };
 pub use sources::{
     DiscoveredStream, NewOAuthState, NewSource, OAuthState, RefreshError, Source, SourceUpdate,
@@ -310,12 +311,12 @@ pub use sync_runs::{
 };
 pub use templates::{
     LockedTemplate, MAX_PREVIEW_PEOPLE, NewTemplate, PreviewPerson, PreviewPersonError, Template,
-    TemplateDraft, TemplateError, TemplateFieldCatalog, TemplatePatch, TemplateUse,
-    TemplateVersion, TemplateVersionSummary, add_preview_person, archive_template, create_template,
-    document_sender, find_template, find_template_draft, find_template_version,
-    list_preview_people, list_template_versions, list_templates, lock_template, publish_template,
-    read_template_field_catalog, remove_preview_person, save_template_draft, template_where_used,
-    update_template,
+    TemplateDraft, TemplateError, TemplateFieldCatalog, TemplateFlowUse, TemplatePatch,
+    TemplateUse, TemplateVersion, TemplateVersionSummary, active_flows_using, add_preview_person,
+    archive_template, create_template, document_sender, find_template, find_template_draft,
+    find_template_version, list_preview_people, list_template_versions, list_templates,
+    lock_template, publish_template, read_template_field_catalog, remove_preview_person,
+    save_template_draft, template_where_used, update_template,
 };
 pub use test_sends::{
     ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
@@ -325,6 +326,13 @@ pub use test_sends::{
     delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
     is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
     reserve_test_send, test_send_may_go,
+};
+pub use themes::{
+    EffectiveTheme, LockedTheme, NewTheme, Theme, ThemeChoice, ThemeDraft, ThemeError, ThemePatch,
+    ThemeTemplate, ThemeUse, ThemeVersion, ThemeVersionSummary, archive_theme, create_theme,
+    effective_theme, find_theme, find_theme_draft, find_theme_version, footer_snippet_usable,
+    list_theme_versions, list_themes, lock_theme, publish_theme, save_theme_draft,
+    set_default_theme, theme_where_used, update_theme,
 };
 pub use tracking::{
     Engagement, PreferenceChange, PreferencesSaved, TrackedMessage, Unsubscribed,

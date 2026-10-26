@@ -46,6 +46,9 @@ pub struct Problem {
     /// The templates whose drafts hold a block for a snippet (`snippet_in_use`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet_templates: Option<Vec<SegmentRefProblem>>,
+    /// The themes whose published version uses a snippet as its footer (`snippet_in_use`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet_themes: Option<Vec<SegmentRefProblem>>,
 }
 
 /// One issue of a flow.
@@ -120,6 +123,8 @@ struct SegmentExtra {
     template_issues: Option<Vec<TemplateIssueProblem>>,
     /// The templates that use a snippet (`snippet_in_use`).
     snippet_templates: Option<Vec<SegmentRefProblem>>,
+    /// The themes that use a snippet as their footer (`snippet_in_use`).
+    snippet_themes: Option<Vec<SegmentRefProblem>>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -895,18 +900,93 @@ impl ApiError {
         }
     }
 
-    /// An archive of a snippet that template drafts still hold, with those templates.
-    pub(crate) fn snippet_in_use(templates: Vec<SegmentRefProblem>) -> Self {
+    /// An archive of a snippet that template drafts or published theme footers still use, with
+    /// those templates and themes.
+    pub(crate) fn snippet_in_use(
+        templates: Vec<SegmentRefProblem>,
+        themes: Vec<SegmentRefProblem>,
+    ) -> Self {
         Self {
             code: Some("snippet_in_use"),
             segment: Some(Box::new(SegmentExtra {
                 snippet_templates: Some(templates),
+                snippet_themes: Some(themes),
                 ..SegmentExtra::default()
             })),
             ..Self::new(
                 StatusCode::CONFLICT,
-                "template drafts still use the snippet; remove it from them first",
+                "template drafts or theme footers still use the snippet; remove it from them first",
             )
+        }
+    }
+
+    /// A theme that does not pass the publish checks: every blocking issue and warning with its
+    /// code and place.
+    pub(crate) fn theme_invalid(issues: Vec<TemplateIssueProblem>) -> Self {
+        Self {
+            code: Some("theme_invalid"),
+            segment: Some(Box::new(SegmentExtra {
+                template_issues: Some(issues),
+                ..SegmentExtra::default()
+            })),
+            ..Self::unprocessable("the theme is not valid")
+        }
+    }
+
+    /// Theme tokens that are not a set of tokens at all, which a draft cannot hold.
+    pub(crate) fn theme_malformed(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("theme_malformed"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A write to an archived theme.
+    pub(crate) fn theme_archived() -> Self {
+        Self {
+            code: Some("theme_archived"),
+            ..Self::new(StatusCode::CONFLICT, "the theme is archived")
+        }
+    }
+
+    /// A publish whose draft was saved again while it was being validated.
+    pub(crate) fn theme_draft_changed() -> Self {
+        Self {
+            code: Some("theme_draft_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
+    /// A draft save that names a revision other than the current one.
+    pub(crate) fn theme_revision_mismatch() -> Self {
+        Self {
+            code: Some("theme_revision_mismatch"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the theme draft is not at the revision named; read it again",
+            )
+        }
+    }
+
+    /// An archive of the workspace default theme.
+    pub(crate) fn theme_is_default() -> Self {
+        Self {
+            code: Some("theme_is_default"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the theme is the workspace default; make another theme the default first",
+            )
+        }
+    }
+
+    /// A default that is not a published, live theme of the workspace.
+    pub(crate) fn theme_not_publishable_default(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("theme_not_publishable_default"),
+            ..Self::new(StatusCode::CONFLICT, detail)
         }
     }
 
@@ -1073,6 +1153,10 @@ impl IntoResponse for ApiError {
                 .segment
                 .as_mut()
                 .and_then(|extra| extra.snippet_templates.take()),
+            snippet_themes: self
+                .segment
+                .as_mut()
+                .and_then(|extra| extra.snippet_themes.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
