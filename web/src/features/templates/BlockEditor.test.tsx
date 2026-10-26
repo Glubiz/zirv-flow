@@ -895,6 +895,21 @@ describe("visibility", () => {
     expect(within(screen.getByRole("group", { name: "Visibility" })).queryByText("This condition can't be shown here.")).toBeNull();
   });
 
+  it.each([
+    ["an event with a where that is not a list", { event: "purchase", where: {} }],
+    ["a messages node with no aggregate", { messages: { channel: "email" } }],
+    ["an event with a window of the wrong type", { all: [{ event: "purchase", window: "last 7d" }] }],
+  ])("shows the notice and keeps the editor up for %s", async (_name, condition) => {
+    mockApi(templateRoutes({ detail: withHeading(condition) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Heading block 1" }));
+    const row = await screen.findByRole("group", { name: "Visibility" });
+    expect(within(row).getByText("This condition can't be shown here.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Heading text" })).toBeInTheDocument();
+  });
+
   it("treats a null visible_if as no condition", async () => {
     const stored = blocksDocument([{ id: "s", visible_if: null, columns: [[{ ...heading("h", "Hi"), visible_if: null }]] }], {}, 2, { theme: "none", footer: "none" });
     mockApi(templateRoutes({ detail: detailOf(stored) }));

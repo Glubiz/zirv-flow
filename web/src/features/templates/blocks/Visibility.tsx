@@ -1,3 +1,5 @@
+import { Component, type ReactNode } from "react";
+
 import { ConditionEditor, type ConditionNode } from "../../segments";
 import { FieldIssues } from "../IssueList";
 import type { TemplateIssue } from "../model";
@@ -32,6 +34,18 @@ export function Visibility({ workspaceId, value, onChange, readOnly, issues }: P
     const pointer = conditionPointer(issue);
     return pointer ? [{ pointer, code: issue.code }] : [];
   });
+  const unshown = (
+    <div className="stack">
+      <p className="notice" role="status">
+        This condition can't be shown here.
+      </p>
+      {readOnly ? null : (
+        <div>
+          <Button onClick={() => onChange(EMPTY)}>Replace with a new condition</Button>
+        </div>
+      )}
+    </div>
+  );
   return (
     <div className="stack" role="group" aria-label="Visibility">
       <div className="row">
@@ -48,19 +62,29 @@ export function Visibility({ workspaceId, value, onChange, readOnly, issues }: P
         </div>
       </div>
       <FieldIssues issues={whole} />
-      {conditional && shown ? <ConditionEditor workspaceId={workspaceId} value={value} onChange={onChange} readOnly={readOnly} issues={inside} /> : null}
-      {conditional && !shown ? (
-        <div className="stack">
-          <p className="notice" role="status">
-            This condition can't be shown here.
-          </p>
-          {readOnly ? null : (
-            <div>
-              <Button onClick={() => onChange(EMPTY)}>Replace with a new condition</Button>
-            </div>
-          )}
-        </div>
+      {conditional && shown ? (
+        <ConditionGuard value={value} fallback={unshown}>
+          <ConditionEditor workspaceId={workspaceId} value={value} onChange={onChange} readOnly={readOnly} issues={inside} />
+        </ConditionGuard>
       ) : null}
+      {conditional && !shown ? unshown : null}
     </div>
   );
+}
+
+/** Keeps a shape the check missed from taking the editor down: it shows the fallback until the condition changes. */
+class ConditionGuard extends Component<{ value: unknown; fallback: ReactNode; children: ReactNode }, { failed: boolean; seen: unknown }> {
+  override state = { failed: false, seen: this.props.value };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  static getDerivedStateFromProps(props: { value: unknown }, state: { failed: boolean; seen: unknown }) {
+    return props.value === state.seen ? null : { failed: false, seen: props.value };
+  }
+
+  override render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
 }

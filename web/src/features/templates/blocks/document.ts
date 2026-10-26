@@ -180,9 +180,52 @@ export function isEditableCondition(value: unknown): value is VisibleIf {
   const node = value as Record<string, unknown>;
   const key = keys[0];
   if (keys.length !== 1 || key === undefined) return false;
-  if (key === "all" || key === "any") return Array.isArray(node[key]) && (node[key] as unknown[]).every(isEditableCondition);
-  if (key === "not") return isEditableCondition(node[key]);
-  return key === "event" ? typeof node[key] === "string" : true;
+  const inner = node[key];
+  switch (key) {
+    case "all":
+    case "any":
+      return Array.isArray(inner) && inner.every(isEditableCondition);
+    case "not":
+      return isEditableCondition(inner);
+    case "trait":
+      return typeof inner === "string" && typeof node["op"] === "string";
+    case "event":
+      return (
+        typeof inner === "string" &&
+        (node["where"] === undefined || (Array.isArray(node["where"]) && node["where"].every(isPropertyFilter))) &&
+        (node["agg"] === undefined || isAggregate(node["agg"])) &&
+        (node["window"] === undefined || isWindow(node["window"]))
+      );
+    case "consent":
+      return isPlainObject(inner);
+    case "messages":
+      return (
+        isPlainObject(inner) &&
+        typeof inner["channel"] === "string" &&
+        isAggregate(inner["agg"]) &&
+        (inner["dimensions"] === undefined || isPlainObject(inner["dimensions"])) &&
+        (inner["window"] === undefined || isWindow(inner["window"]))
+      );
+    default:
+      return typeof inner === "string";
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPropertyFilter(value: unknown): boolean {
+  return isPlainObject(value) && typeof value["prop"] === "string" && typeof value["op"] === "string";
+}
+
+function isAggregate(value: unknown): boolean {
+  return isPlainObject(value) && typeof value["fn"] === "string" && typeof value["op"] === "string" && (value["prop"] === undefined || typeof value["prop"] === "string");
+}
+
+function isWindow(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  return typeof value["last"] === "string" || typeof value["since_trait"] === "string" || (Array.isArray(value["between"]) && value["between"].every((end) => typeof end === "string"));
 }
 
 /** Reads the `blocks` object of a stored document. A value that is not shaped like the document gives what can be read; the server decides what is valid. */
