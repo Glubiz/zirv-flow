@@ -29,6 +29,10 @@ use crate::problem::{
     FlowIssueProblem, ItemProblem, Problem, SegmentIssueProblem, SegmentRefProblem,
     TemplateIssueProblem,
 };
+use crate::segments::preview::{
+    PreviewBody as SegmentPreviewBody, PreviewRequest as SegmentPreviewRequest,
+    SampleBody as SegmentSampleBody,
+};
 use crate::segments::{self, SegmentSchemas};
 use crate::sending;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
@@ -496,9 +500,9 @@ use crate::workspaces::{
         segments::members::SegmentHistoryBody,
         segments::members::SegmentHistoryItemBody,
         segments::members::RefreshQueuedBody,
-        segments::preview::PreviewRequest,
-        segments::preview::PreviewBody,
-        segments::preview::SampleBody,
+        SegmentPreviewRequest,
+        SegmentPreviewBody,
+        SegmentSampleBody,
         segments::preview::DataAgeBody,
         segments::preview::DataSourceBody,
         templates::crud::TemplateBody,
@@ -744,11 +748,6 @@ mod tests {
         );
     }
 
-    /// Two registered types with one name overwrite each other in `components.schemas`, and only
-    /// one survives. These three pairs predate the check (segments and sources both define
-    /// them); no new type may join them.
-    const KNOWN_DUPLICATES: [&str; 3] = ["PreviewBody", "PreviewRequest", "SampleBody"];
-
     #[test]
     fn no_two_registered_schemas_share_a_name() {
         let source = include_str!("openapi.rs");
@@ -770,14 +769,33 @@ mod tests {
                 continue;
             }
             let name = path.rsplit("::").next().unwrap();
-            if let Some(first) = seen.insert(name, path)
-                && !KNOWN_DUPLICATES.contains(&name)
-            {
+            if let Some(first) = seen.insert(name, path) {
                 panic!("schema {name} is registered by {first} and {path}");
             }
         }
         assert!(seen.len() > 100, "the list was not read");
     }
+
+    #[test]
+    fn preview_schemas_match_their_registered_types() {
+        fn check<T: utoipa::ToSchema>(document: &serde_json::Value) {
+            let name = T::name();
+            assert_eq!(
+                document["components"]["schemas"][name.as_ref()],
+                serde_json::to_value(T::schema()).unwrap(),
+                "schema {name} was overwritten",
+            );
+        }
+
+        let document = serde_json::to_value(openapi()).unwrap();
+        check::<segments::preview::PreviewRequest>(&document);
+        check::<segments::preview::PreviewBody>(&document);
+        check::<segments::preview::SampleBody>(&document);
+        check::<sources::preview::PreviewRequest>(&document);
+        check::<sources::preview::PreviewBody>(&document);
+        check::<sources::manifest::SampleBody>(&document);
+    }
+
     #[test]
     fn every_operation_id_is_unique() {
         let document = serde_json::to_value(openapi()).unwrap();

@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use zirv_flow_core::contacts::{
-    FieldProblem, RegistryKey, SOURCE, STREAM, TypedField, plan, validate_contact_key,
+    FieldProblem, KEY_KIND, RegistryKey, SOURCE, STREAM, TypedField, plan, validate_contact_key,
 };
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -266,6 +266,38 @@ async fn archived_identifiers(
         .collect())
 }
 
+/// A patch keeps stored identifiers whose kind no writable definition field produces. Read
+/// the native record: the current definition no longer maps the fields it dropped.
+async fn unlisted_identifiers(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    key: &str,
+    definition: Option<&[TypedField]>,
+) -> Result<Vec<(String, String)>, StoreError> {
+    let replaced: Vec<&str> = std::iter::once(KEY_KIND)
+        .chain(
+            definition
+                .into_iter()
+                .flatten()
+                .filter_map(|typed| typed.field.identifier.as_deref()),
+        )
+        .collect();
+    sqlx::query_as(
+        "SELECT identifier ->> 'kind', identifier ->> 'value' \
+         FROM source_records, jsonb_array_elements(identifiers) identifier \
+         WHERE workspace_id = $1 AND source = $2 AND stream = $3 AND record_key = $4 \
+           AND deleted_at IS NULL AND NOT (identifier ->> 'kind' = ANY($5))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(SOURCE)
+    .bind(STREAM)
+    .bind(key)
+    .bind(&replaced)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Makes an inbox contact record replace the contact's fields: the keys the stored contact has
 /// and the record leaves out are retracted, except those of archived registry keys.
 pub(crate) async fn replace_stored_fields(
@@ -318,6 +350,7 @@ pub async fn write_contact(
         .as_ref()
         .map(|contact| live_fields(&contact.fields, &registry));
     let definition = typed_definition(&mut savepoint, workspace).await?;
+    let is_patch = matches!(&change, ContactChange::Patch(_));
     // The stored fields the write retracts: a replacement retracts all of them, a patch only
     // those the definition still lists, so it leaves the others as they are.
     let (status, fields, retracted) = match change {
@@ -347,9 +380,12 @@ pub async fn write_contact(
         retract_absent(&mut traits, retracted);
     }
     if let Some(existing) = &existing {
-        identifiers.extend(
-            archived_identifiers(&mut savepoint, workspace, &existing.fields, &registry).await?,
-        );
+        let preserved = if is_patch {
+            unlisted_identifiers(&mut savepoint, workspace, key, definition.as_deref()).await?
+        } else {
+            archived_identifiers(&mut savepoint, workspace, &existing.fields, &registry).await?
+        };
+        identifiers.extend(preserved);
     }
     let record = ProfileRecord {
         source: SOURCE.to_owned(),

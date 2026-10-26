@@ -8357,6 +8357,28 @@ export interface components {
         };
         /** @enum {string} */
         SegmentOp: "eq" | "neq" | "in" | "not_in" | "contains" | "starts_with" | "exists" | "not_exists" | "gt" | "gte" | "lt" | "lte" | "between" | "before" | "after" | "within_last" | "more_than_ago" | "within_next" | "contains_all" | "is_empty";
+        SegmentPreviewBody: {
+            /**
+             * Format: date-time
+             * @description The database time the definition was compiled at, which fixes every relative window.
+             */
+            compiled_at: string;
+            /**
+             * Format: int64
+             * @description How many people match.
+             */
+            count: number;
+            data_age: components["schemas"]["DataAgeBody"];
+            sample: components["schemas"]["SegmentSampleBody"][];
+        };
+        SegmentPreviewRequest: {
+            definition: components["schemas"]["SegmentDefinition"];
+            /**
+             * Format: int32
+             * @description People to sample, 1 to 100; default 20. The sample is the first people by id.
+             */
+            sample_size?: number | null;
+        };
         SegmentPropertyFilter: {
             op: components["schemas"]["SegmentOp"];
             prop: string;
@@ -8368,6 +8390,11 @@ export interface components {
             /** Format: uuid */
             id: string;
             name: string;
+        };
+        SegmentSampleBody: {
+            display?: null | components["schemas"]["DisplayBody"];
+            /** Format: uuid */
+            id: string;
         };
         /** @description The person is in the other segment. Cycles are rejected when the segment is saved. */
         SegmentSegmentNode: {
@@ -20042,7 +20069,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PreviewRequest"];
+                "application/json": components["schemas"]["SegmentPreviewRequest"];
             };
         };
         responses: {
@@ -20052,7 +20079,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PreviewBody"];
+                    "application/json": components["schemas"]["SegmentPreviewBody"];
                 };
             };
             /** @description Not authenticated */

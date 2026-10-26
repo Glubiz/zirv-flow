@@ -1470,6 +1470,71 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reported_usage_over_reservation_is_billed_and_counted_as_a_provider_fault(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let request = zirv_flow_ai::RequestBuilder::new(Privacy::SchemaOnly)
+            .user(vec![Content::Schema("Map columns.".into())])
+            .unwrap()
+            .max_output_tokens(10)
+            .build();
+        let input_bound = request.input_tokens_upper_bound();
+        let output_cap = request.max_output_tokens();
+        let model = &ai_config().providers[0].models[0];
+
+        for (input, output, faults) in [
+            (input_bound, output_cap, 0),
+            (input_bound + 1, 0, 1),
+            (0, output_cap + 1, 2),
+            (input_bound + 1, output_cap + 1, 3),
+        ] {
+            fx.fake
+                .push(Ok(zirv_flow_ai::fake::text_response("done", input, output)));
+            let response =
+                crate::assistant::dispatch(&fx.state, Some(fx.admin_id), fx.ws, "mapping", |_| {
+                    Ok(request.clone())
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.usage().input_tokens, input);
+            assert_eq!(response.usage().output_tokens, output);
+            let row: (i32, i32, i64, String) = sqlx::query_as(
+                "SELECT input_tokens, output_tokens, estimated_cost_micros, outcome \
+                 FROM ai_calls ORDER BY id DESC LIMIT 1",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                row,
+                (
+                    i32::try_from(input).unwrap(),
+                    i32::try_from(output).unwrap(),
+                    model.cost_micros(input, output),
+                    "ok".into()
+                )
+            );
+            let metrics = handle.render();
+            if faults == 0 {
+                assert!(
+                    !metrics.contains("zirv_flow_ai_provider_faults_total"),
+                    "{metrics}"
+                );
+            } else {
+                let expected = format!(
+                    "zirv_flow_ai_provider_faults_total{{feature=\"mapping\",reason=\"usage_over_reservation\"}} {faults}"
+                );
+                assert!(metrics.contains(&expected), "{expected} in {metrics}");
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_run_over_budget_is_402_and_sends_nothing(pool: PgPool) {
         let fx = setup(&pool, false, 1_000).await;
         let source = fx.pulled_source(json!({})).await;
