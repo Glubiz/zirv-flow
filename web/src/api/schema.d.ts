@@ -11900,7 +11900,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The assistant is off (`ai_disabled`), or the source does not use a manifest */
+            /** @description The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -11918,7 +11918,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported` */
+            /** @description A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, or a block layout of a code email) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -11936,7 +11936,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The model provider failed (`ai_provider_error`), or the source did */
+            /** @description The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`) */
             502: {
                 headers: {
                     [name: string]: unknown;
@@ -11945,7 +11945,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The server has no master key to open the provider key */
+            /** @description The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -12006,7 +12006,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`) */
+            /** @description The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -12015,7 +12015,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues) */
+            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues) */
             422: {
                 headers: {
                     [name: string]: unknown;

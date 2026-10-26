@@ -724,12 +724,12 @@ async fn dry_run_manifest(
         (status = 402, description = "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The assistant is off (`ai_disabled`), or the source does not use a manifest", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over 160 KiB", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, or a block layout of a code email)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Too many AI calls (`ai_rate_limited`); try again in a minute", body = Problem, content_type = "application/problem+json"),
-        (status = 502, description = "The model provider failed (`ai_provider_error`), or the source did", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The server has no master key to open the provider key", body = Problem, content_type = "application/problem+json")
+        (status = 502, description = "The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`)", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -1635,8 +1635,8 @@ fn recheck_manifest(content: &Value) -> Result<(), ApiError> {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such draft of this user in this workspace, or it expired", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
