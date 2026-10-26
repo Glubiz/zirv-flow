@@ -113,6 +113,9 @@ async fn current_snippets(
     wanted: &[String],
 ) -> Result<BTreeMap<String, LoadedSnippet>, StoreError> {
     let ids: Vec<Uuid> = wanted.iter().filter_map(|id| id.parse().ok()).collect();
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let rows: Vec<(Uuid, i32, Value)> = sqlx::query_as(
         "SELECT s.id, v.version, v.content FROM snippets s \
          JOIN snippet_versions v ON v.snippet_id = s.id AND v.version = s.current_version \
@@ -147,6 +150,9 @@ async fn asset_urls(
     public_url: Option<&str>,
 ) -> Result<BTreeMap<String, String>, StoreError> {
     let ids: Vec<Uuid> = named.iter().filter_map(|id| id.parse().ok()).collect();
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let rows: Vec<(Uuid, Vec<u8>, String)> = sqlx::query_as(
         "SELECT id, sha256, ext FROM assets \
          WHERE workspace_id = $1 AND id = ANY($2) AND deleted_at IS NULL",
