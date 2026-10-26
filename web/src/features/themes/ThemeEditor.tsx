@@ -51,6 +51,7 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
   const [published, setPublished] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const usedBy = useThemeUsedBy(workspaceId, theme.id, reloadKey);
+  const [settled, setSettled] = useState(false);
   const [jump, setJump] = useState(0);
 
   const archived = isArchived(theme);
@@ -167,7 +168,11 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
     void refresh();
   }
 
-  const guard = useLeaveGuard(editable && save !== "saved");
+  const guard = useLeaveGuard(editable && save !== "saved" && !settled);
+
+  useEffect(() => {
+    if (settled) void navigate(`/w/${workspaceId}/themes`);
+  }, [settled, navigate, workspaceId]);
   const issues = useMemo(() => (preview.status === "ready" ? preview.data.issues : []), [preview]);
   const blocking = blockingCount(issues);
   const warnings = issues.length - blocking;
@@ -314,9 +319,10 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
           theme={theme}
           onClose={() => setArchiving(false)}
           onArchived={() => {
+            window.clearTimeout(timer.current);
             stopped.current = true;
             dirty.current = false;
-            void navigate(`/w/${workspaceId}/themes`);
+            setSettled(true);
           }}
         />
       ) : null}
