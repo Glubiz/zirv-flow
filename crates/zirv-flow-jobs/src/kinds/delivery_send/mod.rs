@@ -1119,6 +1119,11 @@ mod tests {
                 "subject": "Hello", "sender": sender, "lang": "en", "category": category,
                 "html": html, "text": "Hello {{ system.unsubscribe_url }}",
             }});
+            self.template_of(category, document).await
+        }
+
+        /// A published email template holding exactly this document, as stored.
+        async fn template_of(&self, category: &str, document: Value) -> Uuid {
             let id = Uuid::now_v7();
             let mut connection = self.pool.acquire().await.unwrap();
             create_template(
@@ -1771,6 +1776,44 @@ mod tests {
                 assert_eq!(target.as_deref(), Some(*url));
             }
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_published_schema_one_block_template_still_renders_as_it_did(pool: PgPool) {
+        let env = Env::new(pool, "schemaone").await;
+        let render_pool = start_pool("serve", "").await;
+        let document = json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hello", "sender": env.sender, "lang": "en", "category": "transactional",
+            "sections": [{"id": "s", "columns": [[
+                {"type": "image", "id": "i", "src": "https://img.example/hero.png", "alt": "Hero"},
+                {"type": "heading", "id": "h", "level": 1, "text": "Hi there"}]]}]}});
+        let template = env.template_of("transactional", document.clone()).await;
+        let stored: Value = sqlx::query_scalar(
+            "SELECT document FROM template_versions WHERE template_id = $1 AND version = 1",
+        )
+        .bind(template)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored["schema"], 1, "published versions stay as saved");
+        let mut context = zirv_flow_render::RenderContext::default();
+        context.message.id = Uuid::now_v7().to_string();
+
+        let sent = render::render(Some(&render_pool), stored, &context, None, &[], None)
+            .await
+            .unwrap();
+
+        // The schema 1 bytes: the golden render of the same blocks, without any theme or footer.
+        let expected = zirv_flow_templates::render_email(
+            &zirv_flow_templates::parse_template_document(&document).unwrap(),
+            &context,
+            &zirv_flow_render::Hooks::untracked(),
+        )
+        .unwrap();
+        assert_eq!(sent.rendered, expected);
+        assert!(sent.rendered.html.contains("https://img.example/hero.png"));
+        assert!(sent.rendered.hidden.is_empty());
     }
 
     #[sqlx::test]

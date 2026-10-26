@@ -48,6 +48,12 @@ pub enum RenderError {
     MjmlTooDeep,
     /// A block document the checks refuse, or a rendered URL a link may not use.
     InvalidBlocks,
+    /// A `visible_if` has no result in the render input.
+    ConditionUnresolved,
+    /// An image names an asset the render input has no URL for.
+    BrokenAssetReference,
+    /// An image names the theme logo and no theme with a logo URL was passed.
+    BrokenThemeReference,
 }
 
 impl RenderError {
@@ -75,6 +81,9 @@ impl RenderError {
             Self::Mjml => "mjml_error",
             Self::MjmlTooDeep => "mjml_too_deep",
             Self::InvalidBlocks => "invalid_blocks",
+            Self::ConditionUnresolved => "condition_unresolved",
+            Self::BrokenAssetReference => "broken_asset_reference",
+            Self::BrokenThemeReference => "broken_theme_reference",
         }
     }
 
@@ -111,6 +120,9 @@ impl RenderError {
             "mjml_error" => Self::Mjml,
             "mjml_too_deep" => Self::MjmlTooDeep,
             "invalid_blocks" => Self::InvalidBlocks,
+            "condition_unresolved" => Self::ConditionUnresolved,
+            "broken_asset_reference" => Self::BrokenAssetReference,
+            "broken_theme_reference" => Self::BrokenThemeReference,
             _ => return None,
         })
     }
@@ -179,6 +191,9 @@ mod tests {
             RenderError::Mjml,
             RenderError::MjmlTooDeep,
             RenderError::InvalidBlocks,
+            RenderError::ConditionUnresolved,
+            RenderError::BrokenAssetReference,
+            RenderError::BrokenThemeReference,
         ];
         for error in all {
             assert_eq!(

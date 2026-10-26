@@ -124,6 +124,7 @@ mod tests {
     fn request_frame(doc: &TemplateDocument, context: &RenderContext) -> Vec<u8> {
         let request = RenderRequest::Email {
             doc: Cow::Borrowed(doc),
+            extras: Cow::default(),
             context: Cow::Borrowed(context),
         };
         let mut out = Vec::new();
@@ -162,6 +163,7 @@ mod tests {
         let request = RenderRequest::Validate {
             doc: Cow::Borrowed(&doc),
             catalog: Cow::Borrowed(&catalog),
+            extras: Cow::default(),
         };
         let mut input = Vec::new();
         write_frame(&mut input, &serde_json::to_vec(&request).unwrap()).unwrap();

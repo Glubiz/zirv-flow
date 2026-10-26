@@ -1,0 +1,43 @@
+{
+  "blocks": {
+    "category": "transactional",
+    "footer": "none",
+    "lang": "en",
+    "preheader": "A preview for {{ person.name }}",
+    "sections": [
+      {
+        "columns": [
+          [
+            {
+              "id": "b1",
+              "label": "Shop now, {{ person.name }}",
+              "type": "button",
+              "url": "https://shop.example/offer?a=1&b=2"
+            },
+            {
+              "align": "left",
+              "id": "b2",
+              "label": "Write to us",
+              "type": "button",
+              "url": "mailto:help@example.com"
+            },
+            {
+              "align": "right",
+              "id": "b3",
+              "label": "Account",
+              "type": "button",
+              "url": "{{ system.preferences_url }}"
+            }
+          ]
+        ],
+        "id": "s1"
+      }
+    ],
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "subject": "Hi {{ person.name }}",
+    "theme": "none"
+  },
+  "channel": "email",
+  "mode": "blocks",
+  "schema": 2
+}
