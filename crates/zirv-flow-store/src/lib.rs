@@ -31,6 +31,7 @@ mod segments;
 mod send_limits;
 mod sending;
 mod sessions;
+mod snippets;
 mod sources;
 mod stream_freshness;
 mod stream_offsets;
@@ -263,6 +264,13 @@ pub use sending::{
 pub use sessions::{
     ActiveSession, create_session, delete_expired_sessions, delete_session,
     delete_sessions_for_user, find_active_session, touch_session,
+};
+pub use snippets::{
+    LockedSnippet, NewSnippet, Snippet, SnippetDraft, SnippetError, SnippetFlowUse, SnippetPatch,
+    SnippetTemplate, SnippetThemeUse, SnippetUse, SnippetVersion, SnippetVersionSummary,
+    archive_snippet, create_snippet, find_snippet, find_snippet_draft, find_snippet_version,
+    list_snippet_versions, list_snippets, lock_snippet, publish_snippet, save_snippet_draft,
+    snippet_where_used, update_snippet,
 };
 pub use sources::{
     DiscoveredStream, NewOAuthState, NewSource, OAuthState, RefreshError, Source, SourceUpdate,
