@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { act, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
@@ -293,26 +293,29 @@ describe("the source wizard", () => {
   });
 
   it("shows a loading state while the access loads, and an error with a retry when it fails", async () => {
-    mockApi({ ...BASE, "GET /api/v1/workspaces/ws1/members": () => new Promise<Response>(() => undefined) });
-    const loading = mount();
-
-    expect(await screen.findByText("Checking your access")).toBeInTheDocument();
-    loading.unmount();
-
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     let attempts = 0;
     mockApi({
       ...BASE,
-      "GET /api/v1/workspaces/ws1/members": () => {
+      "GET /api/v1/workspaces/ws1/members": async () => {
         attempts += 1;
-        return attempts === 1
-          ? problem(500, "Internal Server Error", "internal error")
-          : json(members("admin", OWNER.id));
+        if (attempts > 1) return json(members("admin", OWNER.id));
+        await gate;
+        return problem(500, "Internal Server Error", "internal error");
       },
     });
     const user = userEvent.setup();
     mount();
 
-    await user.click(await screen.findByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Checking your access")).toBeInTheDocument();
+    await act(() => {
+      release();
+      return gate;
+    });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(await screen.findByRole("button", { name: "Choose Fake source" })).toBeInTheDocument();
   });

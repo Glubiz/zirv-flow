@@ -411,15 +411,12 @@ mod tests {
 
     use super::*;
 
-    /// What the mock server does with requests, by arrival order.
+    /// What the mock server does with requests.
     #[derive(Clone, Copy, Default)]
     struct Behavior {
-        /// Answer the first `refuse` requests with 429 and `Retry-After: 1`, all together once
-        /// the last of them has arrived.
-        refuse: usize,
-        /// Delay before every other response.
+        /// Delay before every response.
         delay: Duration,
-        /// Status of every other response; 0 means 202.
+        /// Status of every response; 0 means 202.
         status: u16,
     }
 
@@ -464,26 +461,9 @@ mod tests {
                         data.extend_from_slice(&chunk[..read]);
                     }
                     let body = String::from_utf8_lossy(&data[head_end..]).into_owned();
-                    let number = {
-                        let mut log = log.lock().unwrap();
-                        log.push(body);
-                        log.len()
-                    };
-                    let refused = number <= behavior.refuse;
-                    if refused {
-                        let waited = Instant::now();
-                        while log.lock().unwrap().len() < behavior.refuse
-                            && waited.elapsed() < Duration::from_millis(500)
-                        {
-                            tokio::time::sleep(Duration::from_millis(2)).await;
-                        }
-                    } else {
-                        tokio::time::sleep(behavior.delay).await;
-                    }
-                    let response = if refused {
-                        "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\n\
-                         content-length: 0\r\nconnection: close\r\n\r\n"
-                    } else if behavior.status == 503 {
+                    log.lock().unwrap().push(body);
+                    tokio::time::sleep(behavior.delay).await;
+                    let response = if behavior.status == 503 {
                         "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\
                          connection: close\r\n\r\n"
                     } else {
@@ -506,6 +486,8 @@ mod tests {
         refuse: usize,
         /// Delay before every other response.
         delay: Duration,
+        status: Option<u16>,
+        bodies: Arc<Mutex<Vec<Arc<Vec<u8>>>>>,
         sends: Arc<Mutex<Vec<Instant>>>,
         sent: Arc<tokio::sync::Notify>,
     }
@@ -515,6 +497,8 @@ mod tests {
             Self {
                 refuse,
                 delay,
+                status: Some(202),
+                bodies: Arc::default(),
                 sends: Arc::default(),
                 sent: Arc::default(),
             }
@@ -526,7 +510,8 @@ mod tests {
     }
 
     impl Transport for Scripted {
-        async fn send(&self, _body: Arc<Vec<u8>>) -> Reply {
+        async fn send(&self, body: Arc<Vec<u8>>) -> Reply {
+            self.bodies.lock().unwrap().push(body);
             let number = {
                 let mut sends = self.sends.lock().unwrap();
                 sends.push(Instant::now());
@@ -536,7 +521,7 @@ mod tests {
             if number > self.refuse {
                 tokio::time::sleep(self.delay).await;
                 return Reply {
-                    status: Some(202),
+                    status: self.status,
                     retry_after: None,
                 };
             }
@@ -632,7 +617,6 @@ mod tests {
         // requests go out late. The service time stays near 200 ms; the schedule-based latency
         // carries the lag and is much larger, which a send-to-response clock would hide.
         let mock = serve(Behavior {
-            refuse: 0,
             delay: Duration::from_millis(200),
             ..Behavior::default()
         })
@@ -661,16 +645,12 @@ mod tests {
         assert!(report.service_latency.p99_ms < 500.0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_429_pauses_the_schedule_and_the_retry_keeps_the_original_clock() {
-        let mock = serve(Behavior {
-            refuse: 1,
-            ..Behavior::default()
-        })
-        .await;
-        let outcome = run_phase(
-            &client(),
-            &config(mock.url.clone(), Mode::Identify, 10_000),
+        let transport = Scripted::new(1, Duration::ZERO);
+        let outcome = run_phase_with(
+            transport.clone(),
+            &config(String::new(), Mode::Identify, 10_000),
             &phase(10, 0.25),
             0,
         )
@@ -681,7 +661,7 @@ mod tests {
         assert_eq!(report.retries_after_429, 1);
         assert_eq!(report.status.accepted_202, report.requests);
         assert!(report.elapsed_s >= 1.0, "{}", report.elapsed_s);
-        let seen = mock.bodies.lock().unwrap();
+        let seen = transport.bodies.lock().unwrap();
         assert_eq!(seen[0], seen[1], "the refused body is resent unchanged");
         assert_eq!(seen.len() as u64, report.requests + 1);
         // The throttled request waited out Retry-After: that is in its latency from the
@@ -708,7 +688,6 @@ mod tests {
         let mock = serve(Behavior {
             delay: Duration::from_millis(300),
             status: 503,
-            ..Behavior::default()
         })
         .await;
         let outcome = run_phase(
@@ -778,14 +757,15 @@ mod tests {
         assert!(busiest <= 30, "{busiest} retries inside 20 ms");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_unreachable_server_counts_transport_errors() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
-        let outcome = run_phase(
-            &client(),
-            &config(url, Mode::Track, 10_000),
+        let transport = Scripted {
+            status: None,
+            ..Scripted::new(0, Duration::ZERO)
+        };
+        let outcome = run_phase_with(
+            transport,
+            &config(String::new(), Mode::Track, 10_000),
             &phase(10, 0.2),
             0,
         )
