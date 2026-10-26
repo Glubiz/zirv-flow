@@ -1200,37 +1200,314 @@ mod tests {
         ]}})
     }
 
+    const LINK: &str = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+
+    impl Fixture {
+        /// A call as a workspace admin to a path under the workspace.
+        async fn ws_call(&self, method: &str, tail: &str, body: Option<Value>) -> Reply {
+            let uri = format!("/api/v1/workspaces/{}{tail}", self.ws.as_uuid());
+            self.call(method, &uri, body, Auth::Session(&self.lead))
+                .await
+        }
+
+        /// A published snippet; returns its id.
+        async fn snippet(&self, name: &str, blocks: Value) -> String {
+            let made = self
+                .ws_call(
+                    "POST",
+                    "/snippets",
+                    Some(json!({"name": name, "content": {"blocks": blocks}})),
+                )
+                .await;
+            assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+            let id = made.body["id"].as_str().unwrap().to_owned();
+            let published = self
+                .ws_call("POST", &format!("/snippets/{id}/publish"), None)
+                .await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+            id
+        }
+
+        /// A published theme; returns its id.
+        async fn theme(&self, name: &str, tokens: Value) -> String {
+            let made = self
+                .ws_call(
+                    "POST",
+                    "/themes",
+                    Some(json!({"name": name, "tokens": tokens})),
+                )
+                .await;
+            assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+            let id = made.body["id"].as_str().unwrap().to_owned();
+            let published = self
+                .ws_call("POST", &format!("/themes/{id}/publish"), None)
+                .await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+            id
+        }
+
+        async fn publish_doc(&self, name: &str, document: Value) -> Reply {
+            let id = self.create(name, document).await;
+            self.lead("POST", &format!("/{id}/publish"), None).await
+        }
+
+        async fn preview_of(&self, id: &str, body: Value) -> Reply {
+            let reply = self
+                .lead("POST", &format!("/{id}/preview"), Some(body))
+                .await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            reply
+        }
+    }
+
+    fn issue_pairs(reply: &Reply) -> Vec<(String, String)> {
+        reply.body["template_issues"]
+            .as_array()
+            .map(|issues| {
+                issues
+                    .iter()
+                    .map(|issue| {
+                        (
+                            issue["code"].as_str().unwrap().to_owned(),
+                            issue["at"].as_str().unwrap().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_visibility_condition_blocks_publishing_until_conditions_can_be_sent(pool: PgPool) {
+    async fn a_valid_condition_publishes_and_a_bad_one_is_refused_at_the_ruled_pointer(
+        pool: PgPool,
+    ) {
         let f = fixture(&pool).await;
-        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
-        let mut document = blocks_doc("Welcome", footer);
-        document["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = json!({"all": []});
-        let id = f.create("Conditioned", document).await;
-
-        let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
-
+        let mut ok = blocks_doc("Welcome", LINK);
+        ok["blocks"]["sections"][0]["columns"][0][0]["visible_if"] =
+            json!({"trait": "plan", "op": "eq", "value": "pro"});
+        let published = f.publish_doc("Valid", ok).await;
         assert_eq!(
-            refused.status,
-            StatusCode::UNPROCESSABLE_ENTITY,
+            published.status,
+            StatusCode::CREATED,
             "{:?}",
-            refused.body
+            published.body
         );
-        assert_eq!(refused.body["code"], "template_invalid");
+        assert_eq!(published.body["used_by"], json!([]));
+
+        let mut bad = blocks_doc("Welcome", LINK);
+        bad["blocks"]["sections"][0]["columns"][0][0]["visible_if"] =
+            json!({"trait": "nope", "op": "eq", "value": "pro"});
+        bad["blocks"]["sections"][0]["visible_if"] = json!({"segment": Uuid::now_v7()});
+        let refused = f.publish_doc("Invalid", bad).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let pairs = issue_pairs(&refused);
         assert!(
-            refused.body["template_issues"]
-                .as_array()
-                .unwrap()
+            pairs.contains(&(
+                "invalid_condition".into(),
+                "/blocks/block/title/visible_if".into()
+            )),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&(
+                "broken_segment_reference".into(),
+                "/blocks/sections/intro/visible_if".into()
+            )),
+            "{pairs:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_block_document_needs_the_unsubscribe_link_in_an_unconditioned_place(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let none = f.publish_doc("Bare", blocks_doc("Hi", "<p>bye</p>")).await;
+        assert_eq!(none.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            issue_pairs(&none)
                 .iter()
-                .any(|issue| {
-                    issue["code"] == "condition_unsupported"
-                        && issue["at"] == "/blocks/block/title/visible_if"
-                }),
+                .any(|(code, _)| code == "missing_unsubscribe"),
+            "{:?}",
+            none.body
+        );
+
+        let linked = f
+            .snippet(
+                "Legal",
+                json!([{"type": "text", "id": "t", "content": LINK}]),
+            )
+            .await;
+        let mut with_snippet = blocks_doc("Hi", "<p>bye</p>");
+        with_snippet["blocks"]["sections"][1]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "snippet", "id": "legal2", "snippet_id": linked}));
+        let ok = f.publish_doc("Snippet", with_snippet).await;
+        assert_eq!(ok.status, StatusCode::CREATED, "{:?}", ok.body);
+
+        let theme = f
+            .theme(
+                "Brand",
+                json!({"primary": "#112233", "footer_snippet": linked}),
+            )
+            .await;
+        let mut with_theme = blocks_doc("Hi", "<p>bye</p>");
+        with_theme["blocks"]["theme"] = json!({"id": theme});
+        let ok = f.publish_doc("Footer", with_theme).await;
+        assert_eq!(ok.status, StatusCode::CREATED, "{:?}", ok.body);
+
+        let mut hidden = blocks_doc("Hi", LINK);
+        hidden["blocks"]["sections"][1]["visible_if"] =
+            json!({"trait": "plan", "op": "eq", "value": "pro"});
+        let conditioned = f.publish_doc("Conditioned link", hidden).await;
+        assert_eq!(conditioned.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            issue_pairs(&conditioned)
+                .iter()
+                .any(|(code, _)| code == "missing_unsubscribe"),
+            "{:?}",
+            conditioned.body
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn publish_records_the_assets_the_template_names_and_refuses_a_missing_one(pool: PgPool) {
+        use zirv_flow_store::NewAsset;
+        let f = fixture(&pool).await;
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let stored = zirv_flow_store::store_asset(
+            &mut tx,
+            f.ws,
+            &NewAsset {
+                name: "hero",
+                ext: "png",
+                content_type: "image/png",
+                bytes: b"hero-bytes",
+                width: 2,
+                height: 3,
+                created_by: None,
+            },
+            1 << 30,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let image = |asset: String| {
+            let mut doc = blocks_doc("Hi", LINK);
+            doc["blocks"]["sections"][0]["columns"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type": "image", "id": "pic", "alt": "x", "src": {"asset": asset}}));
+            doc
+        };
+
+        let ok = f
+            .publish_doc("With image", image(stored.asset.id.to_string()))
+            .await;
+        let refused = f
+            .publish_doc("Missing image", image(Uuid::now_v7().to_string()))
+            .await;
+
+        assert_eq!(ok.status, StatusCode::CREATED, "{:?}", ok.body);
+        assert_eq!(
+            f.count(
+                "SELECT count(*) FROM asset_references WHERE owner_kind = 'template' AND version = 1"
+            )
+            .await,
+            1
+        );
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            issue_pairs(&refused)
+                .iter()
+                .any(|(code, _)| code == "broken_asset_reference"),
             "{:?}",
             refused.body
         );
-        assert_eq!(f.count("SELECT count(*) FROM template_versions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn preview_hides_a_block_for_a_person_who_fails_its_condition_and_says_why(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let mut doc = blocks_doc("Hi", LINK);
+        doc["blocks"]["sections"][0]["columns"][0][0]["visible_if"] =
+            json!({"trait": "plan", "op": "eq", "value": "pro"});
+        let id = f.create("Promo", doc).await;
+        let pro = f
+            .person(json!({"plan": "pro"}), Some("pro@example.com"))
+            .await;
+        let free = f
+            .person(json!({"plan": "free"}), Some("free@example.com"))
+            .await;
+
+        let sees = f.preview_of(&id, json!({"person_id": pro})).await;
+        let hidden = f.preview_of(&id, json!({"person_id": free})).await;
+        let sample = f.preview_of(&id, json!({})).await;
+
+        assert_eq!(sees.body["hidden_blocks"], json!([]));
+        assert!(sees.body["html"].as_str().unwrap().contains("Hello pro"));
+        assert_eq!(
+            hidden.body["hidden_blocks"],
+            json!([{"id": "title", "reason": "trait `plan` was not met"}])
+        );
+        assert!(!hidden.body["html"].as_str().unwrap().contains("Hello"));
+        assert_eq!(sample.body["hidden_blocks"][0]["id"], "title");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_named_themes_differ_only_in_tokens_and_the_default_moves_only_following_templates(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let red = f.theme("Red", json!({"primary": "#aa0000"})).await;
+        let blue = f.theme("Blue", json!({"primary": "#0000bb"})).await;
+        let doc_with = |theme: Value| {
+            let mut doc = blocks_doc("Hi", LINK);
+            doc["blocks"]["theme"] = theme;
+            doc
+        };
+        let in_red = f.create("In red", doc_with(json!({"id": red}))).await;
+        let in_blue = f.create("In blue", doc_with(json!({"id": blue}))).await;
+        let follows = f.create("Follows", doc_with(json!("default"))).await;
+        let html = |reply: Reply| reply.body["html"].as_str().unwrap().to_lowercase();
+
+        let red_html = html(f.preview_of(&in_red, json!({})).await);
+        let blue_html = html(f.preview_of(&in_blue, json!({})).await);
+        let before = html(f.preview_of(&follows, json!({})).await);
+        let set = f
+            .ws_call("PUT", "/themes/default", Some(json!({"theme_id": red})))
+            .await;
+        assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+        let after_red = html(f.preview_of(&follows, json!({})).await);
+        let set = f
+            .ws_call("PUT", "/themes/default", Some(json!({"theme_id": blue})))
+            .await;
+        assert_eq!(set.status, StatusCode::OK, "{:?}", set.body);
+        let after_blue = html(f.preview_of(&follows, json!({})).await);
+
+        assert_eq!(red_html.replace("#aa0000", "#0000bb"), blue_html);
+        assert_ne!(before, after_red);
+        assert_eq!(after_red.replace("#aa0000", "#0000bb"), after_blue);
+        assert_eq!(
+            red_html,
+            html(f.preview_of(&in_red, json!({})).await),
+            "a named theme does not follow the default"
+        );
     }
 
     #[sqlx::test]
