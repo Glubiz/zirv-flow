@@ -48,6 +48,23 @@ function blocking(code: string, at: string): Issue {
 }
 
 describe("building with blocks", () => {
+  it("opens with the block of a Fix link selected, and ignores an id the document does not have", async () => {
+    const document = blocksDocument([{ id: "s1", columns: [[heading("h1", "Welcome"), divider("d1")]] }]);
+    mockApi(templateRoutes({ detail: detailOf(document) }));
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?block=h1`, "/w/:ws/templates/:id", <TemplatePage />, [`/w/ws1/templates/${TEMPLATE_ID}?block=h1`]);
+
+    expect(await screen.findByRole("textbox", { name: "Heading text" })).toHaveValue("Welcome");
+  });
+
+  it("starts with nothing selected for a block id that is not in the document", async () => {
+    const document = blocksDocument([{ id: "s1", columns: [[heading("h1", "Welcome")]] }]);
+    mockApi(templateRoutes({ detail: detailOf(document) }));
+    renderRoute(`/w/ws1/templates/${TEMPLATE_ID}?block=gone`, "/w/:ws/templates/:id", <TemplatePage />, [`/w/ws1/templates/${TEMPLATE_ID}?block=gone`]);
+
+    await screen.findByText("Welcome");
+    expect(screen.queryByRole("textbox", { name: "Heading text" })).not.toBeInTheDocument();
+  });
+
   it("shows an empty state for a document with no blocks", async () => {
     mockApi(templateRoutes({ detail: detailOf(blocksDocument()) }));
     mount();

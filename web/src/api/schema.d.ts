@@ -3628,9 +3628,31 @@ export interface paths {
          *     is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
          *     successful publish are in the response and stored with the version. The document's sender must
          *     be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
+         *     An optional body `{ "note" }` adds a note of at most 500 characters to the version.
          *     Audited as `template.published`.
          */
         post: operations["publish_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/send-volume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The active flows that send this template, each with the average non-test messages a day over
+         *     the last 7 days. A flow is active when it is published and its running version names the
+         *     template. By flow name.
+         */
+        get: operations["template_send_volume"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -9838,6 +9860,11 @@ export interface components {
         };
         TemplatePreviewRequest: {
             /**
+             * @description Give each section and block the class `zf-block-<id>` in the HTML, so a page can mark
+             *     them. Only the preview does this; a send, a test send and a publish never do.
+             */
+            annotate?: boolean;
+            /**
              * Format: uuid
              * @description Preview as this person. Needs the workspace admin role, because the render shows their
              *     values. Absent: a sample person built from the field registry's types.
@@ -9849,12 +9876,28 @@ export interface components {
              */
             version?: number | null;
         };
+        /** @description The optional body of a publish. */
+        TemplatePublishRequest: {
+            /** @description A note for the version history, at most 500 characters. Blank is no note. */
+            note?: string | null;
+        };
         /** @description The new version and the template after the publish. */
         TemplatePublishedBody: {
             template: components["schemas"]["TemplateBody"];
             /** @description The active flows that send this template, which now send the new version. */
             used_by: components["schemas"]["TemplateUseBody"][];
             version: components["schemas"]["TemplateVersionBody"];
+        };
+        /** @description How much one active flow sends the template. */
+        TemplateSendVolumeBody: {
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+            /**
+             * Format: double
+             * @description The average non-test messages a day over the last 7 days.
+             */
+            per_day: number;
         };
         /** @description One flow with a version that names the template. */
         TemplateUseBody: {
@@ -9880,6 +9923,8 @@ export interface components {
         TemplateVersionBody: {
             /** @description The document as it was published. */
             document: Record<string, never>;
+            /** @description The note written when it was published. */
+            note?: string | null;
             /** Format: date-time */
             published_at: string;
             /** Format: uuid */
@@ -9897,6 +9942,8 @@ export interface components {
              *     publish.
              */
             blocking: number;
+            /** @description The note written when it was published. */
+            note?: string | null;
             /** Format: date-time */
             published_at: string;
             /** Format: uuid */
@@ -25860,7 +25907,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["TemplatePublishRequest"];
+            };
+        };
         responses: {
             /** @description The template and its new version */
             201: {
@@ -25869,6 +25920,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TemplatePublishedBody"];
+                };
+            };
+            /** @description The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Not authenticated */
@@ -25909,6 +25969,58 @@ export interface operations {
             };
             /** @description The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`) */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    template_send_volume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active flows that send the template, with their daily volume */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateSendVolumeBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

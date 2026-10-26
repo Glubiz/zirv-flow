@@ -137,10 +137,11 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     [`POST ${base}/publish`]: () => {
       const next = ((current["current_version"] as number | null) ?? 0) + 1;
       current = { ...current, current_version: next };
-      return json({ template: current, version: { version: next, document: (current["draft"] as Doc)["document"], published_at: "2026-10-11T09:00:00Z", warnings: [] } });
+      return json({ template: current, version: { version: next, document: (current["draft"] as Doc)["document"], published_at: "2026-10-11T09:00:00Z", warnings: [], note: null }, used_by: [] });
     },
     [`GET ${base}/versions`]: () => json(versions),
     [`GET ${base}/where-used`]: () => json(uses),
+    [`GET ${base}/send-volume`]: () => json([]),
     [`GET ${base}/preview-people`]: () => json(saved),
     [`POST ${base}/preview-people`]: async (request) => json(await request.json(), 201),
     [`DELETE ${base}/preview-people/p-1`]: () => new Response(null, { status: 204 }),

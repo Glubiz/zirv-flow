@@ -1,4 +1,5 @@
 export { TemplatePage } from "./TemplatePage";
+export { PublishPage } from "./PublishPage";
 export { TestSendPage } from "./TestSendPage";
 export { TemplatesPage } from "./TemplatesPage";
 export { usePublishedTemplates } from "./useTemplateOptions";
