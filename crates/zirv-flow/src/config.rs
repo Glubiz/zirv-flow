@@ -34,7 +34,7 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 50] = [
+const CONFIG_KEYS: [&str; 52] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -69,6 +69,8 @@ const CONFIG_KEYS: [&str; 50] = [
     "ingest.drain_batch_size",
     "ingest.drain_shards",
     "imports.max_file_bytes",
+    "assets.max_file_bytes",
+    "assets.max_workspace_bytes",
     "explorer.interactive_timeout_ms",
     "explorer.export_timeout_ms",
     "explorer.interactive_row_limit",
@@ -106,6 +108,7 @@ pub(crate) struct Config {
     events: EventsConfig,
     ingest: IngestConfig,
     imports: ImportsConfig,
+    assets: AssetsConfig,
     explorer: ExplorerConfig,
     render: RenderConfig,
     sending: SendingConfig,
@@ -390,6 +393,16 @@ struct ImportsConfig {
     max_file_bytes: u64,
 }
 
+/// What an uploaded image and a workspace's images may be.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetsConfig {
+    /// The largest image, in bytes.
+    max_file_bytes: u64,
+    /// The most bytes the images of one workspace may take together.
+    max_workspace_bytes: u64,
+}
+
 /// How long the event explorer may run and how much it may return.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -552,6 +565,11 @@ impl Config {
             .merge(Serialized::default(
                 "imports.max_file_bytes",
                 536_870_912_u64,
+            ))
+            .merge(Serialized::default("assets.max_file_bytes", 5_242_880_u64))
+            .merge(Serialized::default(
+                "assets.max_workspace_bytes",
+                1_073_741_824_u64,
             ))
             .merge(Serialized::default(
                 "explorer.interactive_timeout_ms",
@@ -721,6 +739,20 @@ impl Config {
                 "must be at least 1",
                 source_for("imports.max_file_bytes", path, &env_sources),
             ));
+        }
+
+        for key in ["assets.max_file_bytes", "assets.max_workspace_bytes"] {
+            let value = match key {
+                "assets.max_file_bytes" => config.assets.max_file_bytes,
+                _ => config.assets.max_workspace_bytes,
+            };
+            if value == 0 {
+                return Err(ConfigError::new(
+                    key,
+                    "must be at least 1",
+                    source_for(key, path, &env_sources),
+                ));
+            }
         }
 
         if !crate::log::is_valid_filter(&config.log.filter) {
@@ -1057,6 +1089,15 @@ impl Config {
         zirv_flow_api::ImportLimits {
             max_file_bytes: self.imports.max_file_bytes,
             ..zirv_flow_api::ImportLimits::default()
+        }
+    }
+
+    /// What an uploaded image and a workspace's images may be.
+    pub(crate) fn asset_limits(&self) -> zirv_flow_api::AssetLimits {
+        zirv_flow_api::AssetLimits {
+            max_file_bytes: self.assets.max_file_bytes,
+            max_workspace_bytes: self.assets.max_workspace_bytes,
+            ..zirv_flow_api::AssetLimits::default()
         }
     }
 
@@ -2374,6 +2415,40 @@ output_price_per_mtok = 15000000
 
         let file = TestFile::new(&AI_FILE.replace("gpt-x", "gpt-x\\\"\napi_key = \\\"sk-oops"));
         assert!(Config::load(Some(&file.0), []).is_err());
+    }
+
+    #[test]
+    fn the_asset_limits_default_to_5_mib_and_1_gib_and_can_be_set() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_ASSETS__MAX_FILE_BYTES".into(), "2048".into()));
+        env.push((
+            "ZIRV_FLOW_ASSETS__MAX_WORKSPACE_BYTES".into(),
+            "4096".into(),
+        ));
+        let set = Config::load(None, env).unwrap();
+
+        assert_eq!(
+            defaults.asset_limits(),
+            zirv_flow_api::AssetLimits::default()
+        );
+        assert_eq!(defaults.asset_limits().max_file_bytes, 5_242_880);
+        assert_eq!(defaults.asset_limits().max_workspace_bytes, 1_073_741_824);
+        assert_eq!(set.asset_limits().max_file_bytes, 2048);
+        assert_eq!(set.asset_limits().max_workspace_bytes, 4096);
+    }
+
+    #[test]
+    fn the_asset_limits_must_be_positive() {
+        for key in ["MAX_FILE_BYTES", "MAX_WORKSPACE_BYTES"] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((format!("ZIRV_FLOW_ASSETS__{key}").into(), "0".into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains("assets.max_"), "{error}");
+            assert!(error.contains("must be at least 1"), "{error}");
+        }
     }
 
     #[test]
