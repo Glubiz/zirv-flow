@@ -9,7 +9,7 @@ use super::emit::UrlKind;
 use super::model::{
     Block, BlocksContent, ImageSrc, MAX_DOCUMENT_BYTES, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES,
     MAX_RICH_TEXT_BYTES, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, PREHEADER_DISPLAY_CHARS,
-    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_shape, doc_at,
+    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_shape, conditions, doc_at,
 };
 use super::render::{BuildError, build, document_environment};
 use super::sanitize::{has_mjml_tag, link_allowed, sanitize_source, violations};
@@ -288,6 +288,16 @@ pub(crate) fn validate(
         .any(|issue| matches!(issue.code, code::BLOCKS_LIMIT | code::CONTENT_TOO_LARGE))
     {
         return issues;
+    }
+    // #307 removes this when the evaluator supplies condition results.
+    for (id, _) in conditions(content) {
+        issues.push(
+            Issue::new(
+                code::CONDITION_UNSUPPORTED,
+                block_at(id, Some("visible_if")),
+            )
+            .with_message("Visibility conditions can't be published yet."),
+        );
     }
     check_references(content, extras, &mut issues);
 
@@ -1304,14 +1314,19 @@ mod tests {
             v["blocks"]["sections"][1]["columns"][0][1]["visible_if"] =
                 serde_json::json!({"ok": 1});
         });
+        let issues = codes_with(&doc, &RenderExtras::default());
+        let too_large: Vec<_> = issues
+            .iter()
+            .filter(|(code, _)| *code == "condition_too_large")
+            .collect();
         assert_eq!(
-            codes_with(&doc, &RenderExtras::default()),
+            too_large,
             [
-                (
+                &(
                     "condition_too_large",
                     "/blocks/block/hero/visible_if".to_owned()
                 ),
-                (
+                &(
                     "condition_too_large",
                     "/blocks/block/intro_title/visible_if".to_owned()
                 ),
@@ -1322,6 +1337,30 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         assert_eq!(ids, ["hero", "intro_title", "intro_text"]);
+    }
+
+    #[test]
+    fn a_condition_on_a_section_or_block_blocks_publishing_for_now() {
+        let none = newsletter_with(|_| {});
+        assert_eq!(codes_with(&none, &RenderExtras::default()), Vec::new());
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["visible_if"] = serde_json::json!({"all": []});
+            v["blocks"]["sections"][1]["columns"][0][1]["visible_if"] =
+                serde_json::json!({"all": []});
+        });
+        assert_eq!(
+            codes_with(&doc, &RenderExtras::default()),
+            [
+                (
+                    "condition_unsupported",
+                    "/blocks/block/hero/visible_if".to_owned()
+                ),
+                (
+                    "condition_unsupported",
+                    "/blocks/block/intro_text/visible_if".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]

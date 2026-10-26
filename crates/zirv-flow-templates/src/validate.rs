@@ -979,7 +979,7 @@ mod tests {
     #[test]
     fn every_code_is_produced_by_some_test() {
         // The tests above cover each code; this pins the list so a new code needs a new test.
-        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 47);
+        assert_eq!(code::BLOCKING.len() + code::WARNING.len(), 48);
     }
 
     #[test]

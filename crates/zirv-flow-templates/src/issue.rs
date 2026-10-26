@@ -50,6 +50,8 @@ pub mod code {
     pub const SNIPPET_NESTED: &str = "snippet_nested";
     pub const SNIPPET_CONDITION: &str = "snippet_condition";
     pub const NOT_CONVERTIBLE: &str = "not_convertible";
+    // #307 removes this when the evaluator supplies condition results.
+    pub const CONDITION_UNSUPPORTED: &str = "condition_unsupported";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
@@ -63,7 +65,7 @@ pub mod code {
     pub const SMS_MANY_SEGMENTS: &str = "sms_many_segments";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 37] = [
+    pub const BLOCKING: [&str; 38] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -101,6 +103,7 @@ pub mod code {
         SNIPPET_NESTED,
         SNIPPET_CONDITION,
         NOT_CONVERTIBLE,
+        CONDITION_UNSUPPORTED,
     ];
 
     /// Every code that only warns.

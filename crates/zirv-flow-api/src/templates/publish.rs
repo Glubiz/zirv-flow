@@ -14,7 +14,7 @@ use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     PgPool, SenderError, Template, TemplateVersion, TemplateVersionSummary, require_verified_sender,
 };
-use zirv_flow_templates::{Issue, content_type_of};
+use zirv_flow_templates::{Issue, content_type_of, migrate_to_current};
 
 use super::crud::TemplateBody;
 use super::{field_catalog, issue_problems, stored_document, template_error};
@@ -44,7 +44,9 @@ impl From<&TemplateVersion> for TemplateVersionBody {
     fn from(version: &TemplateVersion) -> Self {
         Self {
             version: version.version,
-            document: version.document.clone(),
+            // A version is stored as it was published and served at the current schema.
+            document: migrate_to_current(version.document.clone())
+                .unwrap_or_else(|_| version.document.clone()),
             warnings: stored_warnings(&version.validation),
             published_by: version.published_by,
             published_at: version.published_at,
