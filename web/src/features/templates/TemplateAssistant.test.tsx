@@ -308,6 +308,23 @@ describe("the assistant and the editor's saves", () => {
   });
 });
 
+describe("the prompt counter of a translation", () => {
+  it("counts the text that is sent, so the counter and the Draft button agree", async () => {
+    mount(templateRoutes());
+    const user = await open();
+    await user.selectOptions(await screen.findByLabelText("Task"), "Translate");
+    await user.type(screen.getByLabelText("Translate to"), "Danish");
+    await user.type(screen.getByLabelText("Instructions"), "abc");
+    expect(screen.getByText(/^26 of 2000 characters/)).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("Instructions"));
+    await user.click(screen.getByLabelText("Instructions"));
+    await user.paste("x".repeat(1990));
+    expect(screen.getByText(/^2013 of 2000 characters/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Draft" })).toBeDisabled();
+  });
+});
+
 describe("a lost accept reply", () => {
   it("keeps the subject line that was picked", async () => {
     const calls = mockApi({

@@ -291,7 +291,7 @@ function Drafting({
       ) : null}
       <TextAreaField
         label={translating ? "Instructions" : "What do you want?"}
-        hint={`${prompt.length} of ${MAX_PROMPT_CHARS} characters. Do not paste personal data here.`}
+        hint={`${translating ? asked.length : prompt.length} of ${MAX_PROMPT_CHARS} characters. Do not paste personal data here.`}
         rows={3}
         value={prompt}
         disabled={run.status === "running"}
