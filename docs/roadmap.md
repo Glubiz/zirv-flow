@@ -332,7 +332,7 @@ drafting, on the renderer that sends (architecture section 11, ADR-006).
 - **Webhook payload editor.** JSON body template and headers with a sample-payload preview.
 - **Versions.** Publish validation extended to theme, snippet, asset and condition references, where-used for snippets and themes, active flows shown on publish; message rows record template, snippet and theme versions.
 - **Erasure.** Saved preview-person references are covered.
-- **Decisions.** OQ-21 (asset limits), OQ-22 (dark mode), OQ-23 (block-set growth), OQ-24 (localization).
+- **Decisions.** OQ-21 to OQ-24 are decided (architecture 21.1): asset limits, no dark variants, the block-set growth policy, and localization post-1.0.
 
 **Out of scope.** SMS, push and in-app builders and channels; AMP email; landing
 pages and forms; blocks beyond the v1 set plus the snippet block.
@@ -394,7 +394,7 @@ milestone (M10, M11, ...) with full scope and exit criteria, before work starts.
 | Warehouse sources | Incremental sync from analytical warehouses and lakehouse tables | Operators whose people data lives in a warehouse |
 | Federated live sources | ADR-001's later mode for data that cannot or must not be copied (OQ-18) | Deployments blocked by copy restrictions |
 | More channels | SMS, mobile push and in-app messages, each arriving with its builder on the content types already reserved in the template model | Demand once email is stable |
-| Template builder growth | More email blocks under the growth policy (OQ-23), localized variants (OQ-24) if not in v1.0, object storage for assets | Block requests, code-mode fallback for common layouts |
+| Template builder growth | More email blocks under the growth policy (OQ-23), localized variants (OQ-24, post-1.0), object storage for assets | Block requests, code-mode fallback for common layouts |
 | Ad-audience sync | Hashed identifiers to advertising platforms, with deletion propagation | Demand, plus a consent model for that purpose |
 | WASM component plugins | Sandboxed third-party connectors (ADR-004) | ADR-004's reversal evidence |
 | Event analytics store | Optional add-on for the explorer, high-volume traces, event-heavy segments and reporting (ADR-003, OQ-29) | M8 event/explorer benchmarks miss targets after measured Postgres tuning |
