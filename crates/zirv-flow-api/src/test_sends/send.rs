@@ -25,7 +25,7 @@ use crate::problem::{ApiError, Problem};
 use crate::templates::authorize_render;
 use crate::trace;
 
-/// Who a test goes to. Exactly one of the two fields is given.
+/// Who a test goes to. Exactly one of the three fields is given.
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct TestSendRecipient {
     /// A member of this workspace; the test goes to the address on their account.
@@ -33,6 +33,8 @@ pub(crate) struct TestSendRecipient {
     /// An address on the workspace's test-send allowlist.
     #[schema(example = "qa@example.com")]
     address: Option<String>,
+    /// An entry of the allowlist, by the id the allowlist options list. The address stays sealed.
+    allowlist_entry: Option<Uuid>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -157,10 +159,15 @@ pub(crate) async fn test_send(
             .ok_or_else(ApiError::not_found)?;
     }
 
-    // The recipient: a member's account address, or an allowlisted address. A refusal is the same
-    // problem whichever way it is reached, so it does not say which addresses are on the list.
-    let (address, member) = match (body.to.member, body.to.address.as_deref()) {
-        (Some(member), None) => {
+    // The recipient: a member's account address, or an allowlisted address named by its text or by
+    // its entry. A refusal is the same problem whichever way it is reached, so it does not say
+    // which addresses are on the list.
+    let (hash, member, recipient_display) = match (
+        body.to.member,
+        body.to.address.as_deref(),
+        body.to.allowlist_entry,
+    ) {
+        (Some(member), None, None) => {
             let user = UserId::from_uuid(member);
             zirv_flow_store::membership_role(&mut *tx, workspace.id, user)
                 .await?
@@ -168,29 +175,35 @@ pub(crate) async fn test_send(
             let account = zirv_flow_store::find_user(&mut *tx, user)
                 .await?
                 .ok_or_else(recipient_not_allowed)?;
-            (account.email, Some(member))
+            let identifier =
+                Identifier::parse("email", &account.email).map_err(|_| recipient_not_allowed())?;
+            (
+                identifier_hash(key, &identifier),
+                Some(member),
+                account.email,
+            )
         }
-        (None, Some(address)) => (address.to_owned(), None),
+        (None, Some(address), None) => {
+            let identifier =
+                Identifier::parse("email", address).map_err(|_| recipient_not_allowed())?;
+            let hash = identifier_hash(key, &identifier);
+            zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
+                .await?
+                .ok_or_else(recipient_not_allowed)?;
+            (hash, None, masked_hint(address))
+        }
+        (None, None, Some(entry)) => {
+            let (hash, hint) = zirv_flow_store::find_allowlist_target(&mut tx, workspace.id, entry)
+                .await?
+                .ok_or_else(recipient_not_allowed)?;
+            (hash, None, hint)
+        }
         _ => {
             return Err(ApiError::unprocessable(
-                "`to` names exactly one of `member` and `address`",
+                "`to` names exactly one of `member`, `address` and `allowlist_entry`",
             ));
         }
     };
-    let identifier = Identifier::parse("email", &address).map_err(|_| recipient_not_allowed())?;
-    let hash = identifier_hash(key, &identifier);
-    let recipient_display = if member.is_some() {
-        address.clone()
-    } else {
-        masked_hint(&address)
-    };
-    if member.is_none()
-        && zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
-            .await?
-            .is_none()
-    {
-        return Err(recipient_not_allowed());
-    }
 
     let now = state.clock.now(&mut tx).await?;
     let send_id = Uuid::now_v7();

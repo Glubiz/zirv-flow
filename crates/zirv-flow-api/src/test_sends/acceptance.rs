@@ -1137,4 +1137,66 @@ mod tests {
         assert!(other.body["test_sends"].as_array().unwrap().is_empty());
         assert_eq!(bad.status, StatusCode::BAD_REQUEST);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_allowlist_entry_is_a_recipient_by_its_id_and_a_gone_entry_is_refused(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let url = f.test_send_url();
+        let entry = f.allow("qa.person@example.org").await.body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let write = || Auth::Key(&f.write);
+
+        let by_entry = f
+            .call(
+                "POST",
+                &url,
+                Some(f.request(json!({"allowlist_entry": entry}))),
+                write(),
+            )
+            .await;
+        let both = f
+            .call(
+                "POST",
+                &url,
+                Some(f.request(json!({"allowlist_entry": entry, "member": f.member_id}))),
+                write(),
+            )
+            .await;
+        let unknown = f
+            .call(
+                "POST",
+                &url,
+                Some(f.request(json!({"allowlist_entry": Uuid::now_v7()}))),
+                write(),
+            )
+            .await;
+        f.call(
+            "DELETE",
+            &format!("/test-send-allowlist/{entry}"),
+            None,
+            Auth::Key(&f.admin),
+        )
+        .await;
+        let gone = f
+            .call(
+                "POST",
+                &url,
+                Some(f.request(json!({"allowlist_entry": entry}))),
+                write(),
+            )
+            .await;
+
+        assert_eq!(by_entry.status, StatusCode::ACCEPTED, "{:?}", by_entry.body);
+        assert_eq!(by_entry.body["recipient_display"], "q***@example.org");
+        assert_eq!(by_entry.body["recipient_member_id"], Value::Null);
+        assert_eq!(both.status, StatusCode::UNPROCESSABLE_ENTITY);
+        for refused in [&unknown, &gone] {
+            assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(refused.body["code"], "recipient_not_allowed");
+        }
+        assert_eq!(f.count("SELECT count(*) FROM test_sends").await, 1);
+    }
 }

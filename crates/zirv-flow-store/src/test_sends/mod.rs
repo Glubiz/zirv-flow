@@ -13,7 +13,8 @@ mod log;
 
 pub use allowlist::{
     AllowlistEntry, add_allowlist_entry, delete_allowlist_by_hash, delete_allowlist_entry,
-    find_allowlist_entry, list_allowlist, masked_hint, open_allowlist_address,
+    find_allowlist_entry, find_allowlist_target, list_allowlist, masked_hint,
+    open_allowlist_address,
 };
 pub use log::{
     ABANDONED, ListedTestSend, MEMBER_HOURLY_LIMIT, NewTestSend, QuotaUsage, REMOVED_ADDRESS,

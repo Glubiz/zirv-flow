@@ -39308,7 +39308,7 @@
       },
       "TestSendRecipient": {
         "type": "object",
-        "description": "Who a test goes to. Exactly one of the two fields is given.",
+        "description": "Who a test goes to. Exactly one of the three fields is given.",
         "properties": {
           "address": {
             "type": [
@@ -39317,6 +39317,14 @@
             ],
             "description": "An address on the workspace's test-send allowlist.",
             "example": "qa@example.com"
+          },
+          "allowlist_entry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "An entry of the allowlist, by the id the allowlist options list. The address stays sealed."
           },
           "member": {
             "type": [
