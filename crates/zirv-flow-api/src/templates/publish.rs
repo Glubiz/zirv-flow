@@ -116,17 +116,21 @@ fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
 pub(crate) struct TemplatePublishRequest {
     /// A note for the version history, at most 500 characters. Blank is no note.
     note: Option<String>,
+    /// The revision of the draft that was reviewed. When given, a draft saved since is a 409
+    /// `template_draft_changed` and nothing is published.
+    revision: Option<i32>,
 }
 
-/// The note of a publish request: an absent body or a blank note is none, and more than
-/// [`TEMPLATE_NOTE_MAX_CHARS`] characters is a 400 naming `note`.
-fn note_of(body: &[u8]) -> Result<Option<String>, ApiError> {
+/// The note and reviewed revision of a publish request: an absent body or a blank note is no note,
+/// and more than [`TEMPLATE_NOTE_MAX_CHARS`] characters is a 400 naming `note`.
+fn input_of(body: &[u8]) -> Result<(Option<String>, Option<i32>), ApiError> {
     let request: TemplatePublishRequest = if body.iter().all(u8::is_ascii_whitespace) {
         TemplatePublishRequest::default()
     } else {
         serde_json::from_slice(body)
             .map_err(|_| ApiError::bad_request("request body is not valid JSON"))?
     };
+    let revision = request.revision;
     let note = request.note.map(|note| note.trim().to_owned());
     match note {
         Some(note) if note.chars().count() > TEMPLATE_NOTE_MAX_CHARS => Err(ApiError::bad_request(
@@ -137,8 +141,8 @@ fn note_of(body: &[u8]) -> Result<Option<String>, ApiError> {
             field: "note".to_owned(),
             reason: "too_long".to_owned(),
         }])),
-        Some(note) if !note.is_empty() => Ok(Some(note)),
-        _ => Ok(None),
+        Some(note) if !note.is_empty() => Ok((Some(note), revision)),
+        _ => Ok((None, revision)),
     }
 }
 
@@ -166,6 +170,7 @@ pub(crate) async fn publish_template(
     id: Uuid,
     published_by: Option<UserId>,
     note: Option<&str>,
+    reviewed: Option<i32>,
 ) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
     let (draft, catalog, inputs) = {
         let mut connection = state
@@ -182,6 +187,9 @@ pub(crate) async fn publish_template(
         let draft = zirv_flow_store::find_template_draft(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::internal)?;
+        if reviewed.is_some_and(|revision| revision != draft.revision) {
+            return Err(ApiError::template_draft_changed());
+        }
         let catalog = field_catalog(
             zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
         );
@@ -306,7 +314,8 @@ pub(crate) async fn publish_template(
 /// is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
 /// successful publish are in the response and stored with the version. The document's sender must
 /// be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
-/// An optional body `{ "note" }` adds a note of at most 500 characters to the version.
+/// An optional body `{ "note", "revision" }` adds a note of at most 500 characters to the version and
+/// publishes only if the draft is still `revision`.
 /// Audited as `template.published`.
 #[utoipa::path(
     post,
@@ -324,7 +333,7 @@ pub(crate) async fn publish_template(
         (status = 400, description = "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -336,7 +345,7 @@ pub(crate) async fn publish(
     body: Bytes,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    let note = note_of(&body)?;
+    let (note, reviewed) = input_of(&body)?;
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
@@ -348,6 +357,7 @@ pub(crate) async fn publish(
         path_id(&id)?,
         principal.user_id(),
         note.as_deref(),
+        reviewed,
     )
     .await?;
     Ok((

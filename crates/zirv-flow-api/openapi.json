@@ -22425,7 +22425,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAn optional body `{ \"note\" }` adds a note of at most 500 characters to the version.\nAudited as `template.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAn optional body `{ \"note\", \"revision\" }` adds a note of at most 500 characters to the version and\npublishes only if the draft is still `revision`.\nAudited as `template.published`.",
         "operationId": "publish_template",
         "parameters": [
           {
@@ -22517,7 +22517,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)",
+            "description": "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -40476,6 +40476,14 @@
               "null"
             ],
             "description": "A note for the version history, at most 500 characters. Blank is no note."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The revision of the draft that was reviewed. When given, a draft saved since is a 409\n`template_draft_changed` and nothing is published."
           }
         }
       },
