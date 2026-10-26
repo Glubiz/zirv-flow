@@ -222,6 +222,25 @@ describe("the Review and publish page", () => {
     await waitFor(() => expect(publishButtons()[0]).toBeEnabled());
   });
 
+  it("shows the send volume failing in its own section, and Retry brings the counts", async () => {
+    let failing = true;
+    mockApi({
+      ...templateRoutes({ detail: templateDetail({}, blocksDoc(heading("Hi"))), uses: [useBody()] }),
+      [PREVIEW]: () => rendered(),
+      [`GET ${BASE}/send-volume`]: () => (failing ? problem(500, "Broken", "The counts could not be read.") : json([{ flow_id: useBody().flow_id, flow_name: "Welcome series", per_day: 12 }])),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText("Sends a day could not be loaded")).toBeInTheDocument();
+    expect(screen.queryByText(/a day$/)).not.toBeInTheDocument();
+    failing = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("about 12 a day")).toBeInTheDocument();
+    expect(screen.queryByText("Sends a day could not be loaded")).not.toBeInTheDocument();
+  });
+
   it("offers a member who is not an admin the sample person only, and no way to publish", async () => {
     const calls = mockApi({ ...templateRoutes({ role: "member", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
     mount();

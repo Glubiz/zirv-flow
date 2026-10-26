@@ -159,13 +159,20 @@ export function GoesLivePanel({ workspaceId, uses, volume }: LiveProps) {
       {uses.status === "loading" ? <LoadingState label="Checking which flows use this template" /> : null}
       {uses.status === "error" ? <ErrorState {...describeError(uses.error)} onRetry={uses.reload} /> : null}
       {uses.status === "ready" && active.length === 0 ? <p className="faint">No active flow uses this template yet.</p> : null}
+      {active.length > 0 && volume.status === "loading" ? <LoadingState label="Counting recent sends" /> : null}
+      {active.length > 0 && volume.status === "error" ? (
+        <div className="row">
+          <InlineError title="Sends a day could not be loaded" detail={describeError(volume.error).detail} traceId={null} />
+          <Button onClick={volume.reload}>Retry</Button>
+        </div>
+      ) : null}
       {active.length > 0 ? (
         <ul className="list-plain pb-flows" aria-label="Flows that send this template">
           {active.map((use) => (
             <li key={use.flow_id}>
               <Link className="pb-flow" to={`/w/${workspaceId}/flows/${use.flow_id}`}>
                 <span className="strong">{use.flow_name}</span>
-                <span className="faint">{perDay(sends.get(use.flow_id)) ?? use.flow_state}</span>
+                <span className="faint">{volume.status === "ready" ? (perDay(sends.get(use.flow_id)) ?? use.flow_state) : use.flow_state}</span>
               </Link>
             </li>
           ))}
