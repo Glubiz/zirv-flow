@@ -34,6 +34,7 @@ mod segments;
 mod sending;
 mod session;
 mod setup;
+mod snippets;
 mod sources;
 mod state;
 mod templates;
@@ -297,6 +298,40 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate",
             post(flows::signing::rotate),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets",
+            get(snippets::crud::list).post(snippets::crud::create),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}",
+            get(snippets::crud::get)
+                .put(snippets::crud::update)
+                .delete(snippets::crud::archive),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}/draft",
+            put(snippets::crud::put_draft),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}/preview",
+            post(snippets::preview::preview),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}/publish",
+            post(snippets::publish::publish),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}/versions",
+            get(snippets::publish::versions),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}/versions/{n}",
+            get(snippets::publish::version),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/snippets/{id}/where-used",
+            get(snippets::where_used::where_used),
         )
         .route(
             "/api/v1/workspaces/{ws}/templates",

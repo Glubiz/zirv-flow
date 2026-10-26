@@ -2930,6 +2930,165 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/snippets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's live snippets by name; archived ones with `archived=true`. */
+        get: operations["list_snippets"];
+        put?: never;
+        /** Creates a snippet with its first draft. Audited as `snippet.created`. */
+        post: operations["create_snippet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One snippet with its draft. */
+        get: operations["get_snippet"];
+        /** Renames a snippet. */
+        put: operations["update_snippet"];
+        post?: never;
+        /**
+         * Archives a snippet. Nothing is deleted: the draft and the versions stay readable. Refused
+         *     while the draft of a template holds a block for it. Audited as `snippet.archived`.
+         */
+        delete: operations["archive_snippet"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}/draft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replaces the snippet's draft. The draft is not validated beyond being a block list of known
+         *     blocks: a snippet is edited in steps, and the publish checks it. Audited as
+         *     `snippet.draft_saved`.
+         */
+        put: operations["save_snippet_draft"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Renders the draft or a version of a snippet for the sample person. A snippet with blocking
+         *     issues, including an asset that is missing, is not rendered: the response lists the issues and
+         *     `rendered` is false. A render that fails its limits (memory, deadline) or whose host dies is a
+         *     problem document, and the next preview works.
+         */
+        post: operations["preview_snippet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publishes the draft as the next immutable version. The draft is validated by the renderer's
+         *     snippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound
+         *     blocks), and each asset image must name a live asset of the workspace; an image that takes the
+         *     theme logo is refused as `broken_theme_reference`, because a snippet has no theme of its own,
+         *     and a snippet with no block is refused as `missing_content`. A blocking issue is a 422
+         *     `snippet_invalid` that lists every issue and writes nothing. The response lists the templates,
+         *     themes and active flows that use the snippet. Audited as `snippet.published`.
+         */
+        post: operations["publish_snippet"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The versions of a snippet, newest first. */
+        get: operations["list_snippet_versions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}/versions/{n}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version of a snippet. */
+        get: operations["get_snippet_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/snippets/{id}/where-used": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The templates, themes and active flows that use a snippet. */
+        get: operations["snippet_where_used"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/source-manifests/validate": {
         parameters: {
             query?: never;
@@ -4804,6 +4963,16 @@ export interface components {
              *     `ip4:203.0.113.7`, `a` or `mx`. Without one, any `v=spf1` record satisfies the check.
              */
             spf_mechanism?: string | null;
+        };
+        CreateSnippetRequest: {
+            /** @description The first draft. Absent: an empty block list. */
+            content?: Record<string, never> | null;
+            /**
+             * @description 1 to 100 characters after trimming; unique among the workspace's live snippets, ignoring
+             *     case.
+             * @example Free shipping note
+             */
+            name: string;
         };
         CreateSourceRequest: {
             /** @description The plain settings, checked against the type's field specs. */
@@ -7573,6 +7742,8 @@ export interface components {
             issues?: components["schemas"]["SegmentIssueProblem"][] | null;
             /** @description The `x-request-id` of the failed request. */
             request_id?: string | null;
+            /** @description The templates whose drafts hold a block for a snippet (`snippet_in_use`). */
+            snippet_templates?: components["schemas"]["SegmentRefProblem"][] | null;
             /** Format: int32 */
             status: number;
             /**
@@ -8130,6 +8301,16 @@ export interface components {
         SaveDraftRequest: {
             /** @description Replaces the draft. */
             properties: components["schemas"]["PropertyBody"][];
+        };
+        SaveSnippetDraftRequest: {
+            /** @description The content: `{"blocks": [...]}`. */
+            content: Record<string, never>;
+            /**
+             * Format: int32
+             * @description The revision the caller read. When it is not the draft's current revision the save is a
+             *     409 `snippet_revision_mismatch` and nothing is written. Absent: save regardless.
+             */
+            revision?: number | null;
         };
         SaveTemplateDraftRequest: {
             /** @description The content document. */
@@ -8778,6 +8959,144 @@ export interface components {
             /** Format: date-time */
             occurred_at: string;
             properties?: Record<string, never>;
+        };
+        SnippetBody: {
+            /** Format: date-time */
+            archived_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The user who created it; null when an API key did.
+             */
+            created_by?: string | null;
+            /**
+             * Format: int32
+             * @description The newest published version; null before the first publish.
+             */
+            current_version?: number | null;
+            /** Format: uuid */
+            id: string;
+            /** @example Free shipping note */
+            name: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        /** @description A snippet with its draft. */
+        SnippetDetailBody: components["schemas"]["SnippetBody"] & {
+            draft: components["schemas"]["SnippetDraftBody"];
+        };
+        /** @description The one editable copy of a snippet's content. */
+        SnippetDraftBody: {
+            /** @description The content: `{"blocks": [...]}`. It may be incomplete; only a publish validates it. */
+            content: Record<string, never>;
+            /**
+             * Format: int32
+             * @description How many times the draft has been saved; the first save is 1. Send it back as `revision`
+             *     to save only if nobody saved in between.
+             */
+            revision: number;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: uuid */
+            updated_by?: string | null;
+        };
+        /** @description An active flow that sends a template holding the snippet. */
+        SnippetFlowBody: {
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+            /** @description `published` or `paused`. */
+            flow_state: string;
+            /** @description The templates of the flow that hold the snippet. */
+            template_ids: string[];
+        };
+        /** @description The rendered snippet and its validation results. */
+        SnippetPreviewBody: {
+            /** @description The sample document's HTML, with inert tracking links. */
+            html?: string | null;
+            /** @description The same checks a publish makes, against the workspace's fields and assets now. */
+            issues: components["schemas"]["TemplateIssueProblem"][];
+            /** @description False when the snippet has blocking issues, so nothing was rendered. */
+            rendered: boolean;
+            /** @description `draft` or `version`. */
+            source: string;
+            /** @description The sample document's text part. */
+            text?: string | null;
+            /** Format: int32 */
+            version?: number | null;
+        };
+        SnippetPreviewRequest: {
+            /**
+             * Format: int32
+             * @description Preview this published version. Absent: the draft.
+             */
+            version?: number | null;
+        };
+        /** @description The new version, the snippet after the publish, and what uses the snippet. */
+        SnippetPublishedBody: {
+            snippet: components["schemas"]["SnippetBody"];
+            /** @description What picks the new version up: later sends use it without a template being republished. */
+            used_by: components["schemas"]["SnippetUsedByBody"];
+            version: components["schemas"]["SnippetVersionBody"];
+        };
+        /** @description A template that holds a block for the snippet. */
+        SnippetTemplateBody: {
+            /** Format: uuid */
+            id: string;
+            /** @description Whether the template's current version holds the block. */
+            in_current: boolean;
+            /** @description Whether the template's draft holds the block. */
+            in_draft: boolean;
+            name: string;
+        };
+        /** @description A theme that uses the snippet as its footer. */
+        SnippetThemeBody: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
+        /** @description Everything that uses a snippet. */
+        SnippetUsedByBody: {
+            /**
+             * @description Flows whose running version names one of those templates. A flow that does not run it now,
+             *     and an archived flow, is not listed.
+             */
+            active_flows: components["schemas"]["SnippetFlowBody"][];
+            /**
+             * @description Templates, not archived, whose draft or current version holds a snippet block for it,
+             *     in a section column.
+             */
+            templates: components["schemas"]["SnippetTemplateBody"][];
+            /** @description Themes that use it as their footer. Always empty until themes exist (#304). */
+            themes: components["schemas"]["SnippetThemeBody"][];
+        };
+        /** @description One immutable published version. */
+        SnippetVersionBody: {
+            /** @description The content as it was published. */
+            content: Record<string, never>;
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
+            /** @description The warnings found when it was published; a blocking issue refuses the publish. */
+            warnings: components["schemas"]["TemplateIssueProblem"][];
+        };
+        /** @description One published version in the history list: no content, which `GET .../versions/{n}` returns. */
+        SnippetVersionSummaryBody: {
+            /** Format: date-time */
+            published_at: string;
+            /** Format: uuid */
+            published_by?: string | null;
+            /** Format: int32 */
+            version: number;
+            /**
+             * Format: int64
+             * @description The warnings stored with the version.
+             */
+            warnings: number;
         };
         SourceBody: {
             /** @description The plain settings. Never holds a credential. */
@@ -9588,6 +9907,9 @@ export interface components {
             from_name?: string | null;
             /** @description A new reply-to address; `null` clears it. */
             reply_to?: string | null;
+        };
+        UpdateSnippetRequest: {
+            name: string;
         };
         UpdateSourceRequest: {
             config?: {
@@ -21896,6 +22218,712 @@ export interface operations {
             };
             /** @description An unknown channel or mode, a limit below 1, a window that does not parse or is over 31 days, an invalid time, equal start and end, or no days; each error names its JSON pointer */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_snippets: {
+        parameters: {
+            query?: {
+                /** @description Include archived snippets; default false */
+                archived?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The snippets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetBody"][];
+                };
+            };
+            /** @description archived is not true or false */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    create_snippet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSnippetRequest"];
+            };
+        };
+        responses: {
+            /** @description The new snippet with its draft */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A live snippet has that name */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name, or content that is not a block list (`snippet_malformed`, `template_unknown_block`, `template_unknown_field`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_snippet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The snippet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    update_snippet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSnippetRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated snippet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another live snippet has that name, or the snippet is archived (`snippet_archived`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An invalid name */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    archive_snippet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The archived snippet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The snippet is already archived (`snippet_archived`), or template drafts hold it (`snippet_in_use`, with `snippet_templates`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    save_snippet_draft: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SaveSnippetDraftRequest"];
+            };
+        };
+        responses: {
+            /** @description The snippet with its saved draft */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The snippet is archived (`snippet_archived`), or the draft is not at the `revision` named (`snippet_revision_mismatch`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Content that is not a block list (`snippet_malformed`, `template_unknown_block`, `template_unknown_field`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    preview_snippet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SnippetPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description The rendered snippet and its validation results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetPreviewBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, snippet or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The renderer refused the content (`template_render_failed`), or it used too much memory or time (`render_memory_limit`, `render_deadline`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The render host answered unusably (`render_protocol`) */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The render host stopped (`render_child_exited`), or rendering is not available (`render_unavailable`) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    publish_snippet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The snippet, its new version and what uses it */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetPublishedBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The snippet is archived (`snippet_archived`), or its draft was saved while it was being validated (`snippet_draft_changed`) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The draft has blocking issues (`snippet_invalid`, with `template_issues`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_snippet_versions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The versions without their content, newest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetVersionSummaryBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_snippet_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, snippet or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    snippet_where_used: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Snippet id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What uses the snippet */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnippetUsedByBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or snippet, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
