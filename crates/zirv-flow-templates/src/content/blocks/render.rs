@@ -153,23 +153,18 @@ impl Fields for Rendered<'_> {
     }
 
     fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, RenderError> {
-        match src {
-            ImageSrc::Url(url) => self.url(url, UrlKind::ImageSource),
-            ImageSrc::Asset(id) => {
-                let url = self
-                    .extras
-                    .asset_url(id)
-                    .ok_or(RenderError::BrokenAssetReference)?;
-                self.url(url, UrlKind::ImageSource)
-            }
-            ImageSrc::Theme(ThemeSlot::Logo) => {
-                let url = self
-                    .extras
-                    .theme_logo_url()
-                    .ok_or(RenderError::BrokenThemeReference)?;
-                self.url(url, UrlKind::ImageSource)
-            }
-        }
+        let url = match src {
+            ImageSrc::Url(url) => url,
+            ImageSrc::Asset(id) => self
+                .extras
+                .asset_url(id)
+                .ok_or(RenderError::BrokenAssetReference)?,
+            ImageSrc::Theme(ThemeSlot::Logo) => self
+                .extras
+                .theme_logo_url()
+                .ok_or(RenderError::BrokenThemeReference)?,
+        };
+        self.url(url, UrlKind::ImageSource)
     }
 
     fn visible(&mut self, id: &str) -> Result<bool, RenderError> {

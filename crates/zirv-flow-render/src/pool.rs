@@ -615,8 +615,17 @@ impl RenderPool {
             catalog: Cow::Borrowed(catalog),
             extras: Cow::Borrowed(extras),
         };
+        self.issues("validate", &request).await
+    }
+
+    /// Send a request that answers with issues, and record a failure.
+    async fn issues(
+        &self,
+        channel: &'static str,
+        request: &RenderRequest<'_>,
+    ) -> Result<Vec<Issue>, RenderFailure> {
         let result = async {
-            let response = self.run("validate", &request).await?;
+            let response = self.run(channel, request).await?;
             response
                 .into_issues()
                 .ok_or(RenderFailure::Protocol)?
@@ -632,16 +641,7 @@ impl RenderPool {
         let request = RenderRequest::ValidateTheme {
             theme: Cow::Borrowed(theme),
         };
-        let result = async {
-            let response = self.run("validate_theme", &request).await?;
-            response
-                .into_issues()
-                .ok_or(RenderFailure::Protocol)?
-                .map_err(|_| RenderFailure::UnsupportedDocument)
-        }
-        .await;
-        record_failure(&result);
-        result
+        self.issues("validate_theme", &request).await
     }
 
     /// Run [`zirv_flow_templates::validate_snippet`] in a child.
@@ -654,16 +654,7 @@ impl RenderPool {
             snippet: Cow::Borrowed(snippet),
             catalog: Cow::Borrowed(catalog),
         };
-        let result = async {
-            let response = self.run("validate_snippet", &request).await?;
-            response
-                .into_issues()
-                .ok_or(RenderFailure::Protocol)?
-                .map_err(|_| RenderFailure::UnsupportedDocument)
-        }
-        .await;
-        record_failure(&result);
-        result
+        self.issues("validate_snippet", &request).await
     }
 
     /// Ask every idle child to stop by closing its input, and wait for them. Children serving a

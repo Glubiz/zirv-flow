@@ -226,7 +226,12 @@ pub fn validate_in_app(message: &InAppContent) -> Vec<Issue> {
         https("/in_app/cta_url", url, &mut issues);
     }
     if let Some(label) = &message.cta_label {
-        length("/in_app/cta_label", label, 100, &mut issues);
+        length(
+            "/in_app/cta_label",
+            label,
+            MAX_IN_APP_TITLE_CHARS,
+            &mut issues,
+        );
     }
     if message.cta_label.is_some() != message.cta_url.is_some() {
         issues.push(
