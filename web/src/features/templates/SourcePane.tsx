@@ -23,6 +23,8 @@ interface Props {
   /** The template, for its UTM override in the settings tab. */
   template: Template;
   onTemplate: (next: Template) => void;
+  /** A block or section to select, asked for from outside the editor. */
+  goTo?: { id: string; n: number };
 }
 
 /** The editor pane: the code fields of the template, the merge-tag picker and the validation list. */
@@ -40,7 +42,7 @@ export function SourcePane(props: Props) {
     );
   }
   if (doc.kind === "blocks") {
-    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} issues={props.issues} checked={props.checked} template={props.template} onTemplate={props.onTemplate} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} />;
+    return <BlockEditor workspaceId={props.workspaceId} doc={doc} onChange={props.onChange} readOnly={props.readOnly} issues={props.issues} checked={props.checked} template={props.template} onTemplate={props.onTemplate} onConvert={props.readOnly || doc.newer ? undefined : props.onConvert} goTo={props.goTo} />;
   }
   return doc.kind === "email" ? <EmailPane {...props} doc={doc} /> : <WebhookPane {...props} doc={doc} />;
 }

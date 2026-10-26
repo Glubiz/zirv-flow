@@ -1,4 +1,5 @@
 export { ConditionEditor, describeCondition } from "./ConditionEditor";
+export { AGG_FNS } from "./operators";
 export type { ConditionNode } from "./ConditionEditor";
 export type { BuilderMode } from "./ast";
 export { useCatalog } from "./catalog";
