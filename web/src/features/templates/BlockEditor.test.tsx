@@ -1,13 +1,16 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { json, mockApi, problem } from "../../test/mockApi";
+import { assetBody, listBody } from "../../test/assetsApi";
+import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
+import { snippetBody } from "../../test/snippetsApi";
+import { listItem } from "../../test/themesApi";
 import { drafts, previewBody, templateDetail, templateRoutes, SENDER_ID, TEMPLATE_ID, WS, type Doc, type Issue } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
 import { DEFAULT_STYLE } from "./blocks/document";
-import { readDocument, startingDocument } from "./model";
+import { readDocument, startingDocument, writeDocument } from "./model";
 
 const WAIT = { timeout: 4000 };
 const BASE = `${WS}/templates/${TEMPLATE_ID}`;
@@ -16,12 +19,12 @@ function mount() {
   return renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
 }
 
-function blocksDocument(sections: unknown[] = [], overrides: Doc = {}, schema = 2): Doc {
+function blocksDocument(sections: unknown[] = [], overrides: Doc = {}, schema = 2, extra: Doc = {}): Doc {
   return {
     schema,
     channel: "email",
     mode: "blocks",
-    blocks: { subject: "Hello", preheader: "", category: "marketing", sender: SENDER_ID, settings: { ...DEFAULT_STYLE }, sections },
+    blocks: { subject: "Hello", preheader: "", category: "marketing", sender: SENDER_ID, settings: { ...DEFAULT_STYLE }, sections, ...extra },
     ...overrides,
   };
 }
@@ -75,8 +78,11 @@ describe("building with blocks", () => {
     fireEvent.input(rich);
 
     await user.click(screen.getByRole("button", { name: "Add image block" }));
-    await user.click(await screen.findByRole("textbox", { name: "Image address" }));
+    await user.click(await screen.findByRole("button", { name: "Choose image…" }));
+    await user.click(await screen.findByRole("button", { name: "Use a web address" }));
+    await user.click(screen.getByRole("textbox", { name: "Web address" }));
     await user.paste("https://cdn.example/a.png");
+    await user.click(screen.getByRole("button", { name: "Use image" }));
     await user.click(screen.getByRole("textbox", { name: "Alt text" }));
     await user.paste("A logo");
 
@@ -134,8 +140,8 @@ describe("building with blocks", () => {
     });
   });
 
-  it("edits the document style and the message", async () => {
-    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument()) }));
+  it("edits the document style of a document with no theme, and the message", async () => {
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2, { theme: "none", footer: "none" })) }));
     const user = userEvent.setup();
     mount();
 
@@ -338,7 +344,7 @@ describe("a schema 2 document", () => {
           visible_if: { all: [] },
           columns: [
             [
-              { type: "heading", id: "h", level: 2, text: "Hi", visible_if: { any: [1] } },
+              { type: "heading", id: "h", level: 2, text: "Hi", visible_if: { any: [{ trait: "city", op: "eq", value: "Aarhus" }] } },
               { type: "image", id: "i", src: { asset: "0192b1a4-7c3e-7000-8000-00000000b001" }, alt: "Logo" },
               { type: "snippet", id: "n", snippet_id: "0192b1a4-7c3e-7000-8000-00000000c001" },
             ],
@@ -370,7 +376,7 @@ describe("a schema 2 document", () => {
     expect(saved.blocks["footer"]).toBe("none");
     expect(saved.blocks.sections[0]?.visible_if).toEqual({ all: [] });
     const blocks = saved.blocks.sections[0]?.columns[0] ?? [];
-    expect(blocks[0]?.["visible_if"]).toEqual({ any: [1] });
+    expect(blocks[0]?.["visible_if"]).toEqual({ any: [{ trait: "city", op: "eq", value: "Aarhus" }] });
     expect(blocks[1]?.["src"]).toEqual({ asset: "0192b1a4-7c3e-7000-8000-00000000b001" });
     expect(blocks[2]).toEqual({ type: "snippet", id: "n", snippet_id: "0192b1a4-7c3e-7000-8000-00000000c001" });
   });
@@ -555,5 +561,331 @@ describe("browser-check fixes", () => {
 
     await user.click(await screen.findByRole("button", { name: "Template mode" }));
     expect(screen.getByRole("menu", { name: "Template mode" })).toHaveClass("menu-start");
+  });
+});
+
+const THEME_WARM = "0192b1a4-7c3e-7000-8000-00000000d001";
+const THEME_COOL = "0192b1a4-7c3e-7000-8000-00000000d002";
+const SNIPPET = "0192b1a4-7c3e-7000-8000-00000000c001";
+const THEMES = [
+  listItem({ id: THEME_WARM, name: "Warm", current_version: 1, is_default: true }),
+  listItem({ id: THEME_COOL, name: "Cool", current_version: 2, is_default: false }),
+];
+const SNIPPETS = [{ ...snippetBody({ id: SNIPPET, name: "Shipping promise", current_version: 3 }), used_by_templates: 0 }];
+const withThemes = (): Record<string, Handler> => ({ [`GET ${WS}/themes`]: () => json(THEMES) });
+const withSnippets = (): Record<string, Handler> => ({ [`GET ${WS}/snippets`]: () => json(SNIPPETS) });
+const savedBlocks = (calls: ReturnType<typeof mockApi>) =>
+  (lastDraft(calls) as unknown as { blocks: Doc & { sections: { visible_if?: unknown; columns: Doc[][] }[] } }).blocks;
+
+describe("the theme tab", () => {
+  it("switches between the workspace default and a named theme and never offers none", async () => {
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2, { theme: "default", footer: "theme" })), extra: withThemes() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Theme: Warm" }));
+    const select = await screen.findByRole("combobox", { name: "Theme" });
+    expect(within(select).getAllByRole("option").map((option) => option.textContent)).toEqual(["Follow the workspace default", "Warm", "Cool"]);
+    expect(screen.getByRole("link", { name: "Edit theme" })).toHaveAttribute("href", `/w/ws1/themes/${THEME_WARM}`);
+
+    await user.selectOptions(select, THEME_COOL);
+    expect(await screen.findByRole("tab", { name: "Theme: Cool" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Edit theme" })).toHaveAttribute("href", `/w/ws1/themes/${THEME_COOL}`);
+    await waitFor(() => expect(savedBlocks(calls)["theme"]).toEqual({ id: THEME_COOL }), WAIT);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Theme" }), "default");
+    await waitFor(() => expect(savedBlocks(calls)["theme"]).toBe("default"), WAIT);
+    expect(screen.queryByRole("tab", { name: "Document style" })).toBeNull();
+  });
+
+  it("shows Document style, a notice and Switch to a theme for a document at none, behind a confirm", async () => {
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2, { theme: "none", footer: "none" })), extra: withThemes() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Document style" }));
+    expect(screen.getByText(/has its own style and no theme/)).toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "Content width in pixels" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Switch to a theme" }));
+    const dialog = await screen.findByRole("dialog", { name: "Switch to a theme?" });
+    expect(within(dialog).getByText(/can only be undone from a version/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Document style" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Switch to a theme" }));
+    await user.click(within(await screen.findByRole("dialog", { name: "Switch to a theme?" })).getByRole("button", { name: "Switch to a theme" }));
+    expect(await screen.findByRole("tab", { name: "Theme: Warm" })).toBeInTheDocument();
+    await waitFor(() => expect(savedBlocks(calls)["theme"]).toBe("default"), WAIT);
+  });
+
+  it("offers the theme values as merge tags only while a theme is in effect", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2, { theme: "default" })), extra: withThemes() }));
+    mount();
+    expect(await screen.findByRole("heading", { name: "Theme" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Insert theme.primary" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Insert theme.logo_url" })).toBeInTheDocument();
+  });
+
+  it("offers no theme merge tags for a document with no theme", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2, { theme: "none", footer: "none" })), extra: withThemes() }));
+    mount();
+    expect(await screen.findByRole("button", { name: "Insert system.unsubscribe_url" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Insert theme.primary" })).toBeNull();
+  });
+});
+
+describe("the snippet block", () => {
+  it("is inserted from a picker of published snippets, shows its name and version, and is removed", async () => {
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[]] }])), extra: withSnippets() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Add snippet block" }));
+    await user.click(await screen.findByRole("button", { name: "Add snippet Shipping promise" }));
+
+    const card = await screen.findByRole("group", { name: "Snippet block 1" });
+    expect(within(card).getByText("Shipping promise")).toBeInTheDocument();
+    expect(within(card).getByText(/version 3/)).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: "Open snippet" })).toHaveAttribute("href", `/w/ws1/snippets/${SNIPPET}`);
+    await waitFor(() => expect(savedBlocks(calls).sections[0]?.columns[0]).toEqual([{ type: "snippet", id: "snippet-1", snippet_id: SNIPPET }]), WAIT);
+
+    await user.click(within(card).getByRole("button", { name: "Remove Snippet block 1" }));
+    await waitFor(() => expect(savedBlocks(calls).sections[0]?.columns[0]).toEqual([]), WAIT);
+  });
+
+  it("says so when no snippet is published", async () => {
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[]] }])) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Add snippet block" }));
+    expect(await screen.findByText(/No snippet is published yet/)).toBeInTheDocument();
+  });
+});
+
+describe("the theme footer", () => {
+  const footerDoc = (extra: Doc = {}) =>
+    detailOf(blocksDocument([{ id: "s", columns: [[heading("h", "Hi")]] }], {}, 2, { theme: "default", footer: "theme", ...extra }));
+
+  it("is the locked last item, removed and restored from its menu, with the unsubscribe notice when removed", async () => {
+    const calls = mockApi(templateRoutes({ detail: footerDoc(), extra: withThemes() }));
+    const user = userEvent.setup();
+    mount();
+
+    const footer = await screen.findByRole("group", { name: "Theme footer" });
+    expect(within(footer).getByText("Theme footer · from Warm")).toBeInTheDocument();
+    expect(within(footer).getByRole("img", { name: /Locked/ })).toBeInTheDocument();
+    expect(within(footer).queryByRole("img", { name: /Drag handle/ })).toBeNull();
+    expect(screen.getByRole("group", { name: "Canvas" }).lastElementChild).toBe(footer);
+
+    await user.click(within(footer).getByRole("button", { name: "Theme footer actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Remove" }));
+    expect(await screen.findByText(/needs its own unsubscribe link/)).toBeInTheDocument();
+    await waitFor(() => expect(savedBlocks(calls)["footer"]).toBe("none"), WAIT);
+
+    await user.click(screen.getByRole("button", { name: "Theme footer actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Restore" }));
+    await waitFor(() => expect(savedBlocks(calls)["footer"]).toBe("theme"), WAIT);
+    expect(screen.queryByText(/needs its own unsubscribe link/)).toBeNull();
+  });
+
+  it("shows no unsubscribe notice for a transactional message when removed", async () => {
+    mockApi(templateRoutes({ detail: footerDoc({ category: "transactional", footer: "none" }), extra: withThemes() }));
+    mount();
+    expect(await screen.findByText(/removed from this email/)).toBeInTheDocument();
+    expect(screen.queryByText(/needs its own unsubscribe link/)).toBeNull();
+  });
+
+  it("is not on the canvas for a document with no theme", async () => {
+    mockApi(templateRoutes({ detail: footerDoc({ theme: "none", footer: "none" }), extra: withThemes() }));
+    mount();
+    await screen.findByRole("group", { name: "Heading block 1" });
+    expect(screen.queryByRole("group", { name: "Theme footer" })).toBeNull();
+  });
+});
+
+describe("the image source", () => {
+  const withImage = (extra: Doc = {}) =>
+    detailOf(blocksDocument([{ id: "s", columns: [[{ type: "image", id: "i", src: { url: "" }, alt: "A bag" }]] }], {}, 2, { theme: "default", ...extra }));
+  const library = (): Record<string, Handler> => ({ ...withThemes(), [`GET ${WS}/assets`]: () => json(listBody([assetBody(1)])) });
+  const sourceOf = (calls: ReturnType<typeof mockApi>) => savedBlocks(calls).sections[0]?.columns[0]?.[0]?.["src"];
+
+  it("sets an asset from the library", async () => {
+    const calls = mockApi(templateRoutes({ detail: withImage(), extra: library() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Image block 1" }));
+    await user.click(await screen.findByRole("button", { name: "Choose image…" }));
+    await user.click(await screen.findByRole("radio", { name: /photo-1\.png/ }));
+    await user.click(screen.getByRole("button", { name: "Use image" }));
+
+    await waitFor(() => expect(sourceOf(calls)).toEqual({ asset: assetBody(1).id }), WAIT);
+    expect(screen.getByRole("textbox", { name: "Image source" })).toHaveValue(`Uploaded image ${assetBody(1).id}`);
+  });
+
+  it("sets the https address as a url", async () => {
+    const calls = mockApi(templateRoutes({ detail: withImage(), extra: library() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Image block 1" }));
+    await user.click(await screen.findByRole("button", { name: "Choose image…" }));
+    await user.click(await screen.findByRole("button", { name: "Use a web address" }));
+    await user.click(screen.getByRole("textbox", { name: "Web address" }));
+    await user.paste("https://cdn.example/bag.png");
+    await user.click(screen.getByRole("button", { name: "Use image" }));
+
+    await waitFor(() => expect(sourceOf(calls)).toEqual({ url: "https://cdn.example/bag.png" }), WAIT);
+  });
+
+  it("offers the theme logo while a theme is in effect, and sets it", async () => {
+    const calls = mockApi(templateRoutes({ detail: withImage(), extra: library() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Image block 1" }));
+    await screen.findByRole("tab", { name: "Theme: Warm" });
+    await user.click(screen.getByRole("button", { name: "Choose image…" }));
+    await user.click(await screen.findByRole("radio", { name: /Theme logo/ }));
+    await user.click(screen.getByRole("button", { name: "Use image" }));
+
+    await waitFor(() => expect(sourceOf(calls)).toEqual({ theme: "logo" }), WAIT);
+    expect(screen.getByRole("textbox", { name: "Image source" })).toHaveValue("The theme logo");
+  });
+
+  it("offers no theme logo for a document with no theme", async () => {
+    mockApi(templateRoutes({ detail: withImage({ theme: "none", footer: "none" }), extra: library() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Image block 1" }));
+    await user.click(await screen.findByRole("button", { name: "Choose image…" }));
+    await screen.findByRole("radio", { name: /photo-1\.png/ });
+    expect(screen.queryByRole("radio", { name: /Theme logo/ })).toBeNull();
+  });
+});
+
+describe("visibility", () => {
+  const withHeading = (visible?: unknown) =>
+    detailOf(
+      blocksDocument([{ id: "s", columns: [[{ ...heading("h", "Hi"), ...(visible ? { visible_if: visible } : {}) }]] }], {}, 2, { theme: "none", footer: "none" }),
+    );
+
+  it("writes visible_if from the Show row and removes it again", async () => {
+    const calls = mockApi(templateRoutes({ detail: withHeading() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Heading block 1" }));
+    const row = await screen.findByRole("group", { name: "Visibility" });
+    expect(within(row).getByRole("button", { name: "Always" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(within(row).getByRole("button", { name: "Only when" }));
+
+    await waitFor(() => expect(savedBlocks(calls).sections[0]?.columns[0]?.[0]?.["visible_if"]).toEqual({ all: [] }), WAIT);
+    expect(within(screen.getByRole("group", { name: "Heading block 1" })).getByText("Only when…")).toBeInTheDocument();
+
+    await user.click(within(row).getByRole("button", { name: "Always" }));
+    await waitFor(() => expect(savedBlocks(calls).sections[0]?.columns[0]?.[0]).not.toHaveProperty("visible_if"), WAIT);
+  });
+
+  it("is offered on a section as well", async () => {
+    const calls = mockApi(templateRoutes({ detail: withHeading() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Section 1 settings" }));
+    await user.click(within(await screen.findByRole("group", { name: "Visibility" })).getByRole("button", { name: "Only when" }));
+    await waitFor(() => expect(savedBlocks(calls).sections[0]?.visible_if).toEqual({ all: [] }), WAIT);
+  });
+
+  it("shows an issue pointed at a block's condition on that block and in its Visibility row", async () => {
+    mockApi(
+      templateRoutes({
+        detail: withHeading({ all: [] }),
+        preview: () => previewBody({ issues: [blocking("invalid_condition", "/blocks/block/h/visible_if")] }),
+      }),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    const block = await screen.findByRole("group", { name: "Heading block 1" });
+    expect(await within(block).findByText(/Blocks publishing/)).toBeInTheDocument();
+    await user.click(block);
+    expect(within(await screen.findByRole("group", { name: "Visibility" })).getByText(/Blocks publishing/)).toBeInTheDocument();
+  });
+
+  it("shows an issue pointed at a section's condition on that section", async () => {
+    mockApi(
+      templateRoutes({
+        detail: withHeading(),
+        preview: () => previewBody({ issues: [blocking("invalid_condition", "/blocks/sections/s/visible_if")] }),
+      }),
+    );
+    mount();
+
+    const section = await screen.findByRole("group", { name: "Section 1, 1 column" });
+    expect(await within(section).findByText(/Blocks publishing/)).toBeInTheDocument();
+  });
+});
+
+describe("hidden blocks in the preview", () => {
+  const doc = () => detailOf(blocksDocument([{ id: "s", columns: [[heading("h", "Hi"), heading("g", "Bye")]] }], {}, 2, { theme: "none", footer: "none" }));
+
+  it("says how many blocks are hidden and why, and goes to the block", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    mockApi(templateRoutes({ detail: doc(), preview: () => previewBody({ hidden_blocks: [{ id: "g", reason: "not in Coffee club" }] }) }));
+    const user = userEvent.setup();
+    mount();
+
+    const line = await screen.findByText(/block hidden for the sample person/);
+    expect(line).toHaveTextContent("1 block hidden for the sample person: not in Coffee club.");
+    await user.click(within(line).getByRole("button", { name: "Go to block" }));
+
+    expect(await screen.findByRole("textbox", { name: "Heading text" })).toHaveValue("Bye");
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("shows a line only when something is hidden", async () => {
+    mockApi(templateRoutes({ detail: doc() }));
+    mount();
+    await screen.findByTitle("Preview of the message");
+    expect(screen.queryByText(/hidden for/)).toBeNull();
+  });
+});
+
+describe("schema 2 documents on the wire", () => {
+  it("saves a document of a newer schema back byte-identical", () => {
+    const stored = {
+      schema: 3,
+      channel: "email",
+      mode: "blocks",
+      blocks: { subject: "S", future: { a: [1, 2] }, sections: [{ id: "s", columns: [[{ type: "hologram", id: "x" }]] }] },
+    };
+    const read = readDocument(stored);
+    expect(read.kind === "blocks" && read.newer).toBe(true);
+    expect(JSON.stringify(writeDocument(read))).toBe(JSON.stringify(stored));
+  });
+
+  it("carries fields it does not know on the document, a section and a block through a read and a write", () => {
+    const stored = {
+      schema: 2,
+      channel: "email",
+      mode: "blocks",
+      blocks: {
+        subject: "S",
+        preheader: "",
+        category: "marketing",
+        theme: "default",
+        footer: "theme",
+        extra_top: 1,
+        settings: { ...DEFAULT_STYLE, extra_setting: true },
+        sections: [{ id: "s", extra_section: "x", columns: [[{ type: "heading", id: "h", level: 2, text: "Hi", extra_block: [1] }]] }],
+      },
+    };
+    const written = writeDocument(readDocument(stored)) as { blocks: Doc };
+    expect(written.blocks).toEqual(stored.blocks);
   });
 });

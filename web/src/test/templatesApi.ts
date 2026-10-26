@@ -1,4 +1,5 @@
 import { json, MEMBER, OWNER, problem, session, type Call, type Handler } from "./mockApi";
+import { listBody } from "./assetsApi";
 import { catalogRoutes, members, WS } from "./segmentsApi";
 
 /** Fixtures and routes shared by the template tests. */
@@ -67,6 +68,7 @@ export function previewBody(overrides: Doc = {}) {
     headers: [],
     body: null,
     issues: [],
+    hidden_blocks: [],
     ...overrides,
   };
 }
@@ -95,10 +97,12 @@ interface Options {
   versions?: unknown[];
   /** The people saved on the template, as the preview-people list answers them. */
   saved?: unknown[];
+  /** Routes added to, or replacing, the defaults: the workspace's themes, snippets and images answer empty lists. */
+  extra?: Record<string, Handler>;
 }
 
 /** The session, the catalog, the template and its draft, preview, publish, versions and where-used endpoints. */
-export function templateRoutes({ role = "admin", detail, preview, uses = [], versions = [], saved = [] }: Options = {}): Record<string, Handler> {
+export function templateRoutes({ role = "admin", detail, preview, uses = [], versions = [], saved = [], extra = {} }: Options = {}): Record<string, Handler> {
   let current: Record<string, unknown> = detail ?? templateDetail();
   let asked = 0;
   const base = `${WS}/templates/${TEMPLATE_ID}`;
@@ -148,6 +152,10 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     [`GET ${WS}/destinations/options`]: () => json(DESTINATION_OPTIONS),
     [`GET ${WS}/test-send-allowlist/options`]: () => json([{ id: "a1", name: "q***@example.com" }]),
     [`GET ${WS}/test-sends`]: () => json({ test_sends: [], next_before: null }),
+    [`GET ${WS}/themes`]: () => json([]),
+    [`GET ${WS}/snippets`]: () => json([]),
+    [`GET ${WS}/assets`]: () => json(listBody([])),
+    ...extra,
   };
 }
 

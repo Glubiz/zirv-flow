@@ -26,10 +26,12 @@ interface Props {
   canAdmin: boolean;
   person: PersonChoice | null;
   onPerson: (person: PersonChoice | null) => void;
+  /** Selects a hidden block or section in the editor. Absent where the editor has no blocks. */
+  onGoToBlock?: (id: string) => void;
 }
 
 /** The server-rendered preview. The HTML goes into an iframe with every sandbox permission off; the SPA never renders it. */
-export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetry, canAdmin, person, onPerson }: Props) {
+export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetry, canAdmin, person, onPerson, onGoToBlock }: Props) {
   const [width, setWidth] = useState<Width>("desktop");
   const [view, setView] = useState<View>("html");
 
@@ -61,7 +63,7 @@ export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetr
       {state.status === "failed" ? (
         <ErrorState title="The preview could not be rendered" detail={state.error.detail || state.error.title} traceId={state.error.traceId} onRetry={onRetry} />
       ) : null}
-      {state.status === "ready" ? <Rendered data={state.data} width={width} view={view} onView={setView} /> : null}
+      {state.status === "ready" ? <Rendered data={state.data} width={width} view={view} onView={setView} person={person} onGoToBlock={onGoToBlock} /> : null}
       <p className="faint">Rendered on the server by the renderer a send uses. Links are inert in the preview.</p>
     </section>
   );
@@ -157,7 +159,21 @@ function AdminPreviewAs({ workspaceId, templateId, person, onPerson }: { workspa
   );
 }
 
-function Rendered({ data, width, view, onView }: { data: TemplatePreview; width: Width; view: View; onView: (view: View) => void }) {
+function Rendered({
+  data,
+  width,
+  view,
+  onView,
+  person,
+  onGoToBlock,
+}: {
+  data: TemplatePreview;
+  width: Width;
+  view: View;
+  onView: (view: View) => void;
+  person: PersonChoice | null;
+  onGoToBlock?: (id: string) => void;
+}) {
   if (!data.rendered) {
     return (
       <p className="notice" role="status">
@@ -194,6 +210,7 @@ function Rendered({ data, width, view, onView }: { data: TemplatePreview; width:
           <dd>{data.person_id ? "A real person" : "A sample person"}</dd>
         </div>
       </dl>
+      <HiddenBlocks hidden={data.hidden_blocks} who={person ? person.label : "the sample person"} onGoToBlock={onGoToBlock} />
       <div className="seg-tabs" role="group" aria-label="Preview part">
         <button type="button" className={view === "html" ? "seg seg-on" : "seg"} aria-pressed={view === "html"} onClick={() => onView("html")}>
           HTML
@@ -212,6 +229,25 @@ function Rendered({ data, width, view, onView }: { data: TemplatePreview; width:
         </pre>
       )}
     </div>
+  );
+}
+
+/** The one line that says what the person does not see, and why. */
+function HiddenBlocks({ hidden, who, onGoToBlock }: { hidden: readonly { id: string; reason: string }[]; who: string; onGoToBlock?: (id: string) => void }) {
+  if (hidden.length === 0) return null;
+  const reasons = [...new Set(hidden.map((entry) => entry.reason))].join("; ");
+  const many = hidden.length > 1;
+  return (
+    <p className="faint tp-hidden" role="status">
+      {hidden.length} {many ? "blocks" : "block"} hidden for {who}: {reasons}.
+      {onGoToBlock
+        ? hidden.map((entry, index) => (
+            <button key={entry.id} type="button" className="link-button" onClick={() => onGoToBlock(entry.id)}>
+              {many ? `Go to block ${index + 1}` : "Go to block"}
+            </button>
+          ))
+        : null}
+    </p>
   );
 }
 

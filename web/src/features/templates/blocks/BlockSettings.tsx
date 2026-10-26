@@ -1,10 +1,14 @@
+import type { ReactNode } from "react";
+import { Link } from "react-router";
+
 import { Button, SelectField, TextAreaField, TextField } from "../../../ui";
 import { NumberField } from "./NumberField";
 import { FieldIssues } from "../IssueList";
 import { issuesAt, type TemplateIssue } from "../model";
-import { blockLabel, omit, type Align, type Block, type Section } from "./document";
+import { blockLabel, issuesOf, omit, withVisibleIf, type Align, type Block, type Section } from "./document";
 import { fieldTarget, type InsertTarget } from "./insertTarget";
 import { RichTextEditor } from "./RichTextEditor";
+import { Visibility } from "./Visibility";
 
 interface Props {
   block: Block;
@@ -12,8 +16,24 @@ interface Props {
   readOnly: boolean;
   onTarget: (target: InsertTarget) => void;
   issues: readonly TemplateIssue[];
-  /** Opens the image library for an image block. Absent where the image address is typed. */
+  /** Opens the image library for an image block. */
   onPickImage?: () => void;
+  /** A document: the workspace for the Visibility condition. Absent in a snippet, which has no Visibility and keeps every setting in view. */
+  workspaceId?: string;
+  /** What a snippet block shows: the snippet's name and live version, when known. */
+  snippetInfo?: { name: string; version: number | null; href: string };
+}
+
+/** The settings a document keeps behind a disclosure; a snippet shows them as they are. */
+function More({ tucked, children }: { tucked: boolean; children: ReactNode }) {
+  return tucked ? (
+    <details className="be-more">
+      <summary>More settings</summary>
+      <div className="stack">{children}</div>
+    </details>
+  ) : (
+    <>{children}</>
+  );
 }
 
 const ALIGNS: readonly { id: Align; label: string }[] = [
@@ -41,9 +61,10 @@ function AlignField({ value, onChange, readOnly, label }: { value: Align; onChan
 }
 
 /** The settings of the selected block: one panel per block type. */
-export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onPickImage }: Props) {
-  const own = issuesAt(issues, `/blocks/block/${block.id}`);
+export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onPickImage, workspaceId, snippetInfo }: Props) {
+  const own = issuesOf(issues, block.id);
   const at = (field: string) => issuesAt(own, `/blocks/block/${block.id}/${field}`);
+  const tucked = workspaceId !== undefined;
   const merge = (label: string) => ({
     onFocus: (event: { currentTarget: HTMLInputElement | HTMLTextAreaElement }) => onTarget(fieldTarget(label, event.currentTarget)),
   });
@@ -54,24 +75,28 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
         <>
           <TextField label="Heading text" value={block.text} readOnly={readOnly} autoComplete="off" {...merge("the heading")} onChange={(event) => onChange({ ...block, text: event.target.value })} />
           <FieldIssues issues={at("text")} />
-          <SelectField
-            label="Level"
-            value={String(block.level)}
-            disabled={readOnly}
-            onChange={(event) => onChange({ ...block, level: Number(event.target.value) as 1 | 2 | 3 })}
-          >
-            <option value="1">Heading 1</option>
-            <option value="2">Heading 2</option>
-            <option value="3">Heading 3</option>
-          </SelectField>
-          <AlignField label="Alignment" value={block.align ?? "left"} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
+          <More tucked={tucked}>
+            <SelectField
+              label="Level"
+              value={String(block.level)}
+              disabled={readOnly}
+              onChange={(event) => onChange({ ...block, level: Number(event.target.value) as 1 | 2 | 3 })}
+            >
+              <option value="1">Heading 1</option>
+              <option value="2">Heading 2</option>
+              <option value="3">Heading 3</option>
+            </SelectField>
+            <AlignField label="Alignment" value={block.align ?? "left"} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
+          </More>
         </>
       ) : null}
       {block.type === "text" ? (
         <>
           <RichTextEditor label="Text" value={block.content} readOnly={readOnly} onTarget={onTarget} onChange={(content) => onChange({ ...block, content })} />
           <FieldIssues issues={at("content")} />
-          <AlignField label="Alignment" value={block.align ?? "left"} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
+          <More tucked={tucked}>
+            <AlignField label="Alignment" value={block.align ?? "left"} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
+          </More>
         </>
       ) : null}
       {block.type === "image" ? (
@@ -81,7 +106,7 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
               <Button onClick={onPickImage}>Choose image…</Button>
             </div>
           ) : null}
-          {"url" in block.src ? (
+          {"url" in block.src && !tucked ? (
             <TextField
               label="Image address"
               hint="An https address."
@@ -94,8 +119,8 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
           ) : (
             <TextField
               label="Image source"
-              hint={onPickImage ? "Choose another image to replace it." : "Set outside this editor; kept as it is."}
-              value={"asset" in block.src ? `Uploaded image ${block.src.asset}` : "The theme logo"}
+              hint={onPickImage && !readOnly ? "Choose another image to replace it." : "Set outside this editor; kept as it is."}
+              value={"asset" in block.src ? `Uploaded image ${block.src.asset}` : "theme" in block.src ? "The theme logo" : block.src.url === "" ? "No image chosen yet" : block.src.url}
               readOnly
               autoComplete="off"
               onChange={() => undefined}
@@ -112,27 +137,29 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
             onChange={(event) => onChange({ ...block, alt: event.target.value })}
           />
           <FieldIssues issues={at("alt")} />
-          <TextField
-            label="Link address"
-            hint="Optional. Where a click on the image goes."
-            value={block.href ?? ""}
-            readOnly={readOnly}
-            autoComplete="off"
-            {...merge("the image link")}
-            onChange={(event) => onChange(optional(block, "href", event.target.value))}
-          />
-          <FieldIssues issues={at("href")} />
-          <TextField
-            label="Width in pixels"
-            hint="Optional, up to 800."
-            type="number"
-            min={1}
-            max={800}
-            value={block.width === undefined ? "" : String(block.width)}
-            readOnly={readOnly}
-            onChange={(event) => onChange(optional(block, "width", event.target.value === "" ? undefined : Number(event.target.value)))}
-          />
-          <FieldIssues issues={at("width")} />
+          <More tucked={tucked}>
+            <TextField
+              label="Link address"
+              hint="Optional. Where a click on the image goes."
+              value={block.href ?? ""}
+              readOnly={readOnly}
+              autoComplete="off"
+              {...merge("the image link")}
+              onChange={(event) => onChange(optional(block, "href", event.target.value))}
+            />
+            <FieldIssues issues={at("href")} />
+            <TextField
+              label="Width in pixels"
+              hint="Optional, up to 800."
+              type="number"
+              min={1}
+              max={800}
+              value={block.width === undefined ? "" : String(block.width)}
+              readOnly={readOnly}
+              onChange={(event) => onChange(optional(block, "width", event.target.value === "" ? undefined : Number(event.target.value)))}
+            />
+            <FieldIssues issues={at("width")} />
+          </More>
         </>
       ) : null}
       {block.type === "button" ? (
@@ -149,7 +176,9 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
             onChange={(event) => onChange({ ...block, url: event.target.value })}
           />
           <FieldIssues issues={at("url")} />
-          <AlignField label="Alignment" value={block.align} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
+          <More tucked={tucked}>
+            <AlignField label="Alignment" value={block.align} readOnly={readOnly} onChange={(align) => onChange({ ...block, align })} />
+          </More>
         </>
       ) : null}
       {block.type === "divider" ? (
@@ -197,34 +226,51 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
         </>
       ) : null}
       {block.type === "snippet" ? (
-        <p className="muted">This block shows snippet {block.snippet_id}. It is set outside this editor and kept as it is.</p>
+        <div className="stack">
+          <p className="muted">
+            {snippetInfo ? `This block shows the snippet ${snippetInfo.name}${snippetInfo.version === null ? "" : `, version ${snippetInfo.version}`}.` : `This block shows snippet ${block.snippet_id}.`} Its blocks are edited in the snippet.
+          </p>
+          {snippetInfo ? (
+            <Link to={snippetInfo.href} target="_blank" rel="noreferrer">
+              Open snippet
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
+      {workspaceId !== undefined ? (
+        <Visibility workspaceId={workspaceId} value={block.visible_if} readOnly={readOnly} issues={own} onChange={(next) => onChange(withVisibleIf(block, next))} />
       ) : null}
       <FieldIssues issues={own.filter((issue) => issue.at === `/blocks/block/${block.id}`)} />
     </div>
   );
 }
 
-/** The settings of a section: its own colour and padding. */
+/** The settings of a section: its own colour and padding, and in a document when it shows. */
 export function SectionSettings({
   section,
   onChange,
   readOnly,
   issues,
+  workspaceId,
 }: {
   section: Section;
   onChange: (next: Section) => void;
   readOnly: boolean;
   issues: readonly TemplateIssue[];
+  workspaceId: string;
 }) {
-  const own = issuesAt(issues, `/blocks/block/${section.id}`);
+  const own = issuesOf(issues, section.id);
   const set = (key: "background_color" | "padding", value: string) => {
     onChange(value === "" ? omit(section, key) : { ...section, [key]: value });
   };
   return (
     <div className="stack" role="group" aria-label="Settings of the section">
-      <TextField label="Section background" hint="Optional. Such as #f4f4f4." value={section.background_color ?? ""} readOnly={readOnly} autoComplete="off" onChange={(event) => set("background_color", event.target.value)} />
-      <TextField label="Section padding" hint="Optional. One to four lengths in pixels, such as 20px 0." value={section.padding ?? ""} readOnly={readOnly} autoComplete="off" onChange={(event) => set("padding", event.target.value)} />
-      <FieldIssues issues={own} />
+      <More tucked>
+        <TextField label="Section background" hint="Optional. Such as #f4f4f4." value={section.background_color ?? ""} readOnly={readOnly} autoComplete="off" onChange={(event) => set("background_color", event.target.value)} />
+        <TextField label="Section padding" hint="Optional. One to four lengths in pixels, such as 20px 0." value={section.padding ?? ""} readOnly={readOnly} autoComplete="off" onChange={(event) => set("padding", event.target.value)} />
+      </More>
+      <Visibility workspaceId={workspaceId} value={section.visible_if} readOnly={readOnly} issues={own} onChange={(next) => onChange(withVisibleIf(section, next))} />
+      <FieldIssues issues={own.filter((issue) => !issue.at.includes("/visible_if"))} />
     </div>
   );
 }
