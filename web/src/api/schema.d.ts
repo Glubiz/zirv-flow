@@ -3474,7 +3474,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The workspace's live templates by name; archived ones with `archived=true`. */
+        /**
+         * The workspace's templates for the library, newest edit first; archived ones with
+         *     `archived=true` or `status=archived`.
+         */
         get: operations["list_templates"];
         put?: never;
         /** Creates a template with its first draft. Audited as `template.created`. */
@@ -3521,7 +3524,9 @@ export interface paths {
         /**
          * Replaces the template's draft. The draft is not validated beyond being a template document of
          *     the template's channel and category with a registered content type: a template is edited in
-         *     steps, and the publish checks it. Audited as `template.draft_saved`.
+         *     steps, and the publish checks it. After the save commits the draft is validated once and its
+         *     issue counts stored (`checks` in the template list); a validation that cannot run leaves them
+         *     empty and never fails the save. Audited as `template.draft_saved`.
          */
         put: operations["save_template_draft"];
         post?: never;
@@ -6810,6 +6815,12 @@ export interface components {
             /** @enum {string} */
             mode: "always";
         };
+        /** @description A flow named in a problem. */
+        FlowRefProblem: {
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+        };
         /** @description A cron slot in its own time zone. */
         FlowScheduleTrigger: {
             audience: components["schemas"]["FlowAudience"];
@@ -7987,6 +7998,8 @@ export interface components {
              *     concerns, never a value from the flow.
              */
             flow_issues?: components["schemas"]["FlowIssueProblem"][] | null;
+            /** @description The active flows whose running version sends a template (`template_in_use`). */
+            flows?: components["schemas"]["FlowRefProblem"][] | null;
             /**
              * @description What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
              *     definition and a fixed code for each issue, never a value from it.
@@ -9707,6 +9720,13 @@ export interface components {
          * @enum {string}
          */
         TemplateChannelRequest: "email" | "webhook";
+        /** @description The counts of the issues the draft's last validation found. */
+        TemplateChecksBody: {
+            /** Format: int32 */
+            blocking: number;
+            /** Format: int32 */
+            warnings: number;
+        };
         /** @description A template with its draft. */
         TemplateDetailBody: components["schemas"]["TemplateBody"] & {
             draft: components["schemas"]["TemplateDraftBody"];
@@ -9744,6 +9764,28 @@ export interface components {
             message?: string | null;
             /** @description `blocking` or `warning`. */
             severity: string;
+        };
+        /** @description A template in the library list: the template and the facts the library shows. */
+        TemplateListItemBody: components["schemas"]["TemplateBody"] & {
+            /**
+             * Format: int64
+             * @description How many active flows send the template.
+             */
+            active_flows: number;
+            checks?: null | components["schemas"]["TemplateChecksBody"];
+            /** @description The draft differs from the current version; false before the first publish. */
+            draft_changed: boolean;
+            /** Format: date-time */
+            edited_at: string;
+            /** @description The email of the member who saved the draft last; null for an API key or a removed member. */
+            edited_by_email?: string | null;
+            theme: components["schemas"]["TemplateThemeBody"];
+        };
+        /** @description A theme a block email names. */
+        TemplateNamedTheme: {
+            /** Format: uuid */
+            id: string;
+            name: string;
         };
         /** @description The rendered template and its validation results. */
         TemplatePreviewBody: {
@@ -9792,6 +9834,13 @@ export interface components {
             template: components["schemas"]["TemplateBody"];
             version: components["schemas"]["TemplateVersionBody"];
         };
+        /** @description The theme the draft follows: `default`, `none`, or the theme it names. */
+        TemplateThemeBody: components["schemas"]["TemplateThemeChoice"] | components["schemas"]["TemplateNamedTheme"];
+        /**
+         * @description A theme choice that names no theme row.
+         * @enum {string}
+         */
+        TemplateThemeChoice: "default" | "none";
         /** @description One flow with a version that names the template. */
         TemplateUseBody: {
             /** @description Whether the version the flow runs now is one of them. */
@@ -25057,6 +25106,16 @@ export interface operations {
             query?: {
                 /** @description Include archived templates; default false */
                 archived?: boolean;
+                /** @description A case-insensitive substring of the name, the draft's subject or a merge field the draft uses */
+                q?: string;
+                /** @description `email` or `webhook` */
+                channel?: string;
+                /** @description `live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates */
+                status?: string;
+                /** @description A theme id, `default` or `none` */
+                theme?: string;
+                /** @description `edited` (the default), `name` or `most_used` (non-test messages in the last 30 days) */
+                sort?: string;
             };
             header?: never;
             path: {
@@ -25073,10 +25132,10 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TemplateBody"][];
+                    "application/json": components["schemas"]["TemplateListItemBody"][];
                 };
             };
-            /** @description archived is not true or false */
+            /** @description archived is not true or false, or another parameter has an unknown value */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -25362,7 +25421,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is already archived (`code` is `template_archived`) */
+            /** @description The template is already archived (`code` is `template_archived`), or an active flow still sends it (`code` is `template_in_use`, with the flows in `flows`) */
             409: {
                 headers: {
                     [name: string]: unknown;

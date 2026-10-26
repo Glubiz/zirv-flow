@@ -187,25 +187,6 @@ pub async fn find_template<'e>(
     .map_err(StoreError::query)
 }
 
-/// The workspace's templates by name; archived ones only when asked for.
-pub async fn list_templates<'e>(
-    executor: impl PgExecutor<'e>,
-    workspace: WorkspaceId,
-    include_archived: bool,
-) -> Result<Vec<Template>, StoreError> {
-    sqlx::query_as(concat!(
-        "SELECT ",
-        template_columns!(),
-        " FROM templates WHERE workspace_id = $1 AND ($2 OR archived_at IS NULL) \
-          ORDER BY lower(name), id"
-    ))
-    .bind(workspace.as_uuid())
-    .bind(include_archived)
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)
-}
-
 /// The draft of a template of the workspace.
 pub async fn find_template_draft<'e>(
     executor: impl PgExecutor<'e>,
@@ -283,7 +264,7 @@ pub async fn save_template_draft(
     lock_live_template(connection, workspace, id).await?;
     let draft = sqlx::query_as(concat!(
         "UPDATE template_drafts SET document = $3, revision = revision + 1, updated_by = $4, \
-            updated_at = now() WHERE workspace_id = $1 AND template_id = $2 RETURNING ",
+            updated_at = now(), checks = NULL WHERE workspace_id = $1 AND template_id = $2 RETURNING ",
         draft_columns!()
     ))
     .bind(workspace.as_uuid())
@@ -334,6 +315,14 @@ mod tests {
 
     use super::*;
     use crate::templates::tests_support::*;
+    use crate::templates::{TemplateListQuery, list_templates};
+
+    fn all() -> TemplateListQuery {
+        TemplateListQuery {
+            include_archived: true,
+            ..TemplateListQuery::default()
+        }
+    }
 
     #[test]
     fn a_documents_sender_is_read_where_its_content_type_keeps_it() {
@@ -393,9 +382,11 @@ mod tests {
         assert!(duplicate.unwrap_err().is_conflict());
         assert!(elsewhere.is_ok());
         assert!(reused.is_ok());
-        let live = list_templates(&pool, ws, false).await.unwrap();
+        let live = list_templates(&pool, ws, &TemplateListQuery::default())
+            .await
+            .unwrap();
         assert_eq!(live.len(), 1);
-        assert_eq!(list_templates(&pool, ws, true).await.unwrap().len(), 2);
+        assert_eq!(list_templates(&pool, ws, &all()).await.unwrap().len(), 2);
     }
 
     #[sqlx::test]
@@ -596,7 +587,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(list_templates(&pool, two, true).await.unwrap().is_empty());
+        assert!(list_templates(&pool, two, &all()).await.unwrap().is_empty());
         assert!(matches!(
             save_template_draft(&mut connection, two, template.id, &document("x"), None).await,
             Err(TemplateError::NotFound)
