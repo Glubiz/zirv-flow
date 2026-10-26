@@ -5,7 +5,7 @@
 use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 
-use super::check::{Field, block_fields, check_field_in, check_texts};
+use super::check::{Field, block_fields, check_field, check_texts};
 use super::model::{Block, Section, block_at, check_block_numbers, check_id};
 use crate::issue::{FieldCatalog, Issue, code};
 use crate::sandbox::{FUEL, environment};
@@ -81,7 +81,7 @@ pub fn validate_snippet(snippet: &SnippetContent, catalog: &FieldCatalog) -> Vec
     env.set_fuel(Some(FUEL));
     let sample = sample_context(catalog);
     for field in &fields {
-        check_field_in(&env, catalog, true, &sample, field, &mut issues);
+        check_field(&env, catalog, true, &sample, field, &mut issues);
     }
     issues
 }

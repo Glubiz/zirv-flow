@@ -425,7 +425,7 @@ pub(crate) fn validate(
     let env = document_environment(content, extras, look.footer);
     let sample = look.values(&RenderContext::sample(catalog), extras);
     for field in fields(content, extras, look.footer) {
-        check_field_in(
+        check_field(
             &env,
             catalog,
             look.theme.is_some(),
@@ -452,20 +452,9 @@ pub(crate) fn validate(
     issues
 }
 
-/// The merge field, syntax and sample checks of one text field, where no theme is in effect:
-/// every `theme.*` name is unknown.
+/// The merge field, syntax and sample checks of one text field. `theme` says whether the `theme`
+/// values are known names: a theme is in effect, or the field is in a snippet.
 pub(crate) fn check_field(
-    env: &minijinja::Environment<'static>,
-    catalog: &FieldCatalog,
-    sample: &minijinja::Value,
-    field: &Field<'_>,
-    issues: &mut Vec<Issue>,
-) {
-    check_field_in(env, catalog, false, sample, field, issues);
-}
-
-/// [`check_field`], where `theme` says whether a theme is in effect and its values are known.
-pub(crate) fn check_field_in(
     env: &minijinja::Environment<'static>,
     catalog: &FieldCatalog,
     theme: bool,
