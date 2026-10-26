@@ -31,6 +31,8 @@ export interface ProblemDetails {
   snippetTemplates?: NamedRef[];
   /** The themes that use a snippet (`snippet_in_use`). */
   snippetThemes?: NamedRef[];
+  /** The active flows that send a template (`template_in_use`), by id and name. */
+  flows?: NamedRef[];
 }
 
 /** A thing a problem names, by id and name. */
@@ -69,6 +71,7 @@ export class ApiError extends Error {
   readonly templateIssues: ProblemTemplateIssue[];
   readonly snippetTemplates: NamedRef[];
   readonly snippetThemes: NamedRef[];
+  readonly flows: NamedRef[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -85,6 +88,7 @@ export class ApiError extends Error {
     this.templateIssues = problem.templateIssues ?? [];
     this.snippetTemplates = problem.snippetTemplates ?? [];
     this.snippetThemes = problem.snippetThemes ?? [];
+    this.flows = problem.flows ?? [];
   }
 }
 
@@ -111,6 +115,7 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       templateIssues: templateIssues(body["template_issues"]),
       snippetTemplates: namedRefs(body["snippet_templates"]),
       snippetThemes: namedRefs(body["snippet_themes"]),
+      flows: flowRefs(body["flows"]),
     });
   }
   return new ApiError({
@@ -175,6 +180,15 @@ function namedRefs(value: unknown): NamedRef[] {
   return value.flatMap((entry: unknown) => {
     if (!isRecord(entry)) return [];
     const { id, name } = entry;
+    return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
+  });
+}
+
+function flowRefs(value: unknown): NamedRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { flow_id: id, flow_name: name } = entry;
     return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
   });
 }
