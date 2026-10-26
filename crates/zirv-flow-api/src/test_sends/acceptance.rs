@@ -1199,4 +1199,23 @@ mod tests {
         }
         assert_eq!(f.count("SELECT count(*) FROM test_sends").await, 1);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_test_by_address_answers_with_the_stored_hint_whatever_the_case_typed(pool: PgPool) {
+        let f = fixture(&pool).await;
+        f.allow("qa.person@example.org").await;
+
+        let reply = f
+            .call(
+                "POST",
+                &f.test_send_url(),
+                Some(f.request(json!({"address": "QA.Person@Example.ORG"}))),
+                Auth::Key(&f.write),
+            )
+            .await;
+
+        assert_eq!(reply.status, StatusCode::ACCEPTED, "{:?}", reply.body);
+        assert_eq!(reply.body["recipient_display"], "q***@example.org");
+    }
 }

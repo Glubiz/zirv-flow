@@ -11,9 +11,7 @@ use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::UserId;
 use zirv_flow_core::people::{Identifier, identifier_hash};
-use zirv_flow_store::{
-    ListedTestSend, NewTestSend, TestSendQuota, TestSendReservation, masked_hint,
-};
+use zirv_flow_store::{ListedTestSend, NewTestSend, TestSendQuota, TestSendReservation};
 
 use super::TestSendBody;
 use crate::AppState;
@@ -187,10 +185,14 @@ pub(crate) async fn test_send(
             let identifier =
                 Identifier::parse("email", address).map_err(|_| recipient_not_allowed())?;
             let hash = identifier_hash(key, &identifier);
-            zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
+            let entry = zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
                 .await?
                 .ok_or_else(recipient_not_allowed)?;
-            (hash, None, masked_hint(address))
+            // The hint stored with the entry, not one derived from the text the caller typed.
+            let (_, hint) = zirv_flow_store::find_allowlist_target(&mut tx, workspace.id, entry)
+                .await?
+                .ok_or_else(recipient_not_allowed)?;
+            (hash, None, hint)
         }
         (None, None, Some(entry)) => {
             let (hash, hint) = zirv_flow_store::find_allowlist_target(&mut tx, workspace.id, entry)
