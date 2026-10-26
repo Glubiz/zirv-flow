@@ -31,13 +31,14 @@ pub(crate) struct PreviewPersonBody {
     created_at: OffsetDateTime,
 }
 
+/// Only admins reach these routes, so identifier values are always shown.
 impl PreviewPersonBody {
-    fn new(person: PreviewPerson, reveal: bool) -> Self {
+    fn new(person: PreviewPerson) -> Self {
         Self {
             person_id: person.person_id,
             display: person
                 .display
-                .map(|(kind, value)| DisplayBody::new(kind, value, reveal)),
+                .map(|(kind, value)| DisplayBody::new(kind, value, true)),
             created_at: person.created_at,
         }
     }
@@ -86,10 +87,7 @@ pub(crate) async fn list(
         .await?
         .ok_or_else(ApiError::not_found)?;
     Ok(Json(
-        people
-            .into_iter()
-            .map(|person| PreviewPersonBody::new(person, true))
-            .collect(),
+        people.into_iter().map(PreviewPersonBody::new).collect(),
     ))
 }
 
@@ -150,7 +148,7 @@ pub(crate) async fn add(
     } else {
         StatusCode::OK
     };
-    Ok((status, Json(PreviewPersonBody::new(person, true))))
+    Ok((status, Json(PreviewPersonBody::new(person))))
 }
 
 /// Removes a saved person from the template. Audited as `template.preview_person_removed`.
@@ -194,4 +192,27 @@ pub(crate) async fn remove(
     .await?;
     zirv_flow_store::commit(tx).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_saved_person_shows_the_identifier_unmasked_and_none_when_they_have_none() {
+        let person = |display| PreviewPerson {
+            person_id: Uuid::nil(),
+            display,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        };
+
+        let with =
+            PreviewPersonBody::new(person(Some(("email".into(), "ann@example.test".into()))));
+        let without = PreviewPersonBody::new(person(None));
+
+        let shown = with.display.unwrap();
+        assert_eq!(shown.value.as_deref(), Some("ann@example.test"));
+        assert!(!shown.masked);
+        assert!(without.display.is_none());
+    }
 }
