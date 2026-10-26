@@ -23,3 +23,13 @@ pub use worker::{Worker, WorkerConfig};
 /// The DNS resolver a worker reads sending-domain records through, and the real one the
 /// composition root builds.
 pub use zirv_flow_connectors::dns::{DnsResolver, SystemResolver};
+
+/// The connectors' test doubles (the local SMTP sink and the fixture DNS resolver), re-exported so
+/// the browser test server of the binary reaches them through this crate.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    pub use zirv_flow_connectors::destinations::{
+        SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpCaptured, SmtpSink, SmtpSinkOptions,
+    };
+    pub use zirv_flow_connectors::dns::FixtureResolver;
+}

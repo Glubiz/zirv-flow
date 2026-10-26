@@ -340,11 +340,13 @@ pub use workspaces::{
     remove_membership, set_membership, set_orphan_policy, set_workspace_timezone,
     set_workspace_utm,
 };
-/// The operator master key, its derived keys and the sealing of secrets, re-exported so the
+/// The operator master key, its derived keys and the sealing of secrets, and the workspace and role
+/// types the test server seeds with, re-exported so the
 /// binary reaches them through the store.
 pub use zirv_flow_core::{
-    HmacKey, HmacPurpose, HmacRoot, Keyring, MasterKey, SecretBytes, SecretId, SecretPurpose,
-    deployment_key_aad, open as open_secret, seal as seal_secret, secret_aad,
+    HmacKey, HmacPurpose, HmacRoot, Keyring, MasterKey, Role, Scope, SecretBytes, SecretId,
+    SecretPurpose, Slug, WorkspaceId, WorkspaceName, deployment_key_aad, open as open_secret,
+    seal as seal_secret, secret_aad,
 };
 
 #[derive(Debug)]

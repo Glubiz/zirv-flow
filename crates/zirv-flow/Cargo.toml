@@ -31,6 +31,33 @@ zirv-flow-api.workspace = true
 zirv-flow-jobs.workspace = true
 zirv-flow-render.workspace = true
 zirv-flow-store.workspace = true
+# Only for the browser test server (#315), behind `browser-test`: the harness it reuses drives the
+# router and the worker through these and reaches the local SMTP sink and the fixture resolver.
+axum = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+[features]
+# The test server of the Playwright tests. Never a default feature and never in a release build,
+# the Dockerfile or CD: it refuses to compile unless ZIRV_FLOW_BROWSER_TEST_BUILD is set, and
+# scripts/check-bench-features.sh checks that nothing shipped names it.
+browser-test = [
+    "dep:axum", "dep:http-body-util", "dep:serde_json", "dep:sqlx", "dep:time", "dep:tower",
+    "dep:uuid", "zirv-flow-jobs/test-support", "zirv-flow-store/test-support",
+]
+
+[[bin]]
+name = "zirv-flow"
+path = "src/main.rs"
+
+[[bin]]
+name = "zirv-flow-browser-test"
+path = "src/browser_test/main.rs"
+required-features = ["browser-test"]
 
 [dev-dependencies]
 axum.workspace = true
@@ -46,4 +73,5 @@ uuid.workspace = true
 # the fake email provider.
 zirv-flow-connectors = { workspace = true, features = ["test-support"] }
 zirv-flow-core.workspace = true
+zirv-flow-jobs = { workspace = true, features = ["test-support"] }
 zirv-flow-store = { workspace = true, features = ["test-support"] }

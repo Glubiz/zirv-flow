@@ -9,7 +9,7 @@ import tseslint from "typescript-eslint";
 import { boundaryConfigs } from "./eslint.boundaries.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const typed = ["src/**/*.{ts,tsx}", "vite.config.ts", "vitest.setup.ts"];
+const typed = ["src/**/*.{ts,tsx}", "e2e/**/*.ts", "vite.config.ts", "vitest.setup.ts"];
 
 export default tseslint.config(
   { ignores: ["dist", "node_modules", "lint-fixtures", "src/api/schema.d.ts"] },
@@ -30,7 +30,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ["scripts/**/*.mjs", "*.js"],
+    files: ["scripts/**/*.mjs", "*.js", "e2e/**/*.ts"],
     languageOptions: { globals: { ...globals.node } },
   },
   ...boundaryConfigs,
