@@ -233,19 +233,20 @@ pub use privacy::{
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;
 pub use segments::{
-    CADENCE_MINUTES, CatalogDetails, CatalogSnapshot, ClearFields, DEFAULT_CADENCE_MINUTES,
-    DataAge, DirtyBatch, EXPLAIN_EVENT_CAP, EventDetail, ExplainConsent, ExplainEvent,
-    ExplainEventScope, ExplainPerson, FeedingSource, HistoryCursor, HistoryRow, MemberRow,
-    MembershipCause, NewSegment, NewSegmentVersion, PropertyDetail, REFRESH_JOB_KIND,
+    CADENCE_MINUTES, CatalogDetails, CatalogSnapshot, ClearFields, CompiledCondition,
+    DEFAULT_CADENCE_MINUTES, DataAge, DirtyBatch, EXPLAIN_EVENT_CAP, EventDetail, ExplainConsent,
+    ExplainEvent, ExplainEventScope, ExplainPerson, FeedingSource, HistoryCursor, HistoryRow,
+    MemberRow, MembershipCause, NewSegment, NewSegmentVersion, PropertyDetail, REFRESH_JOB_KIND,
     REFRESH_LOCK_CLASS, ReevaluateApply, RefreshApply, RefreshOutcome, RefreshRequest,
     RefreshTrigger, SampleRow, Segment, SegmentError, SegmentPatch, SegmentRef, SegmentVersion,
     SqlParam, SqlQuery, TopicDetail, TraitDetail, apply_reevaluation, apply_refresh,
     archive_segment, begin_segment_snapshot, create_segment, decision_cause_kind, enqueue_refresh,
-    explain_clear_fields, find_segment, find_segment_version, list_segment_versions, list_segments,
-    load_explain_person, lock_reevaluation, lock_segment_refresh, lock_segments, membership_cause,
-    membership_trace, read_segment_catalog, reconcile_segment_schedules, reevaluation_order,
-    run_person_batch, run_segment_preview, segment_catalog, segment_catalog_details, segment_cron,
-    segment_data_age, segment_history_page, segment_members_page, snapshot_now, update_segment,
+    evaluate_conditions, explain_clear_fields, find_segment, find_segment_version,
+    list_segment_versions, list_segments, load_explain_person, lock_reevaluation,
+    lock_segment_refresh, lock_segments, membership_cause, membership_trace, read_segment_catalog,
+    reconcile_segment_schedules, reevaluation_order, run_person_batch, run_segment_preview,
+    segment_catalog, segment_catalog_details, segment_cron, segment_data_age, segment_history_page,
+    segment_members_page, snapshot_now, update_segment,
 };
 pub use send_limits::{
     CAP_LOCK_CLASS, CapMode, CapVerdict, FrequencyCap, NewFrequencyCap, QuietHours, SendLimits,
