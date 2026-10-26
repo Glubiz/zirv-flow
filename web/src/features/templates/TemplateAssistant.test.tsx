@@ -1,12 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { json, mockApi, problem, type Call, type Handler } from "../../test/mockApi";
+import { json, mockApi, OWNER, problem, session, type Call, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { drafts, emailDocument, SENDER_ID, templateDetail, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
+import { TemplateAssistant } from "./TemplateAssistant";
 import { TemplatePage } from "./TemplatePage";
-import { startingDocument } from "./model";
+import { readDocument, startingDocument } from "./model";
 
 const DRAFTS = `POST ${WS}/ai/drafts`;
 const ACCEPT = `POST ${WS}/ai/drafts/d1/accept`;
@@ -175,28 +176,20 @@ describe("the template assistant", () => {
     expect(calls.some((call) => call.path.endsWith("/publish"))).toBe(false);
   });
 
-  it("asks before replacing unsaved edits and accepts nothing when they are kept", async () => {
+  it("does not draft from an older version when the edits cannot be saved", async () => {
     const calls = mount(
       templateRoutes({
-        extra: {
-          [DRAFTS]: () => json(valid()),
-          [ACCEPT]: () => problem(500, "Boom", "x"),
-          [`PUT ${WS}/templates/${TEMPLATE_ID}/draft`]: () => new Promise<Response>(() => undefined),
-        },
+        extra: { [DRAFTS]: () => json(valid()), [`PUT ${WS}/templates/${TEMPLATE_ID}/draft`]: () => problem(500, "Boom", "x") },
       }),
     );
     const user = userEvent.setup();
     await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
-    await screen.findByText("Saving", undefined, WAIT);
     await user.click(screen.getByRole("button", { name: "Assistant" }));
     await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
     await user.click(screen.getByRole("button", { name: "Draft" }));
-    await screen.findByTitle("After render");
-    await user.click(screen.getByRole("button", { name: "Accept into draft" }));
 
-    expect(await screen.findByRole("dialog", { name: "Replace your unsaved changes?" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Keep my changes" }));
-    expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
+    expect(await screen.findByText("Your latest changes could not be saved")).toBeInTheDocument();
+    expect(asked(calls)).toHaveLength(0);
   });
 
   it("offers a reload when the draft changed since", async () => {
@@ -227,5 +220,82 @@ describe("the template assistant", () => {
 
     await screen.findByRole("textbox", { name: /source/ });
     expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+  });
+});
+
+describe("the assistant and the editor's saves", () => {
+  it("saves the edits that are waiting before the draft request goes out", async () => {
+    const calls = mount(templateRoutes({ extra: { [DRAFTS]: () => json(valid()) } }));
+    const user = userEvent.setup();
+    await user.type(await screen.findByRole("textbox", { name: /source/ }), "x");
+    await user.click(screen.getByRole("button", { name: "Assistant" }));
+    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await screen.findByTitle("After render");
+
+    const order = calls.filter((call) => call.path.endsWith("/draft") || call.path.endsWith("/ai/drafts")).map((call) => call.method + " " + call.path.split("/").slice(-2).join("/"));
+    expect(order[0]).toMatch(/^PUT /);
+    expect(order[order.length - 1]).toBe("POST ai/drafts");
+  });
+
+  function host(overrides: Partial<Parameters<typeof TemplateAssistant>[0]> = {}) {
+    const doc = readDocument(emailDocument());
+    const hold = vi.fn(() => Promise.resolve());
+    const props = {
+      workspaceId: "ws1",
+      templateId: TEMPLATE_ID,
+      doc,
+      unsaved: false,
+      flush: () => Promise.resolve(true),
+      hold,
+      release: vi.fn(),
+      onAccepted: vi.fn(),
+      onReconcile: () => Promise.resolve(false),
+      onReload: () => Promise.resolve(),
+      onGone: vi.fn(),
+      onClose: vi.fn(),
+      ...overrides,
+    };
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      [`GET ${WS}/ai/settings`]: () => json(settings()),
+      [DRAFTS]: () => json(valid()),
+      [ACCEPT]: () => json({ id: "d1", kind: "template", template_id: TEMPLATE_ID, content: {}, template: templateDetail() }),
+    });
+    renderRoute("/w/ws1/t", "/w/:ws/t", <TemplateAssistant {...props} />);
+    return { calls, props };
+  }
+
+  async function draftOnce() {
+    const user = userEvent.setup();
+    await user.type(await screen.findByLabelText("What do you want?"), "Warmer");
+    await user.click(screen.getByRole("button", { name: "Draft" }));
+    await user.click(await screen.findByRole("button", { name: "Accept into draft" }));
+    return user;
+  }
+
+  it("accepts when unsaved edits are replaced and sends no save", async () => {
+    const { calls, props } = host({ unsaved: true });
+    const user = await draftOnce();
+    await user.click(await screen.findByRole("button", { name: "Replace them" }));
+
+    await waitFor(() => expect(props.onAccepted).toHaveBeenCalled());
+    expect(props.hold).toHaveBeenCalledTimes(1);
+    expect(calls.some((call) => call.method === "PUT")).toBe(false);
+    expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(true);
+  });
+
+  it("waits for a save that is in flight before it accepts", async () => {
+    let finish: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const { calls } = host({ hold: () => held });
+    await draftOnce();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(false);
+    finish();
+    await waitFor(() => expect(calls.some((call) => call.path.endsWith("/accept"))).toBe(true));
   });
 });

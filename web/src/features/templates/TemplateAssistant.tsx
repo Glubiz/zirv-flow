@@ -24,6 +24,8 @@ interface Props {
   doc: Editable;
   /** Whether the editor holds edits the server does not have. */
   unsaved: boolean;
+  /** Saves what is waiting and waits for any save in flight; false when a save failed. */
+  flush: () => Promise<boolean>;
   /** Stops the editor saving while the accept runs. */
   hold: () => Promise<void>;
   release: () => void;
@@ -38,7 +40,7 @@ interface Props {
 }
 
 /** The left column of the template editor while the assistant is open. */
-export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, hold, release, onAccepted, onReconcile, onReload, onGone, onClose }: Props) {
+export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, flush, hold, release, onAccepted, onReconcile, onReload, onGone, onClose }: Props) {
   const [replacing, setReplacing] = useState<((replace: boolean) => void) | null>(null);
   const [picked, setPicked] = useState<{ id: string; subject: string } | null>(null);
   const [epoch, setEpoch] = useState(0);
@@ -97,6 +99,7 @@ export function TemplateAssistant({ workspaceId, templateId, doc, unsaved, hold,
         kind="template"
         templateId={templateId}
         templateTasks={tasksOf(doc)}
+        prepare={flush}
         onAccept={accepted}
         confirmAccept={confirmAccept}
         onAcceptFailed={acceptFailed}

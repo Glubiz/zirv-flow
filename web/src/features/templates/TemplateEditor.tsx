@@ -338,6 +338,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               templateId={template.id}
               doc={doc}
               unsaved={save !== "saved"}
+              flush={flush}
               hold={hold}
               release={release}
               onAccepted={adopt}

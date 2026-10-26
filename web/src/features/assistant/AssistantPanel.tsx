@@ -66,6 +66,11 @@ interface AssistantPanelProps {
   onAcceptFailed?: (error: unknown) => unknown;
   /** Offered beside a failed accept, by the failure's code, such as a reload when the draft moved. */
   renderAcceptAction?: (code: string | null) => ReactNode;
+  /**
+   * Asked before the draft request, so the assistant drafts from what the server holds: the host
+   * saves what is waiting and answers false when it could not.
+   */
+  prepare?: () => Promise<boolean>;
   /** Called with the error of a request that failed, so the host can tell that the assistant has been turned off. */
   onFailure?: (error: unknown) => void;
   /** Replaces the field table of the changes, for a kind whose draft is better read in the host's own words. */
@@ -134,6 +139,7 @@ function Drafting({
   onAcceptFailed,
   renderAcceptAction,
   onFailure,
+  prepare,
   renderChanges,
   renderPreview,
   personal,
@@ -174,6 +180,18 @@ function Drafting({
     setLateReply(false);
     setAnnouncement("Drafting");
     try {
+      if (prepare && !(await prepare())) {
+        setRun({
+          status: "failed",
+          failure: {
+            title: "Your latest changes could not be saved",
+            detail: "The assistant drafts from the saved version, so it would work from an older one. Fix the save, then draft again.",
+            traceId: null,
+          },
+        });
+        return;
+      }
+      if (abort.signal.aborted) throw new Error("cancelled");
       const result = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/ai/drafts", {
           params: { path: { ws: workspaceId } },
