@@ -3628,7 +3628,8 @@ export interface paths {
          *     is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
          *     successful publish are in the response and stored with the version. The document's sender must
          *     be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
-         *     An optional body `{ "note" }` adds a note of at most 500 characters to the version.
+         *     An optional body `{ "note", "revision" }` adds a note of at most 500 characters to the version and
+         *     publishes only if the draft is still `revision`.
          *     Audited as `template.published`.
          */
         post: operations["publish_template"];
@@ -9906,6 +9907,12 @@ export interface components {
         TemplatePublishRequest: {
             /** @description A note for the version history, at most 500 characters. Blank is no note. */
             note?: string | null;
+            /**
+             * Format: int32
+             * @description The revision of the draft that was reviewed. When given, a draft saved since is a 409
+             *     `template_draft_changed` and nothing is published.
+             */
+            revision?: number | null;
         };
         /** @description The new version and the template after the publish. */
         TemplatePublishedBody: {
@@ -26013,7 +26020,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`) */
+            /** @description The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;

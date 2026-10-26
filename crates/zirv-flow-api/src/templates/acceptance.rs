@@ -2953,6 +2953,36 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stale_reviewed_revision_is_a_409_and_writes_no_version(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let reviewed =
+            f.lead("GET", &format!("/{id}"), None).await.body["draft"]["revision"].clone();
+        let saved = f
+            .lead(
+                "PUT",
+                &format!("/{id}/draft"),
+                Some(json!({"document": email_doc("Hi", "changed")})),
+            )
+            .await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+
+        let stale = f
+            .lead(
+                "POST",
+                &format!("/{id}/publish"),
+                Some(json!({"revision": reviewed})),
+            )
+            .await;
+        let versions = f.lead("GET", &format!("/{id}/versions"), None).await;
+
+        assert_eq!(stale.status, StatusCode::CONFLICT, "{:?}", stale.body);
+        assert_eq!(stale.body["code"], "template_draft_changed");
+        assert_eq!(versions.body, json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_save_that_names_a_stale_revision_is_a_409_and_writes_nothing(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f.create("Welcome", email_doc("First", "one")).await;
@@ -2980,5 +3010,30 @@ mod tests {
         assert_eq!(stale.body["code"], "template_draft_revision_mismatch");
         assert_eq!(read.body["draft"]["revision"], 2);
         assert_eq!(read.body["draft"]["document"], email_doc("Second", "two"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_matching_reviewed_revision_publishes(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let reviewed =
+            f.lead("GET", &format!("/{id}"), None).await.body["draft"]["revision"].clone();
+
+        let published = f
+            .lead(
+                "POST",
+                &format!("/{id}/publish"),
+                Some(json!({"revision": reviewed})),
+            )
+            .await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(published.body["version"]["version"], 1);
     }
 }

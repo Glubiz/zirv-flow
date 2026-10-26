@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 
-import { client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, useResource, type components, type ErrorSummary } from "../../api";
 import { Button, EmptyState, InlineError, ResourceView, TextField } from "../../ui";
 import { useTemplateAccess } from "./access";
 import { diffDocuments } from "./diff";
@@ -24,8 +24,8 @@ export function PublishPage() {
     [ws, id],
   );
   return (
-    <ResourceView resource={access.ready ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the template">
-      {(data) => <Gate key={`${ws}:${id}`} workspaceId={ws} template={data} canWrite={access.canWrite} canAdmin={access.canAdmin} />}
+    <ResourceView resource={access.ready && !(detail.status === "ready" && detail.refreshing) ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the template">
+      {(data) => <Gate key={`${ws}:${id}`} workspaceId={ws} template={data} canWrite={access.canWrite} canAdmin={access.canAdmin} onReload={detail.reload} />}
     </ResourceView>
   );
 }
@@ -35,6 +35,8 @@ interface GateProps {
   template: TemplateDetail;
   canWrite: boolean;
   canAdmin: boolean;
+  /** Reads the template again, which starts the review over on the draft as it is now. */
+  onReload: () => void;
 }
 
 function Gate(props: GateProps) {
@@ -65,12 +67,12 @@ function WithLive(props: GateProps) {
   );
   return (
     <ResourceView resource={live} loadingLabel="Loading the live version">
-      {(version) => <Review {...props} live={version} />}
+      {(version) => <Review key={props.template.draft.revision} {...props} live={version} />}
     </ResourceView>
   );
 }
 
-function Review({ workspaceId, template, canAdmin, live }: GateProps & { live: TemplateVersion | null }) {
+function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps & { live: TemplateVersion | null }) {
   const liveNumber = live?.version ?? null;
   const next = (liveNumber ?? 0) + 1;
   const saved = useResource(
@@ -108,6 +110,7 @@ function Review({ workspaceId, template, canAdmin, live }: GateProps & { live: T
   const [personKey, setPersonKey] = useState(SAMPLE_SUBJECT.key);
   const [compare, setCompare] = useState<"side" | "draft">("side");
   const [focus, setFocus] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
@@ -125,7 +128,8 @@ function Review({ workspaceId, template, canAdmin, live }: GateProps & { live: T
   const changes = useMemo(() => (live === null ? [] : diffDocuments(live.document, template.draft.document)), [live, template.draft.document]);
   const shown = focus === null ? changes : changes.filter((change) => change.key === focus);
   const summary = summarize(subjects ?? [], checks);
-  const ready = subjects !== null && summary.done && summary.failed === 0 && summary.blocking.length === 0;
+  const peopleError: ErrorSummary | null = saved.status === "error" ? describeError(saved.error) : null;
+  const ready = subjects !== null && summary.done && summary.failed === 0 && summary.blocking.length === 0 && peopleError === null;
 
   async function publish() {
     setBusy(true);
@@ -135,19 +139,20 @@ function Review({ workspaceId, template, canAdmin, live }: GateProps & { live: T
       const result = await unwrap(
         client.POST("/api/v1/workspaces/{ws}/templates/{id}/publish", {
           params: { path: { ws: workspaceId, id: template.id } },
-          ...(trimmed === "" ? {} : { body: { note: trimmed } }),
+          body: { revision: template.draft.revision, ...(trimmed === "" ? {} : { note: trimmed }) },
         }),
       );
       setPublished(result);
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "template_draft_changed") setStale(true);
+      else setFailure(describeError(error));
     } finally {
       setBusy(false);
     }
   }
 
   const heading = published ? `Version ${published.version.version} is live` : `Review and publish version ${next}`;
-  const why = !canAdmin ? "Only workspace admins can publish." : subjects === null || !summary.done ? "Waiting for the checks." : summary.failed > 0 ? "A check could not run." : summary.blocking.length > 0 ? "Fix the blocking issues first." : null;
+  const why = !canAdmin ? "Only workspace admins can publish." : peopleError !== null ? "The saved people could not be loaded." : subjects === null || !summary.done ? "Waiting for the checks." : summary.failed > 0 ? "A check could not run." : summary.blocking.length > 0 ? "Fix the blocking issues first." : null;
   const draftCheck = checks[subject.key];
 
   return (
@@ -175,7 +180,7 @@ function Review({ workspaceId, template, canAdmin, live }: GateProps & { live: T
       <div className="pb-split">
         <div className="pb-side">
           <ChangesPanel live={liveNumber} changes={changes} focus={focus} onFocus={setFocus} />
-          <ChecksPanel workspaceId={workspaceId} templateId={template.id} subjects={subjects ?? [SAMPLE_SUBJECT]} summary={subjects === null ? { ...summary, done: false } : summary} onRetry={() => setAgain((value) => value + 1)} />
+          <ChecksPanel workspaceId={workspaceId} templateId={template.id} subjects={subjects ?? [SAMPLE_SUBJECT]} summary={subjects === null ? { ...summary, done: false } : summary} onRetry={() => setAgain((value) => value + 1)} people={peopleError === null ? null : { error: peopleError, onRetry: saved.reload }} />
           <GoesLivePanel workspaceId={workspaceId} uses={uses} volume={volume} />
           <LastTestPanel workspaceId={workspaceId} templateId={template.id} log={log} />
           {published ? (
@@ -190,6 +195,12 @@ function Review({ workspaceId, template, canAdmin, live }: GateProps & { live: T
                 onChange={(event) => setNote(event.target.value)}
               />
               {failure ? <InlineError {...failure} /> : null}
+              {stale ? (
+                <div className="stack-tight" role="alert">
+                  <InlineError title="The draft changed while you were reviewing it." detail="Nothing was published. Reload to review the draft as it is now." traceId={null} />
+                  <Button onClick={onReload}>Reload</Button>
+                </div>
+              ) : null}
               <div className="row">
                 <Button variant="primary" onClick={() => void publish()} disabled={busy || !ready || !canAdmin}>
                   {busy ? "Publishing" : `Publish version ${next}`}

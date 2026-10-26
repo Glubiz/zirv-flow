@@ -141,9 +141,9 @@ describe("the Review and publish page", () => {
     const done = await screen.findByRole("status", { name: "Published" });
     expect(within(done).getByRole("heading", { name: "Version 1 is live" })).toBeInTheDocument();
     expect(within(done).getByRole("link", { name: "Welcome series" })).toBeInTheDocument();
-    expect(within(done).getByRole("link", { name: "View history" })).toBeInTheDocument();
+    expect(within(done).getByRole("link", { name: "View history" })).toHaveAttribute("href", `/w/ws1/templates/${TEMPLATE_ID}/history`);
     expect(within(done).getByRole("link", { name: "Back to the library" })).toBeInTheDocument();
-    expect(calls.find((call) => call.method === "POST" && call.path.endsWith("/publish"))?.body).toEqual({ note: "First cut" });
+    expect(calls.find((call) => call.method === "POST" && call.path.endsWith("/publish"))?.body).toEqual({ revision: 1, note: "First cut" });
   });
 
   it("shows the refusal of a publish and the newest test of this draft", async () => {
@@ -171,6 +171,74 @@ describe("the Review and publish page", () => {
     await user.click(publishButtons()[0] as HTMLElement);
 
     expect(await screen.findByText("The draft has blocking issues.")).toBeInTheDocument();
+  });
+
+  it("refuses to call a changed draft live, says so, and Reload reviews the draft again", async () => {
+    let reads = 0;
+    const routes = templateRoutes({ detail: templateDetail({}, blocksDoc(heading("Hi"))) });
+    const calls = mockApi({
+      ...routes,
+      [`GET ${BASE}`]: (request) => {
+        reads += 1;
+        return (routes[`GET ${BASE}`] as (request: Request) => Response | Promise<Response>)(request);
+      },
+      [PREVIEW]: () => rendered(),
+      [`POST ${BASE}/publish`]: () => problem(409, "Conflict", "The draft was saved while it was being validated.", undefined, "template_draft_changed"),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await waitFor(() => expect(publishButtons()[0]).toBeEnabled(), WAIT);
+    await user.click(publishButtons()[0] as HTMLElement);
+
+    expect(await screen.findByText("The draft changed while you were reviewing it.")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /is live/ })).not.toBeInTheDocument();
+    const before = reads;
+    await user.click(screen.getByRole("button", { name: "Reload" }));
+    await waitFor(() => expect(reads).toBeGreaterThan(before));
+    await waitFor(() => expect(calls.filter((call) => call.path.endsWith("/preview")).length).toBeGreaterThan(1));
+  });
+
+  it("does not pass the checks when the saved people fail to load, and Retry loads them", async () => {
+    let failing = true;
+    const routes = templateRoutes({ detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE });
+    mockApi({
+      ...routes,
+      [PREVIEW]: () => rendered(),
+      [`GET ${BASE}/preview-people`]: (request) => (failing ? problem(500, "Broken", "The people could not be read.") : (routes[`GET ${BASE}/preview-people`] as (request: Request) => Response)(request)),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText("The saved people could not be loaded")).toBeInTheDocument();
+    await screen.findByTitle("Version 1 draft");
+    expect(screen.queryByText(/Nothing blocks publishing/)).not.toBeInTheDocument();
+    expect(publishButtons().every((button) => button.hasAttribute("disabled"))).toBe(true);
+
+    failing = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Nothing blocks publishing. 4 checks passed.", undefined, WAIT)).toBeInTheDocument();
+    await waitFor(() => expect(publishButtons()[0]).toBeEnabled());
+  });
+
+  it("shows the send volume failing in its own section, and Retry brings the counts", async () => {
+    let failing = true;
+    mockApi({
+      ...templateRoutes({ detail: templateDetail({}, blocksDoc(heading("Hi"))), uses: [useBody()] }),
+      [PREVIEW]: () => rendered(),
+      [`GET ${BASE}/send-volume`]: () => (failing ? problem(500, "Broken", "The counts could not be read.") : json([{ flow_id: useBody().flow_id, flow_name: "Welcome series", per_day: 12 }])),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText("Sends a day could not be loaded")).toBeInTheDocument();
+    expect(screen.queryByText(/a day$/)).not.toBeInTheDocument();
+    failing = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("about 12 a day")).toBeInTheDocument();
+    expect(screen.queryByText("Sends a day could not be loaded")).not.toBeInTheDocument();
   });
 
   it("offers a member who is not an admin the sample person only, and no way to publish", async () => {
