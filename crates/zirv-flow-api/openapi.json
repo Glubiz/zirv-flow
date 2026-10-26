@@ -18550,7 +18550,7 @@
         "tags": [
           "snippets"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; an image that takes the\ntheme logo is refused as `broken_theme_reference`, because a snippet has no theme of its own,\nand a snippet with no block is refused as `missing_content`. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; a snippet with no block\nis refused as `missing_content`. A theme logo image is accepted: the template or theme that\nholds the snippet checks it. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
         "operationId": "publish_snippet",
         "parameters": [
           {

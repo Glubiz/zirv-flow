@@ -3025,9 +3025,9 @@ export interface paths {
         /**
          * Publishes the draft as the next immutable version. The draft is validated by the renderer's
          *     snippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound
-         *     blocks), and each asset image must name a live asset of the workspace; an image that takes the
-         *     theme logo is refused as `broken_theme_reference`, because a snippet has no theme of its own,
-         *     and a snippet with no block is refused as `missing_content`. A blocking issue is a 422
+         *     blocks), and each asset image must name a live asset of the workspace; a snippet with no block
+         *     is refused as `missing_content`. A theme logo image is accepted: the template or theme that
+         *     holds the snippet checks it. A blocking issue is a 422
          *     `snippet_invalid` that lists every issue and writes nothing. The response lists the templates,
          *     themes and active flows that use the snippet. Audited as `snippet.published`.
          */
