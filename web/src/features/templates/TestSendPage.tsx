@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import {
@@ -118,6 +118,13 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
   const [stoppedAt, setStoppedAt] = useState<string | null | undefined>(undefined);
   const [resetKey, setResetKey] = useState(0);
 
+  /** Aborted when the page is left, so the send loop stops and sets no state on a gone page. */
+  const leaving = useRef<AbortController | null>(null);
+  useEffect(() => {
+    leaving.current = new AbortController();
+    return () => leaving.current?.abort();
+  }, []);
+
   const sources = [destinations, senders, members, allowlist];
   const loading = sources.some((entry) => entry.status === "loading");
   const loadFailed = sources.find((entry) => entry.status === "error");
@@ -143,17 +150,21 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
   }
 
   async function send() {
-    if (blocked) return;
+    const signal = leaving.current?.signal;
+    if (blocked || !signal) return;
+    const gone = () => signal.aborted;
     const queue = chosen;
     setBusy(true);
     setStoppedAt(undefined);
     setAttempts(queue.map((choice) => ({ key: keyOf(choice), label: choice.label, state: "waiting" })));
     for (const [index, choice] of queue.entries()) {
+      if (gone()) return;
       const key = keyOf(choice);
       update(key, { state: "sending" });
       try {
         await unwrap(
           client.POST("/api/v1/workspaces/{ws}/templates/{id}/test-send", {
+            signal,
             params: { path: { ws: workspaceId, id: template.id } },
             body: {
               destination_id: chosenDestination,
@@ -164,15 +175,19 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
             },
           }),
         );
+        if (gone()) return;
         update(key, { state: "queued" });
         setResetKey((value) => value + 1);
         log.reload();
         quota.reload();
       } catch (error) {
+        if (gone()) return;
         if (error instanceof ApiError && error.status === 429) {
           const rest = new Set(queue.slice(index).map(keyOf));
           setAttempts((current) => current.map((entry) => (rest.has(entry.key) ? { ...entry, state: "stopped" } : entry)));
-          setStoppedAt(await resetTime(workspaceId));
+          const resets = await resetTime(workspaceId);
+          if (gone()) return;
+          setStoppedAt(resets);
           quota.reload();
           break;
         }

@@ -111,6 +111,30 @@ describe("the Send a test page", () => {
     expect(calls.filter((call) => call.path === `${WS}/test-sends/quota`).length).toBeGreaterThan(1);
   });
 
+  it("stops sending when the page is left", async () => {
+    const answers: (() => void)[] = [];
+    const calls = mockApi(
+      routes({
+        [SEND]: () => new Promise<Response>((resolve) => answers.push(() => resolve(json(row(), 202)))),
+      }),
+    );
+    const user = userEvent.setup();
+    const view = mount();
+
+    await screen.findByRole("form", { name: "Test send" });
+    await user.selectOptions(screen.getByLabelText("Send through"), DESTINATION_ID);
+    await pick(user, MEMBER.email, "other@example.test", "q***@example.com");
+    await user.click(screen.getByRole("button", { name: "Send 3 tests" }));
+    await waitFor(() => expect(answers).toHaveLength(1), WAIT);
+
+    view.unmount();
+    answers[0]?.();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(sent(calls)).toHaveLength(1);
+    expect(answers).toHaveLength(1);
+  });
+
   it("stops the rest at a 429 and shows the reset time", async () => {
     let asked = 0;
     const calls = mockApi(
