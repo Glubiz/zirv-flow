@@ -364,8 +364,13 @@ mod tests {
         let (port, count) = target().await;
         let relay = relay(&["127.0.0.1/32"], table(&[])).await;
 
-        let (code, _stream) = connect(&relay, "127.0.0.1", port).await;
+        let (code, mut stream) = connect(&relay, "127.0.0.1", port).await;
         assert_eq!(code, REPLY_OK);
+        // The echo proves the target accepted; REPLY_OK only proves the TCP handshake finished.
+        stream.write_all(b"ping").await.unwrap();
+        let mut echoed = [0u8; 4];
+        let echo = tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut echoed));
+        echo.await.expect("target never echoed").unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 1);
 
         let denied = self::relay(&[], table(&[])).await;

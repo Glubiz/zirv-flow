@@ -215,17 +215,22 @@ pub(super) async fn lock_theme_row(
     workspace: WorkspaceId,
     id: Uuid,
 ) -> Result<Theme, ThemeError> {
-    sqlx::query_as(concat!(
+    let mut held: Theme = sqlx::query_as(concat!(
         "SELECT ",
         theme_columns!(),
         " FROM themes WHERE workspace_id = $1 AND id = $2 FOR UPDATE"
     ))
     .bind(workspace.as_uuid())
     .bind(id)
-    .fetch_optional(connection)
+    .fetch_optional(&mut *connection)
     .await
     .map_err(StoreError::query)?
-    .ok_or(ThemeError::NotFound)
+    .ok_or(ThemeError::NotFound)?;
+    // A statement that waited for the lock still reads the snapshot from before the wait, so the
+    // default flag it carries may be stale: a set-default that held the lock has committed since.
+    // A new statement sees it.
+    held.is_default = super::where_used::is_default_theme(connection, workspace, id).await?;
+    Ok(held)
 }
 
 /// [`lock_theme_row`], refusing an archived theme.
@@ -447,5 +452,41 @@ mod tests {
             archive_theme(&mut connection, other, theme.id).await,
             Err(ThemeError::NotFound)
         ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archive_that_waited_for_a_set_default_sees_the_new_default(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let theme = create(&pool, ws, "Brand").await;
+        publish(&pool, ws, theme.id).await;
+        let mut first = crate::begin(&pool).await.unwrap();
+        crate::set_default_theme(&mut first, ws, theme.id)
+            .await
+            .unwrap();
+        let mut second = pool.acquire().await.unwrap();
+        let archiving =
+            tokio::spawn(async move { archive_theme(&mut second, ws, theme.id).await.map(|_| ()) });
+
+        // The archive has read the theme as it was before the default and now waits for its lock.
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+                 AND query LIKE '%FROM themes%FOR UPDATE%'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        crate::commit(first).await.unwrap();
+
+        let outcome = archiving.await.unwrap();
+        assert!(matches!(outcome, Err(ThemeError::IsDefault)), "{outcome:?}");
+        let after = find_theme(&pool, ws, theme.id).await.unwrap().unwrap();
+        assert!(after.is_default && after.archived_at.is_none());
     }
 }

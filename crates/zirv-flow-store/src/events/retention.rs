@@ -2,7 +2,7 @@
 //! deletes at the deployment default for the others, whole old partitions, old rejects and the
 //! dedupe records of events that no longer exist. Every step is batched and idempotent.
 
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use time::{Date, Duration, Month, OffsetDateTime};
 
 use super::partitions::PARTITION_PREFIX;
@@ -65,63 +65,76 @@ pub struct RetentionReport {
     pub test_sends_deleted: u64,
 }
 
-/// Applies the retention rules as of `now`. Run it in the job's transaction: a rerun after
-/// a failure finds nothing left to do for the steps that completed.
+/// Applies the retention rules as of `now`, committing each batch on the pool. A rerun after
+/// a failure continues from the committed batches and counts only what it removes.
 pub async fn apply_event_retention(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     settings: &EventRetention,
     now: OffsetDateTime,
+) -> Result<RetentionReport, StoreError> {
+    apply_event_retention_in_batches(pool, settings, now, RETENTION_BATCH).await
+}
+
+async fn apply_event_retention_in_batches(
+    pool: &PgPool,
+    settings: &EventRetention,
+    now: OffsetDateTime,
+    batch_size: i64,
 ) -> Result<RetentionReport, StoreError> {
     let default_days = i32::try_from(settings.default_days).unwrap_or(i32::MAX);
     let mut report = RetentionReport::default();
 
-    report.events_deleted += delete_events_in_batches(connection, &overridden_delete(), |query| {
-        query.bind(now).bind(RETENTION_BATCH)
-    })
-    .await?;
+    report.events_deleted +=
+        delete_events_in_batches(pool, &overridden_delete(), batch_size, |query| {
+            query.bind(now).bind(batch_size)
+        })
+        .await?;
 
     let default_cutoff = now - Duration::days(i64::from(settings.default_days));
-    report.events_deleted += delete_events_in_batches(connection, &default_delete(), |query| {
-        query.bind(default_cutoff).bind(RETENTION_BATCH)
-    })
-    .await?;
+    report.events_deleted +=
+        delete_events_in_batches(pool, &default_delete(), batch_size, |query| {
+            query.bind(default_cutoff).bind(batch_size)
+        })
+        .await?;
 
     report.rejects_deleted = delete_in_batches(
-        connection,
+        pool,
         "DELETE FROM ingest_rejects WHERE id IN ( \
             SELECT id FROM ingest_rejects WHERE received_at < $1 LIMIT $2)",
+        batch_size,
         |query| {
             query
                 .bind(now - Duration::days(i64::from(settings.reject_days)))
-                .bind(RETENTION_BATCH)
+                .bind(batch_size)
         },
     )
     .await?;
 
-    let longest_cutoff = longest_cutoff(connection, default_days, now).await?;
+    let longest_cutoff = longest_cutoff(pool, default_days, now).await?;
 
     report.dedupe_deleted = delete_in_batches(
-        connection,
+        pool,
         "DELETE FROM event_dedupe d USING ( \
             SELECT workspace_id, message_id FROM event_dedupe \
             WHERE event_occurred_at < $1 LIMIT $2) old \
          WHERE d.workspace_id = old.workspace_id AND d.message_id = old.message_id",
-        |query| query.bind(longest_cutoff).bind(RETENTION_BATCH),
+        batch_size,
+        |query| query.bind(longest_cutoff).bind(batch_size),
     )
     .await?;
 
-    report.test_sends_deleted = crate::delete_test_sends_before(connection, now).await?;
+    report.test_sends_deleted = crate::delete_test_sends_before(pool, now).await?;
 
-    // Last, so the lock a drop takes is held briefly.
-    report.partitions_dropped = drop_old_partitions(connection, default_days, now).await?;
+    report.partitions_dropped = drop_old_partitions(pool, default_days, now).await?;
     Ok(report)
 }
 
 /// [`delete_in_batches`] for a statement built at run time that returns the number of rows it
 /// deleted as one `bigint` (the event deletes, which write markers).
 async fn delete_events_in_batches<'q>(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     statement: &str,
+    batch_size: i64,
     bind: impl Fn(
         sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
     ) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
@@ -131,19 +144,20 @@ async fn delete_events_in_batches<'q>(
         let deleted: i64 = bind(sqlx::query_scalar(sqlx::AssertSqlSafe(
             statement.to_owned(),
         )))
-        .fetch_one(&mut *connection)
+        .fetch_one(pool)
         .await
         .map_err(StoreError::query)?;
         total += u64::try_from(deleted).unwrap_or(0);
-        if deleted < RETENTION_BATCH {
+        if deleted < batch_size {
             return Ok(total);
         }
     }
 }
 
 async fn delete_in_batches<'q>(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     statement: &'static str,
+    batch_size: i64,
     bind: impl Fn(
         sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
@@ -151,12 +165,12 @@ async fn delete_in_batches<'q>(
     let mut total = 0;
     loop {
         let deleted = bind(sqlx::query(statement))
-            .execute(&mut *connection)
+            .execute(pool)
             .await
             .map_err(StoreError::query)?
             .rows_affected();
         total += deleted;
-        if i64::try_from(deleted).unwrap_or(i64::MAX) < RETENTION_BATCH {
+        if i64::try_from(deleted).unwrap_or(i64::MAX) < batch_size {
             return Ok(total);
         }
     }
@@ -164,15 +178,15 @@ async fn delete_in_batches<'q>(
 
 /// The instant before which no event is kept under any rule: `now` less the longest of the
 /// default and every override, read as it is now.
-async fn longest_cutoff(
-    connection: &mut PgConnection,
+async fn longest_cutoff<'e>(
+    executor: impl PgExecutor<'e>,
     default_days: i32,
     now: OffsetDateTime,
 ) -> Result<OffsetDateTime, StoreError> {
     let overrides: Vec<i32> = sqlx::query_scalar(
         "SELECT retention_days FROM event_schemas WHERE retention_days IS NOT NULL",
     )
-    .fetch_all(&mut *connection)
+    .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
     let longest = overrides.into_iter().fold(default_days, i32::max);
@@ -193,21 +207,19 @@ pub(crate) async fn lock_retention_overrides(
 }
 
 /// Drops the monthly partitions whose whole range ends at or before the longest retention
-/// cutoff. The DEFAULT partition is never dropped. Run it inside a transaction: the overrides
-/// are read under `lock_retention_overrides`, which every change to one takes first, so a
-/// change waits for the drops and an earlier one is seen.
+/// cutoff. The DEFAULT partition is never dropped. Each drop commits with its markers in its
+/// own transaction. The cutoff is read under `lock_retention_overrides`, which every override
+/// change takes first, so a change waits for the current drop and an earlier one is seen.
 async fn drop_old_partitions(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     default_days: i32,
     now: OffsetDateTime,
 ) -> Result<u64, StoreError> {
-    lock_retention_overrides(connection).await?;
-    let cutoff = longest_cutoff(connection, default_days, now).await?;
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid 
          WHERE i.inhparent = 'events'::regclass",
     )
-    .fetch_all(&mut *connection)
+    .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
     let mut dropped = 0;
@@ -215,19 +227,23 @@ async fn drop_old_partitions(
         let Some(first) = month_of(&name) else {
             continue;
         };
+        let mut tx = crate::begin(pool).await?;
+        lock_retention_overrides(&mut tx).await?;
+        let cutoff = longest_cutoff(&mut *tx, default_days, now).await?;
         if next_month(first).midnight().assume_utc() <= cutoff {
             // The name was parsed from digits only. The sync events of the partition leave their
             // markers first, in the same transaction as the drop.
             sqlx::query(sqlx::AssertSqlSafe(crate::privacy::mark_partition(&name)))
-                .execute(&mut *connection)
+                .execute(&mut *tx)
                 .await
                 .map_err(StoreError::query)?;
             sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
-                .execute(&mut *connection)
+                .execute(&mut *tx)
                 .await
                 .map_err(StoreError::query)?;
             dropped += 1;
         }
+        crate::commit(tx).await?;
     }
     Ok(dropped)
 }
@@ -314,10 +330,271 @@ mod tests {
     }
 
     async fn run(pool: &PgPool) -> RetentionReport {
-        let mut connection = pool.acquire().await.unwrap();
-        apply_event_retention(&mut connection, &settings(), NOW)
+        apply_event_retention(pool, &settings(), NOW).await.unwrap()
+    }
+
+    async fn sync_events(pool: &PgPool) -> Uuid {
+        let ws = workspace(pool, "batches").await;
+        let destination = Uuid::now_v7();
+        crate::create_destination(
+            pool,
+            ws,
+            &crate::NewDestination {
+                id: destination,
+                kind: "fake",
+                name: "sink",
+                config: &json!({}),
+                credential_id: None,
+                rate: 10,
+                burst: 10,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        for index in 0..2 {
+            store(pool, ws, "old", 200, Some(&format!("m-{index}"))).await;
+        }
+        sqlx::query(
+            "UPDATE events SET name = $1, properties = jsonb_build_object('destination_id', $2::text)",
+        )
+        .bind(zirv_flow_core::events::SYNC_SUCCEEDED_EVENT)
+        .bind(destination)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query_scalar("SELECT person_id FROM events LIMIT 1")
+            .fetch_one(pool)
             .await
             .unwrap()
+    }
+
+    async fn run_small_batches(pool: &PgPool) -> Result<RetentionReport, StoreError> {
+        apply_event_retention_in_batches(pool, &settings(), NOW, 1).await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_earlier_batch_releases_its_rows_and_markers_while_a_later_batch_waits(
+        pool: PgPool,
+    ) {
+        let person = sync_events(&pool).await;
+        sqlx::raw_sql(
+            "INSERT INTO event_schemas (workspace_id, name, retention_days)
+             SELECT DISTINCT workspace_id, name, 100 FROM events;
+             CREATE SEQUENCE retention_batches;
+             CREATE FUNCTION pause_later_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF nextval('retention_batches') > 1 THEN
+                     PERFORM pg_advisory_xact_lock(289);
+                 END IF;
+                 RETURN OLD;
+             END $$;
+             CREATE TRIGGER pause_later_batch BEFORE DELETE ON events
+             FOR EACH ROW EXECUTE FUNCTION pause_later_batch()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut barrier = begin(&pool).await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(289)")
+            .execute(&mut *barrier)
+            .await
+            .unwrap();
+        let retention = tokio::spawn({
+            let pool = pool.clone();
+            async move { run_small_batches(&pool).await.unwrap() }
+        });
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                 AND classid = 0 AND objid = 289 AND NOT granted)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                !retention.is_finished(),
+                "retention never reached the later batch"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        let state: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM erasure_handled_markers)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state,
+            (1, 1),
+            "the first delete and marker committed together"
+        );
+        let mut writer = begin(&pool).await.unwrap();
+        sqlx::query("SELECT id FROM people WHERE id = $1 FOR UPDATE NOWAIT")
+            .bind(person)
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM erasure_handled_markers WHERE person_id = $1")
+            .bind(person)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        commit(writer).await.unwrap();
+        assert!(!retention.is_finished());
+        commit(barrier).await.unwrap();
+
+        assert_eq!(retention.await.unwrap().events_deleted, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_later_failure_keeps_committed_deletes_and_markers_and_a_rerun_continues(
+        pool: PgPool,
+    ) {
+        sync_events(&pool).await;
+        sqlx::raw_sql(
+            "CREATE FUNCTION fail_reject_retention() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'later retention step failed'; END $$;
+             CREATE TRIGGER fail_reject_retention BEFORE DELETE ON ingest_rejects
+             FOR EACH STATEMENT EXECUTE FUNCTION fail_reject_retention()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = run_small_batches(&pool).await.unwrap_err();
+        assert!(format!("{error:?}").contains("later retention step failed"));
+        let state: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events), (SELECT count(*) FROM erasure_handled_markers)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, (0, 1), "earlier batches survive the failed run");
+        sqlx::query("DROP TRIGGER fail_reject_retention ON ingest_rejects")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let report = run_small_batches(&pool).await.unwrap();
+        assert_eq!((report.events_deleted, report.dedupe_deleted), (0, 2));
+        assert_eq!(
+            run_small_batches(&pool).await.unwrap(),
+            RetentionReport::default()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn reject_batches_commit_before_a_later_batch_fails(pool: PgPool) {
+        sync_events(&pool).await;
+        sqlx::query(
+            "INSERT INTO ingest_rejects (id, workspace_id, received_at, source, kind, reason, trace_id)
+             SELECT gen_random_uuid(), workspace_id, occurred_at, 'web', 'event',
+                    'validation_failed', gen_random_uuid() FROM events",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_first_batch_commits(&pool, "ingest_rejects").await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn dedupe_batches_commit_before_a_later_batch_fails(pool: PgPool) {
+        sync_events(&pool).await;
+        assert_first_batch_commits(&pool, "event_dedupe").await;
+    }
+
+    async fn assert_first_batch_commits(pool: &PgPool, table: &str) {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE SEQUENCE retention_batches;
+             CREATE FUNCTION fail_later_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF nextval('retention_batches') > 1 THEN
+                     RAISE EXCEPTION 'later batch failed';
+                 END IF;
+                 RETURN NULL;
+             END $$;
+             CREATE TRIGGER fail_later_batch BEFORE DELETE ON {table}
+             FOR EACH STATEMENT EXECUTE FUNCTION fail_later_batch()"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let error = run_small_batches(pool).await.unwrap_err();
+        assert!(format!("{error:?}").contains("later batch failed"));
+        let remaining: i64 =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 1, "the first {table} batch committed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_partition_drop_commits_with_its_markers_even_if_a_later_drop_fails(pool: PgPool) {
+        sync_events(&pool).await;
+        sqlx::raw_sql(
+            "CREATE TABLE events_y2020m01 PARTITION OF events
+             FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-02-01 00:00:00+00');
+             CREATE TABLE events_y2020m02 PARTITION OF events
+             FOR VALUES FROM ('2020-02-01 00:00:00+00') TO ('2020-03-01 00:00:00+00');
+             UPDATE events SET occurred_at = CASE
+                 WHEN id = (SELECT min(id::text)::uuid FROM events) THEN '2020-01-15'::timestamptz
+                 ELSE '2020-02-15'::timestamptz END;
+             INSERT INTO destinations (id, workspace_id, kind, name, config)
+             SELECT gen_random_uuid(), workspace_id, kind, 'second sink', config FROM destinations;
+             UPDATE events SET properties = jsonb_build_object('destination_id',
+                 (SELECT id::text FROM destinations WHERE name = 'second sink'))
+             WHERE occurred_at = '2020-02-15'::timestamptz;
+             CREATE SEQUENCE retention_drops;
+             CREATE FUNCTION fail_later_drop() RETURNS event_trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF nextval('retention_drops') > 1 THEN
+                     RAISE EXCEPTION 'later partition drop failed';
+                 END IF;
+             END $$;
+             CREATE EVENT TRIGGER fail_later_drop ON ddl_command_start
+             WHEN TAG IN ('DROP TABLE') EXECUTE FUNCTION fail_later_drop()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = drop_old_partitions(&pool, 100, datetime!(2020-07-01 00:00 UTC))
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("later partition drop failed"));
+        let partitions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_class WHERE relname IN ('events_y2020m01', 'events_y2020m02')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(partitions, 1, "the first partition drop survived");
+        let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM erasure_handled_markers")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(markers, 1, "the failed drop rolls back its own marker");
+        let overlap: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM erasure_handled_markers m JOIN events e
+             ON e.properties ->> 'destination_id' = m.destination_id::text",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(overlap, 0, "only the dropped partition left a marker");
     }
 
     #[test]
@@ -416,10 +693,7 @@ mod tests {
             ..settings()
         };
 
-        let mut connection = pool.acquire().await.unwrap();
-        let report = apply_event_retention(&mut connection, &settings, NOW)
-            .await
-            .unwrap();
+        let report = apply_event_retention(&pool, &settings, NOW).await.unwrap();
 
         assert_eq!(report.events_deleted, 2);
         assert_eq!(remaining(&pool, "kept_long").await, 2);
@@ -548,11 +822,7 @@ mod tests {
         .unwrap();
 
         // The event deletes of a run would take the event first, so the drop is called alone.
-        let mut connection = pool.acquire().await.unwrap();
-        let dropped = drop_old_partitions(&mut connection, 100, NOW)
-            .await
-            .unwrap();
-        drop(connection);
+        let dropped = drop_old_partitions(&pool, 100, NOW).await.unwrap();
 
         assert!(dropped >= 1);
         let table: Option<String> =
@@ -628,18 +898,26 @@ mod tests {
         .unwrap();
         let drop = tokio::spawn({
             let pool = pool.clone();
-            async move {
-                let mut tx = begin(&pool).await.unwrap();
-                let dropped = drop_old_partitions(&mut tx, 100, NOW).await.unwrap();
-                commit(tx).await.unwrap();
-                dropped
-            }
+            async move { drop_old_partitions(&pool, 100, NOW).await.unwrap() }
         });
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        assert!(
-            !drop.is_finished(),
-            "the drop did not wait for the override change"
-        );
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                 AND NOT granted)",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                !drop.is_finished(),
+                "the drop did not wait for the override change"
+            );
+            tokio::task::yield_now().await;
+        }
 
         commit(writer).await.unwrap();
 

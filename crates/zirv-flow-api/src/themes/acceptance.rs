@@ -934,4 +934,32 @@ mod tests {
         assert_eq!(preview.body["code"], "render_unavailable");
         assert_eq!(f.count("SELECT count(*) FROM theme_versions").await, 0);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_uppercase_footer_id_is_stored_lowercase_and_the_archive_guard_sees_it(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = f.footer_snippet("Footer", "Footer text").await;
+        let theme = f
+            .create("Brand", json!({"footer_snippet": footer.to_uppercase()}))
+            .await;
+
+        let stored = f.admin("GET", &format!("/themes/{theme}"), None).await;
+        let published = f.publish(&theme).await;
+        let refused = f
+            .admin("DELETE", &format!("/snippets/{footer}"), None)
+            .await;
+
+        assert_eq!(stored.body["draft"]["tokens"]["footer_snippet"], footer);
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        assert_eq!(refused.body["code"], "snippet_in_use", "{:?}", refused.body);
+        assert_eq!(ids(&refused.body["snippet_themes"]), [theme.as_str()]);
+    }
 }

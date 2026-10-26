@@ -56,8 +56,19 @@ pub(crate) fn parse_tokens(value: &Value) -> Result<ThemeTokens, ApiError> {
         .map_err(|_| ApiError::theme_malformed("the tokens are not a theme of a known shape"))
 }
 
-/// The tokens as the store keeps them: every token present.
+/// The tokens as the store keeps them: every token present, and the ids of the logo and the
+/// footer in the lowercase hyphenated form, so the store's text comparisons find them. An id that
+/// is not an id stays as it is for the validator to refuse.
 pub(crate) fn stored_tokens(tokens: &ThemeTokens) -> Result<Value, ApiError> {
+    let canonical = |id: &Option<String>| {
+        id.as_ref().map(|id| {
+            id.parse::<Uuid>()
+                .map_or_else(|_| id.clone(), |id| id.to_string())
+        })
+    };
+    let mut tokens = tokens.clone();
+    tokens.logo = canonical(&tokens.logo);
+    tokens.footer_snippet = canonical(&tokens.footer_snippet);
     serde_json::to_value(tokens).map_err(|_| ApiError::internal())
 }
 
