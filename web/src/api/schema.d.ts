@@ -8044,8 +8044,8 @@ export interface components {
             member: components["schemas"]["QuotaUsageBody"];
             /**
              * Format: date-time
-             * @description When the oldest counted send leaves the hour window, freeing a slot; null when none is
-             *     counted.
+             * @description When the next test send is accepted again: the later release time of the limits that are
+             *     full now, as the refusal computes it. Null when the caller can send now.
              */
             resets_at?: string | null;
             workspace: components["schemas"]["QuotaUsageBody"];

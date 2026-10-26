@@ -35006,7 +35006,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the oldest counted send leaves the hour window, freeing a slot; null when none is\ncounted."
+            "description": "When the next test send is accepted again: the later release time of the limits that are\nfull now, as the refusal computes it. Null when the caller can send now."
           },
           "workspace": {
             "$ref": "#/components/schemas/QuotaUsageBody"

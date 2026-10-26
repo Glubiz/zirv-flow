@@ -286,8 +286,8 @@ pub(crate) struct QuotaBody {
     /// The caller's own sends; an API key has none.
     member: QuotaUsageBody,
     workspace: QuotaUsageBody,
-    /// When the oldest counted send leaves the hour window, freeing a slot; null when none is
-    /// counted.
+    /// When the next test send is accepted again: the later release time of the limits that are
+    /// full now, as the refusal computes it. Null when the caller can send now.
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     resets_at: Option<OffsetDateTime>,
