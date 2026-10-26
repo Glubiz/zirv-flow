@@ -23,7 +23,10 @@ pub use crud::{
     create_template, document_sender, find_template, find_template_draft, list_templates,
     save_template_draft, update_template,
 };
-pub use extras::{ExtrasRequest, LoadedInputs, LoadedSnippet, ThemeRequest, load_render_inputs};
+pub use extras::{
+    Candidate, ExtrasRequest, LiveTemplate, LoadedInputs, LoadedSnippet, ThemeRequest,
+    load_render_inputs, load_render_inputs_with,
+};
 pub(crate) use preview_people::move_to_survivor;
 pub use preview_people::{
     MAX_PREVIEW_PEOPLE, PreviewPerson, PreviewPersonError, add_preview_person, list_preview_people,

@@ -8,6 +8,8 @@
 //! A theme's footer is appended to every email that follows the theme, so when the default theme
 //! uses the snippet, the templates that follow the default count as using it too.
 
+use std::collections::BTreeMap;
+
 use hashbrown::HashMap;
 
 use sqlx::prelude::FromRow;
@@ -17,8 +19,8 @@ use zirv_flow_core::WorkspaceId;
 
 use super::crud::SnippetTemplate;
 use crate::StoreError;
-use crate::templates::{TemplateFlowUse, active_flows_using};
-use crate::themes::{default_following_templates, is_default_theme};
+use crate::templates::{LiveTemplate, TemplateFlowUse, active_flows_using};
+use crate::themes::{default_following_templates, is_default_theme, theme_live_templates};
 
 /// The path of a snippet block for `$id` in a block document.
 macro_rules! block_path {
@@ -236,6 +238,31 @@ pub async fn snippet_where_used(
         themes,
         active_flows,
     })
+}
+
+/// The templates, not archived, whose current published version renders with the snippet: those
+/// that hold a block for it, and those that use a theme whose current version has it as the
+/// footer (a named theme, or the default theme for the templates that follow it). By template id.
+pub async fn snippet_live_templates(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    snippet: Uuid,
+) -> Result<Vec<LiveTemplate>, StoreError> {
+    let mut live: BTreeMap<Uuid, String> = templates_holding(&mut *connection, workspace, snippet)
+        .await?
+        .into_iter()
+        .filter(|template| template.in_current)
+        .map(|template| (template.id, template.name))
+        .collect();
+    for theme in themes_using(&mut *connection, workspace, snippet, true).await? {
+        for template in theme_live_templates(&mut *connection, workspace, theme.id).await? {
+            live.insert(template.id, template.name);
+        }
+    }
+    Ok(live
+        .into_iter()
+        .map(|(id, name)| LiveTemplate { id, name })
+        .collect())
 }
 
 #[cfg(test)]
