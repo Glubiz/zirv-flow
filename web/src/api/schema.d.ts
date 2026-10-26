@@ -9369,6 +9369,14 @@ export interface components {
             /** @description The templates of the flow that hold the snippet. */
             template_ids: string[];
         };
+        /** @description A snippet in the list, with how many templates hold it. */
+        SnippetListItemBody: components["schemas"]["SnippetBody"] & {
+            /**
+             * Format: int64
+             * @description How many templates, not archived, hold a block for it in their draft or current version.
+             */
+            used_by_templates: number;
+        };
         /** @description The rendered snippet and its validation results. */
         SnippetPreviewBody: {
             /** @description The sample document's HTML, with inert tracking links. */
@@ -22771,7 +22779,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnippetBody"][];
+                    "application/json": components["schemas"]["SnippetListItemBody"][];
                 };
             };
             /** @description archived is not true or false */

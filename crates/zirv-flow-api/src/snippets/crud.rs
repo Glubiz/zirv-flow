@@ -55,6 +55,15 @@ impl From<&Snippet> for SnippetBody {
     }
 }
 
+/// A snippet in the list, with how many templates hold it.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SnippetListItemBody {
+    #[serde(flatten)]
+    snippet: SnippetBody,
+    /// How many templates, not archived, hold a block for it in their draft or current version.
+    used_by_templates: i64,
+}
+
 /// The one editable copy of a snippet's content.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct SnippetDraftBody {
@@ -260,7 +269,7 @@ pub(crate) async fn archive_snippet(
         ("archived" = Option<bool>, Query, description = "Include archived snippets; default false")
     ),
     responses(
-        (status = 200, description = "The snippets", body = Vec<SnippetBody>),
+        (status = 200, description = "The snippets", body = Vec<SnippetListItemBody>),
         (status = 400, description = "archived is not true or false", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
@@ -273,11 +282,20 @@ pub(crate) async fn list(
     principal: Principal,
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<SnippetBody>>, ApiError> {
+) -> Result<Json<Vec<SnippetListItemBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let archived = bool_param(query.as_deref().unwrap_or_default(), "archived")?;
     let snippets = zirv_flow_store::list_snippets(&state.pool, workspace.id, archived).await?;
-    Ok(Json(snippets.iter().map(SnippetBody::from).collect()))
+    let counts = zirv_flow_store::snippet_template_counts(&state.pool, workspace.id).await?;
+    Ok(Json(
+        snippets
+            .iter()
+            .map(|snippet| SnippetListItemBody {
+                snippet: SnippetBody::from(snippet),
+                used_by_templates: counts.get(&snippet.id).copied().unwrap_or(0),
+            })
+            .collect(),
+    ))
 }
 
 /// Creates a snippet with its first draft. Audited as `snippet.created`.
