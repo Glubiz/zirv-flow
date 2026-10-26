@@ -4,6 +4,7 @@ export { usePublishedTemplates } from "./useTemplateOptions";
 export type { TemplateOption } from "./useTemplateOptions";
 export { BlockEditor } from "./blocks/BlockEditor";
 export { snippetContent, snippetEditable } from "./blocks/snippet";
+export { FONT_STACKS } from "./blocks/document";
 export { IssueList } from "./IssueList";
 export { blockingCount, issueText } from "./model";
 export type { Editable, TemplateIssue } from "./model";
