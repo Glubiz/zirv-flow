@@ -232,19 +232,19 @@ export function BlockEditor(props: Props) {
       {locked ? null : (
         <div className="be-palette" role="group" aria-label="Add a block">
           {snippet ? null : (
-          <div className="row">
-            {[1, 2, 3].map((columns) => (
-              <Button
-                key={columns}
-                aria-label={`Add a section with ${columns} ${columns === 1 ? "column" : "columns"}`}
-                {...paletteDrag({ kind: "new-section", columns })}
-                onClick={() => addSection(columns)}
-                disabled={content.sections.length >= MAX_SECTIONS}
-              >
-                Section, {columns} {columns === 1 ? "col" : "cols"}
-              </Button>
-            ))}
-          </div>
+            <div className="row">
+              {[1, 2, 3].map((columns) => (
+                <Button
+                  key={columns}
+                  aria-label={`Add a section with ${columns} ${columns === 1 ? "column" : "columns"}`}
+                  {...paletteDrag({ kind: "new-section", columns })}
+                  onClick={() => addSection(columns)}
+                  disabled={content.sections.length >= MAX_SECTIONS}
+                >
+                  Section, {columns} {columns === 1 ? "col" : "cols"}
+                </Button>
+              ))}
+            </div>
           )}
           <div className="row">
             {BLOCK_TYPES.map((entry) => (

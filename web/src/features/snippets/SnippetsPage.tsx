@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 
-import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, type ErrorSummary, type NamedRef } from "../../api";
 import { Button, Dialog, EmptyState, InlineError, LibraryNav, PageHeader, Panel, ResourceView, TextField } from "../../ui";
 import { plural } from "../../ui/format";
 import { useSnippetAccess } from "./access";
@@ -181,7 +181,7 @@ function NewSnippetDialog({ workspaceId, onClose }: { workspaceId: string; onClo
 function ArchiveDialog({ workspaceId, snippet, onClose, onArchived }: { workspaceId: string; snippet: Snippet; onClose: () => void; onArchived: () => void }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const [holders, setHolders] = useState<{ templates: ApiError["snippetTemplates"]; themes: ApiError["snippetThemes"] } | null>(null);
+  const [holders, setHolders] = useState<{ templates: NamedRef[]; themes: NamedRef[] } | null>(null);
 
   async function archive() {
     setBusy(true);
