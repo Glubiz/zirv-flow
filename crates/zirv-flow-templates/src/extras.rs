@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde_json::Value;
 
 use crate::content::blocks::{
-    Block, BlocksContent, ImageSrc, SnippetContent, ThemeRef, conditions,
+    Block, BlocksContent, FooterRef, ImageSrc, SnippetContent, ThemeRef, conditions,
 };
 use crate::context::RenderExtras;
 use crate::document::{Mode, TemplateDocument};
@@ -30,6 +30,8 @@ pub enum ThemeNeed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtrasNeeds {
     pub theme: ThemeNeed,
+    /// Whether the theme footer closes the email: the document's `footer` is `"theme"`.
+    pub footer: bool,
     /// The ids of the snippets its snippet blocks name, as spelled, each once.
     pub snippets: Vec<String>,
     /// The ids of the assets its own images name, as spelled, each once. The assets of snippets
@@ -43,6 +45,7 @@ impl ExtrasNeeds {
     fn nothing() -> Self {
         Self {
             theme: ThemeNeed::None,
+            footer: false,
             snippets: Vec::new(),
             assets: Vec::new(),
             conditions: Vec::new(),
@@ -65,6 +68,7 @@ fn block_needs(content: &BlocksContent) -> ExtrasNeeds {
             ThemeRef::Default => ThemeNeed::Default,
             ThemeRef::Id(id) => ThemeNeed::Id(id.clone()),
         },
+        footer: content.footer == FooterRef::Theme,
         conditions: conditions(content)
             .into_iter()
             .map(|(id, condition)| (id.to_owned(), condition.clone()))
@@ -163,6 +167,7 @@ mod tests {
         let needs = extras_needs(&document(json!("default")));
 
         assert_eq!(needs.theme, ThemeNeed::Default);
+        assert!(needs.footer);
         assert_eq!(needs.snippets, [SNIPPET]);
         assert_eq!(needs.assets, [ASSET]);
         let ids: Vec<&str> = needs.conditions.iter().map(|(id, _)| id.as_str()).collect();

@@ -53,6 +53,7 @@ fn request_of(doc: &TemplateDocument) -> ExtrasRequest {
             ThemeNeed::Default => ThemeRequest::Default,
             ThemeNeed::Id(id) => ThemeRequest::Id(id),
         },
+        footer: needs.footer,
         snippets: needs.snippets,
         assets: needs.assets,
     }

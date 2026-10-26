@@ -32,6 +32,8 @@ pub enum ThemeRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtrasRequest {
     pub theme: ThemeRequest,
+    /// Whether the theme footer closes the email; only then is it loaded and recorded.
+    pub footer: bool,
     pub snippets: Vec<String>,
     pub assets: Vec<String>,
 }
@@ -73,7 +75,8 @@ pub async fn load_render_inputs(
     let mut wanted = request.snippets.clone();
     let mut assets = request.assets.clone();
     if let Some(theme) = &theme {
-        if let Some(footer) = text_at(&theme.tokens, "footer_snippet")
+        if request.footer
+            && let Some(footer) = text_at(&theme.tokens, "footer_snippet")
             && !wanted.iter().any(|id| id == footer)
         {
             wanted.push(footer.to_owned());
@@ -197,6 +200,7 @@ mod tests {
     fn request(theme: ThemeRequest, snippets: &[Uuid], assets: &[Uuid]) -> ExtrasRequest {
         ExtrasRequest {
             theme,
+            footer: true,
             snippets: snippets.iter().map(Uuid::to_string).collect(),
             assets: assets.iter().map(Uuid::to_string).collect(),
         }
@@ -366,6 +370,14 @@ mod tests {
             assert!(url.starts_with("https://flow.example.com/a/"), "{url}");
             assert!(url.ends_with(".png"), "{url}");
         }
+        let mut without_footer = request(ThemeRequest::Id(theme.to_string()), &[], &[]);
+        without_footer.footer = false;
+        let loaded = load(&pool, ws, &without_footer, None).await;
+        assert!(
+            loaded.snippets.is_empty(),
+            "a footer that is not rendered is not loaded"
+        );
+        assert!(loaded.theme.is_some());
         let relative = load(
             &pool,
             ws,

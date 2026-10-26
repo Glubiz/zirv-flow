@@ -5434,13 +5434,21 @@ mod tests {
         let body = json!([{"type": "text", "id": "t", "content": "<p>Hi</p>"}]);
         let followed = env.block_template(json!("default"), body.clone()).await;
         let named = env.block_template(json!({"id": theme}), body.clone()).await;
-        let none = env.block_template(json!("none"), body).await;
+        let none = env.block_template(json!("none"), body.clone()).await;
+        let mut unfooted = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hello", "sender": env.sender, "lang": "en", "category": "transactional",
+            "theme": {"id": theme}, "footer": "none",
+            "sections": [{"id": "main", "columns": [body]}]
+        }});
+        let unfooted = env.template_of("transactional", unfooted.take()).await;
 
         let with_default = env.send(person, followed).await;
         let default_html = env.last_html();
         let with_named = env.send(person, named).await;
         let without = env.send(person, none).await;
         let bare_html = env.last_html();
+        let without_footer = env.send(person, unfooted).await;
+        let unfooted_html = env.last_html();
 
         assert!(default_html.contains("FOOTER TEXT") && default_html.contains("#aa0000"));
         let used = (Some(theme), Some(1), Some(json!({ footer.to_string(): 1 })));
@@ -5450,6 +5458,12 @@ mod tests {
         assert_eq!(
             env.rendered_with(without.id).await,
             (None, None, Some(json!({})))
+        );
+        assert!(!unfooted_html.contains("FOOTER TEXT"));
+        assert_eq!(
+            env.rendered_with(without_footer.id).await,
+            (Some(theme), Some(1), Some(json!({}))),
+            "the footer that was not rendered is not recorded"
         );
     }
 

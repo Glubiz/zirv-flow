@@ -68,6 +68,7 @@ pub(crate) fn request_of(needs: &ExtrasNeeds) -> ExtrasRequest {
             ThemeNeed::Default => ThemeRequest::Default,
             ThemeNeed::Id(id) => ThemeRequest::Id(id.clone()),
         },
+        footer: needs.footer,
         snippets: needs.snippets.clone(),
         assets: needs.assets.clone(),
     }
@@ -386,6 +387,7 @@ mod tests {
     fn a_needs_theme_maps_to_the_stores_request() {
         let needs = ExtrasNeeds {
             theme: ThemeNeed::Id("t".into()),
+            footer: true,
             snippets: vec!["s".into()],
             assets: vec!["a".into()],
             conditions: Vec::new(),
