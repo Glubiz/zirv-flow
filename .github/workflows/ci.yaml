@@ -144,19 +144,40 @@ jobs:
       # compiler on the Linux runner. Nothing pulls `ring` in yet; the step is
       # here so the first dependency that does (sqlx with rustls) does not
       # break CI.
-      # The runner's azure apt mirror wedges regularly (every index fetch
-      # stalling or Ign'd), so this swaps sources to the canonical archive
-      # up front, forces IPv4, and bounds every fetch; the step timeout is
-      # the backstop that turns any remaining stall into a fast, retryable
+      # The runner's azure apt mirror wedges regularly (index fetches stall,
+      # and package downloads crawl at minutes per file), so the downloaded
+      # packages are cached per release and month: after the first run of a
+      # month only the index is fetched. The sources, including the image's
+      # apt-mirrors.txt mirror list, are swapped to the canonical archive,
+      # IPv4 is forced and every fetch is bounded; the step timeout is the
+      # backstop that turns any remaining stall into a fast, retryable
       # failure instead of a six-hour hang.
+      - name: Name the mingw-w64 package cache
+        id: mingw-cache
+        run: |
+          prefix="mingw-$(. /etc/os-release && echo "$VERSION_CODENAME")-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache mingw-w64 packages
+        uses: actions/cache@v4.3.0
+        with:
+          path: ~/apt-mingw
+          key: ${{ steps.mingw-cache.outputs.key }}
+          restore-keys: ${{ steps.mingw-cache.outputs.prefix }}
+
       - name: Install mingw-w64 (ring's build script needs a cross C compiler)
         timeout-minutes: 8
         run: |
           if command -v x86_64-w64-mingw32-gcc >/dev/null; then exit 0; fi
-          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
+          for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
+            if [ -f "$f" ]; then sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$f"; fi
+          done
           APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true"
+          mkdir -p ~/apt-mingw/partial
           sudo apt-get $APT_OPTS update
-          sudo apt-get $APT_OPTS install -y --no-install-recommends gcc-mingw-w64-x86-64
+          sudo apt-get $APT_OPTS -o Dir::Cache::archives="$HOME/apt-mingw" install -y --no-install-recommends gcc-mingw-w64-x86-64
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-mingw
 
       - name: Run Clippy Lint (Windows target)
         run: cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings

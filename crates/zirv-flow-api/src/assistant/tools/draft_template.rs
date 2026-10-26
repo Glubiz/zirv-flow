@@ -20,7 +20,7 @@ use zirv_flow_templates::{Issue, TemplateDocument, migrate_to_current};
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
 use crate::problem::ApiError;
-use crate::templates::publish::{load_check_inputs, validate_document};
+use crate::templates::publish::{publish_inputs, publish_issues};
 use crate::templates::{check_matches, parse_document};
 
 pub(crate) struct DraftTemplate;
@@ -289,14 +289,14 @@ impl AiTool<ToolContext> for DraftTemplate {
                 .state
                 .render_pool()
                 .ok_or_else(|| ToolError::Failed(ApiError::render_unavailable()))?;
-            let checked = {
+            let (catalog, inputs) = {
                 let mut connection = context
                     .state
                     .pool
                     .acquire()
                     .await
                     .map_err(|_| ToolError::Failed(ApiError::internal()))?;
-                load_check_inputs(
+                publish_inputs(
                     &context.state,
                     &mut connection,
                     context.workspace,
@@ -305,7 +305,7 @@ impl AiTool<ToolContext> for DraftTemplate {
                 .await
                 .map_err(ToolError::Failed)?
             };
-            let issues = validate_document(render, &drafted.doc, &checked)
+            let issues = publish_issues(render, &drafted.doc, &catalog, &inputs)
                 .await
                 .map_err(ToolError::Failed)?;
             let lines = issue_lines(&issues);

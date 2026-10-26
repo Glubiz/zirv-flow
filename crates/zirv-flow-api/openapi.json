@@ -21344,7 +21344,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "The workspace's live templates by name; archived ones with `archived=true`.",
+        "summary": "The workspace's templates for the library, newest edit first; archived ones with\n`archived=true` or `status=archived`.",
         "operationId": "list_templates",
         "parameters": [
           {
@@ -21365,6 +21365,51 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "A case-insensitive substring of the name, the draft's subject or a merge field the draft uses",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "`email` or `webhook`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "theme",
+            "in": "query",
+            "description": "A theme id, `default` or `none`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "`edited` (the default), `name` or `most_used` (non-test messages in the last 30 days)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -21375,14 +21420,14 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/TemplateBody"
+                    "$ref": "#/components/schemas/TemplateListItemBody"
                   }
                 }
               }
             }
           },
           "400": {
-            "description": "archived is not true or false",
+            "description": "archived is not true or false, or another parameter has an unknown value",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21790,7 +21835,7 @@
             }
           },
           "409": {
-            "description": "The template is already archived (`code` is `template_archived`)",
+            "description": "The template is already archived (`code` is `template_archived`), or an active flow still sends it (`code` is `template_in_use`, with the flows in `flows`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21815,7 +21860,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. Audited as `template.draft_saved`.",
+        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. After the save commits the draft is validated once and its\nissue counts stored (`checks` in the template list); a validation that cannot run leaves them\nempty and never fails the save. Audited as `template.draft_saved`.",
         "operationId": "save_template_draft",
         "parameters": [
           {
@@ -27276,9 +27321,14 @@
         "required": [
           "kind",
           "id",
-          "version"
+          "version",
+          "archived"
         ],
         "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "Whether the owner is archived."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -27286,6 +27336,13 @@
           "kind": {
             "type": "string",
             "description": "`template`, `theme` or `snippet`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner's current name; null when the owner no longer exists."
           },
           "version": {
             "type": "integer",
@@ -32660,6 +32717,23 @@
         ],
         "description": "Whether a person may enter again."
       },
+      "FlowRefProblem": {
+        "type": "object",
+        "description": "A flow named in a problem.",
+        "required": [
+          "flow_id",
+          "flow_name"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          }
+        }
+      },
       "FlowScheduleTrigger": {
         "type": "object",
         "description": "A cron slot in its own time zone.",
@@ -35657,6 +35731,16 @@
               "$ref": "#/components/schemas/FlowIssueProblem"
             },
             "description": "What is wrong with a flow (`flow_invalid`): a fixed code and the node, edge and pointer it\nconcerns, never a value from the flow."
+          },
+          "flows": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/FlowRefProblem"
+            },
+            "description": "The active flows whose running version sends a template (`template_in_use`)."
           },
           "issues": {
             "type": [
@@ -40089,6 +40173,24 @@
           "webhook"
         ]
       },
+      "TemplateChecksBody": {
+        "type": "object",
+        "description": "The counts of the issues the draft's last validation found.",
+        "required": [
+          "blocking",
+          "warnings"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "TemplateDetailBody": {
         "allOf": [
           {
@@ -40196,6 +40298,76 @@
           "severity": {
             "type": "string",
             "description": "`blocking` or `warning`."
+          }
+        }
+      },
+      "TemplateListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TemplateBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "draft_changed",
+              "active_flows",
+              "theme",
+              "edited_at"
+            ],
+            "properties": {
+              "active_flows": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many active flows send the template."
+              },
+              "checks": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TemplateChecksBody",
+                    "description": "The draft's last validation; null when it has not been checked."
+                  }
+                ]
+              },
+              "draft_changed": {
+                "type": "boolean",
+                "description": "The draft differs from the current version; false before the first publish."
+              },
+              "edited_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "edited_by_email": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The email of the member who saved the draft last; null for an API key or a removed member."
+              },
+              "theme": {
+                "$ref": "#/components/schemas/TemplateThemeBody"
+              }
+            }
+          }
+        ],
+        "description": "A template in the library list: the template and the facts the library shows."
+      },
+      "TemplateNamedTheme": {
+        "type": "object",
+        "description": "A theme a block email names.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -40370,6 +40542,25 @@
           "subject_variants",
           "block_layout",
           "translation"
+        ]
+      },
+      "TemplateThemeBody": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TemplateThemeChoice"
+          },
+          {
+            "$ref": "#/components/schemas/TemplateNamedTheme"
+          }
+        ],
+        "description": "The theme the draft follows: `default`, `none`, or the theme it names."
+      },
+      "TemplateThemeChoice": {
+        "type": "string",
+        "description": "A theme choice that names no theme row.",
+        "enum": [
+          "default",
+          "none"
         ]
       },
       "TemplateUseBody": {

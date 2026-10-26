@@ -76,7 +76,7 @@ use crate::sources::{
 use crate::templates::crud::{TemplateDetailBody, check_draft};
 use crate::templates::inputs::{Inputs, Subject, resolve};
 use crate::templates::preview::render;
-use crate::templates::publish::{load_check_inputs, validate_document};
+use crate::templates::publish::{publish_inputs, publish_issues};
 use crate::templates::{
     field_catalog, issue_problems as template_issue_problems, stored_document, template_error,
 };
@@ -1394,15 +1394,15 @@ async fn recheck_template(
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
-    let checked = {
+    let (catalog, inputs) = {
         let mut connection = state
             .pool
             .acquire()
             .await
             .map_err(|_| ApiError::internal())?;
-        load_check_inputs(state, &mut connection, draft.workspace_id, &doc).await?
+        publish_inputs(state, &mut connection, draft.workspace_id, &doc).await?
     };
-    let issues = validate_document(render, &doc, &checked).await?;
+    let issues = publish_issues(render, &doc, &catalog, &inputs).await?;
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::template_invalid(template_issue_problems(&issues)));
     }
