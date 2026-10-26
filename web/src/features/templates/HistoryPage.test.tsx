@@ -135,10 +135,16 @@ describe("the Versions and use page", () => {
     expect(previewsOf(calls).every((body) => body["person_id"] === undefined)).toBe(true);
   });
 
-  it("says no versions are published yet", async () => {
-    mockApi(routes({ versions: [] }));
+  it("says no versions are published yet and still shows the draft, its facts and its flows", async () => {
+    const calls = mockApi(routes({ versions: [] }));
     mount();
 
-    expect(await screen.findByText("No published versions yet")).toBeInTheDocument();
+    expect(await screen.findByText(/No published versions yet/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Draft as the sample person gets it" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Draft" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Welcome series/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy into the draft" })).not.toBeInTheDocument();
+    await waitFor(() => expect(previewsOf(calls).length).toBeGreaterThan(0));
+    expect(calls.some((call) => call.path.endsWith("/stats"))).toBe(false);
   });
 });

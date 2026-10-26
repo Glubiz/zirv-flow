@@ -36,7 +36,7 @@ export function draftRow(live: number | null, changes: number, savedAt: string):
   return { key: "draft", name: "Draft", badge: "Editing", note: since, when: `Saved ${formatDateTime(savedAt)}`, live: false };
 }
 
-export function HistoryList({ rows, selected, onSelect }: { rows: readonly Row[]; selected: "draft" | number; onSelect: (key: "draft" | number) => void }) {
+export function HistoryList({ rows, selected, onSelect, empty }: { rows: readonly Row[]; selected: "draft" | number; onSelect: (key: "draft" | number) => void; empty: boolean }) {
   return (
     <section className="panel pb-panel hv-list" aria-labelledby="hv-history-title">
       <div>
@@ -59,6 +59,7 @@ export function HistoryList({ rows, selected, onSelect }: { rows: readonly Row[]
           </li>
         ))}
       </ul>
+      {empty ? <p className="faint">No published versions yet. Publish the draft to make version 1.</p> : null}
     </section>
   );
 }

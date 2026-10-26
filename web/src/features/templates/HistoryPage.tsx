@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
 
 import { ApiError, client, describeError, unwrap, useResource, type ErrorSummary } from "../../api";
-import { Button, EmptyState, InlineError, LoadingState, ResourceView } from "../../ui";
+import { Button, InlineError, LoadingState, ResourceView } from "../../ui";
 import { useMembers } from "../members";
 import { useTemplateAccess } from "./access";
 import { diffDocuments } from "./diff";
@@ -191,48 +191,41 @@ function Body({ workspaceId, template, versions, authors, canWrite, canAdmin, li
           ) : null}
         </div>
       ) : null}
-      {versions.length === 0 ? (
-        <EmptyState title="No published versions yet">Publish the draft to make version 1. It shows here with its note.</EmptyState>
-      ) : null}
       <div className="pb-split">
         <div className="pb-side">
-          <HistoryList rows={rows} selected={selected} onSelect={setSelected} />
+          <HistoryList rows={rows} selected={selected} onSelect={setSelected} empty={versions.length === 0} />
         </div>
-        {versions.length > 0 ? (
-          <>
-            <RenderCard
-              workspaceId={workspaceId}
-              templateId={template.id}
-              selected={selected}
-              canWrite={canWrite}
-              canAdmin={canAdmin}
-              again={again}
-              action={
-                typeof selected === "number" && canWrite && !archived ? (
-                  <Button onClick={() => void copy(selected)} disabled={busy}>
-                    Copy into the draft
-                  </Button>
-                ) : selected === "draft" && canAdmin && !archived ? (
-                  <Link className="btn btn-primary" to={`${editPath}/publish`}>
-                    Review and publish
-                  </Link>
-                ) : null
-              }
-            />
-            <aside className="pb-side">
-              <Facts
-                key={String(selected)}
-                workspaceId={workspaceId}
-                templateId={template.id}
-                selected={selected}
-                draft={draft}
-                author={summary ? authorOf(authors, summary.published_by) : null}
-                snippetNames={snippetNames}
-              />
-              <UsedByPanel workspaceId={workspaceId} uses={uses} />
-            </aside>
-          </>
-        ) : null}
+        <RenderCard
+          workspaceId={workspaceId}
+          templateId={template.id}
+          selected={selected}
+          canWrite={canWrite}
+          canAdmin={canAdmin}
+          again={again}
+          action={
+            typeof selected === "number" && canWrite && !archived ? (
+              <Button onClick={() => void copy(selected)} disabled={busy}>
+                Copy into the draft
+              </Button>
+            ) : selected === "draft" && canAdmin && !archived ? (
+              <Link className="btn btn-primary" to={`${editPath}/publish`}>
+                Review and publish
+              </Link>
+            ) : null
+          }
+        />
+        <aside className="pb-side">
+          <Facts
+            key={String(selected)}
+            workspaceId={workspaceId}
+            templateId={template.id}
+            selected={selected}
+            draft={draft}
+            author={summary ? authorOf(authors, summary.published_by) : null}
+            snippetNames={snippetNames}
+          />
+          <UsedByPanel workspaceId={workspaceId} uses={uses} />
+        </aside>
       </div>
     </>
   );
