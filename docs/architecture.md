@@ -1811,8 +1811,9 @@ convert, the send job and the webhook call all use it. A draft is saved at schem
 schema 2; a published version stays as saved and is served migrated. New blocking codes: `condition_too_large`,
 `broken_asset_reference`, `broken_theme_reference`, `broken_snippet_reference` (every snippet
 block until #303 renders it), `snippet_section`, `snippet_nested`, `snippet_condition`,
-`not_convertible` and `condition_unsupported` (any `visible_if`, until #307 supplies condition
-results to preview, test send and send); new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
+`not_convertible`, `invalid_condition` and `broken_segment_reference` (a `visible_if` that does not
+validate, or that names a missing segment; `api` and `jobs` raise them, #307; the interim
+`condition_unsupported` no longer exists); new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
 `condition_unresolved`, `broken_asset_reference`, `broken_theme_reference`. `RenderExtras`
 (theme, snippets, condition results, asset URLs) rides on the `email` and `validate` render
 requests; `validate_theme` and `validate_snippet` run in the pool as `validate_theme` and
