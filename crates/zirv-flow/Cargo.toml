@@ -40,8 +40,6 @@ sqlx = { workspace = true, optional = true }
 time = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
-zirv-flow-connectors = { workspace = true, features = ["test-support"], optional = true }
-zirv-flow-core = { workspace = true, optional = true }
 
 [features]
 # The test server of the Playwright tests. Never a default feature and never in a release build,
@@ -49,7 +47,7 @@ zirv-flow-core = { workspace = true, optional = true }
 # scripts/check-bench-features.sh checks that nothing shipped names it.
 browser-test = [
     "dep:axum", "dep:http-body-util", "dep:serde_json", "dep:sqlx", "dep:time", "dep:tower",
-    "dep:uuid", "dep:zirv-flow-connectors", "dep:zirv-flow-core", "zirv-flow-store/test-support",
+    "dep:uuid", "zirv-flow-jobs/test-support", "zirv-flow-store/test-support",
 ]
 
 [[bin]]
@@ -75,4 +73,5 @@ uuid.workspace = true
 # the fake email provider.
 zirv-flow-connectors = { workspace = true, features = ["test-support"] }
 zirv-flow-core.workspace = true
+zirv-flow-jobs = { workspace = true, features = ["test-support"] }
 zirv-flow-store = { workspace = true, features = ["test-support"] }

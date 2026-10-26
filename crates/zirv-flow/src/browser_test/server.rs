@@ -17,8 +17,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use uuid::Uuid;
 use zirv_flow_api::admin::{self, Context};
-use zirv_flow_connectors::destinations::SmtpCaptured;
-use zirv_flow_core::Role;
+use zirv_flow_jobs::test_support::SmtpCaptured;
+use zirv_flow_store::Role;
 
 use crate::harness::World;
 use crate::mail;

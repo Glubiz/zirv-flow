@@ -26,19 +26,17 @@ use zirv_flow_api::AppState;
 use zirv_flow_api::admin::{self, Context};
 #[cfg(test)]
 use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
-use zirv_flow_connectors::destinations::{
-    SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions,
-};
-use zirv_flow_connectors::dns::FixtureResolver;
-use zirv_flow_core::{
-    HmacPurpose, HmacRoot, Keyring, MasterKey, Scope, Slug, WorkspaceId, WorkspaceName,
-    deployment_key_aad,
+use zirv_flow_jobs::test_support::{
+    FixtureResolver, SMTP_SINK_PASSWORD, SMTP_SINK_USER, SmtpSink, SmtpSinkOptions,
 };
 use zirv_flow_jobs::{Registry, Worker, WorkerConfig};
 use zirv_flow_render::{PoolConfig, RenderPool};
 #[cfg(test)]
 use zirv_flow_store::ManualClock;
-use zirv_flow_store::{Clock, secrets};
+use zirv_flow_store::{
+    Clock, HmacPurpose, HmacRoot, Keyring, MasterKey, Scope, Slug, WorkspaceId, WorkspaceName,
+    deployment_key_aad, secrets,
+};
 
 /// Where browsers reach the server in this world: tracking links are built on it.
 #[cfg(test)]
