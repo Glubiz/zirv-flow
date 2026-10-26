@@ -258,6 +258,7 @@ pub(crate) fn render(
     match broken {
         Some(Broken::Theme) => return Err(RenderError::BrokenThemeReference),
         Some(Broken::Footer) => return Err(RenderError::BrokenSnippetReference),
+        Some(Broken::Tokens) => return Err(RenderError::InvalidBlocks),
         None => {}
     }
     let env = document_environment(content, extras, look.footer);
@@ -1335,5 +1336,23 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn theme_tokens_that_are_not_safe_for_mjml_are_refused_and_never_appear_in_the_output() {
+        for edit in [
+            (|theme: &mut crate::theme::ThemeTokens| theme.primary = "#000\" x=\"".into())
+                as fn(&mut crate::theme::ThemeTokens),
+            |theme| theme.link = "red}</mj-style><mj-raw>x".into(),
+            |theme| theme.web_font_url = Some("http://fonts.example/a.css".into()),
+            |theme| theme.web_font_url = Some("https://fonts.example/a b.css".into()),
+        ] {
+            let mut theme = theme_fixture("a");
+            edit(&mut theme);
+            assert_eq!(
+                render_with(&themes_doc(), &themed(theme, "Alpha")),
+                Err(RenderError::InvalidBlocks)
+            );
+        }
     }
 }

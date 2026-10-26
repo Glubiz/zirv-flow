@@ -5,13 +5,15 @@
 //! the sanitizer. [`validate`] adds what only a render shows: merge fields, syntax, the raw HTML
 //! `mrml` must parse, and the unsubscribe link of the rendered sample.
 
+use hashbrown::HashSet;
+
 use super::emit::UrlKind;
 use super::look::{Broken, Look, THEME_FOOTER_ID};
 use super::model::{
     Block, BlocksContent, ImageSrc, MAX_DOCUMENT_BYTES, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES,
     MAX_RICH_TEXT_BYTES, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, PREHEADER_DISPLAY_CHARS,
-    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_block_numbers, check_shape,
-    conditions, doc_at,
+    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_block_numbers, check_id,
+    check_shape, conditions, doc_at,
 };
 use super::render::{BuildError, build, document_environment};
 use super::sanitize::{has_mjml_tag, link_allowed, sanitize_source, violations};
@@ -24,6 +26,7 @@ use crate::error::RenderError;
 use crate::issue::{FieldCatalog, Issue, code};
 use crate::links::{link_urls, links_to, starts_with_ignore_case, unescape};
 use crate::sandbox::MAX_HTML_BYTES;
+use crate::theme::validate_theme;
 use crate::validate::{HTML, HTML_WARN_BYTES, SUBJECT, Scope, check_template_in};
 
 /// What a text field holds.
@@ -174,13 +177,11 @@ pub(crate) fn check_sources(content: &BlocksContent, extras: &RenderExtras) -> V
     if issues.iter().any(|issue| issue.code == code::BLOCKS_LIMIT) {
         return issues;
     }
-    let own = RenderExtras::default();
-    let all = fields(content, &own, None);
-    check_texts(&all, &mut issues);
     // The snippets and the footer were checked when they were published; they are checked again
-    // here because what is rendered is what the caller passed. A reference with no content is
-    // `check_references`' business.
+    // here because what is rendered is what the caller passed. The size limits run over the
+    // whole effective content. A reference with no content is `check_references`' business.
     let (look, _) = Look::resolve(content, extras);
+    check_texts(&fields(content, extras, look.footer), &mut issues);
     for (_, block) in blocks_of(content) {
         if let Block::Snippet(reference) = block
             && let Some(snippet) = extras.snippets.get(&reference.snippet_id)
@@ -194,8 +195,9 @@ pub(crate) fn check_sources(content: &BlocksContent, extras: &RenderExtras) -> V
     issues
 }
 
-/// The checks of a snippet's content at the place it is used: no section, a bounded block
-/// count, no snippet block, no condition, valid numbers, and the text checks of its fields.
+/// The structural checks of a snippet's content at the place it is used: no section, a bounded
+/// block count, valid and unique ids, no snippet block, no condition and valid numbers. Its text
+/// fields are checked with the rest of the effective content.
 fn check_nested(base: &str, snippet: &SnippetContent, issues: &mut Vec<Issue>) {
     if !snippet.sections.is_empty() {
         issues.push(Issue::new(code::SNIPPET_SECTION, base));
@@ -207,8 +209,14 @@ fn check_nested(base: &str, snippet: &SnippetContent, issues: &mut Vec<Issue>) {
         );
         return;
     }
-    let mut all: Vec<Field<'_>> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for block in &snippet.blocks {
+        let start = issues.len();
+        check_id(block.id(), &mut seen, issues);
+        check_block_numbers(block, issues);
+        for issue in &mut issues[start..] {
+            issue.at = nested_at(Some(base), std::mem::take(&mut issue.at));
+        }
         if matches!(block, Block::Snippet(_)) {
             issues.push(Issue::new(
                 code::SNIPPET_NESTED,
@@ -221,18 +229,7 @@ fn check_nested(base: &str, snippet: &SnippetContent, issues: &mut Vec<Issue>) {
                 nested_at(Some(base), block_at(block.id(), Some("visible_if"))),
             ));
         }
-        let start = issues.len();
-        check_block_numbers(block, issues);
-        for issue in &mut issues[start..] {
-            issue.at = nested_at(Some(base), std::mem::take(&mut issue.at));
-        }
-        let first = all.len();
-        block_fields(block, &mut all);
-        for field in &mut all[first..] {
-            field.at = nested_at(Some(base), std::mem::take(&mut field.at));
-        }
     }
-    check_texts(&all, issues);
 }
 
 /// The size limits of the text fields and the checks of their URLs, rich text and raw HTML. A
@@ -572,6 +569,14 @@ pub(crate) fn check_references(
                 block_at(THEME_FOOTER_ID, Some("snippet_id")),
             )
             .with_message("the theme's footer snippet has no content"),
+        ),
+        // The theme's own `invalid_setting` and `invalid_url` issues, at `/theme/<token>`.
+        Some(Broken::Tokens) => issues.extend(
+            extras
+                .theme
+                .iter()
+                .flat_map(validate_theme)
+                .filter(Issue::is_blocking),
         ),
         None => {}
     }
@@ -1793,5 +1798,81 @@ mod tests {
                 serde_json::json!({"asset": ASSET});
         });
         assert!(crate::blocks_to_mjml(asset.blocks.as_ref().unwrap()).is_err());
+    }
+
+    fn with_snippet_block(snippet_ids: &[&str]) -> TemplateDocument {
+        newsletter_with(|v| {
+            for (n, id) in snippet_ids.iter().enumerate() {
+                v["blocks"]["sections"][1]["columns"][0]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "type": "snippet",
+                        "id": format!("sn{n}"),
+                        "snippet_id": id
+                    }));
+            }
+        })
+    }
+
+    #[test]
+    fn snippets_that_are_each_under_the_limit_but_together_over_it_are_blocking() {
+        let ids = [PROMO, FOOTER, THEME_ID];
+        let doc = with_snippet_block(&ids);
+        let big = |n: usize| {
+            snippet_of(serde_json::json!({"blocks": [
+                {"type": "raw_html", "id": format!("a{n}"), "html": "x".repeat(70_000)},
+                {"type": "raw_html", "id": format!("b{n}"), "html": "x".repeat(70_000)}
+            ]}))
+        };
+        let mut extras = RenderExtras::default();
+        extras.snippets.insert(ids[0].into(), big(0));
+        extras.snippets.insert(ids[1].into(), big(1));
+        assert_eq!(
+            codes_with(&with_snippet_block(&ids[..2]), &extras),
+            Vec::new()
+        );
+        extras.snippets.insert(ids[2].into(), big(2));
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [("blocks_limit", "/blocks/sections".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_repeated_block_id_inside_a_passed_snippet_is_blocking_where_it_is_used() {
+        let doc = with_snippet_block(&[PROMO]);
+        let mut extras = RenderExtras::default();
+        extras.snippets.insert(
+            PROMO.into(),
+            snippet_of(serde_json::json!({"blocks": [
+                {"type": "divider", "id": "same"},
+                {"type": "divider", "id": "same"}
+            ]})),
+        );
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [(
+                "duplicate_block_id",
+                "/blocks/block/sn0/block/same".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn theme_tokens_that_are_not_safe_for_mjml_are_blocking_and_never_emitted() {
+        let doc = newsletter_with(|v| v["blocks"]["theme"] = serde_json::json!("default"));
+        let mut extras = themed_extras(None);
+        if let Some(theme) = extras.theme.as_mut() {
+            theme.primary = "#000\" x=\"".into();
+            theme.web_font_url = Some("http://fonts.example/a b.css".into());
+        }
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [
+                ("invalid_setting", "/theme/primary".to_owned()),
+                ("invalid_url", "/theme/web_font_url".to_owned()),
+            ]
+        );
     }
 }

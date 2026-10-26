@@ -10,7 +10,8 @@ use serde_json::{Value, json};
 use super::model::{BlocksContent, FooterRef, Settings, ThemeRef, font_css};
 use super::snippet::SnippetContent;
 use crate::context::{RenderContext, RenderExtras};
-use crate::theme::ThemeTokens;
+use crate::issue::Issue;
+use crate::theme::{ThemeTokens, validate_theme};
 
 /// The id of the section the theme footer becomes. No document may use it.
 pub(crate) const THEME_FOOTER_ID: &str = "theme-footer";
@@ -24,6 +25,8 @@ pub(crate) enum Broken {
     Theme,
     /// The theme's footer snippet has no content.
     Footer,
+    /// The theme tokens fail `validate_theme`: a value that is not safe to put in MJML.
+    Tokens,
 }
 
 /// The values the emitter applies. The extras that matter are borrowed.
@@ -80,6 +83,9 @@ impl<'a> Look<'a> {
             (ThemeRef::Id(_), None) => return (look, Some(Broken::Theme)),
             (_, Some(theme)) => theme,
         };
+        if validate_theme(theme).iter().any(Issue::is_blocking) {
+            return (look, Some(Broken::Tokens));
+        }
         look.background = &theme.background;
         look.text = &theme.text;
         look.link = &theme.link;
