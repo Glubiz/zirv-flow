@@ -39,10 +39,14 @@ async function savedDraft(page: Page): Promise<void> {
   await expect(page.getByText("Draft saved")).toBeVisible();
 }
 
-async function uploadLogo(page: Page): Promise<void> {
+/** Uploads the logo and returns the address the app serves it on, as the image sheet shows it. */
+async function uploadLogo(page: Page): Promise<string> {
   await openLibrary(page, "Images");
   await page.getByLabel("Choose an image file").setInputFiles(LOGO);
   await expect(page.getByRole("button", { name: /logo\.png/ })).toBeVisible();
+  const address = await page.locator(".image-link .mono").textContent();
+  if (!address) throw new Error("the image sheet shows no address");
+  return address;
 }
 
 async function publishSnippet(page: Page): Promise<void> {
@@ -223,7 +227,7 @@ test("the newsletter built in the browser is sent as the preview shows it", asyn
   await signIn(page);
   await page.getByRole("link", { name: "Templates" }).first().click();
 
-  await uploadLogo(page);
+  const logoAddress = await uploadLogo(page);
   await publishSnippet(page);
   await publishDefaultTheme(page);
   await buildLayout(page);
@@ -235,6 +239,9 @@ test("the newsletter built in the browser is sent as the preview shows it", asyn
   await expect(page.getByRole("dialog")).toBeHidden();
 
   const preview = await previewOf(page);
+  // Both sides lack a dropped snippet or image, so the equality below only proves them if the preview has them.
+  expect(preview.html).toContain(ADDRESS_LINE);
+  expect(preview.html).toContain(new URL(logoAddress, FORMS.publicUrl).href);
   const sent = await sendTest(page, request, 0);
 
   const same = differences(preview, sent);
