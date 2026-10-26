@@ -251,7 +251,7 @@ function Done({ workspaceId, template, published }: { workspaceId: string; templ
         </>
       )}
       <div className="row">
-        <Link className="btn" to={`/w/${workspaceId}/templates/${template.id}`}>
+        <Link className="btn" to={`/w/${workspaceId}/templates/${template.id}?tab=versions`}>
           View history
         </Link>
         <Link className="btn" to={`/w/${workspaceId}/templates`}>
