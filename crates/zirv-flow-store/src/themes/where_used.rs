@@ -204,7 +204,7 @@ mod tests {
         let other = create(&pool, ws, "Other").await;
         publish(&pool, ws, brand.id).await;
         publish(&pool, ws, other.id).await;
-        set_default_theme(&mut *pool.acquire().await.unwrap(), ws, brand.id)
+        set_default_theme(&mut pool.acquire().await.unwrap(), ws, brand.id)
             .await
             .unwrap();
         let follows = create_template(&pool, ws, "Follows").await;
@@ -238,7 +238,7 @@ mod tests {
         let ws = workspace(&pool, "one").await;
         let brand = create(&pool, ws, "Brand").await;
         publish(&pool, ws, brand.id).await;
-        set_default_theme(&mut *pool.acquire().await.unwrap(), ws, brand.id)
+        set_default_theme(&mut pool.acquire().await.unwrap(), ws, brand.id)
             .await
             .unwrap();
         // `create_template` makes a code-mode document.
@@ -297,7 +297,7 @@ mod tests {
         let ws = flows::workspace(&pool, "one").await;
         let brand = create(&pool, ws, "Brand").await;
         publish(&pool, ws, brand.id).await;
-        set_default_theme(&mut *pool.acquire().await.unwrap(), ws, brand.id)
+        set_default_theme(&mut pool.acquire().await.unwrap(), ws, brand.id)
             .await
             .unwrap();
         let follows = create_template(&pool, ws, "Follows").await;

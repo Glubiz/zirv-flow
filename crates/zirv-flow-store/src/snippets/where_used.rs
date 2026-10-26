@@ -124,7 +124,7 @@ pub async fn snippet_where_used(
                 }),
             }
         }
-        templates.sort_by(|a, b| (a.name.to_lowercase(), a.id).cmp(&(b.name.to_lowercase(), b.id)));
+        templates.sort_by_key(|template| (template.name.to_lowercase(), template.id));
     }
     let ids: Vec<Uuid> = templates.iter().map(|template| template.id).collect();
     let active_flows = active_flows_using(connection, workspace, &ids).await?;
@@ -434,7 +434,7 @@ mod tests {
         // Not the default yet: the theme is listed, its followers are not.
         let before = used(&pool, ws, footer.id).await;
         crate::themes::tests_support::publish(&pool, ws, theme.id).await;
-        crate::set_default_theme(&mut *pool.acquire().await.unwrap(), ws, theme.id)
+        crate::set_default_theme(&mut pool.acquire().await.unwrap(), ws, theme.id)
             .await
             .unwrap();
 

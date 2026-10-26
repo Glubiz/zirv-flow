@@ -78,7 +78,7 @@ impl From<&SnippetVersionSummary> for SnippetVersionSummaryBody {
 }
 
 /// The issues stored with a version, as the response carries them.
-fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
+pub(crate) fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
     let Some(issues) = validation.as_array() else {
         return Vec::new();
     };
