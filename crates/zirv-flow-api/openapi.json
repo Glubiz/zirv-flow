@@ -27258,9 +27258,14 @@
         "required": [
           "kind",
           "id",
-          "version"
+          "version",
+          "archived"
         ],
         "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "Whether the owner is archived."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -27268,6 +27273,13 @@
           "kind": {
             "type": "string",
             "description": "`template`, `theme` or `snippet`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner's current name; null when the owner no longer exists."
           },
           "version": {
             "type": "integer",
