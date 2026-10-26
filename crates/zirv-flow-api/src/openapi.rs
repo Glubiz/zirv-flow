@@ -539,6 +539,7 @@ use crate::workspaces::{
         segments::preview::DataAgeBody,
         segments::preview::DataSourceBody,
         snippets::crud::SnippetBody,
+        snippets::crud::SnippetListItemBody,
         snippets::crud::SnippetDraftBody,
         snippets::crud::SnippetDetailBody,
         snippets::crud::CreateSnippetRequest,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { applyDrop, canDrop, emptyContent, moveBlock, moveSection, newBlock, newSection, readContent, type BlocksContent } from "./document";
 import { cleanRichText, linkAllowed } from "./richText";
+import { snippetContent, snippetEditable } from "./snippet";
 
 function sample(): BlocksContent {
   const content = emptyContent("marketing");
@@ -81,5 +82,20 @@ describe("the rich text clean pass", () => {
   it("accepts the schemes a link may use", () => {
     expect(["https://a", "http://a", "mailto:a@b", "{{ u }}"].every(linkAllowed)).toBe(true);
     expect(["javascript:a", "ftp://a", "/relative"].some(linkAllowed)).toBe(false);
+  });
+});
+
+describe("a snippet as the block editor holds it", () => {
+  it("round-trips a flat block list through one section and one column", () => {
+    const content = { blocks: [{ type: "divider", id: "a" }, { type: "spacer", id: "b", height: 20 }] };
+    const doc = snippetEditable(content);
+    expect(doc.content.sections).toHaveLength(1);
+    expect(doc.content.sections[0]?.columns).toHaveLength(1);
+    expect(snippetContent(doc)).toEqual(content);
+  });
+
+  it("reads anything that is not a block list as an empty snippet", () => {
+    expect(snippetContent(snippetEditable(null))).toEqual({ blocks: [] });
+    expect(snippetContent(snippetEditable({ blocks: "x" }))).toEqual({ blocks: [] });
   });
 });

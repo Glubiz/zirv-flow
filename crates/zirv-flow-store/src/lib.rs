@@ -271,8 +271,8 @@ pub use snippets::{
     LockedSnippet, NewSnippet, Snippet, SnippetDraft, SnippetError, SnippetPatch, SnippetTemplate,
     SnippetThemeUse, SnippetUse, SnippetVersion, SnippetVersionSummary, archive_snippet,
     create_snippet, find_snippet, find_snippet_draft, find_snippet_version, list_snippet_versions,
-    list_snippets, lock_snippet, publish_snippet, save_snippet_draft, snippet_where_used,
-    update_snippet,
+    list_snippets, lock_snippet, publish_snippet, save_snippet_draft, snippet_template_counts,
+    snippet_where_used, update_snippet,
 };
 pub use sources::{
     DiscoveredStream, NewOAuthState, NewSource, OAuthState, RefreshError, Source, SourceUpdate,

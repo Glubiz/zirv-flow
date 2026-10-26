@@ -17878,7 +17878,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/SnippetBody"
+                    "$ref": "#/components/schemas/SnippetListItemBody"
                   }
                 }
               }
@@ -39056,6 +39056,27 @@
             "description": "The templates of the flow that hold the snippet."
           }
         }
+      },
+      "SnippetListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SnippetBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "used_by_templates"
+            ],
+            "properties": {
+              "used_by_templates": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many templates, not archived, hold a block for it in their draft or current version."
+              }
+            }
+          }
+        ],
+        "description": "A snippet in the list, with how many templates hold it."
       },
       "SnippetPreviewBody": {
         "type": "object",
