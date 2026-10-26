@@ -16,21 +16,19 @@ function accepts(port: number): Promise<boolean> {
 }
 
 /**
- * Asks the test server to stop and waits until its port is closed, so it has dropped its scratch
- * database and exited before Playwright stops it. Windows has no signal to send, and a forced
- * stop would leave the database behind.
+ * Asks the test server to clean up and stop. The server answers 200 only after it finished its
+ * worker and dropped its scratch database, so the run passes or fails on that answer. Windows has
+ * no signal to send, and a forced stop would otherwise leave the database behind. The wait for
+ * the port is a courtesy so the process has exited before Playwright stops it.
  */
 export default async function globalTeardown(): Promise<void> {
   const port = Number(process.env.ZIRV_FLOW_BROWSER_TEST_PORT ?? "47700");
-  try {
-    await fetch(`http://127.0.0.1:${port}/__test/shutdown`, { method: "POST" });
-  } catch {
-    return; // already gone
+  const reply = await fetch(`http://127.0.0.1:${port}/__test/shutdown`, { method: "POST" });
+  if (!reply.ok) {
+    throw new Error(`the test server could not clean up (${reply.status}): ${await reply.text()}`);
   }
   const deadline = Date.now() + WAIT_MS;
-  while (Date.now() < deadline) {
-    if (!(await accepts(port))) return;
+  while (Date.now() < deadline && (await accepts(port))) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`the test server still listens on port ${port} ${WAIT_MS / 1000} s after the shutdown request`);
 }

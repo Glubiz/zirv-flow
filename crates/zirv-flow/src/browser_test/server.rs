@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -115,7 +115,7 @@ impl Scratch {
                 pool,
             }),
             Err(error) => {
-                drop_database(maintenance, &name).await;
+                let _ = drop_database(maintenance, &name).await;
                 Err(format!(
                     "could not connect to the scratch database: {error}"
                 ))
@@ -123,15 +123,16 @@ impl Scratch {
         }
     }
 
-    async fn drop_database(self) {
-        self.pool.close().await;
-        drop_database(self.maintenance, &self.name).await;
+    async fn drop_database(self) -> Result<(), String> {
+        // A connection some task still holds must not keep the drop waiting: `FORCE` cuts it.
+        let _ = tokio::time::timeout(DRAIN, self.pool.close()).await;
+        drop_database(self.maintenance, &self.name).await
     }
 }
 
 /// Drops the database `name`, cutting any connection still open. Only this run's own name is
 /// ever passed.
-async fn drop_database(maintenance: PgConnectOptions, name: &str) {
+async fn drop_database(maintenance: PgConnectOptions, name: &str) -> Result<(), String> {
     let dropped = async {
         let admin = PgPoolOptions::new()
             .max_connections(1)
@@ -146,8 +147,35 @@ async fn drop_database(maintenance: PgConnectOptions, name: &str) {
         Ok::<(), sqlx::Error>(())
     }
     .await;
-    if let Err(error) = dropped {
-        eprintln!("warning: could not drop the scratch database {name}: {error}");
+    dropped.map_err(|error| format!("could not drop the scratch database {name}: {error}"))
+}
+
+/// What the run holds that must be released: the world and the scratch database. Whoever gets
+/// here first (the shutdown route, or the end of `run`) does the cleanup, once.
+struct Shared {
+    world: Mutex<Option<World>>,
+    scratch: Mutex<Option<Scratch>>,
+    /// Held for the whole cleanup, so a second caller waits for the first to finish.
+    cleaning: tokio::sync::Mutex<()>,
+    stop: Stop,
+}
+
+fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
+    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
+impl Shared {
+    /// Stops the worker and the render host, closes the pool and drops the scratch database.
+    /// Calling it again does nothing.
+    async fn clean_up(&self) -> Result<(), String> {
+        let _cleaning = self.cleaning.lock().await;
+        if let Some(world) = take(&self.world) {
+            world.finish().await;
+        }
+        match take(&self.scratch) {
+            Some(scratch) => scratch.drop_database().await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -159,41 +187,53 @@ pub(crate) async fn run() -> Result<(), String> {
         .await
         .map_err(|error| format!("could not listen on 127.0.0.1: {error}"))?;
     let scratch = Scratch::create(&database_url).await?;
-    let served = tokio::spawn(serve(scratch.pool.clone(), listener, password, stop)).await;
-    scratch.drop_database().await;
-    served.unwrap_or_else(|error| Err(format!("the server stopped unexpectedly: {error}")))
+    let pool = scratch.pool.clone();
+    let shared = Arc::new(Shared {
+        world: Mutex::new(None),
+        scratch: Mutex::new(Some(scratch)),
+        cleaning: tokio::sync::Mutex::new(()),
+        stop,
+    });
+    let served = tokio::spawn(serve(Arc::clone(&shared), pool, listener, password)).await;
+    let cleaned = shared.clean_up().await;
+    served.unwrap_or_else(|error| Err(format!("the server stopped unexpectedly: {error}")))?;
+    cleaned
 }
 
 async fn serve(
+    shared: Arc<Shared>,
     pool: PgPool,
     listener: TcpListener,
     password: String,
-    stop: Stop,
 ) -> Result<(), String> {
     let address = listener
         .local_addr()
         .map_err(|error| format!("no local address: {error}"))?;
     let base = format!("http://{address}");
-    let startup = async {
-        let world = Arc::new(World::start(pool, &base).await);
-        seed(&world, &password).await?;
-        Ok::<_, String>(world)
-    };
-    // A stop during startup abandons it; dropping the pool's children kills them.
+    let stop = shared.stop.clone();
+    // A stop while the world starts abandons it: nothing it started outlives the future yet.
     let world = tokio::select! {
-        started = startup => started?,
+        world = World::start(pool, &base) => world,
         () = stop.requested() => return Ok(()),
     };
+    let router = world.router.clone();
+    // From here on the world is finished on every path: a stop or a failure while seeding
+    // finishes it here, and a seeded world goes into `shared` for the shutdown route and `run`.
+    let seeded = tokio::select! {
+        seeded = seed(&world, &password) => Some(seeded),
+        () = stop.requested() => None,
+    };
+    if !matches!(seeded, Some(Ok(()))) {
+        world.finish().await;
+        return seeded.unwrap_or(Ok(()));
+    }
+    *shared.world.lock().unwrap_or_else(PoisonError::into_inner) = Some(world);
 
     let app = Router::new()
         .route("/__test/sink", get(sink_list).delete(sink_clear))
-        .with_state(Arc::clone(&world))
-        .merge(
-            Router::new()
-                .route("/__test/shutdown", post(shutdown))
-                .with_state(stop.clone()),
-        )
-        .merge(world.router.clone());
+        .route("/__test/shutdown", post(shutdown))
+        .with_state(Arc::clone(&shared))
+        .merge(router);
     println!("READY {base}");
     let _ = std::io::stdout().flush();
 
@@ -215,9 +255,6 @@ async fn serve(
             }
         }
     };
-    if let Some(world) = Arc::into_inner(world) {
-        world.finish().await;
-    }
     outcome
         .map_err(|error| format!("the server task failed: {error}"))?
         .map_err(|error| format!("the server failed: {error}"))
@@ -251,7 +288,9 @@ async fn seed(world: &World, password: &str) -> Result<(), String> {
 
 /// The messages the sink accepted: the envelope recipients, every header, and the HTML and text
 /// parts decoded.
-async fn sink_list(State(world): State<Arc<World>>) -> Json<Value> {
+async fn sink_list(State(shared): State<Arc<Shared>>) -> Result<Json<Value>, StatusCode> {
+    let guard = shared.world.lock().unwrap_or_else(PoisonError::into_inner);
+    let world = guard.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let messages: Vec<Value> = world
         .sink
         .messages()
@@ -269,12 +308,31 @@ async fn sink_list(State(world): State<Arc<World>>) -> Json<Value> {
             })
         })
         .collect();
-    Json(Value::Array(messages))
+    Ok(Json(Value::Array(messages)))
 }
 
-async fn sink_clear(State(world): State<Arc<World>>) -> StatusCode {
-    world.sink.clear();
-    StatusCode::NO_CONTENT
+async fn sink_clear(State(shared): State<Arc<Shared>>) -> StatusCode {
+    let guard = shared.world.lock().unwrap_or_else(PoisonError::into_inner);
+    match guard.as_ref() {
+        Some(world) => {
+            world.sink.clear();
+            StatusCode::NO_CONTENT
+        }
+        None => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+/// Cleans up while the server still serves, answers 200 once the scratch database is dropped (500
+/// with the reason when it could not be), and only then stops the server. A forced stop of the
+/// process, as on Windows, can then no longer leave the database behind.
+async fn shutdown(State(shared): State<Arc<Shared>>) -> (StatusCode, String) {
+    match shared.clean_up().await {
+        Ok(()) => {
+            shared.stop.request();
+            (StatusCode::OK, String::new())
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
 }
 
 /// Resolves on SIGINT, on SIGTERM (Unix), or on Ctrl-C (Windows).
@@ -298,10 +356,4 @@ async fn stop_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
-}
-
-/// Stops the server the way a signal does, so it drops its database and exits.
-async fn shutdown(State(stop): State<Stop>) -> StatusCode {
-    stop.request();
-    StatusCode::ACCEPTED
 }
