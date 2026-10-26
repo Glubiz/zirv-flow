@@ -17,8 +17,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use tracing::{error, warn};
 use zirv_flow_templates::{
-    FieldCatalog, Hooks, Issue, RenderContext, RenderRequest, RenderResponse, Rendered,
-    RenderedWebhook, TemplateDocument, apply_tracking,
+    FieldCatalog, Hooks, Issue, RenderContext, RenderExtras, RenderRequest, RenderResponse,
+    Rendered, RenderedWebhook, SnippetContent, TemplateDocument, ThemeTokens, apply_tracking,
 };
 
 use crate::failure::RenderFailure;
@@ -535,9 +535,22 @@ impl RenderPool {
         context: &RenderContext,
         hooks: &Hooks<'_>,
     ) -> Result<Rendered, RenderFailure> {
+        self.render_email_with(doc, context, hooks, &RenderExtras::default())
+            .await
+    }
+
+    /// [`render_email`](Self::render_email) with the resolved inputs of a block email.
+    pub async fn render_email_with(
+        &self,
+        doc: &TemplateDocument,
+        context: &RenderContext,
+        hooks: &Hooks<'_>,
+        extras: &RenderExtras,
+    ) -> Result<Rendered, RenderFailure> {
         let request = RenderRequest::Email {
             doc: Cow::Borrowed(doc),
             context: Cow::Borrowed(context),
+            extras: Cow::Borrowed(extras),
         };
         let result = async {
             let response = self.run("email", &request).await?;
@@ -586,12 +599,63 @@ impl RenderPool {
         doc: &TemplateDocument,
         catalog: &FieldCatalog,
     ) -> Result<Vec<Issue>, RenderFailure> {
+        self.validate_with(doc, catalog, &RenderExtras::default())
+            .await
+    }
+
+    /// [`validate`](Self::validate) with the resolved inputs of a block email.
+    pub async fn validate_with(
+        &self,
+        doc: &TemplateDocument,
+        catalog: &FieldCatalog,
+        extras: &RenderExtras,
+    ) -> Result<Vec<Issue>, RenderFailure> {
         let request = RenderRequest::Validate {
             doc: Cow::Borrowed(doc),
             catalog: Cow::Borrowed(catalog),
+            extras: Cow::Borrowed(extras),
         };
         let result = async {
             let response = self.run("validate", &request).await?;
+            response
+                .into_issues()
+                .ok_or(RenderFailure::Protocol)?
+                .map_err(|_| RenderFailure::UnsupportedDocument)
+        }
+        .await;
+        record_failure(&result);
+        result
+    }
+
+    /// Run [`zirv_flow_templates::validate_theme`] in a child.
+    pub async fn validate_theme(&self, theme: &ThemeTokens) -> Result<Vec<Issue>, RenderFailure> {
+        let request = RenderRequest::ValidateTheme {
+            theme: Cow::Borrowed(theme),
+        };
+        let result = async {
+            let response = self.run("validate_theme", &request).await?;
+            response
+                .into_issues()
+                .ok_or(RenderFailure::Protocol)?
+                .map_err(|_| RenderFailure::UnsupportedDocument)
+        }
+        .await;
+        record_failure(&result);
+        result
+    }
+
+    /// Run [`zirv_flow_templates::validate_snippet`] in a child.
+    pub async fn validate_snippet(
+        &self,
+        snippet: &SnippetContent,
+        catalog: &FieldCatalog,
+    ) -> Result<Vec<Issue>, RenderFailure> {
+        let request = RenderRequest::ValidateSnippet {
+            snippet: Cow::Borrowed(snippet),
+            catalog: Cow::Borrowed(catalog),
+        };
+        let result = async {
+            let response = self.run("validate_snippet", &request).await?;
             response
                 .into_issues()
                 .ok_or(RenderFailure::Protocol)?
@@ -726,7 +790,10 @@ mod tests {
             let read = |suffix: &str| {
                 fs::read_to_string(fixtures().join(format!("{name}.{suffix}"))).unwrap()
             };
-            let doc: TemplateDocument = serde_json::from_str(&read("doc.json")).unwrap();
+            let doc = zirv_flow_templates::parse_template_document(
+                &serde_json::from_str(&read("doc.json")).unwrap(),
+            )
+            .unwrap();
             let context: RenderContext = serde_json::from_str(&read("context.json")).unwrap();
             let direct = render_email(&doc, &context, &hooks).unwrap();
             let pooled = pool.render_email(&doc, &context, &hooks).await.unwrap();
@@ -746,7 +813,10 @@ mod tests {
         let read = |suffix: &str| {
             fs::read_to_string(fixtures().join(format!("webhook_order.{suffix}"))).unwrap()
         };
-        let doc: TemplateDocument = serde_json::from_str(&read("doc.json")).unwrap();
+        let doc = zirv_flow_templates::parse_template_document(
+            &serde_json::from_str(&read("doc.json")).unwrap(),
+        )
+        .unwrap();
         let context: RenderContext = serde_json::from_str(&read("context.json")).unwrap();
         assert_eq!(
             pool.render_webhook(&doc, &context).await.unwrap(),
@@ -832,8 +902,11 @@ mod tests {
             "sections",
             "newsletter",
         ] {
-            let doc: TemplateDocument = serde_json::from_str(
-                &fs::read_to_string(dir.join(format!("{name}.doc.json"))).unwrap(),
+            let doc = zirv_flow_templates::parse_template_document(
+                &serde_json::from_str(
+                    &fs::read_to_string(dir.join(format!("{name}.doc.json"))).unwrap(),
+                )
+                .unwrap(),
             )
             .unwrap();
             let direct = render_email(&doc, &context, &hooks).unwrap();
@@ -870,6 +943,31 @@ mod tests {
             Err(RenderFailure::Render(_))
         ));
         assert_eq!(pool.idle_ids(), before, "the same child served all three");
+    }
+
+    #[tokio::test]
+    async fn theme_and_snippet_checks_run_in_the_child_like_in_process() {
+        let pool = RenderPool::start(child("serve"), config(1, 20_000))
+            .await
+            .unwrap();
+        let theme = zirv_flow_templates::ThemeTokens {
+            text: "#777777".into(),
+            ..Default::default()
+        };
+        let issues = pool.validate_theme(&theme).await.unwrap();
+        assert_eq!(issues, zirv_flow_templates::validate_theme(&theme));
+        assert_eq!(issues[0].code, "low_contrast");
+
+        let snippet: SnippetContent = serde_json::from_value(json!({"blocks": [
+            {"type": "snippet", "id": "n", "snippet_id": "x"}]}))
+        .unwrap();
+        let catalog = FieldCatalog::default();
+        let issues = pool.validate_snippet(&snippet, &catalog).await.unwrap();
+        assert_eq!(
+            issues,
+            zirv_flow_templates::validate_snippet(&snippet, &catalog)
+        );
+        assert_eq!(issues[0].code, "snippet_nested");
     }
 
     #[tokio::test]

@@ -42,6 +42,14 @@ pub mod code {
     pub const INVALID_SETTING: &str = "invalid_setting";
     pub const INVALID_URL: &str = "invalid_url";
     pub const SANITIZER_REJECTED: &str = "sanitizer_rejected";
+    pub const CONDITION_TOO_LARGE: &str = "condition_too_large";
+    pub const BROKEN_ASSET_REFERENCE: &str = "broken_asset_reference";
+    pub const BROKEN_THEME_REFERENCE: &str = "broken_theme_reference";
+    pub const BROKEN_SNIPPET_REFERENCE: &str = "broken_snippet_reference";
+    pub const SNIPPET_SECTION: &str = "snippet_section";
+    pub const SNIPPET_NESTED: &str = "snippet_nested";
+    pub const SNIPPET_CONDITION: &str = "snippet_condition";
+    pub const NOT_CONVERTIBLE: &str = "not_convertible";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
@@ -51,9 +59,11 @@ pub mod code {
     pub const IMAGE_WITHOUT_ALT: &str = "image_without_alt";
     pub const SUBJECT_TOO_LONG: &str = "subject_too_long";
     pub const PREHEADER_TOO_LONG: &str = "preheader_too_long";
+    pub const LOW_CONTRAST: &str = "low_contrast";
+    pub const SMS_MANY_SEGMENTS: &str = "sms_many_segments";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 29] = [
+    pub const BLOCKING: [&str; 37] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -83,10 +93,18 @@ pub mod code {
         INVALID_SETTING,
         INVALID_URL,
         SANITIZER_REJECTED,
+        CONDITION_TOO_LARGE,
+        BROKEN_ASSET_REFERENCE,
+        BROKEN_THEME_REFERENCE,
+        BROKEN_SNIPPET_REFERENCE,
+        SNIPPET_SECTION,
+        SNIPPET_NESTED,
+        SNIPPET_CONDITION,
+        NOT_CONVERTIBLE,
     ];
 
     /// Every code that only warns.
-    pub const WARNING: [&str; 8] = [
+    pub const WARNING: [&str; 10] = [
         MISSING_LANG,
         INSECURE_LINK,
         HTML_NEAR_CLIP,
@@ -95,6 +113,8 @@ pub mod code {
         SUBJECT_TOO_LONG,
         PREHEADER_TOO_LONG,
         URL_FROM_MERGE_FIELD,
+        LOW_CONTRAST,
+        SMS_MANY_SEGMENTS,
     ];
 }
 

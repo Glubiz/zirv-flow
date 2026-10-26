@@ -11,7 +11,7 @@ use super::sanitize::{
 };
 use super::tags::escape_literals;
 use crate::content::mjml::{MjmlError, compile};
-use crate::context::RenderContext;
+use crate::context::{RenderContext, RenderExtras};
 use crate::document::{Category, Channel, Mode, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
 use crate::links::{starts_with_ignore_case, unescape};
@@ -20,7 +20,7 @@ use crate::sandbox::{
     FUEL, MAX_HTML_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, environment, render_string,
 };
 
-use super::model::BlocksContent;
+use super::model::{BlocksContent, ImageSrc, ThemeSlot};
 
 /// Why the pipeline stopped: MiniJinja or the checks (a [`RenderError`]), or `mrml`.
 #[derive(Debug, Eq, PartialEq)]
@@ -45,6 +45,8 @@ impl From<MjmlError> for BuildError {
 pub(crate) struct Built {
     pub(crate) html: String,
     pub(crate) text: String,
+    /// The ids of the sections and blocks a false `visible_if` dropped.
+    pub(crate) hidden: Vec<String>,
 }
 
 /// The MiniJinja fuel of a whole block document: five times the fuel of one code template,
@@ -85,8 +87,10 @@ pub(crate) fn strip_invalid(text: String) -> String {
 struct Rendered<'a> {
     env: &'a Environment<'static>,
     values: &'a Value,
+    extras: &'a RenderExtras,
     /// Whether a rendered URL must be one a link may use. Validation renders a sample whose
-    /// values are not URLs, so it does not check them.
+    /// values are not URLs, so it does not check them. A validation render also shows a block
+    /// whose condition has no result, because it has no person to ask about.
     check_urls: bool,
     /// Bytes the rendered fields have used of the `MAX_HTML_BYTES` they share.
     spent: usize,
@@ -147,6 +151,34 @@ impl Fields for Rendered<'_> {
         }
         Ok(html)
     }
+
+    fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, RenderError> {
+        match src {
+            ImageSrc::Url(url) => self.url(url, UrlKind::ImageSource),
+            ImageSrc::Asset(id) => {
+                let url = self
+                    .extras
+                    .asset_url(id)
+                    .ok_or(RenderError::BrokenAssetReference)?;
+                self.url(url, UrlKind::ImageSource)
+            }
+            ImageSrc::Theme(ThemeSlot::Logo) => {
+                let url = self
+                    .extras
+                    .theme_logo_url()
+                    .ok_or(RenderError::BrokenThemeReference)?;
+                self.url(url, UrlKind::ImageSource)
+            }
+        }
+    }
+
+    fn visible(&mut self, id: &str) -> Result<bool, RenderError> {
+        match self.extras.conditions.get(id) {
+            Some(shown) => Ok(*shown),
+            None if self.check_urls => Err(RenderError::ConditionUnresolved),
+            None => Ok(true),
+        }
+    }
 }
 
 /// Render the tree and turn it into HTML: fields, MJML, `mrml`, then the caps on the result.
@@ -154,11 +186,13 @@ pub(crate) fn build(
     content: &BlocksContent,
     env: &Environment<'static>,
     values: &Value,
+    extras: &RenderExtras,
     check_urls: bool,
 ) -> Result<Built, BuildError> {
     let mut fields = Rendered {
         env,
         values,
+        extras,
         check_urls,
         spent: 0,
     };
@@ -178,6 +212,7 @@ pub(crate) fn build(
     Ok(Built {
         html: compiled.html,
         text: emitted.text,
+        hidden: emitted.hidden,
     })
 }
 
@@ -187,12 +222,14 @@ pub(crate) struct Parts {
     pub(crate) html: String,
     pub(crate) text: String,
     pub(crate) category: Category,
+    pub(crate) hidden: Vec<String>,
 }
 
-/// Render a block document against `context`.
+/// Render a block document against `context`, with the caller's resolved `extras`.
 pub(crate) fn render(
     doc: &TemplateDocument,
     context: &RenderContext,
+    extras: &RenderExtras,
 ) -> Result<Parts, RenderError> {
     if doc.schema != SCHEMA_VERSION {
         return Err(RenderError::UnsupportedSchema);
@@ -217,7 +254,7 @@ pub(crate) fn render(
         &values,
         MAX_SUBJECT_BYTES,
     )?);
-    let built = build(content, &env, &values, true).map_err(|error| match error {
+    let built = build(content, &env, &values, extras, true).map_err(|error| match error {
         BuildError::Render(error) => error,
         BuildError::Mjml(error) => map_mjml_error(error),
     })?;
@@ -226,6 +263,7 @@ pub(crate) fn render(
         html: built.html,
         text: built.text,
         category: content.category,
+        hidden: built.hidden,
     })
 }
 
@@ -240,6 +278,7 @@ mod tests {
     use super::*;
     use crate::document::{EmailContent, Syntax};
     use crate::links::{Hooks, links_to};
+    use crate::migrate::read_doc;
     use crate::render::{Rendered as Email, render_email};
 
     const CORPUS: [&str; 9] = [
@@ -265,7 +304,7 @@ mod tests {
     }
 
     fn doc(name: &str) -> TemplateDocument {
-        serde_json::from_str(&read(&format!("{name}.doc.json"))).unwrap()
+        read_doc(&read(&format!("{name}.doc.json")))
     }
 
     fn context() -> RenderContext {
@@ -394,6 +433,7 @@ mod tests {
             Block::Divider(b) => &mut b.id,
             Block::Spacer(b) => &mut b.id,
             Block::RawHtml(b) => &mut b.id,
+            Block::Snippet(b) => &mut b.id,
         };
         *slot = id.to_owned();
     }
@@ -506,7 +546,7 @@ mod tests {
         }
         assert_eq!(render_doc(&block_doc), Err(RenderError::InvalidBlocks));
         let mut other = doc("heading");
-        other.schema = 2;
+        other.schema = 3;
         assert_eq!(render_doc(&other), Err(RenderError::UnsupportedSchema));
         let mut wrong = doc("heading");
         wrong.channel = Channel::Webhook;
@@ -572,6 +612,7 @@ mod tests {
             background_color: None,
             padding: None,
             columns: vec![blocks],
+            visible_if: None,
         });
         TemplateDocument::email_blocks(content)
     }
@@ -582,6 +623,7 @@ mod tests {
             level: 2,
             text: text.into(),
             align: None,
+            visible_if: None,
         })
     }
 
@@ -589,6 +631,7 @@ mod tests {
         Block::RawHtml(super::super::RawHtml {
             id: id.into(),
             html: html.into(),
+            visible_if: None,
         })
     }
 
@@ -597,6 +640,7 @@ mod tests {
             id: id.into(),
             content: content.into(),
             align: None,
+            visible_if: None,
         })
     }
 
@@ -700,6 +744,7 @@ mod tests {
             label: "Go".into(),
             url: "https://a.example/{{ person.quote | safe }}".into(),
             align: Default::default(),
+            visible_if: None,
         });
         assert_eq!(
             render_email(&doc_of(vec![button]), &context, &Hooks::untracked()),
@@ -718,6 +763,7 @@ mod tests {
             label: label.into(),
             url: "https://a.example".into(),
             align: Default::default(),
+            visible_if: None,
         })]);
         let rendered = render_doc(&block_doc).unwrap();
         assert_eq!(rendered.text, "a pro b }}: https://a.example\n");
@@ -730,5 +776,171 @@ mod tests {
         assert_eq!(render_doc(&block_doc).unwrap().text, "Hello world\n");
         let converted = blocks_to_mjml(block_doc.blocks.as_ref().unwrap()).unwrap();
         assert_eq!(converted.text, "Hello world\n");
+    }
+
+    fn doc_value(name: &str) -> serde_json::Value {
+        serde_json::from_str(&read(&format!("{name}.doc.json"))).unwrap()
+    }
+
+    fn render_with(
+        doc: &TemplateDocument,
+        extras: &crate::context::RenderExtras,
+    ) -> Result<Email, RenderError> {
+        crate::render::render_email_with(doc, &context(), &Hooks::untracked(), extras)
+    }
+
+    fn extras_of(conditions: &[(&str, bool)]) -> crate::context::RenderExtras {
+        crate::context::RenderExtras {
+            conditions: conditions
+                .iter()
+                .map(|(id, shown)| ((*id).to_owned(), *shown))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    const ASSET: &str = "0192b1a4-7c3e-7000-8000-00000000b001";
+
+    #[test]
+    fn every_schema_one_fixture_migrates_to_its_golden_document_and_renders_the_same_bytes() {
+        for name in CORPUS {
+            let migrated = crate::migrate_to_current(doc_value(name)).unwrap();
+            let mut text = serde_json::to_string_pretty(&migrated).unwrap();
+            text.push('\n');
+            check(&format!("migrations/{name}.v2.json"), &text);
+
+            let golden = read_doc(&read(&format!("migrations/{name}.v2.json")));
+            assert_eq!(golden.schema, 2, "{name}");
+            let rendered = render_doc(&golden).unwrap();
+            assert_eq!(rendered.html, read(&format!("{name}.html")), "{name}");
+            assert_eq!(rendered.text, read(&format!("{name}.txt")), "{name}");
+            assert!(rendered.hidden.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_false_condition_drops_the_block_and_lists_it() {
+        let mut value = doc_value("newsletter");
+        value["blocks"]["sections"][1]["columns"][0][1]["visible_if"] = json!({"all": []});
+        let conditioned = read_doc(&value.to_string());
+        let baseline = render_doc(&read_doc(&read("newsletter.doc.json"))).unwrap();
+
+        let shown = render_with(&conditioned, &extras_of(&[("intro_text", true)])).unwrap();
+        assert_eq!(shown, baseline);
+
+        let hidden = render_with(&conditioned, &extras_of(&[("intro_text", false)])).unwrap();
+        assert_eq!(
+            hidden.hidden,
+            [crate::render::HiddenBlock {
+                id: "intro_text".into()
+            }]
+        );
+        assert!(baseline.html.contains("collection is here"));
+        assert!(!hidden.html.contains("collection is here"));
+        assert!(!hidden.text.contains("collection is here"));
+        assert!(hidden.html.contains("Hello"), "the sibling stays");
+    }
+
+    #[test]
+    fn a_false_section_condition_drops_the_section_and_lists_only_the_section() {
+        let mut value = doc_value("newsletter");
+        value["blocks"]["sections"][2]["visible_if"] = json!({"x": 1});
+        let conditioned = read_doc(&value.to_string());
+        let rendered = render_with(&conditioned, &extras_of(&[("features", false)])).unwrap();
+        assert_eq!(
+            rendered.hidden,
+            [crate::render::HiddenBlock {
+                id: "features".into()
+            }]
+        );
+        assert!(!rendered.html.contains("Prices that stay put"));
+    }
+
+    #[test]
+    fn a_condition_without_a_result_is_a_typed_render_error() {
+        let mut value = doc_value("newsletter");
+        value["blocks"]["sections"][1]["columns"][0][1]["visible_if"] = json!({"all": []});
+        let conditioned = read_doc(&value.to_string());
+        assert_eq!(
+            render_with(&conditioned, &Default::default()),
+            Err(RenderError::ConditionUnresolved)
+        );
+        assert_eq!(
+            RenderError::ConditionUnresolved.code(),
+            "condition_unresolved"
+        );
+    }
+
+    #[test]
+    fn an_unknown_field_on_a_conditioned_block_still_fails() {
+        let mut value = doc_value("newsletter");
+        value["blocks"]["sections"][1]["columns"][0][1]["hidden_if"] = json!(true);
+        assert_eq!(
+            super::super::parse_template_document(&value).unwrap_err(),
+            super::super::BlocksError::UnknownField
+        );
+    }
+
+    fn image_doc(src: serde_json::Value) -> TemplateDocument {
+        let mut value = doc_value("image");
+        value["blocks"]["sections"][0]["columns"][0][0]["src"] = src;
+        read_doc(&value.to_string())
+    }
+
+    #[test]
+    fn image_sources_resolve_from_the_asset_the_url_and_the_theme_logo() {
+        let url = image_doc(json!({"url": "https://img.example/hero.png"}));
+        assert_eq!(
+            render_doc(&url).unwrap(),
+            render_doc(&doc("image")).unwrap()
+        );
+
+        let asset = image_doc(json!({"asset": ASSET}));
+        let mut extras = crate::context::RenderExtras::default();
+        extras
+            .assets
+            .insert(ASSET.into(), "https://cdn.example/a.png".into());
+        let rendered = render_with(&asset, &extras).unwrap();
+        assert!(rendered.html.contains("https://cdn.example/a.png"));
+        assert_eq!(
+            render_with(&asset, &Default::default()),
+            Err(RenderError::BrokenAssetReference)
+        );
+
+        let logo = image_doc(json!({"theme": "logo"}));
+        assert_eq!(
+            render_with(&logo, &extras),
+            Err(RenderError::BrokenThemeReference)
+        );
+        extras.theme = Some(crate::theme::ThemeTokens {
+            logo: Some(ASSET.into()),
+            ..Default::default()
+        });
+        let rendered = render_with(&logo, &extras).unwrap();
+        assert!(rendered.html.contains("https://cdn.example/a.png"));
+    }
+
+    #[test]
+    fn rendering_twice_gives_equal_bytes() {
+        use proptest::prelude::*;
+        let mut runner = proptest::test_runner::TestRunner::default();
+        runner
+            .run(
+                &("[a-zA-Z0-9 ,.!]{0,40}", any::<bool>()),
+                |(text, shown)| {
+                    let mut value = doc_value("heading");
+                    value["blocks"]["sections"][0]["columns"][0][0]["text"] = json!(text);
+                    value["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = json!({});
+                    let doc = read_doc(&value.to_string());
+                    let id = value["blocks"]["sections"][0]["columns"][0][0]["id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let extras = extras_of(&[(id.as_str(), shown)]);
+                    prop_assert_eq!(render_with(&doc, &extras), render_with(&doc, &extras));
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 }

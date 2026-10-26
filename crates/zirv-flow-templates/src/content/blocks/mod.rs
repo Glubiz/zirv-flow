@@ -11,23 +11,29 @@ mod emit;
 mod model;
 mod render;
 mod sanitize;
+mod snippet;
 mod tags;
 
 use std::fmt;
 
 use super::{RenderKind, TemplateContent};
+use crate::context::RenderExtras;
 use crate::document::{Channel, Mode, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
 pub(crate) use check::validate;
 pub use model::{
-    Align, Block, BlocksContent, BlocksError, Button, Divider, FONT_STACKS, Heading, Image,
-    MAX_BLOCKS, MAX_COLUMNS, MAX_CONTENT_WIDTH, MAX_DOCUMENT_BYTES, MAX_ID_BYTES, MAX_IMAGE_WIDTH,
-    MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES, MAX_SECTIONS, MAX_SPACER_HEIGHT,
+    Align, Block, BlocksContent, BlocksError, Button, Divider, FONT_STACKS, FooterRef, Heading,
+    Image, ImageSrc, MAX_BLOCKS, MAX_COLUMNS, MAX_CONDITION_BYTES, MAX_CONDITION_DEPTH,
+    MAX_CONTENT_WIDTH, MAX_DOCUMENT_BYTES, MAX_ID_BYTES, MAX_IMAGE_WIDTH, MAX_LABEL_BYTES,
+    MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES, MAX_SECTIONS, MAX_SPACER_HEIGHT,
     MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, MIN_CONTENT_WIDTH, PREHEADER_DISPLAY_CHARS, RawHtml,
-    RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Spacer, parse_template_document,
+    RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Snippet, Spacer, ThemeRef, ThemeSlot,
+    conditions, parse_template_document,
 };
+pub(crate) use model::{font_css, is_color};
 pub(crate) use render::render;
+pub use snippet::{MAX_SNIPPET_BLOCKS, SnippetContent, validate_snippet};
 
 pub(super) struct Blocks;
 
@@ -48,7 +54,16 @@ impl TemplateContent for Blocks {
     }
 
     fn validate(&self, doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
-        validate(doc, catalog)
+        validate(doc, catalog, &RenderExtras::default())
+    }
+
+    fn validate_with(
+        &self,
+        doc: &TemplateDocument,
+        catalog: &FieldCatalog,
+        extras: &RenderExtras,
+    ) -> Vec<Issue> {
+        validate(doc, catalog, extras)
     }
 
     fn render_kind(&self) -> RenderKind {
@@ -88,11 +103,15 @@ impl std::error::Error for ConvertError {}
 /// Convert a block document to MJML source and a text part. One way: nothing turns MJML back
 /// into blocks. The checks that need no render (shape, limits, URLs, the sanitizer) must pass;
 /// merge fields and syntax are the converted code's business afterwards.
+///
+/// MJML code has no place for a condition, an asset, a theme image or a snippet, so a document
+/// that uses one is refused with `not_convertible`.
 pub fn blocks_to_mjml(content: &BlocksContent) -> Result<Converted, ConvertError> {
-    let issues: Vec<Issue> = check::check_sources(content)
+    let mut issues: Vec<Issue> = check::check_sources(content)
         .into_iter()
         .filter(Issue::is_blocking)
         .collect();
+    issues.extend(check::not_convertible(content));
     if !issues.is_empty() {
         return Err(ConvertError { issues });
     }
@@ -132,7 +151,7 @@ mod tests {
     /// of a caller that reads `email` first must not decide for a renderer that reads `blocks`.
     fn two_contents() -> serde_json::Value {
         serde_json::json!({
-            "schema": 1, "channel": "email", "mode": "blocks",
+            "schema": 2, "channel": "email", "mode": "blocks",
             "email": {"subject": "x", "html": "", "category": "marketing"},
             "blocks": {"subject": "Hi", "category": "transactional", "sender": "0192b1a4-7c3e-7000-8000-00000000a001", "lang": "en"}
         })
@@ -179,10 +198,10 @@ mod tests {
 
     #[test]
     fn an_unknown_root_field_is_a_typed_error() {
-        let mut value = serde_json::json!({"schema": 1, "channel": "email", "mode": "blocks",
+        let mut value = serde_json::json!({"schema": 2, "channel": "email", "mode": "blocks",
                                            "blocks": {"subject": "Hi"}});
         assert!(parse_template_document(&value).is_ok());
-        value["theme"] = serde_json::json!("dark");
+        value["palette"] = serde_json::json!("dark");
         assert_eq!(
             parse_template_document(&value).unwrap_err(),
             BlocksError::UnknownField

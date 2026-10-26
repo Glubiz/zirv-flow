@@ -1,0 +1,35 @@
+{
+  "blocks": {
+    "category": "transactional",
+    "footer": "none",
+    "lang": "en",
+    "preheader": "A preview for {{ person.name }}",
+    "sections": [
+      {
+        "columns": [
+          [
+            {
+              "align": "left",
+              "content": "<p>Hello <b>{{ person.name }}</b>, <i>welcome</i> and <u>enjoy</u>.<br>Second line with a <a href=\"https://shop.example/a?x=1&amp;y=2\">link</a>.</p><ul><li>One</li><li>Two {{ person.plan }}</li></ul><ol><li>First</li><li>Second</li></ol>",
+              "id": "t1",
+              "type": "text"
+            },
+            {
+              "align": "center",
+              "content": "<p>Centered and <a href=\"mailto:help@example.com\">mail us</a></p>",
+              "id": "t2",
+              "type": "text"
+            }
+          ]
+        ],
+        "id": "s1"
+      }
+    ],
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "subject": "Hi {{ person.name }}",
+    "theme": "none"
+  },
+  "channel": "email",
+  "mode": "blocks",
+  "schema": 2
+}

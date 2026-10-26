@@ -1733,6 +1733,26 @@ when saved. Each migration ships with golden tests: a schema-`N` fixture
 migrates to the expected document and renders byte-identically. The builder
 refuses a document whose schema is newer than the server's.
 
+**As built (schema 2, #302).** `zirv-flow-templates::migrate` holds `v1_to_v2` and
+`migrate_to_current`, pure functions over the JSON value. Schema 2 adds `theme`
+(`"default"`, `{"id"}`, `"none"`), `footer` (`"theme"`, `"none"`), `visible_if` on sections
+and blocks, the `snippet` block, the image `src` (`{"asset"}`, `{"url"}`, `{"theme": "logo"}`)
+and typed reserved `sms`, `push` and `in_app` contents. The v1 to v2 migration writes
+`theme: "none"` and `footer: "none"`, keeps `settings`, and turns each image `src` string into
+`{"url"}`, so a migrated document renders byte-identically (golden files in
+`tests/fixtures/blocks/migrations/`). Stored-read rule: every place that turns a stored document
+into a `TemplateDocument` goes through `parse_template_document`, which migrates in memory and
+refuses a newer schema with `unsupported_schema`; the API draft routes, preview, publish,
+convert, the send job and the webhook call all use it. A draft is saved at schema 2 and served at
+schema 2; a published version stays as saved. New blocking codes: `condition_too_large`,
+`broken_asset_reference`, `broken_theme_reference`, `broken_snippet_reference` (every snippet
+block until #303 renders it), `snippet_section`, `snippet_nested`, `snippet_condition` and
+`not_convertible`; new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
+`condition_unresolved`, `broken_asset_reference`, `broken_theme_reference`. `RenderExtras`
+(theme, snippets, condition results, asset URLs) rides on the `email` and `validate` render
+requests; `validate_theme` and `validate_snippet` run in the pool as `validate_theme` and
+`validate_snippet` requests.
+
 ### 11.9 Render isolation
 
 Fuel, the recursion limit and the output caps (11.5) bound a render's work and its
