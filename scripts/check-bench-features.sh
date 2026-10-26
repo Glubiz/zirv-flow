@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Benchmark-feature gate. The `bench-no-decisions` feature of zirv-flow-store turns decision
-# appends into no-ops, for the decision-overhead benchmark only. The store refuses to compile it
-# unless ZIRV_FLOW_BENCH_BUILD is set, so `--all-features`, aliases and default lists cannot enable
-# it by accident; this gate checks the two things left:
+# Test-only feature gate. Two features exist for benchmarks and tests only: `bench-no-decisions` of
+# zirv-flow-store (decision appends become no-ops, for the decision-overhead benchmark) and
+# `browser-test` of zirv-flow (the test server of the Playwright tests, #315). Each refuses to
+# compile unless its build variable is set (ZIRV_FLOW_BENCH_BUILD, ZIRV_FLOW_BROWSER_TEST_BUILD),
+# so `--all-features`, aliases and default lists cannot enable one by accident; this gate checks
+# what is left:
 #
-#   1. the guard works: `cargo check --features bench-no-decisions` without the variable must FAIL
-#      with the guard's message;
-#   2. neither the variable nor the feature name appears on a non-comment line of a shipped-build
-#      input: any workflow but ci.yaml, a Dockerfile, a compose file, cargo config (.cargo/config.toml,
-#      .cargo/config), or a script those invoke (any scripts/... path, whatever its suffix).
+#   1. the guards work: `cargo check --features bench-no-decisions` without its variable must FAIL
+#      with the guard's message, and so must the browser-test build without its variable;
+#   2. neither variable nor feature name appears on a non-comment line of a shipped-build input:
+#      any workflow but ci.yaml, a Dockerfile, a compose file, cargo config (.cargo/config.toml,
+#      .cargo/config), or a script those invoke (any scripts/... path, whatever its suffix);
+#   3. no Cargo.toml lists `browser-test` among its default features;
+#   4. the server binary of a default build has no `/__test/sink` route in it.
 #
 # Usage: check-bench-features.sh [ROOT]   |   check-bench-features.sh --self-test
-# Exits 1 listing the offences, 2 on a setup error. Requires bash, grep and (for 1) cargo.
+# Exits 1 listing the offences, 2 on a setup error. Requires bash, grep, awk and (for 1 and 4) cargo.
 
 set -euo pipefail
 
@@ -37,28 +41,79 @@ scan() {
     done < <(grep -v '^[[:space:]]*#' "${queue[$i]}" | grep -oE '[A-Za-z0-9_./-]+\.sh|scripts/[A-Za-z0-9_./-]+' || true)
   done
   [ "${#queue[@]}" -eq 0 ] && return 0
-  grep -nHE 'ZIRV_FLOW_BENCH_BUILD|bench-no-decisions' -- "${queue[@]}" \
+  grep -nHE 'ZIRV_FLOW_BENCH_BUILD|bench-no-decisions|ZIRV_FLOW_BROWSER_TEST_BUILD|browser-test' -- "${queue[@]}" \
     | grep -Ev '^[^:]+:[0-9]+:[[:space:]]*#' || true
+}
+
+# Cargo.toml lines that put the browser-test feature in a default feature list, however the list
+# is wrapped.
+default_hits() {
+  (
+    cd "$1"
+    files="$(find . -maxdepth 4 -name Cargo.toml -not -path './target/*' -not -path './node_modules/*' \
+      -not -path './.git/*' -not -path './.zirv/*' -not -path './.claude/*' | sed 's|^\./||' | sort)"
+    [ -n "$files" ] || exit 0
+    # shellcheck disable=SC2086
+    awk '
+      FNR == 1 { listing = 0 }
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*default[[:space:]]*=/ { listing = 1 }
+      listing && /browser-test/ { print FILENAME ":" FNR ":" $0 }
+      listing && /\]/ { listing = 0 }
+    ' $files
+  )
 }
 
 run_gate() {
   hits="$(scan "$1")"
   if [ -n "$hits" ]; then
-    echo "benchmark-feature gate: ZIRV_FLOW_BENCH_BUILD and bench-no-decisions must not appear in a shipped build input:" >&2
+    echo "test-feature gate: the build variables and feature names of bench-no-decisions and browser-test must not appear in a shipped build input:" >&2
+    printf '%s\n' "$hits" | sed 's/^/  - /' >&2
+    return 1
+  fi
+  hits="$(default_hits "$1")"
+  if [ -n "$hits" ]; then
+    echo "test-feature gate: browser-test must not be a default feature:" >&2
     printf '%s\n' "$hits" | sed 's/^/  - /' >&2
     return 1
   fi
 }
 
-run_guard_check() {
-  if output="$(cd "$1" && env -u ZIRV_FLOW_BENCH_BUILD cargo check --quiet -p zirv-flow-store \
-      --features bench-no-decisions 2>&1)"; then
-    echo "benchmark-feature gate: bench-no-decisions compiled without ZIRV_FLOW_BENCH_BUILD" >&2
+# Checks that building `args` without the variable `var` fails with the guard's message `message`.
+guard_fails() {
+  var="$1"; message="$2"; shift 2
+  if output="$(cd "$ROOT_FOR_CARGO" && env -u "$var" cargo check --quiet "$@" 2>&1)"; then
+    echo "test-feature gate: $* compiled without $var" >&2
     return 1
   fi
-  if [[ "$output" != *"is for benchmark builds only"* ]]; then
-    echo "benchmark-feature gate: the check failed, but not with the guard's message:" >&2
+  if [[ "$output" != *"$message"* ]]; then
+    echo "test-feature gate: the check failed, but not with the guard's message:" >&2
     printf '%s\n' "$output" | tail -n 15 >&2
+    return 1
+  fi
+}
+
+run_guard_check() {
+  ROOT_FOR_CARGO="$1"
+  guard_fails ZIRV_FLOW_BENCH_BUILD "is for benchmark builds only" -p zirv-flow-store --features bench-no-decisions
+  guard_fails ZIRV_FLOW_BROWSER_TEST_BUILD "is for the browser test server only" -p zirv-flow --features browser-test
+}
+
+# The server binary of a default build must not carry the test sink route. Cargo's default target
+# directory is `target`; CARGO_TARGET_DIR overrides it.
+run_route_check() {
+  (cd "$1" && cargo build --quiet -p zirv-flow --bin zirv-flow)
+  target="${CARGO_TARGET_DIR:-$1/target}"
+  binary=""
+  for candidate in "$target/debug/zirv-flow" "$target/debug/zirv-flow.exe"; do
+    [ ! -f "$candidate" ] || binary="$candidate"
+  done
+  if [ -z "$binary" ]; then
+    echo "test-feature gate: the default build left no zirv-flow binary under $target/debug" >&2
+    return 2
+  fi
+  if grep -aqF '/__test/sink' "$binary"; then
+    echo "test-feature gate: the default zirv-flow binary contains the /__test/sink route" >&2
     return 1
   fi
 }
@@ -69,12 +124,13 @@ run_self_test() {
   failures=0
   expect() {   # name, wanted exit, mutation applied to a fresh clean tree
     dir="$work/.claude/worktrees/$1"
-    mkdir -p "$dir/.github/workflows" "$dir/scripts"
+    mkdir -p "$dir/.github/workflows" "$dir/scripts" "$dir/crates/zirv-flow"
     printf 'FROM rust\nRUN cargo build --release -p zirv-flow\n' >"$dir/Dockerfile"
     printf 'steps:\n  - run: bash scripts/build.sh\n' >"$dir/.github/workflows/cd.yaml"
     printf '#!/usr/bin/env bash\ncargo build --release\n' >"$dir/scripts/build.sh"
     printf 'services: {}\n' >"$dir/docker-compose.yml"
-    printf 'steps:\n  - run: ZIRV_FLOW_BENCH_BUILD=1 cargo clippy --features bench-no-decisions\n' \
+    printf '[features]\nbrowser-test = []\n' >"$dir/crates/zirv-flow/Cargo.toml"
+    printf 'steps:\n  - run: ZIRV_FLOW_BENCH_BUILD=1 cargo clippy --features bench-no-decisions\n  - run: ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo build --features browser-test\n' \
       >"$dir/.github/workflows/ci.yaml"
     (cd "$dir" && eval "$3")
     set +e; run_gate "$dir" >/dev/null 2>&1; got=$?; set -e
@@ -100,6 +156,21 @@ run_self_test() {
     'mkdir .cargo; printf "[alias]\nb = \"build --features bench-no-decisions\"\n" >.cargo/config'
   expect "a comment in .cargo/config.toml is not a use" 0 \
     'mkdir .cargo; printf "# not ZIRV_FLOW_BENCH_BUILD\n[build]\njobs = 4\n" >.cargo/config.toml'
+  expect "the browser-test variable in a Dockerfile fails" 1 'echo "ENV ZIRV_FLOW_BROWSER_TEST_BUILD=1" >>Dockerfile'
+  expect "the browser-test feature in the CD workflow fails" 1 \
+    'echo "  - run: cargo build --features browser-test" >>.github/workflows/cd.yaml'
+  expect "the test server binary in a compose file fails" 1 'echo "  command: zirv-flow-browser-test" >>docker-compose.yml'
+  expect "the browser-test variable in a CD-invoked script fails" 1 \
+    'echo "ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo build" >>scripts/build.sh'
+  expect "the browser-test feature in a .cargo/config alias fails" 1 \
+    'mkdir .cargo; printf "[alias]\nb = \"build --features browser-test\"\n" >.cargo/config.toml'
+  expect "a comment naming browser-test is not a use" 0 'echo "# never build browser-test here" >>Dockerfile'
+  expect "browser-test as a default feature fails" 1 \
+    'printf "[features]\ndefault = [\"browser-test\"]\nbrowser-test = []\n" >crates/zirv-flow/Cargo.toml'
+  expect "browser-test in a wrapped default list fails" 1 \
+    'printf "[features]\ndefault = [\n    \"other\",\n    \"browser-test\",\n]\nbrowser-test = []\n" >crates/zirv-flow/Cargo.toml'
+  expect "a commented default line is not a use" 0 \
+    'printf "[features]\n# default = [\"browser-test\"]\ndefault = []\nbrowser-test = []\n" >crates/zirv-flow/Cargo.toml'
   [ "$failures" -eq 0 ] || { echo "check-bench-features.sh --self-test: $failures scenario(s) failed" >&2; return 1; }
   echo "check-bench-features.sh --self-test: all scenarios passed"
 }
@@ -111,5 +182,6 @@ case "${1:-}" in
     root="${1:-$(git rev-parse --show-toplevel 2>/dev/null)}" || { echo "not inside a git repository" >&2; exit 2; }
     run_gate "$root"
     run_guard_check "$root"
+    run_route_check "$root"
     ;;
 esac

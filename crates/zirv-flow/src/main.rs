@@ -1,3 +1,5 @@
+#[cfg(feature = "browser-test")]
+mod browser_guard;
 mod cli;
 mod config;
 #[cfg(test)]
@@ -1837,6 +1839,40 @@ endpoint = \"http://collector:4318/\""
         sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_server_binary_has_no_test_sink_route() {
+        use tower::ServiceExt;
+
+        let app = zirv_flow_api::router(zirv_flow_api::AppState::new(
+            lazy_pool(),
+            Arc::new(String::new),
+        ));
+        let send = |method: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/__test/sink")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let read = send("GET").await;
+        let clear = send("DELETE").await;
+
+        // Only the web app's history fallback answers a GET, and it answers a DELETE with 405.
+        let content_type = read.headers()[axum::http::header::CONTENT_TYPE]
+            .to_str()
+            .unwrap();
+        assert!(content_type.starts_with("text/html"), "{content_type}");
+        assert_eq!(clear.status(), axum::http::StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
