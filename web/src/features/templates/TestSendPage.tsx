@@ -254,7 +254,7 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
                     </label>
                   ))}
                 <p className="faint">
-                  Only members and allowlisted inboxes can get tests. <Link to={`/w/${workspaceId}/settings/sending`}>Manage the allowlist</Link>
+                  Only members and allowlisted inboxes can get tests. <Link to={`/w/${workspaceId}/settings/sending#test-inboxes`}>Manage the allowlist</Link>
                 </p>
               </fieldset>
 

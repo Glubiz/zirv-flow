@@ -27,6 +27,8 @@ function routes(role: "admin" | "member", utm: typeof UTM_OFF, extra: Record<str
         { id: "d1", domain: "news.example.com", status: "verified", records: [], selector: "s", created_at: "2026-10-01T09:00:00Z" },
         { id: "d2", domain: "pending.example.com", status: "unverified", records: [], selector: "s", created_at: "2026-10-01T09:00:00Z" },
       ]),
+    [`GET ${WS}/test-send-allowlist`]: () => json({ entries: [] }),
+    [`GET ${WS}/test-send-allowlist/options`]: () => json([]),
     ...extra,
   };
 }
