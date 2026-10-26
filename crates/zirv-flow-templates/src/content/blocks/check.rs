@@ -465,7 +465,7 @@ pub(crate) fn check_field(
 }
 
 /// [`check_field`], where `theme` says whether a theme is in effect and its values are known.
-fn check_field_in(
+pub(crate) fn check_field_in(
     env: &minijinja::Environment<'static>,
     catalog: &FieldCatalog,
     theme: bool,

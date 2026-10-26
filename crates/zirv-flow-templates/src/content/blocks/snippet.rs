@@ -5,7 +5,7 @@
 use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 
-use super::check::{Field, block_fields, check_field, check_texts};
+use super::check::{Field, block_fields, check_field_in, check_texts};
 use super::model::{Block, Section, block_at, check_block_numbers, check_id};
 use crate::issue::{FieldCatalog, Issue, code};
 use crate::sandbox::{FUEL, environment};
@@ -26,7 +26,8 @@ pub struct SnippetContent {
     pub sections: Vec<Section>,
 }
 
-/// Check a snippet: it holds no section, no snippet block and no `visible_if`; its ids, numbers,
+/// Check a snippet (the `theme.*` names and the theme logo are accepted: whether a theme is in
+/// effect is the template's business): it holds no section, no snippet block and no `visible_if`; its ids, numbers,
 /// URLs, rich text and raw HTML pass the checks a template's blocks pass, and every merge field
 /// is one the catalog knows. A snippet need not hold an unsubscribe link, because the template
 /// that uses it is checked as a whole. The result is in document order.
@@ -80,7 +81,7 @@ pub fn validate_snippet(snippet: &SnippetContent, catalog: &FieldCatalog) -> Vec
     env.set_fuel(Some(FUEL));
     let sample = sample_context(catalog);
     for field in &fields {
-        check_field(&env, catalog, &sample, field, &mut issues);
+        check_field_in(&env, catalog, true, &sample, field, &mut issues);
     }
     issues
 }
@@ -179,5 +180,34 @@ mod tests {
             validate_snippet(&rich, &catalog())[0].code,
             "sanitizer_rejected"
         );
+    }
+
+    #[test]
+    fn the_known_theme_names_are_accepted() {
+        for name in crate::context::THEME_FIELDS {
+            let content = snippet(json!({"blocks": [
+                {"type": "heading", "id": "h", "level": 2, "text": format!("{{{{ theme.{name} | default(\"\") }}}}")}
+            ]}));
+            assert_eq!(validate_snippet(&content, &catalog()), Vec::new(), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_theme_name_is_an_unknown_merge_field() {
+        let content = snippet(json!({"blocks": [
+            {"type": "heading", "id": "h", "level": 2, "text": "{{ theme.nope }}"}]}));
+        let issues = validate_snippet(&content, &catalog());
+        assert_eq!(
+            codes(&issues),
+            [("unknown_merge_field", "/blocks/block/h/text")]
+        );
+        assert_eq!(issues[0].field.as_deref(), Some("theme.nope"));
+    }
+
+    #[test]
+    fn an_image_with_the_theme_logo_is_accepted() {
+        let content = snippet(json!({"blocks": [
+            {"type": "image", "id": "i", "src": {"theme": "logo"}, "alt": "Logo"}]}));
+        assert_eq!(validate_snippet(&content, &catalog()), Vec::new());
     }
 }
