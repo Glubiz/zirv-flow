@@ -2377,7 +2377,10 @@ two calls a publish makes, `load_check_inputs` and `validate_document` (the fiel
 effective theme, snippets and conditions of #307, through the render pool), and repaired up to
 `ai.max_repair_attempts`; an unknown merge field comes back as `unknown_merge_field` at its place,
 with the field's name shown to the model only. The context is the document, the merge-field, theme
-and snippet names and the task, all schema text, so no person value enters it and the row holds none.
+and snippet names and the task. Under schema-only privacy the literals of every `visible_if` are
+masked with the segment assistant's placeholders and restored in the answer, and a condition the
+mask walk cannot fully cover is refused (`ai_template_unsupported`); with the opt-in the document
+goes as personal data. The row holds no person value.
 The response carries the field diff (`TEMPLATE_KEYS`) and the draft and the result rendered for the
 sample person with inert tracking (`renders.before`, `renders.after`, html and text). Accepting
 validates again, then locks the template and writes only its draft, including `lang`, when the
