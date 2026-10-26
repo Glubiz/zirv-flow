@@ -10,6 +10,7 @@ use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{Clock, EventRetention, PgPool, SchemaState, StoreError};
 
+use crate::assets::AssetLimits;
 use crate::assistant::{AiConfig, runtime::AiRuntime};
 use crate::events::ExplorerLimits;
 use crate::events::debugger::DebuggerHub;
@@ -38,6 +39,7 @@ pub struct AppState {
     pub(crate) ingest: IngestState,
     /// The largest CSV file an upload takes.
     pub(crate) imports: ImportLimits,
+    pub(crate) assets: AssetLimits,
     /// The SHA-256 of the first-run setup token while one is valid; never the token itself.
     pub(crate) setup_token: Arc<Mutex<Option<[u8; 32]>>>,
     /// Hashes identifiers for suppressions; absent until the master key is given.
@@ -105,6 +107,7 @@ impl AppState {
             event_retention: EventRetention::default(),
             ingest: IngestState::new(IngestLimits::default()),
             imports: ImportLimits::default(),
+            assets: AssetLimits::default(),
             setup_token: Arc::default(),
             identifier_key: None,
             redaction_key: None,
@@ -258,6 +261,12 @@ impl AppState {
     /// The ingestion limits: body size, batch size and the per-key rate, per process.
     pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
         self.ingest = IngestState::new(limits);
+        self
+    }
+
+    /// The limits on image uploads.
+    pub fn with_asset_limits(mut self, limits: AssetLimits) -> Self {
+        self.assets = limits;
         self
     }
 

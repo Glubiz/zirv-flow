@@ -521,6 +521,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The workspace's images, newest first, with the bytes they take and the limit for them. */
+        get: operations["list_assets"];
+        put?: never;
+        /**
+         * Uploads an image. The body is the raw file with its own `Content-Type`: `image/png`,
+         *     `image/jpeg`, `image/gif` or `image/webp`; SVG and every other type are refused before the
+         *     body is read. The type must match the file's magic bytes. The file may be at most
+         *     `assets.max_file_bytes` (5 MiB by default) and 8192 pixels a side and 40 megapixels, read from
+         *     its header. The workspace's images may take at most `assets.max_workspace_bytes` together. The
+         *     same bytes uploaded again to the workspace return the existing asset with 200. Audited as
+         *     `asset.uploaded` with the id, name and size.
+         */
+        post: operations["upload_asset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/assets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One image, with the published versions that use it. */
+        get: operations["get_asset"];
+        put?: never;
+        post?: never;
+        /**
+         * Deletes an image: it is marked deleted and its bytes are dropped. Refused with 409
+         *     (`asset_in_use`, the users in the detail) while a published template, theme or snippet
+         *     version uses it. Workspace admins only. Audited as `asset.deleted`.
+         */
+        delete: operations["delete_asset"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/consent/dimensions": {
         parameters: {
             query?: never;
@@ -4110,6 +4158,73 @@ export interface components {
              *     ]
              */
             scopes: string[];
+        };
+        /** @description An image asset. */
+        AssetBody: {
+            /** @example image/png */
+            content_type: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: int32 */
+            height: number;
+            /** Format: uuid */
+            id: string;
+            /** @example Spring banner */
+            name: string;
+            /**
+             * Format: int64
+             * @description How many published versions of templates, themes and snippets use it.
+             */
+            references: number;
+            /** @description The lowercase hex SHA-256 of the file. */
+            sha256: string;
+            /** Format: int64 */
+            size_bytes: number;
+            /**
+             * @description Where the world reaches the file: absolute when `server.public_url` is set, else the
+             *     path `/a/<sha256>.<ext>`.
+             */
+            url: string;
+            /** Format: int32 */
+            width: number;
+        };
+        /** @description An asset with the versions that use it. */
+        AssetDetailBody: components["schemas"]["AssetBody"] & {
+            used_by: components["schemas"]["AssetOwnerBody"][];
+        };
+        /** @description A published version that uses an asset. */
+        AssetOwnerBody: {
+            /** Format: uuid */
+            id: string;
+            /** @description `template`, `theme` or `snippet`. */
+            kind: string;
+            /** Format: int32 */
+            version: number;
+        };
+        /** @description A page of assets with the workspace's quota. */
+        AssetsBody: {
+            /** @description Newest first. */
+            assets: components["schemas"]["AssetBody"][];
+            /**
+             * Format: int64
+             * @description The most bytes they may take (`assets.max_workspace_bytes`).
+             */
+            limit_bytes: number;
+            /**
+             * Format: int64
+             * @description The largest single image (`assets.max_file_bytes`).
+             */
+            max_file_bytes: number;
+            /**
+             * Format: uuid
+             * @description Pass as `before` for the next page; null when there is none.
+             */
+            next_before?: string | null;
+            /**
+             * Format: int64
+             * @description The bytes the workspace's live assets take.
+             */
+            used_bytes: number;
         };
         /** @description The people a segment trigger with `enroll_current` would enroll at publish. */
         AudienceBody: {
@@ -11469,6 +11584,293 @@ export interface operations {
             };
             /** @description No such workspace or live key, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_assets: {
+        parameters: {
+            query?: {
+                /** @description Assets per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_before of the previous page */
+                before?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of assets and the quota */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetsBody"];
+                };
+            };
+            /** @description limit is out of range or before is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    upload_asset: {
+        parameters: {
+            query: {
+                /** @description A name for the image, 1 to 200 characters without path separators */
+                name: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        /** @description The image file; image/jpeg, image/gif and image/webp are accepted too */
+        requestBody: {
+            content: {
+                "image/png": number[];
+            };
+        };
+        responses: {
+            /** @description The workspace already had these bytes; the existing asset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetBody"];
+                };
+            };
+            /** @description The new asset */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetBody"];
+                };
+            };
+            /** @description A missing name, or an upload that broke off */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the write scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No byte arrived for 60 seconds */
+            408: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description asset_too_large: over assets.max_file_bytes; asset_quota_exceeded: the workspace is over assets.max_workspace_bytes */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description asset_type_unsupported: not a PNG, JPEG, GIF or WebP content type; asset_type_mismatch: the file is not the declared type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A bad name, or asset_dimensions_exceeded */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_asset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Asset id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The asset and its users */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetDetailBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or asset, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_asset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Asset id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, a missing scope, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or asset, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description asset_in_use: published versions use the asset */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
