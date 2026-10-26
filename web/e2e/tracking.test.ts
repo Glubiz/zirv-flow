@@ -28,6 +28,7 @@ describe("normaliseTracking", () => {
     expect(normaliseTracking(`<p>Hi</p>${pixel}`, forms)).toBe("<p>Hi</p>");
     expect(normaliseTracking('<img alt="" width="1" src="https://flow.example.test/t/o/tok">', forms)).toBe("");
     expect(normaliseTracking('<img src="https:&#x2f;&#x2f;flow.example.test&#x2f;t&#x2f;o&#x2f;tok">', forms)).toBe("");
+    expect(normaliseTracking('<p>Hi</p><img src="https://preview.sample.invalid/t/o/inert" width="1" height="1" alt="">', forms)).toBe("<p>Hi</p>");
   });
 
   it("treats a direct address as the tracked link only inside an href", () => {
