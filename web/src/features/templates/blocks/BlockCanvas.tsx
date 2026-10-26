@@ -8,7 +8,7 @@ import type { TemplateIssue } from "../model";
 import { blockLabel, canDrop, isEditableCondition, issuesOf, moveBlock, type Block, type BlocksContent, type Drag, type Drop, type Section, type VisibleIf } from "./document";
 
 /** What the canvas knows of the snippets a document holds, by id. */
-export type SnippetNames = ReadonlyMap<string, { name: string; version: number | null }>;
+export type SnippetNames = ReadonlyMap<string, { name: string; version: number | null; archived: boolean }>;
 
 /** The theme footer as the last, locked item of a document. */
 export interface FooterView {
@@ -181,6 +181,7 @@ export function BlockCanvas(props: Props) {
         <p className="be-summary">
           {summary(block, props.snippets)}
           {held && held.version !== null ? <span className="faint"> · version {held.version}</span> : null}
+          {held?.archived ? <span className="faint"> · Archived</span> : null}
           {block.type === "snippet" && held && props.workspaceId ? (
             <>
               {" "}

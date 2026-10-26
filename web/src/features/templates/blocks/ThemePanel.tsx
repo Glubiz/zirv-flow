@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router";
 
-import { Button, Dialog, SelectField } from "../../../ui";
+import { Button, Dialog, Pill, SelectField } from "../../../ui";
 import { fontCss, readTokens } from "../../themes";
 import { DocumentStyleForm } from "./DocumentPanel";
 import type { BlocksContent, ThemeRef } from "./document";
@@ -63,6 +63,7 @@ export function ThemePanel({ workspaceId, scope, content, onChange, readOnly, is
   const chosen = scope.ref === "default" ? FOLLOW_DEFAULT : scope.ref.id;
   const listed = scope.choices.some((theme) => theme.id === chosen);
   const tokens = scope.current ? readTokens(scope.current.tokens) : null;
+  const unpublished = scope.current !== null && scope.ref !== "default" && !scope.inEffect;
   return (
     <div className="stack" role="group" aria-label="Theme">
       <SelectField
@@ -77,13 +78,21 @@ export function ThemePanel({ workspaceId, scope, content, onChange, readOnly, is
             {theme.name}
           </option>
         ))}
-        {chosen !== FOLLOW_DEFAULT && !listed ? <option value={chosen}>{scope.name}</option> : null}
+        {chosen !== FOLLOW_DEFAULT && !listed ? <option value={chosen}>{scope.archived ? `${scope.name} (archived)` : scope.name}</option> : null}
       </SelectField>
       {scope.current && tokens ? (
         <>
-          <p className="faint">
-            {scope.ref === "default" ? `The workspace default is ${scope.current.name}.` : `${scope.current.name} sets the look of this email.`}
-          </p>
+          {scope.archived ? <Pill tone="neutral">Archived</Pill> : null}
+          {unpublished ? (
+            <p className="notice" role="status">
+              This theme is not published, so this email has no theme until it is.
+            </p>
+          ) : null}
+          {unpublished ? null : (
+            <p className="faint">
+              {scope.ref === "default" ? `The workspace default is ${scope.current.name}.` : `${scope.current.name} sets the look of this email.`}
+            </p>
+          )}
           <dl className="facts" aria-label="What the theme sets">
             {(
               [

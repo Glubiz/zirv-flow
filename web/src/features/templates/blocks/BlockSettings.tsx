@@ -21,7 +21,7 @@ interface Props {
   /** A document: the workspace for the Visibility condition. Absent in a snippet, which has no Visibility and keeps every setting in view. */
   workspaceId?: string;
   /** What a snippet block shows: the snippet's name and live version, when known. */
-  snippetInfo?: { name: string; version: number | null; href: string };
+  snippetInfo?: { name: string; version: number | null; archived: boolean; href: string };
 }
 
 /** The settings a document keeps behind a disclosure; a snippet shows them as they are. */
@@ -228,7 +228,7 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onP
       {block.type === "snippet" ? (
         <div className="stack">
           <p className="muted">
-            {snippetInfo ? `This block shows the snippet ${snippetInfo.name}${snippetInfo.version === null ? "" : `, version ${snippetInfo.version}`}.` : `This block shows snippet ${block.snippet_id}.`} Its blocks are edited in the snippet.
+            {snippetInfo ? `This block shows the snippet ${snippetInfo.name}${snippetInfo.version === null ? "" : `, version ${snippetInfo.version}`}.` : `This block shows snippet ${block.snippet_id}.`}{snippetInfo?.archived ? " It is archived." : ""} Its blocks are edited in the snippet.
           </p>
           {snippetInfo ? (
             <Link to={snippetInfo.href} target="_blank" rel="noreferrer">

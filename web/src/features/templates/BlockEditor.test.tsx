@@ -636,6 +636,68 @@ describe("the theme tab", () => {
   });
 });
 
+describe("themes and snippets that are archived or not published", () => {
+  const OLD = "0192b1a4-7c3e-7000-8000-00000000d003";
+  const DRAFT = "0192b1a4-7c3e-7000-8000-00000000d004";
+  const named = (id: string, extra: Doc = {}) =>
+    detailOf(blocksDocument([{ id: "s", columns: [[{ type: "image", id: "i", src: { url: "" }, alt: "A bag" }]] }], {}, 2, { theme: { id }, footer: "theme", ...extra }));
+  const themes = (): Record<string, Handler> => ({
+    [`GET ${WS}/themes`]: () =>
+      json([
+        ...THEMES,
+        listItem({ id: OLD, name: "Retired", current_version: 4, archived_at: "2026-10-20T09:00:00Z" }, 0, tokens({ primary: "#112233", footer_snippet: SNIPPET })),
+        listItem({ id: DRAFT, name: "Unfinished", current_version: null }, 0, tokens({ footer_snippet: SNIPPET })),
+      ]),
+    [`GET ${WS}/assets`]: () => json(listBody([assetBody(1)])),
+  });
+
+  it("resolves an archived named theme by name, values and link, marks it archived, and keeps it in effect", async () => {
+    mockApi(templateRoutes({ detail: named(OLD), extra: themes() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Theme: Retired" }));
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    expect(screen.getByText("#112233")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Edit theme" })).toHaveAttribute("href", `/w/ws1/themes/${OLD}`);
+    expect(within(screen.getByRole("combobox", { name: "Theme" })).queryByRole("option", { name: "Retired" })).toBeNull();
+    expect(screen.getByRole("group", { name: "Theme footer" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Insert theme.primary" })).toBeInTheDocument();
+  });
+
+  it("treats a named theme with no published version as broken: no logo, no theme tags, no footer", async () => {
+    mockApi(templateRoutes({ detail: named(DRAFT), extra: themes() }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Theme: Unfinished" }));
+    expect(screen.getByText(/This theme is not published/)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Theme footer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Insert theme.primary" })).toBeNull();
+    await user.click(screen.getByRole("group", { name: "Image block 1" }));
+    await user.click(await screen.findByRole("button", { name: "Choose image…" }));
+    await screen.findByRole("radio", { name: /photo-1.png/ });
+    expect(screen.queryByRole("radio", { name: /Theme logo/ })).toBeNull();
+  });
+
+  it("resolves an archived snippet by name and version with its link, marked archived", async () => {
+    const archived = [{ ...snippetBody({ id: SNIPPET, name: "Old promise", current_version: 2, archived_at: "2026-10-20T09:00:00Z" }), used_by_templates: 1 }];
+    mockApi(
+      templateRoutes({
+        detail: detailOf(blocksDocument([{ id: "s", columns: [[{ type: "snippet", id: "n", snippet_id: SNIPPET }]] }], {}, 2, { theme: "none", footer: "none" })),
+        extra: { [`GET ${WS}/snippets`]: () => json(archived) },
+      }),
+    );
+    mount();
+
+    const card = await screen.findByRole("group", { name: "Snippet block 1" });
+    expect(await within(card).findByText("Old promise")).toBeInTheDocument();
+    expect(within(card).getByText(/version 2/)).toBeInTheDocument();
+    expect(within(card).getByText(/Archived/)).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: "Open snippet" })).toHaveAttribute("href", `/w/ws1/snippets/${SNIPPET}`);
+  });
+});
+
 describe("the snippet block", () => {
   it("is inserted from a picker of published snippets, shows its name and version, and is removed", async () => {
     const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[]] }])), extra: withSnippets() }));
