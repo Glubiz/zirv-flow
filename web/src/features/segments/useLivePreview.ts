@@ -6,30 +6,19 @@ import { toDefinition, type Node } from "./ast";
 /** How long the definition rests before a count is asked for. */
 export const PREVIEW_DELAY_MS = 600;
 
-/**
- * What `POST /segments/preview` answers, as `PreviewBody` in `crates/zirv-flow-api/src/segments/preview.rs`.
- * The generated client types that path with the source-stream preview, because the two Rust structs
- * share a schema name in the OpenAPI document, so the answer is typed here instead.
- */
-export interface PreviewResult {
-  count: number;
-  sample: { id: string; display?: components["schemas"]["DisplayBody"] | null }[];
-  data_age: components["schemas"]["DataAgeBody"];
-  compiled_at: string;
-}
+export type PreviewResult = components["schemas"]["SegmentPreviewBody"];
 
 const SAMPLE_SIZE = 20;
 
 async function previewSegment(workspaceId: string, root: Node, signal: AbortSignal): Promise<PreviewResult> {
   const body = { definition: toDefinition(root), sample_size: SAMPLE_SIZE };
-  const answer: unknown = await unwrap(
+  return unwrap(
     client.POST("/api/v1/workspaces/{ws}/segments/preview", {
       params: { path: { ws: workspaceId } },
-      body: body as never,
+      body,
       signal,
     }),
   );
-  return answer as PreviewResult;
 }
 
 export type PreviewState =

@@ -15673,7 +15673,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PreviewRequest"
+                "$ref": "#/components/schemas/SegmentPreviewRequest"
               }
             }
           },
@@ -15685,7 +15685,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PreviewBody"
+                  "$ref": "#/components/schemas/SegmentPreviewBody"
                 }
               }
             }
@@ -35714,6 +35714,56 @@
           "is_empty"
         ]
       },
+      "SegmentPreviewBody": {
+        "type": "object",
+        "required": [
+          "count",
+          "sample",
+          "data_age",
+          "compiled_at"
+        ],
+        "properties": {
+          "compiled_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The database time the definition was compiled at, which fixes every relative window."
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many people match."
+          },
+          "data_age": {
+            "$ref": "#/components/schemas/DataAgeBody"
+          },
+          "sample": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SegmentSampleBody"
+            }
+          }
+        }
+      },
+      "SegmentPreviewRequest": {
+        "type": "object",
+        "required": [
+          "definition"
+        ],
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/SegmentDefinition"
+          },
+          "sample_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "People to sample, 1 to 100; default 20. The sample is the first people by id.",
+            "minimum": 0
+          }
+        }
+      },
       "SegmentPropertyFilter": {
         "type": "object",
         "required": [
@@ -35747,6 +35797,29 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "SegmentSampleBody": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "display": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayBody",
+                "description": "The strongest identifier; null for a person with none. The value is masked for callers\nwho may not see personal values."
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },
