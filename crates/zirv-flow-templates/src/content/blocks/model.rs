@@ -1,4 +1,4 @@
-//! The block document v1 (architecture 11.1, 11.2): the types, their limits and the checks of
+//! The block document, schema 2 (architecture 11.1, 11.2): the types, their limits and the checks of
 //! their shape that need no template engine.
 //!
 //! Every struct refuses a field it does not know (`deny_unknown_fields`), and the block enum
@@ -47,6 +47,11 @@ pub const SUBJECT_DISPLAY_CHARS: usize = 78;
 /// Characters of a preheader beyond which an inbox cuts it off.
 pub const PREHEADER_DISPLAY_CHARS: usize = 110;
 
+/// Bytes of a `visible_if` condition once serialized.
+pub const MAX_CONDITION_BYTES: usize = 16 * 1024;
+/// How deep a `visible_if` condition may nest.
+pub const MAX_CONDITION_DEPTH: usize = 32;
+
 /// The web-safe font stacks a document may name, with the CSS each stands for.
 pub const FONT_STACKS: [(&str, &str); 8] = [
     ("arial", "Arial, Helvetica, sans-serif"),
@@ -83,10 +88,56 @@ pub struct BlocksContent {
     pub lang: Option<String>,
     #[serde(default)]
     pub category: Category,
+    /// The theme the email follows. `none` renders the `settings` below, exactly as schema 1.
+    #[serde(default)]
+    pub theme: ThemeRef,
+    /// Whether the theme's footer is appended as the last section.
+    #[serde(default)]
+    pub footer: FooterRef,
     #[serde(default)]
     pub settings: Settings,
     #[serde(default)]
     pub sections: Vec<Section>,
+}
+
+/// Which theme a block email follows: `"default"` (the workspace default), `{"id": <theme id>}`
+/// or `"none"` (the document's own `settings`).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeRef {
+    #[default]
+    Default,
+    None,
+    Id(String),
+}
+
+/// Whether the theme's footer closes the email: `"theme"` or `"none"`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FooterRef {
+    #[default]
+    Theme,
+    None,
+}
+
+/// Where an image gets its URL: `{"asset": <id>}`, `{"url": "https://..."}` or
+/// `{"theme": "logo"}`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSrc {
+    /// An uploaded asset, by id.
+    Asset(String),
+    /// An `https` URL, or a merge tag that renders to one.
+    Url(String),
+    /// A slot of the theme.
+    Theme(ThemeSlot),
+}
+
+/// The image slots of a theme.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeSlot {
+    Logo,
 }
 
 impl BlocksContent {
@@ -98,6 +149,8 @@ impl BlocksContent {
             sender: None,
             lang: None,
             category: Category::default(),
+            theme: ThemeRef::default(),
+            footer: FooterRef::default(),
             settings: Settings::default(),
             sections: Vec::new(),
         }
@@ -144,6 +197,9 @@ pub struct Section {
     /// One to four lengths in pixels, such as `20px 0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub padding: Option<String>,
+    /// An opaque condition; the crate lists it and takes its result as an input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
     /// Each column is a list of blocks. A section holds no section.
     pub columns: Vec<Vec<Block>>,
 }
@@ -179,6 +235,7 @@ pub enum Block {
     Divider(Divider),
     Spacer(Spacer),
     RawHtml(RawHtml),
+    Snippet(Snippet),
 }
 
 impl Block {
@@ -192,6 +249,21 @@ impl Block {
             Self::Divider(block) => &block.id,
             Self::Spacer(block) => &block.id,
             Self::RawHtml(block) => &block.id,
+            Self::Snippet(block) => &block.id,
+        }
+    }
+
+    /// The `visible_if` condition of the block, if it has one.
+    pub fn visible_if(&self) -> Option<&serde_json::Value> {
+        match self {
+            Self::Heading(block) => block.visible_if.as_ref(),
+            Self::Text(block) => block.visible_if.as_ref(),
+            Self::Image(block) => block.visible_if.as_ref(),
+            Self::Button(block) => block.visible_if.as_ref(),
+            Self::Divider(block) => block.visible_if.as_ref(),
+            Self::Spacer(block) => block.visible_if.as_ref(),
+            Self::RawHtml(block) => block.visible_if.as_ref(),
+            Self::Snippet(block) => block.visible_if.as_ref(),
         }
     }
 }
@@ -206,6 +278,8 @@ pub struct Heading {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<Align>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -216,14 +290,15 @@ pub struct RichText {
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<Align>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Image {
     pub id: String,
-    /// An `https` URL, or a merge tag that renders to one.
-    pub src: String,
+    pub src: ImageSrc,
     #[serde(default)]
     pub alt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +306,8 @@ pub struct Image {
     /// Pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -241,6 +318,8 @@ pub struct Button {
     pub url: String,
     #[serde(default)]
     pub align: Align,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -249,6 +328,8 @@ pub struct Divider {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -257,6 +338,8 @@ pub struct Spacer {
     pub id: String,
     /// Pixels, 1 to 200.
     pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -265,6 +348,18 @@ pub struct RawHtml {
     pub id: String,
     /// The marketer's own HTML, a MiniJinja template, passed through as `mj-raw`.
     pub html: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
+}
+
+/// A reference to a snippet, a block list kept outside the template.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snippet {
+    pub id: String,
+    pub snippet_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_if: Option<serde_json::Value>,
 }
 
 /// Why a block document could not be read.
@@ -272,9 +367,9 @@ pub struct RawHtml {
 pub enum BlocksError {
     /// The `schema` is not the one this crate reads.
     UnsupportedSchema,
-    /// A block has a `type` that is not in the v1 set.
+    /// A block has a `type` that is not in the block set.
     UnknownBlock,
-    /// An object has a field that the v1 document does not define.
+    /// An object has a field that the document does not define.
     UnknownField,
     /// The document carries more than one content (`email`, `blocks`, `webhook`).
     AmbiguousContent,
@@ -311,8 +406,8 @@ impl fmt::Display for BlocksError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::UnsupportedSchema => "the document schema is not supported",
-            Self::UnknownBlock => "a block has a type that is not part of the v1 block set",
-            Self::UnknownField => "an object has a field the v1 document does not define",
+            Self::UnknownBlock => "a block has a type that is not part of the block set",
+            Self::UnknownField => "an object has a field the document does not define",
             Self::AmbiguousContent => "the document carries more than one content",
             Self::Malformed => "the value is not a template document",
         })
@@ -321,12 +416,12 @@ impl fmt::Display for BlocksError {
 
 impl std::error::Error for BlocksError {}
 
-/// The `type` values of the v1 block set.
-const BLOCK_TYPES: [&str; 7] = [
-    "heading", "text", "image", "button", "divider", "spacer", "raw_html",
+/// The `type` values of the block set.
+const BLOCK_TYPES: [&str; 8] = [
+    "heading", "text", "image", "button", "divider", "spacer", "raw_html", "snippet",
 ];
 
-/// Whether a block of a block document names a `type` that is not in the v1 set.
+/// Whether a block of a block document names a `type` that is not in the block set.
 fn unknown_block_type(value: &serde_json::Value) -> bool {
     let sections = value
         .pointer("/blocks/sections")
@@ -345,26 +440,20 @@ fn unknown_block_type(value: &serde_json::Value) -> bool {
     })
 }
 
-/// Read a template document from JSON with typed refusals: a `schema` other than the one this
-/// crate reads is [`BlocksError::UnsupportedSchema`] before anything else is looked at, then an
-/// unknown block type, an unknown field, and a document with more than one content. A document
-/// without a `schema` is [`BlocksError::Malformed`].
+/// Read a template document from JSON with typed refusals. Every stored document is read here:
+/// a `schema` this crate migrates (see [`crate::migrate_to_current`]) is brought to the current
+/// one in memory, and any other is [`BlocksError::UnsupportedSchema`] before anything else is
+/// looked at, then an unknown block type, an unknown field, and a document with more than one
+/// content. A document without a `schema` is [`BlocksError::Malformed`].
 pub fn parse_template_document(
     value: &serde_json::Value,
 ) -> Result<crate::document::TemplateDocument, BlocksError> {
-    match value.get("schema") {
-        None => return Err(BlocksError::Malformed),
-        Some(schema) => {
-            if schema.as_u64() != Some(u64::from(crate::document::SCHEMA_VERSION)) {
-                return Err(BlocksError::UnsupportedSchema);
-            }
-        }
-    }
-    if unknown_block_type(value) {
+    let value = crate::migrate::migrate_to_current(value.clone())?;
+    if unknown_block_type(&value) {
         return Err(BlocksError::UnknownBlock);
     }
     let doc: crate::document::TemplateDocument =
-        serde_json::from_value(value.clone()).map_err(|error| BlocksError::from_serde(&error))?;
+        serde_json::from_value(value).map_err(|error| BlocksError::from_serde(&error))?;
     if doc.is_ambiguous() {
         return Err(BlocksError::AmbiguousContent);
     }
@@ -460,6 +549,14 @@ pub(crate) fn check_shape(content: &BlocksContent) -> Vec<Issue> {
     }
 
     check_settings(&content.settings, &mut issues);
+    if let ThemeRef::Id(id) = &content.theme
+        && !crate::validate::is_uuid(id)
+    {
+        issues.push(
+            Issue::new(code::INVALID_SETTING, doc_at("theme"))
+                .with_message("a theme is `default`, `none` or `{\"id\": <theme id>}`"),
+        );
+    }
     if let Some(lang) = content
         .lang
         .as_deref()
@@ -494,19 +591,71 @@ pub(crate) fn check_shape(content: &BlocksContent) -> Vec<Issue> {
                     .with_message("one to four lengths in pixels, such as `20px 0`"),
             );
         }
+        check_condition(&section.id, section.visible_if.as_ref(), &mut issues);
         for block in section.columns.iter().flatten() {
             check_id(block.id(), &mut seen, &mut issues);
             check_block_numbers(block, &mut issues);
+            check_condition(block.id(), block.visible_if(), &mut issues);
         }
     }
     issues
+}
+
+/// Every `visible_if` of the document with the id of the section or block that holds it, in
+/// document order: the conditions a caller evaluates and passes back as results.
+pub fn conditions(content: &BlocksContent) -> Vec<(&str, &serde_json::Value)> {
+    let mut out = Vec::new();
+    for section in &content.sections {
+        if let Some(condition) = &section.visible_if {
+            out.push((section.id.as_str(), condition));
+        }
+        for block in section.columns.iter().flatten() {
+            if let Some(condition) = block.visible_if() {
+                out.push((block.id(), condition));
+            }
+        }
+    }
+    out
+}
+
+fn value_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(items) => 1 + items.iter().map(value_depth).max().unwrap_or(0),
+        serde_json::Value::Object(map) => 1 + map.values().map(value_depth).max().unwrap_or(0),
+        _ => 1,
+    }
+}
+
+/// A condition is opaque here, but bounded: its serialized size and its depth.
+pub(crate) fn check_condition(
+    id: &str,
+    condition: Option<&serde_json::Value>,
+    issues: &mut Vec<Issue>,
+) {
+    let Some(condition) = condition else {
+        return;
+    };
+    // The depth first: it is cheap, and a serialized deep value is not worth measuring.
+    let message = if value_depth(condition) > MAX_CONDITION_DEPTH {
+        format!("nests at most {MAX_CONDITION_DEPTH} levels")
+    } else if serde_json::to_vec(condition).map_or(usize::MAX, |bytes| bytes.len())
+        > MAX_CONDITION_BYTES
+    {
+        format!("at most {MAX_CONDITION_BYTES} bytes")
+    } else {
+        return;
+    };
+    issues.push(
+        Issue::new(code::CONDITION_TOO_LARGE, block_at(id, Some("visible_if")))
+            .with_message(message),
+    );
 }
 
 fn color_issue(at: String) -> Issue {
     Issue::new(code::INVALID_SETTING, at).with_message("a colour as `#rgb` or `#rrggbb`")
 }
 
-fn check_id<'a>(id: &'a str, seen: &mut HashSet<&'a str>, issues: &mut Vec<Issue>) {
+pub(crate) fn check_id<'a>(id: &'a str, seen: &mut HashSet<&'a str>, issues: &mut Vec<Issue>) {
     if !is_block_id(id) {
         issues.push(
             Issue::new(code::INVALID_BLOCK_ID, block_at(id, None)).with_message(format!(
@@ -545,7 +694,7 @@ fn check_settings(settings: &Settings, issues: &mut Vec<Issue>) {
     }
 }
 
-fn check_block_numbers(block: &Block, issues: &mut Vec<Issue>) {
+pub(crate) fn check_block_numbers(block: &Block, issues: &mut Vec<Issue>) {
     match block {
         Block::Heading(heading) if !(1..=3).contains(&heading.level) => issues.push(
             Issue::new(code::INVALID_SETTING, block_at(&heading.id, Some("level")))
@@ -589,6 +738,7 @@ pub(crate) mod tests {
             level: 1,
             text: "Hi".into(),
             align: None,
+            visible_if: None,
         })
     }
 
@@ -599,6 +749,7 @@ pub(crate) mod tests {
             background_color: None,
             padding: None,
             columns,
+            visible_if: None,
         });
         content
     }
@@ -619,7 +770,7 @@ pub(crate) mod tests {
     #[test]
     fn an_unknown_block_type_and_an_unknown_field_are_typed_errors() {
         let doc = |blocks: serde_json::Value| {
-            json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
+            json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
                 "subject": "Hi", "sections": [{"id": "s", "columns": [blocks]}]}})
         };
         let unknown_block = doc(json!([{"type": "carousel", "id": "x"}]));
@@ -633,7 +784,7 @@ pub(crate) mod tests {
             BlocksError::UnknownField
         );
         let mut unknown_content_field = doc(json!([]));
-        unknown_content_field["blocks"]["theme"] = json!("dark");
+        unknown_content_field["blocks"]["palette"] = json!("dark");
         assert_eq!(
             parse_template_document(&unknown_content_field).unwrap_err(),
             BlocksError::UnknownField
@@ -655,12 +806,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn schema_one_is_read_and_another_schema_is_refused_first() {
+    fn schema_one_migrates_schema_two_reads_and_another_schema_is_refused_first() {
         let mut doc = json!({"schema": 1, "channel": "email", "mode": "blocks",
                              "blocks": {"subject": "Hi"}});
         let read = parse_template_document(&doc).unwrap();
+        let mut expected = BlocksContent::new("Hi");
+        expected.theme = ThemeRef::None;
+        expected.footer = FooterRef::None;
+        assert_eq!(read.schema, 2);
+        assert_eq!(read.blocks, Some(expected));
+        doc["schema"] = json!(2);
+        let read = parse_template_document(&doc).unwrap();
         assert_eq!(read.blocks, Some(BlocksContent::new("Hi")));
-        for schema in [json!(2), json!(0), json!("1"), json!(null)] {
+        for schema in [json!(3), json!(0), json!("1"), json!(null)] {
             doc["schema"] = schema;
             assert_eq!(
                 parse_template_document(&doc).unwrap_err(),
@@ -668,7 +826,7 @@ pub(crate) mod tests {
             );
         }
         // A newer schema may also have a shape this one cannot read: the schema still wins.
-        let newer = json!({"schema": 2, "blocks": {"nope": true}});
+        let newer = json!({"schema": 3, "blocks": {"nope": true}});
         assert_eq!(
             parse_template_document(&newer).unwrap_err(),
             BlocksError::UnsupportedSchema
@@ -682,6 +840,7 @@ pub(crate) mod tests {
             Block::Spacer(Spacer {
                 id: "sp".into(),
                 height: 10,
+                visible_if: None,
             }),
         ]]);
         content.sender = Some("0192b1a4-7c3e-7000-8000-00000000a001".into());
@@ -702,6 +861,7 @@ pub(crate) mod tests {
                 background_color: Some("red".into()),
                 padding: None,
                 columns: vec![vec![]],
+                visible_if: None,
             });
         }
         let issues = check_shape(&content);
@@ -816,21 +976,25 @@ pub(crate) mod tests {
                 level: 4,
                 text: String::new(),
                 align: None,
+                visible_if: None,
             }),
             Block::Image(Image {
                 id: "i".into(),
-                src: String::new(),
+                src: ImageSrc::Url(String::new()),
                 alt: String::new(),
                 href: None,
                 width: Some(801),
+                visible_if: None,
             }),
             Block::Divider(Divider {
                 id: "d".into(),
                 color: Some("grey".into()),
+                visible_if: None,
             }),
             Block::Spacer(Spacer {
                 id: "p".into(),
                 height: 0,
+                visible_if: None,
             }),
         ]]);
         content.sections[0].padding = Some("2em".into());

@@ -74,15 +74,26 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues }: P
       ) : null}
       {block.type === "image" ? (
         <>
-          <TextField
-            label="Image address"
-            hint="An https address."
-            value={block.src}
-            readOnly={readOnly}
-            autoComplete="off"
-            {...merge("the image address")}
-            onChange={(event) => onChange({ ...block, src: event.target.value })}
-          />
+          {"url" in block.src ? (
+            <TextField
+              label="Image address"
+              hint="An https address."
+              value={block.src.url}
+              readOnly={readOnly}
+              autoComplete="off"
+              {...merge("the image address")}
+              onChange={(event) => onChange({ ...block, src: { url: event.target.value } })}
+            />
+          ) : (
+            <TextField
+              label="Image source"
+              hint="Set outside this editor; kept as it is."
+              value={"asset" in block.src ? `Uploaded image ${block.src.asset}` : "The theme logo"}
+              readOnly
+              autoComplete="off"
+              onChange={() => undefined}
+            />
+          )}
           <FieldIssues issues={at("src")} />
           <TextField
             label="Alt text"
@@ -177,6 +188,9 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues }: P
           />
           <FieldIssues issues={at("html")} />
         </>
+      ) : null}
+      {block.type === "snippet" ? (
+        <p className="muted">This block shows snippet {block.snippet_id}. It is set outside this editor and kept as it is.</p>
       ) : null}
       <FieldIssues issues={own.filter((issue) => issue.at === `/blocks/block/${block.id}`)} />
     </div>

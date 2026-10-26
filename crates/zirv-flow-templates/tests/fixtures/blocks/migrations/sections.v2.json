@@ -1,0 +1,78 @@
+{
+  "blocks": {
+    "category": "transactional",
+    "footer": "none",
+    "lang": "en",
+    "preheader": "A preview for {{ person.name }}",
+    "sections": [
+      {
+        "columns": [
+          [
+            {
+              "id": "a1",
+              "level": 2,
+              "text": "One column",
+              "type": "heading"
+            }
+          ]
+        ],
+        "id": "one"
+      },
+      {
+        "background_color": "#f0f0f0",
+        "columns": [
+          [
+            {
+              "id": "b1",
+              "level": 3,
+              "text": "Left",
+              "type": "heading"
+            }
+          ],
+          [
+            {
+              "id": "b2",
+              "level": 3,
+              "text": "Right",
+              "type": "heading"
+            }
+          ]
+        ],
+        "id": "two"
+      },
+      {
+        "columns": [
+          [
+            {
+              "content": "<p>First</p>",
+              "id": "c1",
+              "type": "text"
+            }
+          ],
+          [
+            {
+              "content": "<p>Second</p>",
+              "id": "c2",
+              "type": "text"
+            }
+          ],
+          [
+            {
+              "content": "<p>Third</p>",
+              "id": "c3",
+              "type": "text"
+            }
+          ]
+        ],
+        "id": "three",
+        "padding": "30px 10px"
+      }
+    ],
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "subject": "Hi {{ person.name }}",
+    "theme": "none"
+  },
+  "channel": "email",
+  "mode": "blocks",
+  "schema": 2
+}

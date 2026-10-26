@@ -8,7 +8,9 @@ use serde_json::Value;
 use zirv_flow_core::events::PropertyType;
 use zirv_flow_core::people::TraitType;
 
+use crate::content::blocks::SnippetContent;
 use crate::issue::FieldCatalog;
+use crate::theme::ThemeTokens;
 
 /// The unsubscribe URL of the sample context: a marketing email must link to exactly this.
 pub const SAMPLE_UNSUBSCRIBE_URL: &str = "https://unsubscribe.sample.invalid/u";
@@ -99,6 +101,40 @@ impl RenderContext {
                 .insert(RESERVED_EMAIL.to_owned(), Value::from(email));
         }
         context
+    }
+}
+
+/// The inputs of a block render beyond the context, all resolved by the caller: the crate holds
+/// no tables and loads nothing. Every field is optional and defaults, so an old request, and a
+/// document that needs none of them, still render.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RenderExtras {
+    /// The theme in effect.
+    pub theme: Option<ThemeTokens>,
+    /// Resolved snippet contents by snippet id.
+    pub snippets: BTreeMap<String, SnippetContent>,
+    /// The result of each `visible_if`, by the id of the section or block that holds it.
+    pub conditions: BTreeMap<String, bool>,
+    /// The URL of each asset by asset id.
+    pub assets: BTreeMap<String, String>,
+}
+
+impl RenderExtras {
+    /// The `https` URL of an asset, if the caller passed one.
+    pub fn asset_url(&self, id: &str) -> Option<&str> {
+        self.assets.get(id).map(String::as_str).filter(|url| {
+            url.starts_with("https://")
+                && !url.contains(|c: char| {
+                    c.is_whitespace() || matches!(c, '{' | '}' | '<' | '>' | '"')
+                })
+        })
+    }
+
+    /// The URL of the theme logo: the theme must be present and name a logo with a URL.
+    pub fn theme_logo_url(&self) -> Option<&str> {
+        let logo = self.theme.as_ref()?.logo.as_deref()?;
+        self.asset_url(logo)
     }
 }
 

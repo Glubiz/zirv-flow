@@ -1,11 +1,17 @@
-/** The block document v1 as the editor builds it (architecture 11.2). The shape is the server's; nothing here adds a field. */
+/** The block document, schema 2, as the editor builds it (architecture 11.2). The shape is the server's; nothing here adds a field. */
 
-export const BLOCKS_SCHEMA = 1;
+export const BLOCKS_SCHEMA = 2;
 export const MAX_SECTIONS = 50;
 export const MAX_BLOCKS = 500;
 export const MAX_COLUMNS = 3;
 
 export type Align = "left" | "center" | "right";
+
+/** Where an image gets its address. Only `url` is edited here; the others are shown and carried through. */
+export type ImageSrc = { url: string } | { asset: string } | { theme: "logo" };
+
+/** A condition the server evaluates. The editor never reads it; it carries it through untouched. */
+export type VisibleIf = unknown;
 
 export interface HeadingBlock {
   type: "heading";
@@ -13,20 +19,23 @@ export interface HeadingBlock {
   level: 1 | 2 | 3;
   text: string;
   align?: Align;
+  visible_if?: VisibleIf;
 }
 export interface TextBlock {
   type: "text";
   id: string;
   content: string;
   align?: Align;
+  visible_if?: VisibleIf;
 }
 export interface ImageBlock {
   type: "image";
   id: string;
-  src: string;
+  src: ImageSrc;
   alt: string;
   href?: string;
   width?: number;
+  visible_if?: VisibleIf;
 }
 export interface ButtonBlock {
   type: "button";
@@ -34,30 +43,42 @@ export interface ButtonBlock {
   label: string;
   url: string;
   align: Align;
+  visible_if?: VisibleIf;
 }
 export interface DividerBlock {
   type: "divider";
   id: string;
   color?: string;
+  visible_if?: VisibleIf;
 }
 export interface SpacerBlock {
   type: "spacer";
   id: string;
   height: number;
+  visible_if?: VisibleIf;
 }
 export interface RawHtmlBlock {
   type: "raw_html";
   id: string;
   html: string;
+  visible_if?: VisibleIf;
+}
+/** A reference to a snippet. The editor shows it as a locked placeholder and keeps it as it was read. */
+export interface SnippetBlock {
+  type: "snippet";
+  id: string;
+  snippet_id: string;
+  visible_if?: VisibleIf;
 }
 
-export type Block = HeadingBlock | TextBlock | ImageBlock | ButtonBlock | DividerBlock | SpacerBlock | RawHtmlBlock;
+export type Block = HeadingBlock | TextBlock | ImageBlock | ButtonBlock | DividerBlock | SpacerBlock | RawHtmlBlock | SnippetBlock;
 export type BlockType = Block["type"];
 
 export interface Section {
   id: string;
   background_color?: string;
   padding?: string;
+  visible_if?: VisibleIf;
   columns: Block[][];
 }
 
@@ -77,6 +98,10 @@ export interface BlocksContent {
   sender?: string;
   lang?: string;
   category: "marketing" | "transactional";
+  /** `"default"`, `"none"` or `{ id }`; carried through as read. */
+  theme?: unknown;
+  /** `"theme"` or `"none"`; carried through as read. */
+  footer?: unknown;
   settings: DocumentStyle;
   sections: Section[];
 }
@@ -103,7 +128,10 @@ export const FONT_STACKS: readonly { id: string; label: string }[] = [
   { id: "courier", label: "Courier New" },
 ];
 
-export const BLOCK_TYPES: readonly { type: BlockType; label: string }[] = [
+/** The blocks the palette offers. A snippet block is not one of them yet. */
+export type PaletteType = Exclude<BlockType, "snippet">;
+
+export const BLOCK_TYPES: readonly { type: PaletteType; label: string }[] = [
   { type: "heading", label: "Heading" },
   { type: "text", label: "Text" },
   { type: "image", label: "Image" },
@@ -114,11 +142,11 @@ export const BLOCK_TYPES: readonly { type: BlockType; label: string }[] = [
 ];
 
 export function blockLabel(type: BlockType): string {
-  return BLOCK_TYPES.find((entry) => entry.type === type)?.label ?? type;
+  return type === "snippet" ? "Snippet" : (BLOCK_TYPES.find((entry) => entry.type === type)?.label ?? type);
 }
 
 export function emptyContent(category: "marketing" | "transactional"): BlocksContent {
-  return { subject: "", preheader: "", category, settings: { ...DEFAULT_STYLE }, sections: [] };
+  return { subject: "", preheader: "", category, theme: "default", footer: "theme", settings: { ...DEFAULT_STYLE }, sections: [] };
 }
 
 /** The object without `key`. */
@@ -130,7 +158,14 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-/** Reads the `blocks` object of a stored document. A value that is not shaped like the v1 document gives what can be read; the server decides what is valid. */
+/** A schema 1 image has its address as a string in `src`; the editor works on the schema 2 shape. */
+function readBlock(block: Block): Block {
+  const raw = block as unknown as Record<string, unknown>;
+  if (raw["type"] === "image" && typeof raw["src"] === "string") return { ...raw, src: { url: raw["src"] } } as unknown as Block;
+  return block;
+}
+
+/** Reads the `blocks` object of a stored document. A value that is not shaped like the document gives what can be read; the server decides what is valid. */
 export function readContent(value: unknown): BlocksContent {
   const raw = record(value);
   const settings = record(raw["settings"]);
@@ -151,16 +186,19 @@ export function readContent(value: unknown): BlocksContent {
       const read: Section = {
         id: typeof entry["id"] === "string" ? entry["id"] : "",
         columns: columns.map((column) =>
-          Array.isArray(column) ? (column as unknown[]).filter((block) => typeof block === "object" && block !== null) as Block[] : [],
+          Array.isArray(column) ? ((column as unknown[]).filter((block) => typeof block === "object" && block !== null) as Block[]).map(readBlock) : [],
         ),
       };
       if (typeof entry["background_color"] === "string") read.background_color = entry["background_color"];
       if (typeof entry["padding"] === "string") read.padding = entry["padding"];
+      if (entry["visible_if"] !== undefined) read.visible_if = entry["visible_if"];
       return read;
     }),
   };
   if (typeof raw["sender"] === "string") content.sender = raw["sender"];
   if (typeof raw["lang"] === "string") content.lang = raw["lang"];
+  if (raw["theme"] !== undefined) content.theme = raw["theme"];
+  if (raw["footer"] !== undefined) content.footer = raw["footer"];
   return content;
 }
 
@@ -186,7 +224,7 @@ export function blockCount(content: BlocksContent): number {
 }
 
 /** A new block with the fields the v1 document needs and nothing else. */
-export function newBlock(type: BlockType, content: BlocksContent): Block {
+export function newBlock(type: PaletteType, content: BlocksContent): Block {
   const id = freshId(type.replace("_", "-"), content);
   switch (type) {
     case "heading":
@@ -194,7 +232,7 @@ export function newBlock(type: BlockType, content: BlocksContent): Block {
     case "text":
       return { type, id, content: "<p>Write your text here.</p>" };
     case "image":
-      return { type, id, src: "", alt: "" };
+      return { type, id, src: { url: "" }, alt: "" };
     case "button":
       return { type, id, label: "Button", url: "", align: "left" };
     case "divider":
@@ -287,7 +325,7 @@ export type Drag =
   | { kind: "section"; id: string }
   | { kind: "block"; id: string }
   | { kind: "new-section"; columns: number }
-  | { kind: "new-block"; type: BlockType };
+  | { kind: "new-block"; type: PaletteType };
 
 /** Where it is dropped: between the sections, or at a place in a column. */
 export type Drop = { kind: "root"; index: number } | ({ kind: "column" } & BlockPath);

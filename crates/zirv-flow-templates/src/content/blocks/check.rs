@@ -7,15 +7,15 @@
 
 use super::emit::UrlKind;
 use super::model::{
-    Block, BlocksContent, MAX_DOCUMENT_BYTES, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES,
+    Block, BlocksContent, ImageSrc, MAX_DOCUMENT_BYTES, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES,
     MAX_RICH_TEXT_BYTES, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, PREHEADER_DISPLAY_CHARS,
-    SUBJECT_DISPLAY_CHARS, block_at, blocks_of, check_shape, doc_at,
+    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_shape, conditions, doc_at,
 };
 use super::render::{BuildError, build, document_environment};
 use super::sanitize::{has_mjml_tag, link_allowed, sanitize_source, violations};
 use super::tags::{Protected, escape_literals, starts_with_tag};
 use crate::content::mjml::{MAX_DEPTH, MjmlError, compile, has_include};
-use crate::context::SAMPLE_UNSUBSCRIBE_URL;
+use crate::context::{RenderExtras, SAMPLE_UNSUBSCRIBE_URL};
 use crate::document::{Category, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
 use crate::issue::{FieldCatalog, Issue, code};
@@ -68,33 +68,40 @@ pub(crate) fn fields(content: &BlocksContent) -> Vec<Field<'_>> {
         },
     ];
     for (_, block) in blocks_of(content) {
-        let id = block.id();
-        let mut field = |name: &str, source, kind| {
-            out.push(Field {
-                at: block_at(id, Some(name)),
-                source,
-                kind,
-            });
-        };
-        match block {
-            Block::Heading(heading) => field("text", &heading.text, Kind::Plain),
-            Block::Text(rich) => field("content", &rich.content, Kind::Rich),
-            Block::Image(image) => {
-                field("src", &image.src, Kind::Url(UrlKind::ImageSource));
-                field("alt", &image.alt, Kind::Plain);
-                if let Some(href) = &image.href {
-                    field("href", href, Kind::Url(UrlKind::Link));
-                }
-            }
-            Block::Button(button) => {
-                field("label", &button.label, Kind::Plain);
-                field("url", &button.url, Kind::Url(UrlKind::Link));
-            }
-            Block::RawHtml(raw) => field("html", &raw.html, Kind::Raw),
-            Block::Divider(_) | Block::Spacer(_) => {}
-        }
+        block_fields(block, &mut out);
     }
     out
+}
+
+/// The text fields of one block, in the order they are checked.
+pub(crate) fn block_fields<'a>(block: &'a Block, out: &mut Vec<Field<'a>>) {
+    let id = block.id();
+    let mut field = |name: &str, source, kind| {
+        out.push(Field {
+            at: block_at(id, Some(name)),
+            source,
+            kind,
+        });
+    };
+    match block {
+        Block::Heading(heading) => field("text", &heading.text, Kind::Plain),
+        Block::Text(rich) => field("content", &rich.content, Kind::Rich),
+        Block::Image(image) => {
+            if let ImageSrc::Url(url) = &image.src {
+                field("src", url, Kind::Url(UrlKind::ImageSource));
+            }
+            field("alt", &image.alt, Kind::Plain);
+            if let Some(href) = &image.href {
+                field("href", href, Kind::Url(UrlKind::Link));
+            }
+        }
+        Block::Button(button) => {
+            field("label", &button.label, Kind::Plain);
+            field("url", &button.url, Kind::Url(UrlKind::Link));
+        }
+        Block::RawHtml(raw) => field("html", &raw.html, Kind::Raw),
+        Block::Divider(_) | Block::Spacer(_) | Block::Snippet(_) => {}
+    }
 }
 
 fn has_insecure_scheme(url: &str) -> bool {
@@ -109,9 +116,27 @@ pub(crate) fn check_sources(content: &BlocksContent) -> Vec<Issue> {
         return issues;
     }
     let all = fields(content);
+    check_texts(&all, &mut issues);
+    for block in blocks_of(content).map(|(_, block)| block) {
+        if matches!(block, Block::Snippet(_)) {
+            issues.push(
+                Issue::new(
+                    code::BROKEN_SNIPPET_REFERENCE,
+                    block_at(block.id(), Some("snippet_id")),
+                )
+                .with_message("snippet blocks are not rendered yet"),
+            );
+        }
+    }
+    issues
+}
+
+/// The size limits of the text fields and the checks of their URLs, rich text and raw HTML. A
+/// field over its limit, or a document over the total, gets that issue alone.
+pub(crate) fn check_texts(all: &[Field<'_>], issues: &mut Vec<Issue>) {
     let mut total = 0usize;
     let mut oversize = false;
-    for field in &all {
+    for field in all {
         total = total.saturating_add(field.source.len());
         if field.source.len() > field.kind.limit() {
             issues.push(
@@ -126,15 +151,15 @@ pub(crate) fn check_sources(content: &BlocksContent) -> Vec<Issue> {
             Issue::new(code::BLOCKS_LIMIT, doc_at("sections"))
                 .with_message(format!("at most {MAX_DOCUMENT_BYTES} bytes of text in all")),
         );
-        return issues;
+        return;
     }
     if oversize {
-        return issues;
+        return;
     }
-    for field in &all {
+    for field in all {
         match field.kind {
-            Kind::Url(kind) => check_url(field, kind, &mut issues),
-            Kind::Rich => check_rich(field, &mut issues),
+            Kind::Url(kind) => check_url(field, kind, issues),
+            Kind::Rich => check_rich(field, issues),
             Kind::Raw if raw_has_mjml_tag(field.source) => issues.push(
                 Issue::new(code::MJML_IN_RAW_HTML, field.at.clone())
                     .with_message("raw HTML holds no mj-* element: it sits inside an mj-raw"),
@@ -142,7 +167,6 @@ pub(crate) fn check_sources(content: &BlocksContent) -> Vec<Issue> {
             _ => {}
         }
     }
-    issues
 }
 
 /// Whether the raw HTML source holds an `mj-*` tag. The MiniJinja tags are set aside first, so
@@ -247,7 +271,11 @@ fn check_raw(field: &Field<'_>, rendered: Option<&str>, issues: &mut Vec<Issue>)
 }
 
 /// The publish checks of a block document.
-pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue> {
+pub(crate) fn validate(
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+    extras: &RenderExtras,
+) -> Vec<Issue> {
     if doc.schema != SCHEMA_VERSION {
         return vec![Issue::new(code::UNSUPPORTED_SCHEMA, "/schema")];
     }
@@ -261,6 +289,17 @@ pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Is
     {
         return issues;
     }
+    // #307 removes this when the evaluator supplies condition results.
+    for (id, _) in conditions(content) {
+        issues.push(
+            Issue::new(
+                code::CONDITION_UNSUPPORTED,
+                block_at(id, Some("visible_if")),
+            )
+            .with_message("Visibility conditions can't be published yet."),
+        );
+    }
+    check_references(content, extras, &mut issues);
 
     // The sender is the id of a sender identity, as in a code document.
     if content
@@ -281,58 +320,7 @@ pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Is
     let env = document_environment(content);
     let sample = sample_context(catalog);
     for field in fields(content) {
-        let kind = if field.kind == Kind::Subject {
-            SUBJECT
-        } else {
-            HTML
-        };
-        // Check the text MiniJinja is given: the plain fields have their literal text escaped
-        // and the rich text is the sanitized one, so a syntax error that only they have is
-        // found here, with the block path.
-        let source = match field.kind {
-            Kind::Preheader | Kind::Plain | Kind::Url(_) => escape_literals(field.source),
-            Kind::Rich => sanitize_source(field.source).html,
-            Kind::Subject | Kind::Raw => field.source.to_owned(),
-        };
-        let checked = check_template(
-            &env,
-            catalog,
-            &sample,
-            &field.at,
-            &source,
-            kind,
-            &mut issues,
-        );
-        if matches!(field.kind, Kind::Preheader | Kind::Plain | Kind::Url(_))
-            && checked
-                .sample
-                .as_deref()
-                .is_some_and(|text| text.contains(['<', '"']))
-        {
-            issues.push(
-                Issue::new(code::MARKUP_IN_PLAIN_FIELD, field.at.clone())
-                    .with_message("a value of this field is not escaped: |safe or autoescape off"),
-            );
-        }
-        let shown = checked.sample.as_deref().map(unescape);
-        match field.kind {
-            Kind::Subject => display_length(
-                &shown,
-                &field.at,
-                SUBJECT_DISPLAY_CHARS,
-                code::SUBJECT_TOO_LONG,
-                &mut issues,
-            ),
-            Kind::Preheader => display_length(
-                &shown,
-                &field.at,
-                PREHEADER_DISPLAY_CHARS,
-                code::PREHEADER_TOO_LONG,
-                &mut issues,
-            ),
-            Kind::Raw => check_raw(&field, checked.sample.as_deref(), &mut issues),
-            _ => {}
-        }
+        check_field(&env, catalog, &sample, &field, &mut issues);
     }
     for (_, block) in blocks_of(content) {
         if let Block::Image(image) = block
@@ -348,8 +336,127 @@ pub(crate) fn validate(doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Is
     if issues.iter().any(Issue::is_blocking) {
         return issues;
     }
-    check_sample_render(content, catalog, &env, &mut issues);
+    check_sample_render(content, catalog, &env, extras, &mut issues);
     issues
+}
+
+/// The merge field, syntax and sample checks of one text field.
+pub(crate) fn check_field(
+    env: &minijinja::Environment<'static>,
+    catalog: &FieldCatalog,
+    sample: &minijinja::Value,
+    field: &Field<'_>,
+    issues: &mut Vec<Issue>,
+) {
+    let kind = if field.kind == Kind::Subject {
+        SUBJECT
+    } else {
+        HTML
+    };
+    // Check the text MiniJinja is given: the plain fields have their literal text escaped
+    // and the rich text is the sanitized one, so a syntax error that only they have is
+    // found here, with the block path.
+    let source = match field.kind {
+        Kind::Preheader | Kind::Plain | Kind::Url(_) => escape_literals(field.source),
+        Kind::Rich => sanitize_source(field.source).html,
+        Kind::Subject | Kind::Raw => field.source.to_owned(),
+    };
+    let checked = check_template(env, catalog, sample, &field.at, &source, kind, issues);
+    if matches!(field.kind, Kind::Preheader | Kind::Plain | Kind::Url(_))
+        && checked
+            .sample
+            .as_deref()
+            .is_some_and(|text| text.contains(['<', '"']))
+    {
+        issues.push(
+            Issue::new(code::MARKUP_IN_PLAIN_FIELD, field.at.clone())
+                .with_message("a value of this field is not escaped: |safe or autoescape off"),
+        );
+    }
+    let shown = checked.sample.as_deref().map(unescape);
+    match field.kind {
+        Kind::Subject => display_length(
+            &shown,
+            &field.at,
+            SUBJECT_DISPLAY_CHARS,
+            code::SUBJECT_TOO_LONG,
+            issues,
+        ),
+        Kind::Preheader => display_length(
+            &shown,
+            &field.at,
+            PREHEADER_DISPLAY_CHARS,
+            code::PREHEADER_TOO_LONG,
+            issues,
+        ),
+        Kind::Raw => check_raw(field, checked.sample.as_deref(), issues),
+        _ => {}
+    }
+}
+
+/// The issues of what MJML code cannot hold: a condition on a section or block, and an image
+/// that is not a plain URL. A snippet block is already refused by [`check_sources`].
+pub(crate) fn not_convertible(content: &BlocksContent) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for section in &content.sections {
+        if section.visible_if.is_some() {
+            issues.push(
+                Issue::new(
+                    code::NOT_CONVERTIBLE,
+                    block_at(&section.id, Some("visible_if")),
+                )
+                .with_message("MJML code cannot hold a visibility condition"),
+            );
+        }
+    }
+    for (_, block) in blocks_of(content) {
+        if block.visible_if().is_some() {
+            issues.push(
+                Issue::new(
+                    code::NOT_CONVERTIBLE,
+                    block_at(block.id(), Some("visible_if")),
+                )
+                .with_message("MJML code cannot hold a visibility condition"),
+            );
+        }
+        if let Block::Image(image) = block
+            && !matches!(image.src, ImageSrc::Url(_))
+        {
+            issues.push(
+                Issue::new(code::NOT_CONVERTIBLE, block_at(&image.id, Some("src")))
+                    .with_message("only an image with a URL converts to MJML code"),
+            );
+        }
+    }
+    issues
+}
+
+/// The references an image names: an asset needs a URL in the extras, and the theme logo needs a
+/// theme whose logo has one. A document with neither input has none to check.
+pub(crate) fn check_references(
+    content: &BlocksContent,
+    extras: &RenderExtras,
+    issues: &mut Vec<Issue>,
+) {
+    for (_, block) in blocks_of(content) {
+        let Block::Image(image) = block else {
+            continue;
+        };
+        let at = block_at(&image.id, Some("src"));
+        match &image.src {
+            ImageSrc::Url(_) => {}
+            ImageSrc::Asset(id) => {
+                if extras.asset_url(id).is_none() {
+                    issues.push(Issue::new(code::BROKEN_ASSET_REFERENCE, at));
+                }
+            }
+            ImageSrc::Theme(ThemeSlot::Logo) => {
+                if extras.theme_logo_url().is_none() {
+                    issues.push(Issue::new(code::BROKEN_THEME_REFERENCE, at));
+                }
+            }
+        }
+    }
 }
 
 fn display_length(
@@ -373,11 +480,12 @@ fn check_sample_render(
     content: &BlocksContent,
     catalog: &FieldCatalog,
     env: &minijinja::Environment<'static>,
+    extras: &RenderExtras,
     issues: &mut Vec<Issue>,
 ) {
     const AT: &str = "/blocks";
     let values = sample_context(catalog);
-    match build(content, env, &values, false) {
+    match build(content, env, &values, extras, false) {
         Ok(built) => {
             if content.category == Category::Marketing
                 && !links_to(&built.html, SAMPLE_UNSUBSCRIBE_URL)
@@ -426,11 +534,12 @@ mod tests {
     use crate::content::{content_type_of, validate_document};
     use crate::context::RenderContext;
     use crate::issue::{Severity, severity_of};
+    use crate::migrate::read_doc;
 
     fn newsletter() -> TemplateDocument {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/blocks/newsletter.doc.json");
-        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+        read_doc(&fs::read_to_string(path).unwrap())
     }
 
     fn catalog() -> FieldCatalog {
@@ -447,7 +556,7 @@ mod tests {
     fn after(change: impl FnOnce(&mut BlocksContent)) -> Vec<(&'static str, String)> {
         let mut doc = newsletter();
         change(doc.blocks.as_mut().expect("block content"));
-        validate(&doc, &catalog())
+        validate(&doc, &catalog(), &RenderExtras::default())
             .into_iter()
             .map(|issue| (issue.code, issue.at))
             .collect()
@@ -477,7 +586,7 @@ mod tests {
         if let Block::Heading(heading) = block(doc.blocks.as_mut().unwrap(), "intro_title") {
             heading.text = "Hi {{ person.nope }}".into();
         }
-        let issues = validate(&doc, &catalog());
+        let issues = validate(&doc, &catalog(), &RenderExtras::default());
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].code, code::UNKNOWN_MERGE_FIELD);
         assert_eq!(issues[0].at, "/blocks/block/intro_title/text");
@@ -570,11 +679,17 @@ mod tests {
     #[test]
     fn a_schema_or_content_failure_is_blocking() {
         let mut doc = newsletter();
-        doc.schema = 2;
-        assert_eq!(validate(&doc, &catalog())[0].code, code::UNSUPPORTED_SCHEMA);
+        doc.schema = 3;
+        assert_eq!(
+            validate(&doc, &catalog(), &RenderExtras::default())[0].code,
+            code::UNSUPPORTED_SCHEMA
+        );
         let mut empty = newsletter();
         empty.blocks = None;
-        assert_eq!(validate(&empty, &catalog())[0].code, code::MISSING_CONTENT);
+        assert_eq!(
+            validate(&empty, &catalog(), &RenderExtras::default())[0].code,
+            code::MISSING_CONTENT
+        );
     }
 
     #[test]
@@ -590,7 +705,7 @@ mod tests {
             if let Block::Text(rich) = block(doc.blocks.as_mut().unwrap(), "intro_text") {
                 rich.content = content.into();
             }
-            let issues = validate(&doc, &catalog());
+            let issues = validate(&doc, &catalog(), &RenderExtras::default());
             assert_eq!(issues.len(), 1, "{content}: {issues:?}");
             assert_eq!(issues[0].code, code::SANITIZER_REJECTED);
             assert_eq!(issues[0].at, "/blocks/block/intro_text/content");
@@ -609,6 +724,7 @@ mod tests {
                 c.sections[1].columns[0].push(Block::RawHtml(RawHtml {
                     id: "raw1".into(),
                     html,
+                    visible_if: None,
                 }));
             })
         };
@@ -641,6 +757,7 @@ mod tests {
                     background_color: None,
                     padding: None,
                     columns: vec![vec![]],
+                    visible_if: None,
                 });
             }
         });
@@ -655,6 +772,7 @@ mod tests {
                     Block::Spacer(crate::content::blocks::Spacer {
                         id: format!("sp{n}"),
                         height: 1,
+                        visible_if: None,
                     })
                 })
                 .collect();
@@ -679,6 +797,7 @@ mod tests {
                 c.sections[0].columns[0].push(Block::RawHtml(RawHtml {
                     id: format!("big{n}"),
                     html: "x".repeat(MAX_RAW_HTML_BYTES),
+                    visible_if: None,
                 }));
             }
         });
@@ -733,7 +852,7 @@ mod tests {
             let value = value.to_owned();
             after(move |c| {
                 if let Block::Image(image) = block(c, "hero_image") {
-                    image.src = value;
+                    image.src = ImageSrc::Url(value);
                 }
             })
         };
@@ -762,10 +881,11 @@ mod tests {
         let image = after(|c| {
             c.sections[0].columns[0].push(Block::Image(Image {
                 id: "noalt".into(),
-                src: "https://a.example/i.png".into(),
+                src: ImageSrc::Url("https://a.example/i.png".into()),
                 alt: " ".into(),
                 href: None,
                 width: None,
+                visible_if: None,
             }));
         });
         assert_eq!(
@@ -806,6 +926,7 @@ mod tests {
             c.sections[1].columns[0].push(Block::RawHtml(RawHtml {
                 id: "fat".into(),
                 html: format!("<p>{}</p>", "x".repeat(95_000)),
+                visible_if: None,
             }));
         });
         assert_eq!(near_clip, [entry(code::HTML_NEAR_CLIP, "/blocks")]);
@@ -906,7 +1027,7 @@ mod tests {
             if let Block::Heading(heading) = block(doc.blocks.as_mut().unwrap(), "intro_title") {
                 heading.text = text.into();
             }
-            let issues = validate(&doc, &catalog());
+            let issues = validate(&doc, &catalog(), &RenderExtras::default());
             let rendered_html = crate::render_email(&doc, &sample, &crate::Hooks::untracked());
             match rendered {
                 Some(expected) => {
@@ -934,6 +1055,7 @@ mod tests {
                 c.sections[1].columns[0].push(Block::RawHtml(RawHtml {
                     id: "raw1".into(),
                     html,
+                    visible_if: None,
                 }));
             })
         };
@@ -963,6 +1085,7 @@ mod tests {
         doc.blocks.as_mut().unwrap().sections[1].columns[0].push(Block::RawHtml(RawHtml {
             id: "raw1".into(),
             html: "{{ person.name | safe }}".into(),
+            visible_if: None,
         }));
         let mut context = RenderContext::sample(&catalog());
         context
@@ -1098,5 +1221,159 @@ mod tests {
             }),
             Vec::new()
         );
+    }
+
+    fn newsletter_with(edit: impl FnOnce(&mut serde_json::Value)) -> TemplateDocument {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/blocks/newsletter.doc.json");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        edit(&mut value);
+        read_doc(&value.to_string())
+    }
+
+    fn codes_with(doc: &TemplateDocument, extras: &RenderExtras) -> Vec<(&'static str, String)> {
+        validate(doc, &catalog(), extras)
+            .into_iter()
+            .filter(Issue::is_blocking)
+            .map(|issue| (issue.code, issue.at))
+            .collect()
+    }
+
+    const ASSET: &str = "0192b1a4-7c3e-7000-8000-00000000b001";
+
+    #[test]
+    fn asset_and_theme_references_must_resolve() {
+        let asset = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["columns"][0][0]["src"] =
+                serde_json::json!({"asset": ASSET});
+        });
+        assert_eq!(
+            codes_with(&asset, &RenderExtras::default()),
+            [(
+                "broken_asset_reference",
+                "/blocks/block/hero_image/src".to_owned()
+            )]
+        );
+        let mut extras = RenderExtras::default();
+        extras
+            .assets
+            .insert(ASSET.into(), "https://cdn.example/a.png".into());
+        assert_eq!(codes_with(&asset, &extras), Vec::new());
+
+        let logo = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["columns"][0][0]["src"] =
+                serde_json::json!({"theme": "logo"});
+        });
+        assert_eq!(
+            codes_with(&logo, &extras),
+            [(
+                "broken_theme_reference",
+                "/blocks/block/hero_image/src".to_owned()
+            )]
+        );
+        extras.theme = Some(crate::theme::ThemeTokens {
+            logo: Some(ASSET.into()),
+            ..Default::default()
+        });
+        assert_eq!(codes_with(&logo, &extras), Vec::new());
+    }
+
+    #[test]
+    fn a_snippet_block_is_a_broken_reference_with_or_without_content() {
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][1]["columns"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"type": "snippet", "id": "sn", "snippet_id": ASSET}));
+        });
+        let expected = [(
+            "broken_snippet_reference",
+            "/blocks/block/sn/snippet_id".to_owned(),
+        )];
+        assert_eq!(codes_with(&doc, &RenderExtras::default()), expected);
+        let mut extras = RenderExtras::default();
+        extras.snippets.insert(
+            ASSET.into(),
+            crate::content::blocks::SnippetContent::default(),
+        );
+        assert_eq!(codes_with(&doc, &extras), expected);
+        assert!(crate::blocks_to_mjml(doc.blocks.as_ref().unwrap()).is_err());
+    }
+
+    #[test]
+    fn a_condition_is_bounded_in_size_and_depth_and_listed_in_order() {
+        let big = serde_json::json!({"v": "x".repeat(17 * 1024)});
+        let mut deep = serde_json::json!(1);
+        for _ in 0..40 {
+            deep = serde_json::json!([deep]);
+        }
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["visible_if"] = big.clone();
+            v["blocks"]["sections"][1]["columns"][0][0]["visible_if"] = deep.clone();
+            v["blocks"]["sections"][1]["columns"][0][1]["visible_if"] =
+                serde_json::json!({"ok": 1});
+        });
+        let issues = codes_with(&doc, &RenderExtras::default());
+        let too_large: Vec<_> = issues
+            .iter()
+            .filter(|(code, _)| *code == "condition_too_large")
+            .collect();
+        assert_eq!(
+            too_large,
+            [
+                &(
+                    "condition_too_large",
+                    "/blocks/block/hero/visible_if".to_owned()
+                ),
+                &(
+                    "condition_too_large",
+                    "/blocks/block/intro_title/visible_if".to_owned()
+                ),
+            ]
+        );
+        let ids: Vec<&str> = crate::conditions(doc.blocks.as_ref().unwrap())
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, ["hero", "intro_title", "intro_text"]);
+    }
+
+    #[test]
+    fn a_condition_on_a_section_or_block_blocks_publishing_for_now() {
+        let none = newsletter_with(|_| {});
+        assert_eq!(codes_with(&none, &RenderExtras::default()), Vec::new());
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["visible_if"] = serde_json::json!({"all": []});
+            v["blocks"]["sections"][1]["columns"][0][1]["visible_if"] =
+                serde_json::json!({"all": []});
+        });
+        assert_eq!(
+            codes_with(&doc, &RenderExtras::default()),
+            [
+                (
+                    "condition_unsupported",
+                    "/blocks/block/hero/visible_if".to_owned()
+                ),
+                (
+                    "condition_unsupported",
+                    "/blocks/block/intro_text/visible_if".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_document_with_a_condition_or_an_asset_image_does_not_convert_to_mjml() {
+        let conditioned = newsletter_with(|v| {
+            v["blocks"]["sections"][1]["visible_if"] = serde_json::json!({"ok": 1});
+        });
+        let error = crate::blocks_to_mjml(conditioned.blocks.as_ref().unwrap()).unwrap_err();
+        assert_eq!(error.issues[0].code, code::NOT_CONVERTIBLE);
+        let asset = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["columns"][0][0]["src"] =
+                serde_json::json!({"asset": ASSET});
+        });
+        assert!(crate::blocks_to_mjml(asset.blocks.as_ref().unwrap()).is_err());
     }
 }
