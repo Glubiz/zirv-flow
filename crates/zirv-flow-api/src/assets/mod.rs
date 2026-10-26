@@ -96,6 +96,10 @@ pub(crate) struct AssetOwnerBody {
     kind: String,
     id: Uuid,
     version: i32,
+    /// The owner's current name; null when the owner no longer exists.
+    name: Option<String>,
+    /// Whether the owner is archived.
+    archived: bool,
 }
 
 impl From<&AssetOwner> for AssetOwnerBody {
@@ -104,6 +108,8 @@ impl From<&AssetOwner> for AssetOwnerBody {
             kind: owner.owner_kind.clone(),
             id: owner.owner_id,
             version: owner.version,
+            name: owner.name.clone(),
+            archived: owner.archived,
         }
     }
 }

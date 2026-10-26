@@ -17,6 +17,8 @@ interface Props {
   onClose: () => void;
   /** Offer the "Theme logo" choice: pass it when a theme is in effect. */
   themeLogo?: boolean;
+  /** Offer "Use a web address"; false where only a library image can be used, such as a theme logo. */
+  allowUrl?: boolean;
 }
 
 const THEME_LOGO = "theme-logo";
@@ -31,12 +33,12 @@ export function httpsAddress(text: string): string | null {
   }
 }
 
-export function AssetPicker({ open, onPick, onClose, themeLogo = false }: Props) {
+export function AssetPicker({ open, onPick, onClose, themeLogo = false, allowUrl = true }: Props) {
   const { ws = "" } = useParams();
-  return open ? <Picker workspaceId={ws} onPick={onPick} onClose={onClose} themeLogo={themeLogo} /> : null;
+  return open ? <Picker workspaceId={ws} onPick={onPick} onClose={onClose} themeLogo={themeLogo} allowUrl={allowUrl} /> : null;
 }
 
-function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open"> & { workspaceId: string }) {
+function Picker({ workspaceId, onPick, onClose, themeLogo, allowUrl }: Omit<Props, "open"> & { workspaceId: string }) {
   const access = useAssetAccess(workspaceId);
   const { resource, hasMore, loadingMore, loadMoreFailed, loadMore, add } = useAssets(workspaceId);
   const maxBytes = resource.status === "ready" ? resource.data.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
@@ -210,9 +212,11 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
           </>
         )}
         <div className="dialog-actions dialog-actions-wrap">
-          <Button onClick={() => setByAddress(!byAddress)} className="btn-ghost">
-            {byAddress ? "Choose from images" : "Use a web address"}
-          </Button>
+          {allowUrl ? (
+            <Button onClick={() => setByAddress(!byAddress)} className="btn-ghost">
+              {byAddress ? "Choose from images" : "Use a web address"}
+            </Button>
+          ) : null}
           <Button onClick={close}>Cancel</Button>
           <Button variant="primary" disabled={!ready} onClick={use}>
             Use image

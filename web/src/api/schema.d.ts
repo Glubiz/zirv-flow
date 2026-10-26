@@ -4604,10 +4604,14 @@ export interface components {
         };
         /** @description A published version that uses an asset. */
         AssetOwnerBody: {
+            /** @description Whether the owner is archived. */
+            archived: boolean;
             /** Format: uuid */
             id: string;
             /** @description `template`, `theme` or `snippet`. */
             kind: string;
+            /** @description The owner's current name; null when the owner no longer exists. */
+            name?: string | null;
             /** Format: int32 */
             version: number;
         };
@@ -10087,6 +10091,17 @@ export interface components {
             flow_state: string;
             /** @description The templates of the flow that use the theme. */
             template_ids: string[];
+        };
+        /** @description A theme in the list, with what a card shows. */
+        ThemeListItemBody: components["schemas"]["ThemeBody"] & {
+            /** @description The current version's tokens, or the draft's while the theme has never been published. */
+            tokens: Record<string, never>;
+            /**
+             * Format: int64
+             * @description How many templates, not archived, use the theme: their draft or current version names it,
+             *     and, for the default theme, they follow the default.
+             */
+            used_by_templates: number;
         };
         /** @description The rendered sample and the theme's validation results. */
         ThemePreviewBody: {
@@ -26538,7 +26553,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ThemeBody"][];
+                    "application/json": components["schemas"]["ThemeListItemBody"][];
                 };
             };
             /** @description archived is not true or false */
