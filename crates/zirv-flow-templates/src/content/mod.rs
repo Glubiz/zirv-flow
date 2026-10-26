@@ -13,6 +13,7 @@ mod webhook;
 
 use std::fmt;
 
+use crate::context::RenderExtras;
 use crate::document::{Channel, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
@@ -37,6 +38,17 @@ pub trait TemplateContent: Sync {
 
     /// The publish checks for a document this type handles.
     fn validate(&self, doc: &TemplateDocument, catalog: &FieldCatalog) -> Vec<Issue>;
+
+    /// [`validate`](Self::validate) with the resolved render inputs. A type that reads none of
+    /// them keeps this default.
+    fn validate_with(
+        &self,
+        doc: &TemplateDocument,
+        catalog: &FieldCatalog,
+        _extras: &RenderExtras,
+    ) -> Vec<Issue> {
+        self.validate(doc, catalog)
+    }
 
     /// The render call the type's documents use.
     fn render_kind(&self) -> RenderKind;
@@ -100,6 +112,19 @@ pub fn validate_document(
     catalog: &FieldCatalog,
 ) -> Result<Vec<Issue>, ContentError> {
     validate_in(&REGISTRY, doc, catalog)
+}
+
+/// [`validate_document`] with the resolved render inputs.
+pub fn validate_document_with(
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+    extras: &RenderExtras,
+) -> Result<Vec<Issue>, ContentError> {
+    REGISTRY
+        .iter()
+        .find(|content| content.handles(doc))
+        .map(|content| content.validate_with(doc, catalog, extras))
+        .ok_or(ContentError::UnsupportedDocument)
 }
 
 /// [`validate_document`] over a given set of types, so a test can register one of its own.

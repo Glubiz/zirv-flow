@@ -68,7 +68,13 @@ export function readDocument(document: unknown): Editable {
   }
   if (doc["mode"] === "blocks" && doc["channel"] === "email" && typeof doc["blocks"] === "object" && doc["blocks"] !== null) {
     const schema = doc["schema"];
-    return { kind: "blocks", content: readContent(doc["blocks"]), newer: typeof schema === "number" && schema > BLOCKS_SCHEMA, rest: doc };
+    const content = readContent(doc["blocks"]);
+    if (schema === 1) {
+      // A schema 1 document renders from its own settings, with no theme and no footer.
+      content.theme ??= "none";
+      content.footer ??= "none";
+    }
+    return { kind: "blocks", content, newer: typeof schema === "number" && schema > BLOCKS_SCHEMA, rest: doc };
   }
   if (doc["mode"] === "code" && doc["channel"] === "webhook" && doc["webhook"] !== undefined) {
     const headers = record(webhook["headers"]);
@@ -101,7 +107,7 @@ export function writeDocument(editable: Editable): Record<string, unknown> {
     return { ...editable.rest, email };
   }
   if (editable.kind === "blocks") {
-    return editable.newer ? editable.rest : { ...editable.rest, blocks: editable.content };
+    return editable.newer ? editable.rest : { ...editable.rest, schema: BLOCKS_SCHEMA, blocks: editable.content };
   }
   if (editable.kind === "webhook") {
     const headers: Record<string, string> = {};

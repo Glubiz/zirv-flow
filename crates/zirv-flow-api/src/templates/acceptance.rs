@@ -399,7 +399,7 @@ mod tests {
 
     /// A valid marketing email: a sender, a language and the unsubscribe link.
     fn email_doc(subject: &str, body: &str) -> Value {
-        json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+        json!({"schema": 2, "channel": "email", "mode": "code", "email": {
             "subject": subject, "sender": SENDER, "lang": "en", "category": "marketing",
             "html": format!("<p>{body}</p><a href=\"{{{{ system.unsubscribe_url }}}}\">Unsubscribe</a>"),
             "text": format!("{body} {{{{ system.unsubscribe_url }}}}")
@@ -407,7 +407,7 @@ mod tests {
     }
 
     fn webhook_doc(body: &str) -> Value {
-        json!({"schema": 1, "channel": "webhook", "mode": "code",
+        json!({"schema": 2, "channel": "webhook", "mode": "code",
                "webhook": {"headers": {"X-Plan": "{{ person.plan }}"}, "body": body}})
     }
 
@@ -934,9 +934,9 @@ mod tests {
             doc["email"]["category"] = json!("transactional");
             draft(doc).await
         };
-        let blocks = draft(json!({"schema": 1, "channel": "email", "mode": "blocks"})).await;
+        let blocks = draft(json!({"schema": 2, "channel": "email", "mode": "blocks"})).await;
         let nonsense = draft(json!({"channel": "email"})).await;
-        let incomplete = draft(json!({"schema": 1, "channel": "email", "mode": "code",
+        let incomplete = draft(json!({"schema": 2, "channel": "email", "mode": "code",
                                       "email": {"subject": "", "html": ""}}))
         .await;
 
@@ -1102,7 +1102,7 @@ mod tests {
     }
 
     fn mjml_doc(body: &str, footer: &str) -> Value {
-        json!({"schema": 1, "channel": "email", "mode": "code", "email": {
+        json!({"schema": 2, "channel": "email", "mode": "code", "email": {
             "subject": "Hello {{ person.plan }}", "sender": SENDER, "category": "marketing",
             "syntax": "mjml",
             "html": format!(
@@ -1187,7 +1187,7 @@ mod tests {
 
     /// A valid marketing block email: a sender, a language and the unsubscribe link.
     fn blocks_doc(subject: &str, footer: &str) -> Value {
-        json!({"schema": 1, "channel": "email", "mode": "blocks", "blocks": {
+        json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
         "subject": subject, "sender": SENDER, "lang": "en", "category": "marketing",
         "sections": [
             {"id": "intro", "columns": [[
@@ -1198,6 +1198,118 @@ mod tests {
                 {"type": "text", "id": "legal", "content": footer}
             ]]}
         ]}})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_visibility_condition_blocks_publishing_until_conditions_can_be_sent(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let mut document = blocks_doc("Welcome", footer);
+        document["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = json!({"all": []});
+        let id = f.create("Conditioned", document).await;
+
+        let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "template_invalid");
+        assert!(
+            refused.body["template_issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|issue| {
+                    issue["code"] == "condition_unsupported"
+                        && issue["at"] == "/blocks/block/title/visible_if"
+                }),
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(f.count("SELECT count(*) FROM template_versions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_stored_schema_one_version_is_served_at_schema_two_and_stays_schema_one(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let id = f.create("Old", email_doc("First", "one")).await;
+        sqlx::query("UPDATE template_drafts SET document = jsonb_set(document, '{schema}', '1') WHERE template_id = $1::uuid")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+
+        let served = f.lead("GET", &format!("/{id}/versions/1"), None).await;
+
+        assert_eq!(served.body["document"], email_doc("First", "one"));
+        let stored: i32 = sqlx::query_scalar(
+            "SELECT (document->>'schema')::int FROM template_versions WHERE template_id = $1::uuid AND version = 1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, 1, "the stored row is not rewritten");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_condition_nested_200_levels_deep_is_a_client_error_not_a_crash(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let id = f.create("Deep", blocks_doc("Welcome", footer)).await;
+        let mut deep = json!(1);
+        for _ in 0..200 {
+            deep = json!([deep]);
+        }
+        let mut document = blocks_doc("Welcome", footer);
+        document["blocks"]["sections"][0]["columns"][0][0]["visible_if"] = deep;
+
+        let reply = f.put_draft(&id, document).await;
+
+        assert!(reply.status.is_client_error(), "{:?}", reply.status);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_schema_one_block_draft_is_saved_and_served_at_schema_two(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#;
+        let id = f.create("Old", blocks_doc("Welcome", footer)).await;
+        let mut old = blocks_doc("Welcome", footer);
+        old["schema"] = json!(1);
+        old["blocks"]["sections"][0]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "image", "id": "pic", "src": "https://img.example/a.png", "alt": "A"}));
+
+        let saved = f.put_draft(&id, old).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let document = &saved.body["draft"]["document"];
+        assert_eq!(document["schema"], 2);
+        assert_eq!(document["blocks"]["theme"], "none");
+        assert_eq!(document["blocks"]["footer"], "none");
+        assert_eq!(
+            document["blocks"]["sections"][0]["columns"][0][2]["src"],
+            json!({"url": "https://img.example/a.png"})
+        );
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(read.body["draft"]["document"], *document);
     }
 
     #[sqlx::test]
@@ -1493,7 +1605,7 @@ mod tests {
         assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(refused.body["code"], "template_unknown_block");
         let mut newer = blocks_doc("Welcome", footer);
-        newer["schema"] = json!(2);
+        newer["schema"] = json!(3);
         assert_eq!(
             f.put_draft(&id, newer).await.body["code"],
             "template_unsupported_schema"

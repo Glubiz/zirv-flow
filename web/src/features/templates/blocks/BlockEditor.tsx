@@ -29,7 +29,7 @@ import {
   updateBlock,
   updateSection,
   BLOCK_TYPES,
-  type BlockType,
+  type PaletteType,
   type BlocksContent,
   type Drag,
   type Drop,
@@ -99,7 +99,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
     setStatus(`Added a section with ${columns} ${columns === 1 ? "column" : "columns"}.`);
   }
 
-  function addBlock(type: BlockType) {
+  function addBlock(type: PaletteType) {
     if (blockCount(content) >= MAX_BLOCKS) return;
     const block = newBlock(type, content);
     const { base, place } = placeNewBlock(content, selected);
