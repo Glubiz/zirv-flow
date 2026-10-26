@@ -25,6 +25,27 @@ export interface ProblemDetails {
   issues?: DefinitionIssue[];
   /** What is wrong with a flow's draft (`flow_invalid`). */
   flowIssues?: FlowProblemIssue[];
+  /** What is wrong with a snippet's content (`snippet_invalid`). */
+  templateIssues?: ProblemTemplateIssue[];
+  /** The templates that hold a snippet (`snippet_in_use`). */
+  snippetTemplates?: NamedRef[];
+  /** The themes that use a snippet (`snippet_in_use`). */
+  snippetThemes?: NamedRef[];
+}
+
+/** A thing a problem names, by id and name. */
+export interface NamedRef {
+  id: string;
+  name: string;
+}
+
+/** One issue of a template document as a problem lists it. */
+export interface ProblemTemplateIssue {
+  code: string;
+  severity: string;
+  at: string;
+  field?: string | null;
+  message?: string | null;
 }
 
 /** One issue of a flow as a problem lists it: a fixed code and the step, connection or pointer it concerns. */
@@ -45,6 +66,9 @@ export class ApiError extends Error {
   readonly errors: FieldError[];
   readonly issues: DefinitionIssue[];
   readonly flowIssues: FlowProblemIssue[];
+  readonly templateIssues: ProblemTemplateIssue[];
+  readonly snippetTemplates: NamedRef[];
+  readonly snippetThemes: NamedRef[];
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -58,6 +82,9 @@ export class ApiError extends Error {
     this.errors = problem.errors ?? [];
     this.issues = problem.issues ?? [];
     this.flowIssues = problem.flowIssues ?? [];
+    this.templateIssues = problem.templateIssues ?? [];
+    this.snippetTemplates = problem.snippetTemplates ?? [];
+    this.snippetThemes = problem.snippetThemes ?? [];
   }
 }
 
@@ -81,6 +108,9 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       errors: fieldErrors(body["errors"]),
       issues: definitionIssues(body["issues"]),
       flowIssues: flowProblemIssues(body["flow_issues"]),
+      templateIssues: templateIssues(body["template_issues"]),
+      snippetTemplates: namedRefs(body["snippet_templates"]),
+      snippetThemes: namedRefs(body["snippet_themes"]),
     });
   }
   return new ApiError({
@@ -137,5 +167,24 @@ function flowProblemIssues(value: unknown): FlowProblemIssue[] {
     const edge = text(entry["edge"]);
     const at = text(entry["at"]);
     return [{ code: entry["code"], ...(node ? { node } : {}), ...(edge ? { edge } : {}), ...(at ? { at } : {}) }];
+  });
+}
+
+function namedRefs(value: unknown): NamedRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { id, name } = entry;
+    return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
+  });
+}
+
+function templateIssues(value: unknown): ProblemTemplateIssue[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { code, severity, at } = entry;
+    if (typeof code !== "string" || typeof severity !== "string" || typeof at !== "string") return [];
+    return [{ code, severity, at, field: text(entry["field"]), message: text(entry["message"]) }];
   });
 }

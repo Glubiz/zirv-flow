@@ -1,4 +1,4 @@
-import { SelectField, TextAreaField, TextField } from "../../../ui";
+import { Button, SelectField, TextAreaField, TextField } from "../../../ui";
 import { NumberField } from "./NumberField";
 import { FieldIssues } from "../IssueList";
 import { issuesAt, type TemplateIssue } from "../model";
@@ -12,6 +12,8 @@ interface Props {
   readOnly: boolean;
   onTarget: (target: InsertTarget) => void;
   issues: readonly TemplateIssue[];
+  /** Opens the image library for an image block. Absent where the image address is typed. */
+  onPickImage?: () => void;
 }
 
 const ALIGNS: readonly { id: Align; label: string }[] = [
@@ -39,7 +41,7 @@ function AlignField({ value, onChange, readOnly, label }: { value: Align; onChan
 }
 
 /** The settings of the selected block: one panel per block type. */
-export function BlockSettings({ block, onChange, readOnly, onTarget, issues }: Props) {
+export function BlockSettings({ block, onChange, readOnly, onTarget, issues, onPickImage }: Props) {
   const own = issuesAt(issues, `/blocks/block/${block.id}`);
   const at = (field: string) => issuesAt(own, `/blocks/block/${block.id}/${field}`);
   const merge = (label: string) => ({
@@ -74,6 +76,11 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues }: P
       ) : null}
       {block.type === "image" ? (
         <>
+          {onPickImage && !readOnly ? (
+            <div>
+              <Button onClick={onPickImage}>Choose image…</Button>
+            </div>
+          ) : null}
           {"url" in block.src ? (
             <TextField
               label="Image address"
@@ -87,7 +94,7 @@ export function BlockSettings({ block, onChange, readOnly, onTarget, issues }: P
           ) : (
             <TextField
               label="Image source"
-              hint="Set outside this editor; kept as it is."
+              hint={onPickImage ? "Choose another image to replace it." : "Set outside this editor; kept as it is."}
               value={"asset" in block.src ? `Uploaded image ${block.src.asset}` : "The theme logo"}
               readOnly
               autoComplete="off"

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type DragEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 
-import { Button, MenuButton } from "../../../ui";
+import { Button, MenuButton, Sheet } from "../../../ui";
+import { AssetPicker, type AssetPick } from "../../assets";
 import { IssueList } from "../IssueList";
 import { MergeTagPicker } from "../MergeTagPicker";
 import { TabBar } from "../TabBar";
@@ -45,13 +46,17 @@ const PANEL_TABS: readonly { id: PanelTab; label: string }[] = [
   { id: "message", label: "Message" },
 ];
 
-interface Props {
+interface CommonProps {
   workspaceId: string;
   doc: Blocks;
   onChange: (next: Editable) => void;
   readOnly: boolean;
   issues: readonly TemplateIssue[];
   checked: boolean;
+}
+
+interface DocumentProps extends CommonProps {
+  mode?: "document";
   /** The template, for its UTM override in the Message tab. */
   template: Template;
   onTemplate: (next: Template) => void;
@@ -59,8 +64,25 @@ interface Props {
   onConvert?: () => void;
 }
 
+/** A snippet: one column of blocks, with no sections, no document style and no message settings. */
+interface SnippetProps extends CommonProps {
+  mode: "snippet";
+  /** Shown at the start of the toolbar, before the merge-tag button. */
+  toolbar?: ReactNode;
+}
+
+type Props = DocumentProps | SnippetProps;
+
+/** The image block's source for what the library gave back. */
+function pickedSource(pick: AssetPick) {
+  if ("asset" in pick) return { asset: pick.asset.id };
+  return "themeLogo" in pick ? { theme: "logo" as const } : { url: pick.url };
+}
+
 /** The block editor pane: palette, canvas, a docked settings panel, the validation list and the merge-tag picker. */
-export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, checked, template, onTemplate, onConvert }: Props) {
+export function BlockEditor(props: Props) {
+  const { workspaceId, doc, onChange, readOnly, issues, checked } = props;
+  const snippet = props.mode === "snippet";
   const content = doc.content;
   const locked = readOnly || doc.newer;
   const [selected, setSelected] = useState<string | null>(null);
@@ -68,6 +90,8 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
   const [drag, setDrag] = useState<Drag | null>(null);
   const [target, setTarget] = useState<InsertTarget | null>(null);
   const [status, setStatus] = useState("");
+  const [picking, setPicking] = useState(false);
+  const [inserting, setInserting] = useState(false);
   const pane = useRef<HTMLElement>(null);
   /** Selectors to try, in order, for the control that takes focus after the next render. */
   const refocus = useRef<string[]>([]);
@@ -155,6 +179,12 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
   const block = selected === null ? undefined : findById(content, selected);
   const section = selected === null ? undefined : content.sections.find((entry) => entry.id === selected);
 
+  function pickImage(pick: AssetPick) {
+    setPicking(false);
+    if (block?.type !== "image") return;
+    commit(updateBlock(content, block.id, () => ({ ...block, src: pickedSource(pick) })));
+  }
+
   function go(where: string, issue: TemplateIssue) {
     const id = issueBlockId(issue.at);
     if (id !== null) {
@@ -169,17 +199,28 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
 
   return (
     <section ref={pane} className="tp-pane be-pane" aria-label="Editor">
-      <div className="be-head">
-        <MenuButton
-          label="Template mode"
-          placement="below-start"
-          buttonClassName="btn"
-          buttonContent="Mode: Blocks"
-          entries={onConvert ? [{ key: "convert", label: "Convert to MJML…", onSelect: onConvert }] : []}
-          emptyText="Converting needs permission to edit."
-        />
-        <span className="faint">One-way: code cannot become blocks again.</span>
-      </div>
+      {props.mode === "snippet" ? (
+        <div className="be-head">
+          {props.toolbar}
+          {locked ? null : (
+            <Button aria-expanded={inserting} onClick={() => setInserting((open) => !open)}>
+              Insert field
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="be-head">
+          <MenuButton
+            label="Template mode"
+            placement="below-start"
+            buttonClassName="btn"
+            buttonContent="Mode: Blocks"
+            entries={props.onConvert ? [{ key: "convert", label: "Convert to MJML…", onSelect: props.onConvert }] : []}
+            emptyText="Converting needs permission to edit."
+          />
+          <span className="faint">One-way: code cannot become blocks again.</span>
+        </div>
+      )}
       {doc.newer ? (
         <p className="notice" role="status">
           This template was written by a newer version of the editor. You can look at it and preview it, but not change it here.
@@ -190,6 +231,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
       </p>
       {locked ? null : (
         <div className="be-palette" role="group" aria-label="Add a block">
+          {snippet ? null : (
           <div className="row">
             {[1, 2, 3].map((columns) => (
               <Button
@@ -203,6 +245,7 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
               </Button>
             ))}
           </div>
+          )}
           <div className="row">
             {BLOCK_TYPES.map((entry) => (
               <Button
@@ -233,25 +276,49 @@ export function BlockEditor({ workspaceId, doc, onChange, readOnly, issues, chec
         onDrop={drop}
         onMove={move}
         onRemove={remove}
+        flat={snippet}
       />
       <div className="be-panel">
-        <TabBar label="Settings panel" tabs={PANEL_TABS} tab={tab} onTab={setTab} />
+        {snippet ? null : <TabBar label="Settings panel" tabs={PANEL_TABS} tab={tab} onTab={setTab} />}
         <div role="tabpanel" aria-label={PANEL_TABS.find((entry) => entry.id === tab)?.label} className="stack">
           {tab === "block" && block ? (
-            <BlockSettings block={block} readOnly={locked} issues={issues} onTarget={setTarget} onChange={(next) => commit(updateBlock(content, block.id, () => next))} />
+            <BlockSettings
+              block={block}
+              readOnly={locked}
+              issues={issues}
+              onTarget={setTarget}
+              onPickImage={snippet ? () => setPicking(true) : undefined}
+              onChange={(next) => commit(updateBlock(content, block.id, () => next))}
+            />
           ) : null}
-          {tab === "block" && section ? (
+          {tab === "block" && section && !snippet ? (
             <SectionSettings section={section} readOnly={locked} issues={issues} onChange={(next) => commit(updateSection(content, section.id, () => next))} />
           ) : null}
-          {tab === "block" && !block && !section ? <p className="faint">Select a block or a section to edit its settings.</p> : null}
-          {tab === "style" ? <DocumentStyleForm content={content} readOnly={locked} issues={issues} onChange={commit} /> : null}
-          {tab === "message" ? (
-            <MessageForm workspaceId={workspaceId} content={content} readOnly={locked} issues={issues} onChange={commit} onTarget={setTarget} template={template} onTemplate={onTemplate} />
+          {tab === "block" && !block && (snippet || !section) ? (
+            <p className="faint">{snippet ? "Select a block to edit its settings." : "Select a block or a section to edit its settings."}</p>
+          ) : null}
+          {props.mode !== "snippet" && tab === "style" ? <DocumentStyleForm content={content} readOnly={locked} issues={issues} onChange={commit} /> : null}
+          {props.mode !== "snippet" && tab === "message" ? (
+            <MessageForm workspaceId={workspaceId} content={content} readOnly={locked} issues={issues} onChange={commit} onTarget={setTarget} template={props.template} onTemplate={props.onTemplate} />
           ) : null}
         </div>
       </div>
       <IssueList issues={issues} checked={checked} onGo={go} />
-      {locked ? null : (
+      {locked ? null : snippet ? (
+        <>
+          {inserting ? (
+            <Sheet title="Insert a field" autoFocus={false} onClose={() => setInserting(false)}>
+              <MergeTagPicker
+                workspaceId={workspaceId}
+                disabled={target === null}
+                target={target === null ? "a text field" : target.label}
+                onInsert={(tag) => target?.insert(tag)}
+              />
+            </Sheet>
+          ) : null}
+          <AssetPicker open={picking} themeLogo onPick={pickImage} onClose={() => setPicking(false)} />
+        </>
+      ) : (
         <MergeTagPicker
           workspaceId={workspaceId}
           disabled={target === null}
