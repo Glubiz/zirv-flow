@@ -7,6 +7,9 @@ export type AssetOwner = components["schemas"]["AssetOwnerBody"];
 /** The image types the server accepts, for the file chooser. */
 export const ACCEPTED_TYPES = "image/png,image/jpeg,image/gif,image/webp";
 
+/** The server's default, used until the list says what it is. */
+export const DEFAULT_MAX_FILE_BYTES = 5 * 1024 * 1024;
+
 export const IN_USE_LINE = "Published versions use this image, so it can't be deleted.";
 
 const UNITS = ["B", "KB", "MB", "GB", "TB"] as const;

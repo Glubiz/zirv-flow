@@ -3,9 +3,8 @@ import { useParams } from "react-router";
 
 import { Button, Dialog, InlineError, ResourceView, TextField } from "../../ui";
 import { useAssetAccess } from "./access";
-import { SendingTile } from "./AssetLibraryPage";
-import { ACCEPTED_TYPES, dimensionsText, matchesSearch } from "./model";
-import { Thumb, UploadIcon } from "./Thumb";
+import { ACCEPTED_TYPES, DEFAULT_MAX_FILE_BYTES, dimensionsText, matchesSearch } from "./model";
+import { SendingTile, Thumb, UploadIcon } from "./Thumb";
 import { useAssets } from "./useAssets";
 import { useAssetUpload } from "./useAssetUpload";
 
@@ -40,7 +39,7 @@ export function AssetPicker({ open, onPick, onClose, themeLogo = false }: Props)
 function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open"> & { workspaceId: string }) {
   const access = useAssetAccess(workspaceId);
   const { resource, hasMore, loadingMore, loadMore, add } = useAssets(workspaceId);
-  const maxBytes = resource.status === "ready" ? resource.data.maxFileBytes : 5 * 1024 * 1024;
+  const maxBytes = resource.status === "ready" ? resource.data.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
   const { sending, failure, upload } = useAssetUpload(workspaceId, maxBytes);
   const [search, setSearch] = useState("");
   const [choice, setChoice] = useState<string | null>(null);
@@ -117,8 +116,6 @@ function Picker({ workspaceId, onPick, onClose, themeLogo }: Omit<Props, "open">
             <ResourceView
               resource={resource}
               loadingLabel="Loading images"
-              isEmpty={(data) => data.assets.length === 0 && !themeLogo && !access.canWrite}
-              empty={<p className="muted">No images yet. Members of the workspace upload them.</p>}
             >
               {(data) => (
                 <>

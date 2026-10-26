@@ -4,10 +4,10 @@ import { useParams } from "react-router";
 import { Button, EmptyState, InlineError, LibraryNav, ResourceView } from "../../ui";
 import { useAssetAccess } from "./access";
 import { AssetSheet } from "./AssetSheet";
-import { ACCEPTED_TYPES, dimensionsText, formatBytes, matchesSearch, type Asset } from "./model";
-import { Thumb, UploadIcon } from "./Thumb";
+import { ACCEPTED_TYPES, DEFAULT_MAX_FILE_BYTES, dimensionsText, formatBytes, matchesSearch, type Asset } from "./model";
+import { SendingTile, Thumb, UploadIcon } from "./Thumb";
 import { useAssets } from "./useAssets";
-import { useAssetUpload, type Sending } from "./useAssetUpload";
+import { useAssetUpload } from "./useAssetUpload";
 
 export function AssetLibraryPage() {
   const { ws = "" } = useParams();
@@ -17,7 +17,7 @@ export function AssetLibraryPage() {
 function Library({ workspaceId }: { workspaceId: string }) {
   const access = useAssetAccess(workspaceId);
   const { resource, hasMore, loadingMore, loadMoreFailed, loadMore, add, reload, forget } = useAssets(workspaceId);
-  const maxBytes = resource.status === "ready" ? resource.data.maxFileBytes : 5 * 1024 * 1024;
+  const maxBytes = resource.status === "ready" ? resource.data.maxFileBytes : DEFAULT_MAX_FILE_BYTES;
   const { sending, failure, upload } = useAssetUpload(workspaceId, maxBytes);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -176,22 +176,5 @@ function AssetTile({ asset, selected, onSelect }: { asset: Asset; selected: bool
         {dimensionsText(asset)} · {formatBytes(asset.size_bytes)}
       </span>
     </button>
-  );
-}
-
-export function SendingTile({ sending }: { sending: Sending }) {
-  const percent = sending.total > 0 ? Math.round((sending.sent / sending.total) * 100) : 0;
-  return (
-    <li>
-      <button type="button" className="image-tile" disabled>
-        <span className="image-thumb" aria-hidden="true">
-          <UploadIcon />
-        </span>
-        <span className="image-name">{sending.name}</span>
-        <span className="image-meta" role="status">
-          Uploading {percent}%
-        </span>
-      </button>
-    </li>
   );
 }
