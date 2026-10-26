@@ -104,7 +104,7 @@ function LogoSection({ workspaceId, logo, readOnly, onChange }: { workspaceId: s
           </>
         )}
       </div>
-      <AssetPicker open={picking} onPick={pick} onClose={() => setPicking(false)} />
+      <AssetPicker open={picking} allowUrl={false} onPick={pick} onClose={() => setPicking(false)} />
     </section>
   );
 }
