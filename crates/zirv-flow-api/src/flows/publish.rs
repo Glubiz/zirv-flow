@@ -7,11 +7,13 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::BTreeSet;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
-use zirv_flow_core::flow::{FlowSettings, Trigger};
+
+use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, Trigger};
 use zirv_flow_store::{Flow, FlowAction, FlowVersion};
 
 use super::crud::{FlowBody, FlowDetailBody, FlowVersionBody, check_flow, issues_schema};
@@ -159,6 +161,20 @@ async fn impact(
     })
 }
 
+/// The templates a graph's send and webhook nodes name, once each.
+fn named_templates(graph: &FlowGraph) -> Vec<Uuid> {
+    let named: BTreeSet<Uuid> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            NodeKind::ActionSend { template, .. } => Some(*template),
+            NodeKind::ActionWebhook { template, .. } => *template,
+            _ => None,
+        })
+        .collect();
+    named.into_iter().collect()
+}
+
 /// Validates the draft under the flow's lock and publishes it as the next version, or changes
 /// nothing.
 async fn publish_now(
@@ -172,6 +188,10 @@ async fn publish_now(
         .await
         .map_err(flow_error)?;
     refuse_if_not_allowed(locked.flow(), FlowAction::Publish)?;
+    // The templates the draft names are share-locked before they are checked, so an archive of one
+    // and this publish cannot both commit: see `lock_templates_shared`.
+    let (graph, _) = draft_of(locked.flow())?;
+    zirv_flow_store::lock_templates_shared(&mut tx, workspace, &named_templates(&graph)).await?;
     let (checked, _) = check_flow(state, &mut tx, workspace, locked.flow()).await?;
     if !checked.issues.is_empty() {
         // Dropping the transaction writes nothing.

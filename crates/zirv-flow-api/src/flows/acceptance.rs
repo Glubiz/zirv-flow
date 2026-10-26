@@ -2416,4 +2416,171 @@ mod tests {
             "a malformed path id is not found, as everywhere"
         );
     }
+
+    /// A published webhook template and a draft flow that sends it, on a workspace that can sign.
+    async fn flow_sending_a_webhook_template(f: &Fixture, pool: &PgPool) -> (String, Uuid) {
+        sqlx::query(
+            "INSERT INTO encrypted_secrets \
+                (id, workspace_id, purpose, key_id, wrapped_key, nonce, ciphertext) \
+             VALUES ($1, $2, 'webhook_signing', 'k', '\\x00', decode(repeat('00', 24), 'hex'), \
+                '\\x00')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(f.ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+        let template = Uuid::now_v7();
+        let mut connection = pool.acquire().await.unwrap();
+        zirv_flow_store::create_template(
+            &mut connection,
+            f.ws,
+            &zirv_flow_store::NewTemplate {
+                id: template,
+                name: "Hook".to_owned(),
+                channel: "webhook".to_owned(),
+                category: "transactional".to_owned(),
+                document: json!({"schema": 1, "channel": "webhook", "mode": "code",
+                    "webhook": {"headers": {}, "body": "{}"}}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let locked = zirv_flow_store::lock_template(&mut connection, f.ws, template)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_template(
+            &mut connection,
+            f.ws,
+            &locked,
+            &json!([]),
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "hook", "type": "action.webhook", "template": template,
+             "url": "https://hooks.example.com/hook"},
+            {"id": "end", "type": "exit"}
+        ], "edges": [{"id": "e1", "from": "hook", "port": "next", "to": "end"}]});
+        (f.create("Sends a hook", graph, manual()).await, template)
+    }
+
+    /// Waits until a statement on the templates table is waiting for a lock.
+    async fn blocked_on_templates(pool: &PgPool) -> bool {
+        for _ in 0..200 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                   AND wait_event_type = 'Lock' AND query ILIKE '%FROM templates%'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_publish_waits_for_an_archive_in_progress_and_then_refuses_the_archived_template(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let (flow, template) = flow_sending_a_webhook_template(&f, &pool).await;
+        // An archive that holds the template row and has not committed yet.
+        let mut archiving = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::archive_template(&mut archiving, f.ws, template)
+            .await
+            .unwrap();
+
+        let publish = {
+            let router = f.router.clone();
+            let uri = f.flows(&format!("/{flow}/publish"));
+            let login = Login {
+                cookie: f.lead.cookie.clone(),
+                csrf: f.lead.csrf.clone(),
+            };
+            tokio::spawn(
+                async move { send(&router, "POST", &uri, None, Auth::Session(&login)).await },
+            )
+        };
+        assert!(
+            blocked_on_templates(&pool).await,
+            "the publish should wait for the template row"
+        );
+        zirv_flow_store::commit(archiving).await.unwrap();
+
+        let reply = publish.await.unwrap();
+        assert_eq!(
+            reply.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            reply.body
+        );
+        assert_eq!(reply.body["code"], "flow_invalid");
+        assert_eq!(f.count("SELECT count(*) FROM flow_versions").await, 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_archive_waits_for_a_publish_in_progress_and_then_answers_template_in_use(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let (flow, template) = flow_sending_a_webhook_template(&f, &pool).await;
+        let flow_id: Uuid = flow.parse().unwrap();
+        // A publish that has share-locked the template and published the flow, and has not
+        // committed yet.
+        let mut publishing = zirv_flow_store::begin(&pool).await.unwrap();
+        let locked = zirv_flow_store::lock_flow(&mut publishing, f.ws, flow_id)
+            .await
+            .unwrap();
+        zirv_flow_store::lock_templates_shared(&mut publishing, f.ws, &[template])
+            .await
+            .unwrap();
+        zirv_flow_store::publish_flow(
+            &mut publishing,
+            &zirv_flow_store::Clock::default(),
+            f.ws,
+            &locked,
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+
+        let archive = {
+            let router = f.router.clone();
+            let uri = format!("/api/v1/workspaces/{}/templates/{template}", f.ws.as_uuid());
+            let login = Login {
+                cookie: f.lead.cookie.clone(),
+                csrf: f.lead.csrf.clone(),
+            };
+            tokio::spawn(
+                async move { send(&router, "DELETE", &uri, None, Auth::Session(&login)).await },
+            )
+        };
+        assert!(
+            blocked_on_templates(&pool).await,
+            "the archive should wait for the share lock"
+        );
+        zirv_flow_store::commit(publishing).await.unwrap();
+
+        let reply = archive.await.unwrap();
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{:?}", reply.body);
+        assert_eq!(reply.body["code"], "template_in_use");
+        assert_eq!(
+            f.count("SELECT count(*) FROM templates WHERE archived_at IS NOT NULL")
+                .await,
+            0
+        );
+    }
 }

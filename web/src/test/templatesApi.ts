@@ -40,6 +40,20 @@ export function templateBody(overrides: Doc = {}) {
   };
 }
 
+/** An item of the library list: the template and the facts the library shows. */
+export function listItem(overrides: Doc = {}) {
+  return {
+    ...templateBody(),
+    draft_changed: false,
+    checks: null,
+    active_flows: 0,
+    theme: "none",
+    edited_by_email: null,
+    edited_at: "2026-10-10T09:00:00Z",
+    ...overrides,
+  };
+}
+
 export function templateDetail(overrides: Doc = {}, document: Doc = emailDocument()) {
   return {
     ...templateBody(overrides),
@@ -119,7 +133,7 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
   return {
     ...actorRoutes,
     ...catalogRoutes(),
-    [`GET ${WS}/templates`]: () => json([current]),
+    [`GET ${WS}/templates`]: () => json([listItem({ id: current["id"], name: current["name"], current_version: current["current_version"], archived_at: current["archived_at"] })]),
     [`GET ${base}`]: () => json(current),
     [`PUT ${base}`]: async (request) => {
       const body = (await request.json()) as Doc;

@@ -79,6 +79,10 @@ pub struct AssetOwner {
     pub owner_kind: String,
     pub owner_id: Uuid,
     pub version: i32,
+    /// The owner's current name; `None` when its row is gone.
+    pub name: Option<String>,
+    /// Whether the owner is archived now.
+    pub archived: bool,
 }
 
 pub(crate) const ASSET_COLUMNS: &str = "id, workspace_id, sha256, ext, content_type, size_bytes, \
@@ -180,14 +184,25 @@ pub async fn find_asset<'e>(
     .map_err(StoreError::query)
 }
 
-/// The published versions that reference an asset, in a fixed order.
+/// The published versions that reference an asset, in a fixed order, each with its owner's
+/// current name and whether the owner is archived.
 pub async fn asset_owners<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
 ) -> Result<Vec<AssetOwner>, StoreError> {
     sqlx::query_as(
-        "SELECT owner_kind, owner_id, version FROM asset_references WHERE asset_id = $1 \
-         ORDER BY owner_kind, owner_id, version",
+        "SELECT r.owner_kind, r.owner_id, r.version, \
+                COALESCE(t.name, h.name, s.name) AS name, \
+                COALESCE(t.archived_at, h.archived_at, s.archived_at) IS NOT NULL AS archived \
+         FROM asset_references r \
+         LEFT JOIN templates t ON r.owner_kind = 'template' \
+              AND t.workspace_id = r.workspace_id AND t.id = r.owner_id \
+         LEFT JOIN themes h ON r.owner_kind = 'theme' \
+              AND h.workspace_id = r.workspace_id AND h.id = r.owner_id \
+         LEFT JOIN snippets s ON r.owner_kind = 'snippet' \
+              AND s.workspace_id = r.workspace_id AND s.id = r.owner_id \
+         WHERE r.asset_id = $1 \
+         ORDER BY r.owner_kind, r.owner_id, r.version",
     )
     .bind(id)
     .fetch_all(executor)
@@ -351,7 +366,9 @@ mod tests {
             [AssetOwner {
                 owner_kind: "template".into(),
                 owner_id: owner,
-                version: 3
+                version: 3,
+                name: None,
+                archived: false,
             }]
         );
         delete_asset(&mut connection, ws, free.id).await.unwrap();
@@ -378,6 +395,70 @@ mod tests {
         )
         .await;
         assert!(matches!(missing, Err(AssetReferenceError::Missing(_))));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn owners_carry_their_current_name_and_archived_flag_or_a_null_name(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let asset = upload(&pool, ws, "a", b"bytes").await.asset;
+        let (template, theme, snippet, gone) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        sqlx::query(
+            "INSERT INTO templates (id, workspace_id, name, channel, category, archived_at) \
+             VALUES ($1, $2, 'Welcome', 'email', 'marketing', now())",
+        )
+        .bind(template)
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO themes (id, workspace_id, name) VALUES ($1, $2, 'Brand')")
+            .bind(theme)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO snippets (id, workspace_id, name) VALUES ($1, $2, 'Footer')")
+            .bind(snippet)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        for (kind, owner) in [
+            (AssetOwnerKind::Template, template),
+            (AssetOwnerKind::Theme, theme),
+            (AssetOwnerKind::Snippet, snippet),
+            (AssetOwnerKind::Snippet, gone),
+        ] {
+            record_references(
+                &mut connection,
+                ws,
+                kind,
+                owner,
+                1,
+                &[zirv_flow_core::AssetId::from_uuid(asset.id)],
+            )
+            .await
+            .unwrap();
+        }
+
+        let owners = asset_owners(&pool, asset.id).await.unwrap();
+
+        let seen = |id: Uuid| {
+            let owner = owners.iter().find(|o| o.owner_id == id).unwrap();
+            (owner.name.clone(), owner.archived)
+        };
+        assert_eq!(owners.len(), 4);
+        assert_eq!(seen(template), (Some("Welcome".into()), true));
+        assert_eq!(seen(theme), (Some("Brand".into()), false));
+        assert_eq!(seen(snippet), (Some("Footer".into()), false));
+        assert_eq!(seen(gone), (None, false));
     }
 
     #[sqlx::test]
