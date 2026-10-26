@@ -197,6 +197,88 @@ jobs:
       - name: Build
         run: npm run build
 
+  # Browser end-to-end tests (#315): Playwright drives Chromium against the test server, which
+  # runs the e2e harness behind a loopback listener on a scratch database. The feature and its
+  # build variable are named here and in web/e2e/playwright.config.ts only
+  # (scripts/check-bench-features.sh keeps every shipped build input clear of them).
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+
+      - name: Set Up Node
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Web Dependencies
+        run: npm ci
+        working-directory: web
+
+      # The server binary embeds web/dist, so the bundle is built first.
+      - name: Build Web Bundle
+        run: npm run build
+        working-directory: web
+
+      - name: Set Up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo Registry
+        uses: actions/cache@v4.3.0
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo Build
+        uses: actions/cache@v4.3.0
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-browser-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-browser-
+
+      - name: Build Test Server
+        run: ZIRV_FLOW_BROWSER_TEST_BUILD=1 cargo build --features browser-test --bin zirv-flow-browser-test
+
+      - name: Install Chromium
+        run: npm run e2e:install
+        working-directory: web
+
+      - name: Run Browser Tests
+        run: npm run e2e
+        working-directory: web
+
+      - name: Upload Playwright Report
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: playwright-report
+          path: |
+            web/e2e/playwright-report
+            web/e2e/test-results
+          if-no-files-found: ignore
+
   postgres:
     name: PostgreSQL ${{ matrix.pg }}
     runs-on: ubuntu-latest
