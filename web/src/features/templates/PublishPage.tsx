@@ -128,7 +128,8 @@ function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps &
   const changes = useMemo(() => (live === null ? [] : diffDocuments(live.document, template.draft.document)), [live, template.draft.document]);
   const shown = focus === null ? changes : changes.filter((change) => change.key === focus);
   const summary = summarize(subjects ?? [], checks);
-  const ready = subjects !== null && summary.done && summary.failed === 0 && summary.blocking.length === 0;
+  const peopleError: ErrorSummary | null = saved.status === "error" ? describeError(saved.error) : null;
+  const ready = subjects !== null && summary.done && summary.failed === 0 && summary.blocking.length === 0 && peopleError === null;
 
   async function publish() {
     setBusy(true);
@@ -151,7 +152,7 @@ function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps &
   }
 
   const heading = published ? `Version ${published.version.version} is live` : `Review and publish version ${next}`;
-  const why = !canAdmin ? "Only workspace admins can publish." : subjects === null || !summary.done ? "Waiting for the checks." : summary.failed > 0 ? "A check could not run." : summary.blocking.length > 0 ? "Fix the blocking issues first." : null;
+  const why = !canAdmin ? "Only workspace admins can publish." : peopleError !== null ? "The saved people could not be loaded." : subjects === null || !summary.done ? "Waiting for the checks." : summary.failed > 0 ? "A check could not run." : summary.blocking.length > 0 ? "Fix the blocking issues first." : null;
   const draftCheck = checks[subject.key];
 
   return (
@@ -179,7 +180,7 @@ function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps &
       <div className="pb-split">
         <div className="pb-side">
           <ChangesPanel live={liveNumber} changes={changes} focus={focus} onFocus={setFocus} />
-          <ChecksPanel workspaceId={workspaceId} templateId={template.id} subjects={subjects ?? [SAMPLE_SUBJECT]} summary={subjects === null ? { ...summary, done: false } : summary} onRetry={() => setAgain((value) => value + 1)} />
+          <ChecksPanel workspaceId={workspaceId} templateId={template.id} subjects={subjects ?? [SAMPLE_SUBJECT]} summary={subjects === null ? { ...summary, done: false } : summary} onRetry={() => setAgain((value) => value + 1)} people={peopleError === null ? null : { error: peopleError, onRetry: saved.reload }} />
           <GoesLivePanel workspaceId={workspaceId} uses={uses} volume={volume} />
           <LastTestPanel workspaceId={workspaceId} templateId={template.id} log={log} />
           {published ? (

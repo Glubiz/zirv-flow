@@ -199,6 +199,29 @@ describe("the Review and publish page", () => {
     await waitFor(() => expect(calls.filter((call) => call.path.endsWith("/preview")).length).toBeGreaterThan(1));
   });
 
+  it("does not pass the checks when the saved people fail to load, and Retry loads them", async () => {
+    let failing = true;
+    const routes = templateRoutes({ detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE });
+    mockApi({
+      ...routes,
+      [PREVIEW]: () => rendered(),
+      [`GET ${BASE}/preview-people`]: (request) => (failing ? problem(500, "Broken", "The people could not be read.") : (routes[`GET ${BASE}/preview-people`] as (request: Request) => Response)(request)),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText("The saved people could not be loaded")).toBeInTheDocument();
+    await screen.findByTitle("Version 1 draft");
+    expect(screen.queryByText(/Nothing blocks publishing/)).not.toBeInTheDocument();
+    expect(publishButtons().every((button) => button.hasAttribute("disabled"))).toBe(true);
+
+    failing = false;
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText("Nothing blocks publishing. 4 checks passed.", undefined, WAIT)).toBeInTheDocument();
+    await waitFor(() => expect(publishButtons()[0]).toBeEnabled());
+  });
+
   it("offers a member who is not an admin the sample person only, and no way to publish", async () => {
     const calls = mockApi({ ...templateRoutes({ role: "member", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
     mount();

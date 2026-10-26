@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 
-import { describeError, type components, type Resource } from "../../api";
+import { describeError, type components, type ErrorSummary, type Resource } from "../../api";
 import { Button, EmptyState, ErrorState, InlineError, LoadingState } from "../../ui";
 import { formatDateTime } from "../../ui/format";
 import { issueBlockId } from "./blocks/document";
@@ -60,6 +60,8 @@ interface ChecksProps {
   subjects: readonly Subject[];
   summary: Summary;
   onRetry: () => void;
+  /** Set when the saved people could not be loaded: only the sample person was checked. */
+  people: { error: ErrorSummary; onRetry: () => void } | null;
 }
 
 /** The fix link of an issue: the editor, at the block when the issue names one. */
@@ -88,7 +90,7 @@ function IssueRow({ workspaceId, templateId, issue }: { workspaceId: string; tem
 }
 
 /** The checks across the saved preview people and the sample person. */
-export function ChecksPanel({ workspaceId, templateId, subjects, summary, onRetry }: ChecksProps) {
+export function ChecksPanel({ workspaceId, templateId, subjects, summary, onRetry, people }: ChecksProps) {
   const names = subjects.map((subject) => subject.label);
   const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : (names[0] ?? "");
   return (
@@ -98,13 +100,19 @@ export function ChecksPanel({ workspaceId, templateId, subjects, summary, onRetr
       </h2>
       <p className="faint">For {list}</p>
       {!summary.done ? <LoadingState label="Checking the draft" /> : null}
+      {people ? (
+        <div className="stack-tight">
+          <InlineError title="The saved people could not be loaded" detail={people.error.detail || people.error.title} traceId={people.error.traceId} />
+          <Button onClick={people.onRetry}>Retry</Button>
+        </div>
+      ) : null}
       {summary.done && summary.failed > 0 ? (
         <div className="stack-tight">
           <InlineError title="Some checks could not run" detail="Publishing waits until every check has run." traceId={null} />
           <Button onClick={onRetry}>Check again</Button>
         </div>
       ) : null}
-      {summary.done && summary.failed === 0 && summary.blocking.length === 0 ? (
+      {summary.done && summary.failed === 0 && summary.blocking.length === 0 && !people ? (
         <p className="pb-ok" role="status">
           Nothing blocks publishing. {summary.passed} {summary.passed === 1 ? "check" : "checks"} passed.
         </p>
