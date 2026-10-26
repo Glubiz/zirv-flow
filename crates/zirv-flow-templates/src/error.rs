@@ -54,6 +54,8 @@ pub enum RenderError {
     BrokenAssetReference,
     /// An image names the theme logo and no theme with a logo URL was passed.
     BrokenThemeReference,
+    /// A snippet block or the theme footer names a snippet the render input has no content for.
+    BrokenSnippetReference,
 }
 
 impl RenderError {
@@ -84,6 +86,7 @@ impl RenderError {
             Self::ConditionUnresolved => "condition_unresolved",
             Self::BrokenAssetReference => "broken_asset_reference",
             Self::BrokenThemeReference => "broken_theme_reference",
+            Self::BrokenSnippetReference => "broken_snippet_reference",
         }
     }
 
@@ -123,6 +126,7 @@ impl RenderError {
             "condition_unresolved" => Self::ConditionUnresolved,
             "broken_asset_reference" => Self::BrokenAssetReference,
             "broken_theme_reference" => Self::BrokenThemeReference,
+            "broken_snippet_reference" => Self::BrokenSnippetReference,
             _ => return None,
         })
     }
@@ -194,6 +198,7 @@ mod tests {
             RenderError::ConditionUnresolved,
             RenderError::BrokenAssetReference,
             RenderError::BrokenThemeReference,
+            RenderError::BrokenSnippetReference,
         ];
         for error in all {
             assert_eq!(

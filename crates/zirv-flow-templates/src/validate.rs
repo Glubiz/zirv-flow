@@ -7,6 +7,7 @@ use crate::callables::{Kind, unknown_callables};
 use crate::content::mjml::{MjmlError, compile, has_include};
 use crate::context::{
     MESSAGE_FIELDS, RenderContext, RenderExtras, SAMPLE_UNSUBSCRIBE_URL, SYSTEM_FIELDS,
+    THEME_FIELDS,
 };
 use crate::document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
@@ -384,12 +385,36 @@ fn walk_body(
     }
 }
 
+/// The names a template may read: the catalog, and the `theme` values when a theme is in effect.
+#[derive(Clone, Copy)]
+pub(crate) struct Scope<'a> {
+    pub(crate) catalog: &'a FieldCatalog,
+    pub(crate) theme: bool,
+}
+
 /// Parse one template, check the merge fields it reads, and render it against the sample
 /// context. A filter, test or function the sandbox does not have only fails at render time, so
 /// the sample render is what finds it.
 pub(crate) fn check_template(
     env: &Environment<'static>,
     catalog: &FieldCatalog,
+    sample: &Value,
+    at: &str,
+    source: &str,
+    kind: FieldKind,
+    issues: &mut Vec<Issue>,
+) -> Checked {
+    let scope = Scope {
+        catalog,
+        theme: false,
+    };
+    check_template_in(env, scope, sample, at, source, kind, issues)
+}
+
+/// [`check_template`] over the names of `scope`.
+pub(crate) fn check_template_in(
+    env: &Environment<'static>,
+    scope: Scope<'_>,
     sample: &Value,
     at: &str,
     source: &str,
@@ -419,7 +444,7 @@ pub(crate) fn check_template(
     let mut paths: Vec<String> = template.undeclared_variables(true).into_iter().collect();
     paths.sort();
     for path in &paths {
-        match lookup(catalog, path) {
+        match lookup(scope, path) {
             Lookup::Known => {}
             Lookup::Unknown => {
                 issues.push(Issue::new(code::UNKNOWN_MERGE_FIELD, at).with_field(path.clone()));
@@ -475,7 +500,8 @@ fn event_path_is_known(catalog: &FieldCatalog, path: &str) -> bool {
 
 /// Classify a merge path (`person.first_name`). The whole path must be in the catalog: a path
 /// below a person trait is unknown, because no trait type is an object or JSON value.
-fn lookup(catalog: &FieldCatalog, path: &str) -> Lookup {
+fn lookup(scope: Scope<'_>, path: &str) -> Lookup {
+    let catalog = scope.catalog;
     let (root, key) = match path.split_once('.') {
         Some((root, key)) => (root, Some(key)),
         None => (path, None),
@@ -494,6 +520,8 @@ fn lookup(catalog: &FieldCatalog, path: &str) -> Lookup {
         ("message", Some(key)) => known(MESSAGE_FIELDS.contains(&key)),
         ("system", Some(key)) => known(SYSTEM_FIELDS.contains(&key)),
         ("message" | "system", None) => Lookup::Known,
+        ("theme", Some(key)) if scope.theme => known(THEME_FIELDS.contains(&key)),
+        ("theme", None) if scope.theme => Lookup::Known,
         (name, None) => known(GLOBAL_FUNCTIONS.contains(&name)),
         (_, Some(_)) => Lookup::Unknown,
     }
@@ -1035,5 +1063,30 @@ mod tests {
         let issues = validate(&in_app, &catalog());
         assert_eq!(codes(&issues), [code::UNSUPPORTED_CHANNEL]);
         assert!(issues[0].is_blocking());
+    }
+
+    #[test]
+    fn theme_names_are_known_only_in_a_scope_with_a_theme() {
+        let catalog = FieldCatalog::default();
+        let env = crate::sandbox::environment();
+        let sample = Value::from_serialize(serde_json::json!({"theme": {"primary": "#000000"}}));
+        let check = |theme: bool, source: &str| {
+            let mut issues = Vec::new();
+            let scope = Scope {
+                catalog: &catalog,
+                theme,
+            };
+            check_template_in(&env, scope, &sample, "/x", source, HTML, &mut issues);
+            issues
+                .into_iter()
+                .map(|issue| issue.code)
+                .collect::<Vec<_>>()
+        };
+        assert!(check(true, "{{ theme.primary }}").is_empty());
+        assert_eq!(check(true, "{{ theme.nope }}"), [code::UNKNOWN_MERGE_FIELD]);
+        assert_eq!(
+            check(false, "{{ theme.primary }}"),
+            [code::UNKNOWN_MERGE_FIELD]
+        );
     }
 }

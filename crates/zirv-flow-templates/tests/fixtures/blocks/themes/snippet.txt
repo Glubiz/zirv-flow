@@ -1,0 +1,11 @@
+Welcome, Ann <b>O'Neil</b>
+
+Spring sale for Ann <b>O'Neil</b>
+
+See the sale: https://shop.example/sale
+
+Plain
+
+Shop now: https://shop.example/offer
+
+----------

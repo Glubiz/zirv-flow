@@ -5,23 +5,29 @@
 //! the sanitizer. [`validate`] adds what only a render shows: merge fields, syntax, the raw HTML
 //! `mrml` must parse, and the unsubscribe link of the rendered sample.
 
+use hashbrown::HashSet;
+
 use super::emit::UrlKind;
+use super::look::{Broken, Look, THEME_FOOTER_ID};
 use super::model::{
     Block, BlocksContent, ImageSrc, MAX_DOCUMENT_BYTES, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES,
     MAX_RICH_TEXT_BYTES, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, PREHEADER_DISPLAY_CHARS,
-    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_shape, conditions, doc_at,
+    SUBJECT_DISPLAY_CHARS, ThemeSlot, block_at, blocks_of, check_block_numbers, check_id,
+    check_shape, conditions, doc_at,
 };
 use super::render::{BuildError, build, document_environment};
 use super::sanitize::{has_mjml_tag, link_allowed, sanitize_source, violations};
+use super::snippet::{MAX_SNIPPET_BLOCKS, SnippetContent};
 use super::tags::{Protected, escape_literals, starts_with_tag};
 use crate::content::mjml::{MAX_DEPTH, MjmlError, compile, has_include};
-use crate::context::{RenderExtras, SAMPLE_UNSUBSCRIBE_URL};
+use crate::context::{RenderContext, RenderExtras, SAMPLE_UNSUBSCRIBE_URL};
 use crate::document::{Category, SCHEMA_VERSION, TemplateDocument};
 use crate::error::RenderError;
 use crate::issue::{FieldCatalog, Issue, code};
 use crate::links::{link_urls, links_to, starts_with_ignore_case, unescape};
 use crate::sandbox::MAX_HTML_BYTES;
-use crate::validate::{HTML, HTML_WARN_BYTES, SUBJECT, check_template, sample_context};
+use crate::theme::validate_theme;
+use crate::validate::{HTML, HTML_WARN_BYTES, SUBJECT, Scope, check_template_in};
 
 /// What a text field holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,8 +59,60 @@ pub(crate) struct Field<'a> {
     pub(crate) kind: Kind,
 }
 
-/// Every text field, in document order: the subject and preheader, then each block's fields.
-pub(crate) fn fields(content: &BlocksContent) -> Vec<Field<'_>> {
+/// The blocks of the effective content in document order, each with the path of the snippet
+/// block or `theme-footer` it came through (`None` for the document's own). A snippet block is
+/// replaced by the blocks of its content; one without content has none here, and a snippet block
+/// inside a snippet is kept for the checks to refuse.
+pub(crate) fn effective_blocks<'a>(
+    content: &'a BlocksContent,
+    extras: &'a RenderExtras,
+    footer: Option<&'a SnippetContent>,
+) -> Vec<(Option<String>, &'a Block)> {
+    let mut out = Vec::new();
+    for (_, block) in blocks_of(content) {
+        match block {
+            Block::Snippet(reference) => {
+                if let Some(snippet) = extras.snippets.get(&reference.snippet_id) {
+                    let base = block_at(block.id(), None);
+                    out.extend(
+                        snippet
+                            .blocks
+                            .iter()
+                            .map(|inner| (Some(base.clone()), inner)),
+                    );
+                }
+            }
+            _ => out.push((None, block)),
+        }
+    }
+    if let Some(footer) = footer {
+        let base = block_at(THEME_FOOTER_ID, None);
+        out.extend(
+            footer
+                .blocks
+                .iter()
+                .map(|inner| (Some(base.clone()), inner)),
+        );
+    }
+    out
+}
+
+/// A path inside a snippet block or the theme footer: the path of that block, then the path of
+/// the inner block.
+fn nested_at(base: Option<&str>, at: String) -> String {
+    match base {
+        None => at,
+        Some(base) => format!("{base}{}", at.strip_prefix("/blocks").unwrap_or(&at)),
+    }
+}
+
+/// Every text field of the effective content, in document order: the subject and preheader,
+/// then each block's fields, with those of a snippet and of the theme footer in place.
+pub(crate) fn fields<'a>(
+    content: &'a BlocksContent,
+    extras: &'a RenderExtras,
+    footer: Option<&'a SnippetContent>,
+) -> Vec<Field<'a>> {
     let mut out = vec![
         Field {
             at: doc_at("subject"),
@@ -67,8 +125,12 @@ pub(crate) fn fields(content: &BlocksContent) -> Vec<Field<'_>> {
             kind: Kind::Preheader,
         },
     ];
-    for (_, block) in blocks_of(content) {
+    for (base, block) in effective_blocks(content, extras, footer) {
+        let start = out.len();
         block_fields(block, &mut out);
+        for field in &mut out[start..] {
+            field.at = nested_at(base.as_deref(), std::mem::take(&mut field.at));
+        }
     }
     out
 }
@@ -110,25 +172,64 @@ fn has_insecure_scheme(url: &str) -> bool {
 
 /// The checks that need no template engine: shape, limits, URL sources and the sanitizer. A
 /// document over a limit gets that issue alone, so nothing past it is scanned.
-pub(crate) fn check_sources(content: &BlocksContent) -> Vec<Issue> {
+pub(crate) fn check_sources(content: &BlocksContent, extras: &RenderExtras) -> Vec<Issue> {
     let mut issues = check_shape(content);
     if issues.iter().any(|issue| issue.code == code::BLOCKS_LIMIT) {
         return issues;
     }
-    let all = fields(content);
-    check_texts(&all, &mut issues);
-    for block in blocks_of(content).map(|(_, block)| block) {
-        if matches!(block, Block::Snippet(_)) {
-            issues.push(
-                Issue::new(
-                    code::BROKEN_SNIPPET_REFERENCE,
-                    block_at(block.id(), Some("snippet_id")),
-                )
-                .with_message("snippet blocks are not rendered yet"),
-            );
+    // The snippets and the footer were checked when they were published; they are checked again
+    // here because what is rendered is what the caller passed. The size limits run over the
+    // whole effective content. A reference with no content is `check_references`' business.
+    let (look, _) = Look::resolve(content, extras);
+    check_texts(&fields(content, extras, look.footer), &mut issues);
+    for (_, block) in blocks_of(content) {
+        if let Block::Snippet(reference) = block
+            && let Some(snippet) = extras.snippets.get(&reference.snippet_id)
+        {
+            check_nested(&block_at(block.id(), None), snippet, &mut issues);
         }
     }
+    if let Some(footer) = look.footer {
+        check_nested(&block_at(THEME_FOOTER_ID, None), footer, &mut issues);
+    }
     issues
+}
+
+/// The structural checks of a snippet's content at the place it is used: no section, a bounded
+/// block count, valid and unique ids, no snippet block, no condition and valid numbers. Its text
+/// fields are checked with the rest of the effective content.
+fn check_nested(base: &str, snippet: &SnippetContent, issues: &mut Vec<Issue>) {
+    if !snippet.sections.is_empty() {
+        issues.push(Issue::new(code::SNIPPET_SECTION, base));
+    }
+    if snippet.blocks.len() > MAX_SNIPPET_BLOCKS {
+        issues.push(
+            Issue::new(code::BLOCKS_LIMIT, base)
+                .with_message(format!("at most {MAX_SNIPPET_BLOCKS} blocks")),
+        );
+        return;
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    for block in &snippet.blocks {
+        let start = issues.len();
+        check_id(block.id(), &mut seen, issues);
+        check_block_numbers(block, issues);
+        for issue in &mut issues[start..] {
+            issue.at = nested_at(Some(base), std::mem::take(&mut issue.at));
+        }
+        if matches!(block, Block::Snippet(_)) {
+            issues.push(Issue::new(
+                code::SNIPPET_NESTED,
+                nested_at(Some(base), block_at(block.id(), None)),
+            ));
+        }
+        if block.visible_if().is_some() {
+            issues.push(Issue::new(
+                code::SNIPPET_CONDITION,
+                nested_at(Some(base), block_at(block.id(), Some("visible_if"))),
+            ));
+        }
+    }
 }
 
 /// The size limits of the text fields and the checks of their URLs, rich text and raw HTML. A
@@ -282,7 +383,7 @@ pub(crate) fn validate(
     let Some(content) = &doc.blocks else {
         return vec![Issue::new(code::MISSING_CONTENT, "/blocks")];
     };
-    let mut issues = check_sources(content);
+    let mut issues = check_sources(content, extras);
     if issues
         .iter()
         .any(|issue| matches!(issue.code, code::BLOCKS_LIMIT | code::CONTENT_TOO_LARGE))
@@ -299,7 +400,8 @@ pub(crate) fn validate(
             .with_message("Visibility conditions can't be published yet."),
         );
     }
-    check_references(content, extras, &mut issues);
+    let (look, broken) = Look::resolve(content, extras);
+    check_references(content, extras, &look, broken, &mut issues);
 
     // The sender is the id of a sender identity, as in a code document.
     if content
@@ -317,18 +419,25 @@ pub(crate) fn validate(
         issues.push(Issue::new(code::MISSING_LANG, doc_at("lang")));
     }
 
-    let env = document_environment(content);
-    let sample = sample_context(catalog);
-    for field in fields(content) {
-        check_field(&env, catalog, &sample, &field, &mut issues);
+    let env = document_environment(content, extras, look.footer);
+    let sample = look.values(&RenderContext::sample(catalog), extras);
+    for field in fields(content, extras, look.footer) {
+        check_field(
+            &env,
+            catalog,
+            look.theme.is_some(),
+            &sample,
+            &field,
+            &mut issues,
+        );
     }
-    for (_, block) in blocks_of(content) {
+    for (base, block) in effective_blocks(content, extras, look.footer) {
         if let Block::Image(image) = block
             && image.alt.trim().is_empty()
         {
             issues.push(Issue::new(
                 code::IMAGE_WITHOUT_ALT,
-                block_at(&image.id, Some("alt")),
+                nested_at(base.as_deref(), block_at(&image.id, Some("alt"))),
             ));
         }
     }
@@ -336,14 +445,16 @@ pub(crate) fn validate(
     if issues.iter().any(Issue::is_blocking) {
         return issues;
     }
-    check_sample_render(content, catalog, &env, extras, &mut issues);
+    check_sample_render(content, &look, catalog, &env, extras, &mut issues);
     issues
 }
 
-/// The merge field, syntax and sample checks of one text field.
+/// The merge field, syntax and sample checks of one text field. `theme` says whether the `theme`
+/// values are known names: a theme is in effect, or the field is in a snippet.
 pub(crate) fn check_field(
     env: &minijinja::Environment<'static>,
     catalog: &FieldCatalog,
+    theme: bool,
     sample: &minijinja::Value,
     field: &Field<'_>,
     issues: &mut Vec<Issue>,
@@ -361,7 +472,8 @@ pub(crate) fn check_field(
         Kind::Rich => sanitize_source(field.source).html,
         Kind::Subject | Kind::Raw => field.source.to_owned(),
     };
-    let checked = check_template(env, catalog, sample, &field.at, &source, kind, issues);
+    let scope = Scope { catalog, theme };
+    let checked = check_template_in(env, scope, sample, &field.at, &source, kind, issues);
     if matches!(field.kind, Kind::Preheader | Kind::Plain | Kind::Url(_))
         && checked
             .sample
@@ -395,7 +507,7 @@ pub(crate) fn check_field(
 }
 
 /// The issues of what MJML code cannot hold: a condition on a section or block, and an image
-/// that is not a plain URL. A snippet block is already refused by [`check_sources`].
+/// that is not a plain URL, and a snippet block. A theme is ignored: the MJML has no footer.
 pub(crate) fn not_convertible(content: &BlocksContent) -> Vec<Issue> {
     let mut issues = Vec::new();
     for section in &content.sections {
@@ -410,6 +522,12 @@ pub(crate) fn not_convertible(content: &BlocksContent) -> Vec<Issue> {
         }
     }
     for (_, block) in blocks_of(content) {
+        if matches!(block, Block::Snippet(_)) {
+            issues.push(
+                Issue::new(code::NOT_CONVERTIBLE, block_at(block.id(), None))
+                    .with_message("MJML code cannot hold a snippet"),
+            );
+        }
         if block.visible_if().is_some() {
             issues.push(
                 Issue::new(
@@ -436,13 +554,47 @@ pub(crate) fn not_convertible(content: &BlocksContent) -> Vec<Issue> {
 pub(crate) fn check_references(
     content: &BlocksContent,
     extras: &RenderExtras,
+    look: &Look<'_>,
+    broken: Option<Broken>,
     issues: &mut Vec<Issue>,
 ) {
+    match broken {
+        Some(Broken::Theme) => issues.push(
+            Issue::new(code::BROKEN_THEME_REFERENCE, doc_at("theme"))
+                .with_message("the theme the document names was not passed"),
+        ),
+        Some(Broken::Footer) => issues.push(
+            Issue::new(
+                code::BROKEN_SNIPPET_REFERENCE,
+                block_at(THEME_FOOTER_ID, Some("snippet_id")),
+            )
+            .with_message("the theme's footer snippet has no content"),
+        ),
+        // The theme's own `invalid_setting` and `invalid_url` issues, at `/theme/<token>`.
+        Some(Broken::Tokens) => issues.extend(
+            extras
+                .theme
+                .iter()
+                .flat_map(validate_theme)
+                .filter(Issue::is_blocking),
+        ),
+        None => {}
+    }
     for (_, block) in blocks_of(content) {
+        if let Block::Snippet(reference) = block
+            && !extras.snippets.contains_key(&reference.snippet_id)
+        {
+            issues.push(Issue::new(
+                code::BROKEN_SNIPPET_REFERENCE,
+                block_at(block.id(), Some("snippet_id")),
+            ));
+        }
+    }
+    for (base, block) in effective_blocks(content, extras, look.footer) {
         let Block::Image(image) = block else {
             continue;
         };
-        let at = block_at(&image.id, Some("src"));
+        let at = nested_at(base.as_deref(), block_at(&image.id, Some("src")));
         match &image.src {
             ImageSrc::Url(_) => {}
             ImageSrc::Asset(id) => {
@@ -478,14 +630,15 @@ fn display_length(
 /// out: the unsubscribe link, the size, and whether `mrml` accepted the MJML.
 fn check_sample_render(
     content: &BlocksContent,
+    look: &Look<'_>,
     catalog: &FieldCatalog,
     env: &minijinja::Environment<'static>,
     extras: &RenderExtras,
     issues: &mut Vec<Issue>,
 ) {
     const AT: &str = "/blocks";
-    let values = sample_context(catalog);
-    match build(content, env, &values, extras, false) {
+    let values = look.values(&RenderContext::sample(catalog), extras);
+    match build(content, look, env, &values, extras, false) {
         Ok(built) => {
             if content.category == Category::Marketing
                 && !links_to(&built.html, SAMPLE_UNSUBSCRIBE_URL)
@@ -511,7 +664,7 @@ fn check_sample_render(
             // The sample cannot stand for every person (for example `| int` on a string
             // sample), so this warns. The source must still put the unsubscribe URL in a link.
             issues.push(Issue::new(code::SAMPLE_RENDER_FAILED, AT).with_message(error.code()));
-            let mentions = fields(content)
+            let mentions = fields(content, extras, look.footer)
                 .iter()
                 .any(|field| field.source.contains("system.unsubscribe_url"));
             if content.category == Category::Marketing && !mentions {
@@ -530,6 +683,7 @@ mod tests {
     use zirv_flow_core::people::TraitType;
 
     use super::super::model::{Image, MAX_BLOCKS, MAX_SECTIONS, RawHtml, Section};
+    use super::super::snippet::SnippetContent;
     use super::*;
     use crate::content::{content_type_of, validate_document};
     use crate::context::RenderContext;
@@ -1279,26 +1433,295 @@ mod tests {
         assert_eq!(codes_with(&logo, &extras), Vec::new());
     }
 
+    const FOOTER: &str = "0192b1a4-7c3e-7000-8000-00000000c001";
+    const PROMO: &str = "0192b1a4-7c3e-7000-8000-00000000c002";
+    const THEME_ID: &str = "0192b1a4-7c3e-7000-8000-00000000d001";
+
+    fn snippet_of(value: serde_json::Value) -> SnippetContent {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn unsubscribe_snippet() -> SnippetContent {
+        snippet_of(serde_json::json!({"blocks": [{
+            "type": "text",
+            "id": "legal",
+            "content": "<p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a></p>"
+        }]}))
+    }
+
+    fn text_snippet(content: &str) -> SnippetContent {
+        snippet_of(serde_json::json!({"blocks": [{
+            "type": "text",
+            "id": "legal",
+            "content": content
+        }]}))
+    }
+
+    fn themed_extras(footer: Option<SnippetContent>) -> RenderExtras {
+        let mut extras = RenderExtras {
+            theme: Some(crate::theme::ThemeTokens {
+                footer_snippet: footer.as_ref().map(|_| FOOTER.to_owned()),
+                ..Default::default()
+            }),
+            theme_name: Some("Brand".into()),
+            ..Default::default()
+        };
+        if let Some(footer) = footer {
+            extras.snippets.insert(FOOTER.into(), footer);
+        }
+        extras
+    }
+
+    /// The newsletter with its own footer section removed and the theme footer switched on.
+    fn footerless(footer: &str) -> TemplateDocument {
+        newsletter_with(|v| {
+            v["blocks"]["theme"] = serde_json::json!("default");
+            v["blocks"]["footer"] = serde_json::json!(footer);
+            if let Some(sections) = v["blocks"]["sections"].as_array_mut() {
+                sections.retain(|section| section["id"] != "footer");
+            }
+        })
+    }
+
     #[test]
-    fn a_snippet_block_is_a_broken_reference_with_or_without_content() {
+    fn a_snippet_block_needs_content_and_renders_from_it_in_a_section_column() {
         let doc = newsletter_with(|v| {
             v["blocks"]["sections"][1]["columns"][0]
                 .as_array_mut()
                 .unwrap()
-                .push(serde_json::json!({"type": "snippet", "id": "sn", "snippet_id": ASSET}));
+                .push(serde_json::json!({"type": "snippet", "id": "sn", "snippet_id": PROMO}));
         });
-        let expected = [(
-            "broken_snippet_reference",
-            "/blocks/block/sn/snippet_id".to_owned(),
-        )];
-        assert_eq!(codes_with(&doc, &RenderExtras::default()), expected);
+        assert_eq!(
+            codes_with(&doc, &RenderExtras::default()),
+            [(
+                "broken_snippet_reference",
+                "/blocks/block/sn/snippet_id".to_owned()
+            )]
+        );
+        let mut extras = RenderExtras::default();
+        extras
+            .snippets
+            .insert(PROMO.into(), text_snippet("<p>Spring</p>"));
+        assert_eq!(codes_with(&doc, &extras), Vec::new());
+        assert!(crate::blocks_to_mjml(doc.blocks.as_ref().unwrap()).is_err());
+    }
+
+    #[test]
+    fn an_unknown_merge_field_in_a_snippet_is_blocking_and_the_path_names_the_snippet_block() {
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][1]["columns"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"type": "snippet", "id": "sn", "snippet_id": PROMO}));
+        });
+        let mut extras = RenderExtras::default();
+        extras
+            .snippets
+            .insert(PROMO.into(), text_snippet("<p>{{ person.nope }}</p>"));
+        let issues = validate(&doc, &catalog(), &extras);
+        let blocking: Vec<_> = issues.iter().filter(|issue| issue.is_blocking()).collect();
+        assert_eq!(blocking.len(), 1, "{issues:?}");
+        assert_eq!(blocking[0].code, code::UNKNOWN_MERGE_FIELD);
+        assert_eq!(blocking[0].at, "/blocks/block/sn/block/legal/content");
+        assert_eq!(blocking[0].field.as_deref(), Some("person.nope"));
+    }
+
+    #[test]
+    fn a_snippet_that_is_not_a_valid_snippet_is_blocking_where_it_is_used() {
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][1]["columns"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"type": "snippet", "id": "sn", "snippet_id": PROMO}));
+        });
         let mut extras = RenderExtras::default();
         extras.snippets.insert(
-            ASSET.into(),
-            crate::content::blocks::SnippetContent::default(),
+            PROMO.into(),
+            snippet_of(serde_json::json!({"blocks": [
+                {"type": "snippet", "id": "inner", "snippet_id": FOOTER},
+                {"type": "spacer", "id": "gap", "height": 10, "visible_if": {"x": 1}}
+            ]})),
         );
-        assert_eq!(codes_with(&doc, &extras), expected);
-        assert!(crate::blocks_to_mjml(doc.blocks.as_ref().unwrap()).is_err());
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [
+                ("snippet_nested", "/blocks/block/sn/block/inner".to_owned()),
+                (
+                    "snippet_condition",
+                    "/blocks/block/sn/block/gap/visible_if".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_marketing_document_whose_snippets_have_no_unsubscribe_link_is_blocking() {
+        let doc = newsletter_with(|v| {
+            if let Some(sections) = v["blocks"]["sections"].as_array_mut() {
+                sections.retain(|section| section["id"] != "footer");
+                sections.push(serde_json::json!({"id": "tail", "columns": [[
+                    {"type": "snippet", "id": "sn", "snippet_id": PROMO}
+                ]]}));
+            }
+        });
+        let mut extras = RenderExtras::default();
+        extras
+            .snippets
+            .insert(PROMO.into(), text_snippet("<p>No link</p>"));
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [("missing_unsubscribe", "/blocks".to_owned())]
+        );
+        extras.snippets.insert(PROMO.into(), unsubscribe_snippet());
+        assert_eq!(codes_with(&doc, &extras), Vec::new());
+    }
+
+    #[test]
+    fn the_theme_footer_supplies_the_unsubscribe_link_of_a_marketing_document() {
+        let doc = footerless("theme");
+        assert_eq!(
+            codes_with(&doc, &themed_extras(Some(unsubscribe_snippet()))),
+            Vec::new()
+        );
+        assert_eq!(
+            codes_with(&doc, &themed_extras(Some(text_snippet("<p>No link</p>")))),
+            [("missing_unsubscribe", "/blocks".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_opted_out_document_with_no_link_of_its_own_gets_missing_unsubscribe() {
+        let extras = themed_extras(Some(unsubscribe_snippet()));
+        assert_eq!(
+            codes_with(&footerless("none"), &extras),
+            [("missing_unsubscribe", "/blocks".to_owned())]
+        );
+        let theme_none = newsletter_with(|v| {
+            if let Some(sections) = v["blocks"]["sections"].as_array_mut() {
+                sections.retain(|section| section["id"] != "footer");
+            }
+        });
+        assert_eq!(
+            codes_with(&theme_none, &extras),
+            [("missing_unsubscribe", "/blocks".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_unknown_merge_field_in_the_theme_footer_is_blocking_and_names_theme_footer() {
+        let extras = themed_extras(Some(text_snippet(
+            "<p>{{ person.nope }} <a href=\"{{ system.unsubscribe_url }}\">u</a></p>",
+        )));
+        let issues = validate(&footerless("theme"), &catalog(), &extras);
+        let blocking: Vec<_> = issues.iter().filter(|issue| issue.is_blocking()).collect();
+        assert_eq!(blocking.len(), 1, "{issues:?}");
+        assert_eq!(blocking[0].code, code::UNKNOWN_MERGE_FIELD);
+        assert_eq!(
+            blocking[0].at,
+            "/blocks/block/theme-footer/block/legal/content"
+        );
+    }
+
+    #[test]
+    fn a_named_theme_or_a_footer_snippet_that_was_not_passed_is_a_broken_reference() {
+        let named = newsletter_with(|v| {
+            v["blocks"]["theme"] = serde_json::json!({"id": THEME_ID});
+        });
+        assert_eq!(
+            codes_with(&named, &RenderExtras::default()),
+            [("broken_theme_reference", "/blocks/theme".to_owned())]
+        );
+        assert_eq!(
+            codes_with(&named, &themed_extras(Some(unsubscribe_snippet()))),
+            Vec::new()
+        );
+
+        let mut extras = themed_extras(Some(unsubscribe_snippet()));
+        extras.snippets.clear();
+        assert_eq!(
+            codes_with(&footerless("theme"), &extras),
+            [(
+                "broken_snippet_reference",
+                "/blocks/block/theme-footer/snippet_id".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_followed_default_with_no_theme_passed_is_not_a_broken_reference() {
+        let doc = newsletter_with(|v| v["blocks"]["theme"] = serde_json::json!("default"));
+        assert_eq!(codes_with(&doc, &RenderExtras::default()), Vec::new());
+    }
+
+    #[test]
+    fn theme_values_are_known_names_only_while_a_theme_is_in_effect() {
+        let with = |theme: &str, extras: &RenderExtras, text: &str| {
+            let doc = newsletter_with(|v| {
+                v["blocks"]["theme"] = serde_json::json!(theme);
+                v["blocks"]["sections"][1]["columns"][0][0]["text"] = serde_json::json!(text);
+            });
+            validate(&doc, &catalog(), extras)
+                .into_iter()
+                .filter(Issue::is_blocking)
+                .map(|issue| (issue.code, issue.field))
+                .collect::<Vec<_>>()
+        };
+        let extras = themed_extras(None);
+        for name in crate::context::THEME_FIELDS {
+            let text = format!("{{{{ theme.{name} | default(\"\") }}}}");
+            assert_eq!(with("default", &extras, &text), Vec::new(), "{name}");
+        }
+        assert_eq!(
+            with("default", &extras, "{{ theme.nope }}"),
+            [(code::UNKNOWN_MERGE_FIELD, Some("theme.nope".to_owned()))]
+        );
+        // No theme in effect: every `theme.*` name is unknown, with a theme in the extras or not.
+        for (theme, extras) in [("none", &extras), ("default", &RenderExtras::default())] {
+            assert_eq!(
+                with(theme, extras, "{{ theme.primary }}"),
+                [(code::UNKNOWN_MERGE_FIELD, Some("theme.primary".to_owned()))]
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_id_is_reserved_and_a_document_that_uses_it_gets_the_duplicate_id_issue() {
+        let doc = newsletter_with(|v| {
+            v["blocks"]["sections"][0]["id"] = serde_json::json!("theme-footer");
+        });
+        let issues = codes_with(&doc, &RenderExtras::default());
+        assert_eq!(
+            issues,
+            [(
+                "duplicate_block_id",
+                "/blocks/block/theme-footer".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_theme_logo_inside_a_snippet_resolves_against_the_theme_in_effect() {
+        let doc = newsletter_with(|v| {
+            v["blocks"]["theme"] = serde_json::json!("default");
+            v["blocks"]["sections"][1]["columns"][0]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"type": "snippet", "id": "sn", "snippet_id": PROMO}));
+        });
+        let mut extras = RenderExtras::default();
+        extras.snippets.insert(
+            PROMO.into(),
+            snippet_of(serde_json::json!({"blocks": [
+                {"type": "image", "id": "logo", "src": {"theme": "logo"}, "alt": "Logo"}
+            ]})),
+        );
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [(
+                "broken_theme_reference",
+                "/blocks/block/sn/block/logo/src".to_owned()
+            )]
+        );
     }
 
     #[test]
@@ -1375,5 +1798,81 @@ mod tests {
                 serde_json::json!({"asset": ASSET});
         });
         assert!(crate::blocks_to_mjml(asset.blocks.as_ref().unwrap()).is_err());
+    }
+
+    fn with_snippet_block(snippet_ids: &[&str]) -> TemplateDocument {
+        newsletter_with(|v| {
+            for (n, id) in snippet_ids.iter().enumerate() {
+                v["blocks"]["sections"][1]["columns"][0]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "type": "snippet",
+                        "id": format!("sn{n}"),
+                        "snippet_id": id
+                    }));
+            }
+        })
+    }
+
+    #[test]
+    fn snippets_that_are_each_under_the_limit_but_together_over_it_are_blocking() {
+        let ids = [PROMO, FOOTER, THEME_ID];
+        let doc = with_snippet_block(&ids);
+        let big = |n: usize| {
+            snippet_of(serde_json::json!({"blocks": [
+                {"type": "raw_html", "id": format!("a{n}"), "html": "x".repeat(70_000)},
+                {"type": "raw_html", "id": format!("b{n}"), "html": "x".repeat(70_000)}
+            ]}))
+        };
+        let mut extras = RenderExtras::default();
+        extras.snippets.insert(ids[0].into(), big(0));
+        extras.snippets.insert(ids[1].into(), big(1));
+        assert_eq!(
+            codes_with(&with_snippet_block(&ids[..2]), &extras),
+            Vec::new()
+        );
+        extras.snippets.insert(ids[2].into(), big(2));
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [("blocks_limit", "/blocks/sections".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_repeated_block_id_inside_a_passed_snippet_is_blocking_where_it_is_used() {
+        let doc = with_snippet_block(&[PROMO]);
+        let mut extras = RenderExtras::default();
+        extras.snippets.insert(
+            PROMO.into(),
+            snippet_of(serde_json::json!({"blocks": [
+                {"type": "divider", "id": "same"},
+                {"type": "divider", "id": "same"}
+            ]})),
+        );
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [(
+                "duplicate_block_id",
+                "/blocks/block/sn0/block/same".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn theme_tokens_that_are_not_safe_for_mjml_are_blocking_and_never_emitted() {
+        let doc = newsletter_with(|v| v["blocks"]["theme"] = serde_json::json!("default"));
+        let mut extras = themed_extras(None);
+        if let Some(theme) = extras.theme.as_mut() {
+            theme.primary = "#000\" x=\"".into();
+            theme.web_font_url = Some("http://fonts.example/a b.css".into());
+        }
+        assert_eq!(
+            codes_with(&doc, &extras),
+            [
+                ("invalid_setting", "/theme/primary".to_owned()),
+                ("invalid_url", "/theme/web_font_url".to_owned()),
+            ]
+        );
     }
 }

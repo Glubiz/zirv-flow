@@ -1,0 +1,44 @@
+{
+  "schema": 2,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "From {{ theme.name }}",
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "lang": "en",
+    "category": "transactional",
+    "theme": "default",
+    "footer": "theme",
+    "sections": [
+      {
+        "id": "intro",
+        "columns": [
+          [
+            {
+              "type": "heading",
+              "id": "title",
+              "level": 1,
+              "text": "Welcome, {{ person.name }}"
+            },
+            {
+              "type": "text",
+              "id": "body",
+              "content": "<p>Brand colour {{ theme.primary }} from {{ theme.name }}. <a href=\"https://shop.example/spring\">See the spring range</a>.</p>"
+            },
+            {
+              "type": "button",
+              "id": "cta",
+              "label": "Shop now",
+              "url": "https://shop.example/offer"
+            },
+            {
+              "type": "divider",
+              "id": "rule"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}
