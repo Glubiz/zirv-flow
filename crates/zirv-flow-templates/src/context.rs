@@ -112,6 +112,9 @@ impl RenderContext {
 pub struct RenderExtras {
     /// The theme in effect.
     pub theme: Option<ThemeTokens>,
+    /// The name of the theme in effect, for `theme.name`: it lives on the theme row, not in the
+    /// tokens.
+    pub theme_name: Option<String>,
     /// Resolved snippet contents by snippet id.
     pub snippets: BTreeMap<String, SnippetContent>,
     /// The result of each `visible_if`, by the id of the section or block that holds it.
@@ -159,6 +162,17 @@ pub struct SystemValues {
 pub(crate) const MESSAGE_FIELDS: [&str; 1] = ["id"];
 /// The fixed fields of `system`.
 pub(crate) const SYSTEM_FIELDS: [&str; 2] = ["unsubscribe_url", "preferences_url"];
+/// The fixed fields of `theme`, readable while a theme is in effect.
+pub(crate) const THEME_FIELDS: [&str; 8] = [
+    "primary",
+    "text",
+    "background",
+    "link",
+    "button",
+    "button_text",
+    "logo_url",
+    "name",
+];
 
 #[cfg(test)]
 mod tests {
@@ -225,5 +239,15 @@ mod tests {
             serde_json::to_string(&one).unwrap(),
             serde_json::to_string(&two).unwrap()
         );
+    }
+
+    #[test]
+    fn the_extras_default_to_no_theme_and_no_theme_name() {
+        let extras: RenderExtras = serde_json::from_str("{}").unwrap();
+        assert_eq!(extras, RenderExtras::default());
+        assert_eq!(extras.theme_name, None);
+        let named: RenderExtras = serde_json::from_str(r#"{"theme_name":"Brand"}"#).unwrap();
+        assert_eq!(named.theme_name.as_deref(), Some("Brand"));
+        assert!(named.theme_logo_url().is_none());
     }
 }

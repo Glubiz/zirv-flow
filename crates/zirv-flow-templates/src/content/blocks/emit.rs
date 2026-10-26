@@ -8,11 +8,12 @@
 
 use std::convert::Infallible;
 
+use super::look::{Look, THEME_FOOTER_ID};
 use super::model::{
-    Align, Block, BlocksContent, Button, Heading, Image, ImageSrc, RawHtml, Section, Settings,
-    font_css,
+    Align, Block, BlocksContent, Button, Heading, Image, ImageSrc, RawHtml, Section,
 };
 use super::sanitize::{Cleaned, sanitize_source};
+use super::snippet::SnippetContent;
 use super::tags::escape_literals;
 
 /// The value of a plain text field: safe to put in MJML, and as plain text.
@@ -47,6 +48,8 @@ pub(crate) trait Fields {
     fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, Self::Error>;
     /// Whether the section or block `id`, which holds a `visible_if`, is shown.
     fn visible(&mut self, id: &str) -> Result<bool, Self::Error>;
+    /// The content of the snippet a snippet block names.
+    fn snippet(&mut self, snippet_id: &str) -> Result<SnippetContent, Self::Error>;
 }
 
 /// The result of an emit: the MJML and the text part.
@@ -95,6 +98,19 @@ impl Fields for Sources {
     fn visible(&mut self, _id: &str) -> Result<bool, Infallible> {
         Ok(true)
     }
+
+    /// The conversion refuses a snippet block before it walks.
+    fn snippet(&mut self, _snippet_id: &str) -> Result<SnippetContent, Infallible> {
+        Ok(SnippetContent::default())
+    }
+}
+
+/// `text` as an XML attribute value.
+fn attribute(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The heading font size for a level, in pixels.
@@ -106,14 +122,15 @@ const fn heading_size(level: u8) -> u32 {
     }
 }
 
-/// Emit the MJML and the text part of `content`. The settings are applied here; their values
-/// were checked by the caller (see `check_shape`), and an unknown font name falls back to the
-/// first stack so the walk cannot fail on it.
+/// Emit the MJML and the text part of `content`. The look (settings or theme) is applied here;
+/// its values were checked by the caller (see `check_shape`), and an unknown font name falls
+/// back to the first stack so the walk cannot fail on it. The theme footer, when the look has
+/// one, closes the email as a section with the id `theme-footer`.
 pub(crate) fn emit<F: Fields>(
     content: &BlocksContent,
+    look: &Look<'_>,
     fields: &mut F,
 ) -> Result<Emitted, F::Error> {
-    let settings = &content.settings;
     let mut mjml = String::new();
     let mut text: Vec<String> = Vec::new();
     let mut hidden: Vec<String> = Vec::new();
@@ -124,19 +141,29 @@ pub(crate) fn emit<F: Fields>(
     {
         mjml.push_str(&format!(" lang=\"{lang}\""));
     }
-    mjml.push_str(">\n<mj-head>\n<mj-attributes>\n");
-    mjml.push_str(&format!(
-        "<mj-all font-family=\"{}\" />\n",
-        font_css(&settings.font_family).unwrap_or("Arial, Helvetica, sans-serif")
-    ));
+    mjml.push_str(">\n<mj-head>\n");
+    if let Some(url) = look.web_font_url {
+        mjml.push_str(&format!(
+            "<mj-font name=\"{}\" href=\"{}\" />\n",
+            attribute(look.font_name()),
+            attribute(url)
+        ));
+    }
+    mjml.push_str("<mj-attributes>\n");
+    mjml.push_str(&format!("<mj-all font-family=\"{}\" />\n", look.font_stack));
     mjml.push_str(&format!(
         "<mj-text color=\"{}\" line-height=\"1.5\" />\n",
-        settings.text_color
+        look.text
     ));
     mjml.push_str("</mj-attributes>\n");
+    let decoration = match look.link_underline {
+        Some(true) => ";text-decoration:underline",
+        Some(false) => ";text-decoration:none",
+        None => "",
+    };
     mjml.push_str(&format!(
-        "<mj-style>a{{color:{}}}</mj-style>\n",
-        settings.link_color
+        "<mj-style>a{{color:{}{decoration}}}</mj-style>\n",
+        look.link
     ));
     let preheader = fields.plain(&content.preheader)?;
     if !preheader.html.trim().is_empty() {
@@ -145,14 +172,24 @@ pub(crate) fn emit<F: Fields>(
     mjml.push_str("</mj-head>\n");
     mjml.push_str(&format!(
         "<mj-body background-color=\"{}\" width=\"{}px\">\n",
-        settings.background_color, settings.content_width
+        look.background, look.content_width
     ));
     for section in &content.sections {
         if section.visible_if.is_some() && !fields.visible(&section.id)? {
             hidden.push(section.id.clone());
             continue;
         }
-        emit_section(section, settings, fields, &mut mjml, &mut text, &mut hidden)?;
+        emit_section(section, look, fields, &mut mjml, &mut text, &mut hidden)?;
+    }
+    if let Some(footer) = look.footer {
+        let section = Section {
+            id: THEME_FOOTER_ID.to_owned(),
+            background_color: None,
+            padding: None,
+            columns: vec![footer.blocks.clone()],
+            visible_if: None,
+        };
+        emit_section(&section, look, fields, &mut mjml, &mut text, &mut hidden)?;
     }
     mjml.push_str("</mj-body>\n</mjml>\n");
 
@@ -165,7 +202,7 @@ pub(crate) fn emit<F: Fields>(
 
 fn emit_section<F: Fields>(
     section: &Section,
-    settings: &Settings,
+    look: &Look<'_>,
     fields: &mut F,
     mjml: &mut String,
     text: &mut Vec<String>,
@@ -186,7 +223,7 @@ fn emit_section<F: Fields>(
                 hidden.push(block.id().to_owned());
                 continue;
             }
-            emit_block(block, settings, fields, mjml, text)?;
+            emit_block(block, look, fields, mjml, text)?;
         }
         mjml.push_str("</mj-column>\n");
     }
@@ -200,7 +237,7 @@ fn align_of(align: Option<Align>) -> &'static str {
 
 fn emit_block<F: Fields>(
     block: &Block,
-    settings: &Settings,
+    look: &Look<'_>,
     fields: &mut F,
     mjml: &mut String,
     text: &mut Vec<String>,
@@ -214,8 +251,12 @@ fn emit_block<F: Fields>(
         }) => {
             let value = fields.plain(source)?;
             let size = heading_size(*level);
+            let color = look
+                .heading
+                .map(|color| format!(" color=\"{color}\""))
+                .unwrap_or_default();
             mjml.push_str(&format!(
-                "<mj-text align=\"{}\" font-size=\"{size}px\" font-weight=\"bold\" line-height=\"1.3\"><h{level} style=\"margin:0;font-size:{size}px;font-weight:bold\">{}</h{level}></mj-text>\n",
+                "<mj-text{color} align=\"{}\" font-size=\"{size}px\" font-weight=\"bold\" line-height=\"1.3\"><h{level} style=\"margin:0;font-size:{size}px;font-weight:bold\">{}</h{level}></mj-text>\n",
                 align_of(*align),
                 value.html
             ));
@@ -266,18 +307,30 @@ fn emit_block<F: Fields>(
         }) => {
             let label = fields.plain(label)?;
             let url = fields.url(url, UrlKind::Link)?;
+            let radius = look
+                .button_radius
+                .map(|radius| format!(" border-radius=\"{radius}px\""))
+                .unwrap_or_default();
             mjml.push_str(&format!(
-                "<mj-button href=\"{}\" align=\"{}\" background-color=\"{}\" color=\"{}\">{}</mj-button>\n",
+                "<mj-button href=\"{}\" align=\"{}\" background-color=\"{}\" color=\"{}\"{radius}>{}</mj-button>\n",
                 url.html,
                 align.css(),
-                settings.button_color,
-                settings.button_text_color,
+                look.button,
+                look.button_text,
                 label.html
             ));
             push_text(text, &format!("{}: {}", label.text.trim(), url.text));
         }
-        // A snippet block is refused by the checks before any walk: nothing resolves it yet.
-        Block::Snippet(_) => {}
+        // A snippet holds no snippet block (the checks refuse one); a stray one is skipped, so
+        // the walk cannot loop.
+        Block::Snippet(snippet) => {
+            let content = fields.snippet(&snippet.snippet_id)?;
+            for inner in &content.blocks {
+                if !matches!(inner, Block::Snippet(_)) {
+                    emit_block(inner, look, fields, mjml, text)?;
+                }
+            }
+        }
         Block::Divider(divider) => {
             mjml.push_str(&format!(
                 "<mj-divider border-width=\"1px\" border-color=\"{}\" />\n",
@@ -306,6 +359,7 @@ fn push_text(parts: &mut Vec<String>, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::super::model::{Divider, RichText, Spacer};
+    use super::super::snippet::SnippetContent;
     use super::*;
 
     fn content(blocks: Vec<Block>) -> BlocksContent {
@@ -328,7 +382,7 @@ mod tests {
         doc.settings.content_width = 640;
         doc.settings.background_color = "#f0f0f0".into();
         doc.preheader = "Preview & more".into();
-        let emitted = emit(&doc, &mut Sources).unwrap();
+        let emitted = emit(&doc, &Look::of_settings(&doc.settings), &mut Sources).unwrap();
         for part in [
             "<mjml lang=\"en\">",
             "<mj-all font-family=\"Georgia, 'Times New Roman', serif\" />",
@@ -390,7 +444,7 @@ mod tests {
                 visible_if: None,
             }),
         ]);
-        let emitted = emit(&doc, &mut Sources).unwrap();
+        let emitted = emit(&doc, &Look::of_settings(&doc.settings), &mut Sources).unwrap();
         for part in [
             "<mj-text align=\"center\" font-size=\"22px\" font-weight=\"bold\" line-height=\"1.3\"><h2 style=\"margin:0;font-size:22px;font-weight:bold\">Big &amp; bold</h2></mj-text>",
             "<mj-text align=\"left\"><p>Body <a href=\"https://a.example\">link</a></p></mj-text>",
@@ -420,7 +474,12 @@ mod tests {
                 visible_if: None,
             })
         };
-        let text = |block| emit(&content(vec![block]), &mut Sources).unwrap().text;
+        let text = |block| {
+            let doc = content(vec![block]);
+            emit(&doc, &Look::of_settings(&doc.settings), &mut Sources)
+                .unwrap()
+                .text
+        };
         assert_eq!(text(image("", None)), "");
         assert_eq!(text(image("Alt", None)), "Alt\n");
         assert_eq!(
@@ -438,7 +497,7 @@ mod tests {
             align: Align::Center,
             visible_if: None,
         })]);
-        let emitted = emit(&doc, &mut Sources).unwrap();
+        let emitted = emit(&doc, &Look::of_settings(&doc.settings), &mut Sources).unwrap();
         assert!(
             emitted
                 .mjml
@@ -454,6 +513,113 @@ mod tests {
         assert_eq!(
             emitted.text,
             "Go, {{ person.name | default(\"you\") }} & co: {{ system.unsubscribe_url }}\n"
+        );
+    }
+
+    #[test]
+    fn a_theme_look_adds_the_font_the_radius_the_heading_colour_and_the_footer() {
+        let theme = crate::theme::ThemeTokens {
+            web_font_url: Some("https://fonts.example/f.css?a=1&b=2".into()),
+            link_underline: false,
+            button_radius: 9,
+            ..Default::default()
+        };
+        let footer = SnippetContent {
+            blocks: vec![Block::Spacer(Spacer {
+                id: "gap".into(),
+                height: 5,
+                visible_if: None,
+            })],
+            sections: Vec::new(),
+        };
+        let mut doc = content(vec![
+            Block::Heading(Heading {
+                id: "h".into(),
+                level: 1,
+                text: "Hi".into(),
+                align: None,
+                visible_if: None,
+            }),
+            Block::Button(Button {
+                id: "b".into(),
+                label: "Go".into(),
+                url: "https://a.example".into(),
+                align: Align::Left,
+                visible_if: None,
+            }),
+        ]);
+        doc.settings.font_family = "arial".into();
+        let mut look = Look::of_settings(&doc.settings);
+        look.heading = Some(&theme.primary);
+        look.link_underline = Some(theme.link_underline);
+        look.button_radius = Some(theme.button_radius);
+        look.web_font_url = theme.web_font_url.as_deref();
+        look.footer = Some(&footer);
+        let mjml = emit(&doc, &look, &mut Sources).unwrap().mjml;
+        for part in [
+            "<mj-font name=\"Arial\" href=\"https://fonts.example/f.css?a=1&amp;b=2\" />",
+            "<mj-style>a{color:#1a5fb4;text-decoration:none}</mj-style>",
+            "<mj-text color=\"#1a5fb4\" align=",
+            "border-radius=\"9px\">Go</mj-button>",
+            "<mj-spacer height=\"5px\" />\n</mj-column>\n</mj-section>\n</mj-body>",
+        ] {
+            assert!(mjml.contains(part), "{part}\n{mjml}");
+        }
+    }
+
+    #[test]
+    fn a_snippet_block_emits_the_blocks_the_fields_source_gives_for_it() {
+        struct One;
+        impl Fields for One {
+            type Error = Infallible;
+            fn plain(&mut self, source: &str) -> Result<Plain, Infallible> {
+                Sources.plain(source)
+            }
+            fn url(&mut self, source: &str, kind: UrlKind) -> Result<Plain, Infallible> {
+                Sources.url(source, kind)
+            }
+            fn rich(&mut self, source: &str) -> Result<Cleaned, Infallible> {
+                Sources.rich(source)
+            }
+            fn raw(&mut self, source: &str) -> Result<String, Infallible> {
+                Sources.raw(source)
+            }
+            fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, Infallible> {
+                Sources.image_source(src)
+            }
+            fn visible(&mut self, _id: &str) -> Result<bool, Infallible> {
+                Ok(true)
+            }
+            fn snippet(&mut self, _snippet_id: &str) -> Result<SnippetContent, Infallible> {
+                Ok(SnippetContent {
+                    blocks: vec![
+                        Block::Spacer(Spacer {
+                            id: "gap".into(),
+                            height: 7,
+                            visible_if: None,
+                        }),
+                        Block::Snippet(super::super::model::Snippet {
+                            id: "again".into(),
+                            snippet_id: "x".into(),
+                            visible_if: None,
+                        }),
+                    ],
+                    sections: Vec::new(),
+                })
+            }
+        }
+        let doc = content(vec![Block::Snippet(super::super::model::Snippet {
+            id: "sn".into(),
+            snippet_id: "x".into(),
+            visible_if: None,
+        })]);
+        let mjml = emit(&doc, &Look::of_settings(&doc.settings), &mut One)
+            .unwrap()
+            .mjml;
+        assert_eq!(
+            mjml.matches("<mj-spacer height=\"7px\" />").count(),
+            1,
+            "{mjml}"
         );
     }
 }

@@ -1,0 +1,9 @@
+{
+  "blocks": [
+    {
+      "type": "text",
+      "id": "legal",
+      "content": "<p>You get this because you signed up. <a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>.</p>"
+    }
+  ]
+}
