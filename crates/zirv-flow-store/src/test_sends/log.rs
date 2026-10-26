@@ -135,6 +135,11 @@ const COLUMNS: &str = "id, template_id, template_version, member_id, destination
     sender_identity_id, recipient_hash, recipient_member_id, render_context, draft_revision, outcome, reason, created_at, \
     completed_at";
 
+/// [`COLUMNS`] qualified for the joined list query.
+const LISTED_COLUMNS: &str = "t.id, t.template_id, t.template_version, t.member_id, \
+    t.destination_id, t.sender_identity_id, t.recipient_hash, t.recipient_member_id, \
+    t.render_context, t.draft_revision, t.outcome, t.reason, t.created_at, t.completed_at";
+
 /// A test send to reserve a slot for. It carries no address: the job finds the recipient by the
 /// row's hash.
 pub struct NewTestSend<'a> {
@@ -404,13 +409,8 @@ pub async fn list_test_sends(
     limit: u32,
     before: Option<TestSendCursor>,
 ) -> Result<(Vec<ListedTestSend>, bool), StoreError> {
-    let columns = COLUMNS
-        .split(',')
-        .map(|column| format!("t.{}", column.trim()))
-        .collect::<Vec<_>>()
-        .join(", ");
     let mut rows: Vec<ListedRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "SELECT {columns}, \
+        "SELECT {LISTED_COLUMNS}, \
             COALESCE(rm.email, a.display_hint, '{REMOVED_ADDRESS}') AS recipient_display, \
             sm.email AS sent_by_email \
          FROM test_sends t \

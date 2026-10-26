@@ -72,6 +72,8 @@ function Gate(props: GateProps) {
 
 type Pick = { kind: "member" | "entry"; id: string; label: string };
 
+const keyOf = (choice: Pick) => `${choice.kind}:${choice.id}`;
+
 interface Attempt {
   key: string;
   label: string;
@@ -126,13 +128,13 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
     ...(members.status === "ready" ? members.data.map((entry) => ({ kind: "member" as const, id: entry.user_id, label: entry.email })) : []),
     ...(allowlist.status === "ready" ? allowlist.data.map((entry) => ({ kind: "entry" as const, id: entry.id, label: entry.name })) : []),
   ];
-  const chosen = choices.filter((choice) => picked[`${choice.kind}:${choice.id}`]);
+  const chosen = choices.filter((choice) => picked[keyOf(choice)]);
   const left = quota.status === "ready" ? Math.max(0, quota.data.member.limit - quota.data.member.used) : null;
   const overQuota = left !== null && chosen.length > left;
   const blocked = busy || chosen.length === 0 || overQuota || chosenDestination === "" || sender === "";
 
   function toggle(choice: Pick) {
-    const key = `${choice.kind}:${choice.id}`;
+    const key = keyOf(choice);
     setPicked((current) => ({ ...current, [key]: !current[key] }));
   }
 
@@ -145,9 +147,9 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
     const queue = chosen;
     setBusy(true);
     setStoppedAt(undefined);
-    setAttempts(queue.map((choice) => ({ key: `${choice.kind}:${choice.id}`, label: choice.label, state: "waiting" })));
+    setAttempts(queue.map((choice) => ({ key: keyOf(choice), label: choice.label, state: "waiting" })));
     for (const [index, choice] of queue.entries()) {
-      const key = `${choice.kind}:${choice.id}`;
+      const key = keyOf(choice);
       update(key, { state: "sending" });
       try {
         await unwrap(
@@ -168,7 +170,7 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
         quota.reload();
       } catch (error) {
         if (error instanceof ApiError && error.status === 429) {
-          const rest = new Set(queue.slice(index).map((entry) => `${entry.kind}:${entry.id}`));
+          const rest = new Set(queue.slice(index).map(keyOf));
           setAttempts((current) => current.map((entry) => (rest.has(entry.key) ? { ...entry, state: "stopped" } : entry)));
           setStoppedAt(await resetTime(workspaceId));
           quota.reload();
@@ -217,7 +219,7 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
                   .filter((choice) => choice.kind === "member")
                   .map((choice) => (
                     <label className="ts-recipient" key={choice.id}>
-                      <input type="checkbox" checked={picked[`member:${choice.id}`] ?? false} onChange={() => toggle(choice)} />
+                      <input type="checkbox" checked={picked[keyOf(choice)] ?? false} onChange={() => toggle(choice)} />
                       <span className="ts-avatar" aria-hidden="true">
                         {initials(choice.label)}
                       </span>
@@ -232,7 +234,7 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
                   .filter((choice) => choice.kind === "entry")
                   .map((choice) => (
                     <label className="ts-recipient" key={choice.id}>
-                      <input type="checkbox" checked={picked[`entry:${choice.id}`] ?? false} onChange={() => toggle(choice)} />
+                      <input type="checkbox" checked={picked[keyOf(choice)] ?? false} onChange={() => toggle(choice)} />
                       <span>{choice.label}</span>
                     </label>
                   ))}
