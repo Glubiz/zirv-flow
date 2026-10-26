@@ -5343,6 +5343,42 @@ mod tests {
 
         let first = env.send(person, template).await;
         let first_html = env.last_html();
+        // Preview and send resolve the inputs and render with the same calls, so the sent bytes
+        // are the bytes of a render of the resolved inputs.
+        let stored: Value = sqlx::query_scalar(
+            "SELECT document FROM template_versions WHERE template_id = $1 AND version = 1",
+        )
+        .bind(template)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let document = render::document_of(&stored).unwrap();
+        let mut connection = env.pool.acquire().await.unwrap();
+        let resolved = inputs::resolve(
+            &mut connection,
+            env.ws,
+            &document,
+            inputs::Subject::Person(person),
+            Some(PUBLIC_URL),
+            env.clock.now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(connection);
+        let mut context = zirv_flow_render::RenderContext::default();
+        context
+            .person
+            .insert("email".into(), json!("ada@example.com"));
+        context.message.id = first.id.to_string();
+        let expected = zirv_flow_templates::render_email_with(
+            &document,
+            &context,
+            &zirv_flow_render::Hooks::untracked(),
+            &resolved.extras,
+        )
+        .unwrap();
+        assert_eq!(first_html, expected.html);
         env.edit_snippet(snippet, "OFFER TWO").await;
         assert_eq!(env.publish_snippet(snippet).await, 2);
         let second = env.send(person, template).await;
