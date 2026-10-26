@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { ApiError } from "../../api";
-import { Button, Dialog, Pill } from "../../ui";
+import { Button, Dialog } from "../../ui";
 import { AssistantPanel, DraftChanges, assistantGone, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
 import type { Editable, TemplateDetail } from "./model";
 
@@ -133,9 +133,10 @@ function DraftReview({ changes, draft, onPick }: { changes: Draft["changes"]; dr
   const [chosen, setChosen] = useState(0);
   const variants = draft.subject_variants;
   const renders = draft.renders;
+  const repaired = draft.repaired ?? [];
   return (
     <div className="stack">
-      {draft.attempts > 1 ? <Pill tone="attention">Repaired before you saw it</Pill> : null}
+      {repaired.length > 0 ? <p className="faint">The assistant repaired {repaired.length === 1 ? "a field" : "fields"} before you saw this draft.</p> : null}
       {variants.length > 0 ? (
         <fieldset className="stack-tight">
           <legend className="field-label">Subject line</legend>
@@ -155,7 +156,7 @@ function DraftReview({ changes, draft, onPick }: { changes: Draft["changes"]; dr
           ))}
         </fieldset>
       ) : null}
-      <DraftChanges changes={changes} />
+      <DraftChanges changes={changes} repaired={repaired} />
       {renders ? (
         <div className="stack-tight">
           <div className="seg-tabs" role="group" aria-label="Width">

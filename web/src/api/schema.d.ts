@@ -5921,6 +5921,11 @@ export interface components {
             issues: components["schemas"]["DraftIssue"][];
             kind: components["schemas"]["DraftKindBody"];
             renders?: null | components["schemas"]["TemplateRendersBody"];
+            /**
+             * @description For a template draft that needed more than one attempt: the places in the document that an
+             *     earlier attempt got wrong and a later one fixed, as JSON pointers. Absent otherwise.
+             */
+            repaired?: string[];
             simulation?: null | components["schemas"]["SimulationBody"];
             /**
              * @description `valid`, or `invalid` when no attempt passed validation: then there is no `content` and
@@ -5942,6 +5947,11 @@ export interface components {
             at?: string | null;
             /** @description A stable code such as `unknown_column`, `unknown_list` or `path_invalid`. */
             code: string;
+            /**
+             * @description For `unknown_merge_field`: the merge field the document names, a key of the schema and
+             *     never a person's value.
+             */
+            field?: string | null;
         };
         /**
          * @description What a draft is of.

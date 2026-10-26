@@ -129,7 +129,7 @@ describe("the template assistant", () => {
       status: "invalid",
       attempts: 3,
       content: null,
-      issues: [{ code: "unknown_merge_field", at: "/email/html" }],
+      issues: [{ code: "unknown_merge_field", at: "/email/html", field: "person.nope" }],
       changes: [],
       subject_variants: [],
     };
@@ -139,13 +139,15 @@ describe("the template assistant", () => {
     await user.click(screen.getByRole("button", { name: "Draft" }));
 
     const list = await screen.findByRole("list", { name: "Problems with the last attempt" });
-    expect(list).toHaveTextContent("not a field in this workspace");
+    expect(list).toHaveTextContent("person.nope: This merge field is not a field in this workspace.");
     expect(list).toHaveTextContent("/email/html");
     expect(screen.queryByRole("button", { name: /Accept/ })).not.toBeInTheDocument();
 
-    answer = valid({ attempts: 2 });
+    answer = valid({ attempts: 2, repaired: ["/email/subject"] });
     await user.click(screen.getByRole("button", { name: "Draft again" }));
-    expect(await screen.findByText("Repaired before you saw it")).toBeInTheDocument();
+    const row = (await screen.findByRole("table", { name: "What the draft changes" })).querySelector("tbody tr");
+    expect(row).toHaveTextContent("Repaired");
+    expect(screen.getByText(/repaired a field before you saw/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Accept into draft" })).toBeEnabled();
   });
 

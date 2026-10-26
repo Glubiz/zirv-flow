@@ -106,7 +106,7 @@ const SEGMENT_ISSUE_TEXT: Record<string, string> = {
 
 /** What a template validator code means, in a sentence; the editor's own wording where it has one. */
 const TEMPLATE_ISSUE_TEXT: Record<string, string> = {
-  unknown_merge_field: "A merge field here is not a field in this workspace.",
+  unknown_merge_field: "This merge field is not a field in this workspace.",
   missing_unsubscribe: "A marketing email needs an unsubscribe link.",
   missing_content: "The template has no content.",
   syntax_error: "The merge tags have a syntax error.",
@@ -124,7 +124,8 @@ export function issueSentence(issue: DraftIssue, kind: DraftKindName = "mapping"
     kind === "flow"
       ? `This part of the flow is not valid (${issue.code.replaceAll("_", " ")}).`
       : (table[issue.code] ?? "The answer broke a rule that the draft must follow.");
-  return issue.at ? `${text} (${issue.at})` : text;
+  const named = issue.field ? `${issue.field}: ${text}` : text;
+  return issue.at ? `${named} (${issue.at})` : named;
 }
 
 const DRY_RUN_REASONS: Record<string, string> = {
