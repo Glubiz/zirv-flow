@@ -1,0 +1,16 @@
+{
+  "blocks": [
+    {
+      "type": "heading",
+      "id": "promo_title",
+      "level": 2,
+      "text": "Spring sale for {{ person.name }}"
+    },
+    {
+      "type": "button",
+      "id": "promo_button",
+      "label": "See the sale",
+      "url": "https://shop.example/sale"
+    }
+  ]
+}

@@ -293,9 +293,10 @@ impl Flight {
     /// the client's timeout, then checks the per-user rate limit and the monthly budget, and
     /// records the call as `pending` at its worst-case cost: the model's price for the request's
     /// input-token upper bound and the full output cap. A call is admitted only when the month's
-    /// spend plus that cost stays within the budget, so real spend never exceeds it. Pending rows
-    /// count in both limits, so calls still in flight are counted, on this instance and on every
-    /// other. Nothing is sent and nothing is recorded when a limit refuses. Returns the call's id
+    /// spend plus that cost stays within the budget. A provider that reports usage above these
+    /// bounds can overrun the budget by the calls in flight; its reported usage is still billed.
+    /// Pending rows count in both limits, so calls still in flight are counted on every instance.
+    /// Nothing is sent and nothing is recorded when a limit refuses. Returns the call's id
     /// and its worst-case cost.
     async fn reserve(&self) -> Result<(Uuid, i64), DispatchError> {
         let call = Uuid::now_v7();
@@ -400,6 +401,21 @@ impl Flight {
         };
         let (input_tokens, output_tokens) =
             usage.map_or((0, 0), |usage| (usage.input_tokens, usage.output_tokens));
+        if input_tokens > self.request.input_tokens_upper_bound()
+            || output_tokens > self.request.max_output_tokens()
+        {
+            metrics::counter!(
+                "zirv_flow_ai_provider_faults_total",
+                "feature" => self.feature,
+                "reason" => "usage_over_reservation",
+            )
+            .increment(1);
+            tracing::warn!(
+                feature = self.feature,
+                reason = "usage_over_reservation",
+                "AI provider reported usage above the request's reserved bounds"
+            );
+        }
         let transcript = self.transcript_days.map(|days| NewTranscript {
             workspace: self.workspace,
             user: self.user,

@@ -200,6 +200,10 @@ pub(super) async fn merge_people(
     .await
     .map_err(StoreError::query)?;
 
+    // Saved preview people move in the same transaction; a template that already keeps the
+    // survivor just loses the loser's row.
+    crate::templates::move_to_survivor(connection, workspace, losers, survivor).await?;
+
     // Conflicts between the people that are now one person have nothing left to review.
     let mut group = losers.to_vec();
     group.push(survivor);
@@ -373,6 +377,9 @@ async fn lock_merged_and_survivor(
 ///   was sent to, and the log reads through `person_merges` ([`crate::list_person_messages`]) so
 ///   the survivor sees it. A `delivery.send` still queued names the old id and is dropped when the
 ///   enrollment it belongs to has exited (the merge exits the loser's in-flight enrollments).
+/// - `template_preview_people` is **moved** to the survivor in the merge transaction
+///   ([`merge_people`]), dropping a row when the survivor is already saved on that template. It
+///   is the one person-keyed table here that does not stay on the old person.
 /// - `step_executions` has no person column and follows its enrollment.
 /// - `enrollment_waits` is **deleted** in the merge transaction with the enrollment that held it:
 ///   a wait left on the old id would never match an event, which resolves to the survivor, while
@@ -1371,6 +1378,68 @@ mod tests {
             assert_eq!(decision.reason.as_deref(), Some("merge"));
             assert_eq!(decision.subject_ids["person"], loser.to_string());
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_merge_moves_saved_preview_people_to_the_survivor_and_collapses_a_duplicate(
+        pool: PgPool,
+    ) {
+        use crate::templates::tests_support::create;
+        let ws = workspace(&pool, "one").await;
+        let survivor = apply_one(
+            &pool,
+            ws,
+            record("crm", "1", &[("external:user_id", "u")], json!({})),
+        )
+        .await;
+        let loser = apply_one(
+            &pool,
+            ws,
+            record("web", "2", &[("anonymous_id", "a")], json!({})),
+        )
+        .await;
+        let both = create(&pool, ws, "Both").await;
+        let only_loser = create(&pool, ws, "Only loser").await;
+        for (template, person) in [
+            (both.id, survivor),
+            (both.id, loser),
+            (only_loser.id, loser),
+        ] {
+            sqlx::query(
+                "INSERT INTO template_preview_people (template_id, workspace_id, person_id) \
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(template)
+            .bind(ws.as_uuid())
+            .bind(person)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        apply_one(
+            &pool,
+            ws,
+            record(
+                "app",
+                "3",
+                &[("external:user_id", "u"), ("anonymous_id", "a")],
+                json!({}),
+            ),
+        )
+        .await;
+
+        let mut rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT template_id, person_id FROM template_preview_people ORDER BY 1, 2",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        rows.sort();
+        let mut expected = vec![(both.id, survivor), (only_loser.id, survivor)];
+        expected.sort();
+        assert_eq!(rows, expected);
     }
 
     #[sqlx::test]

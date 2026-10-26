@@ -310,6 +310,30 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
     }
     commit(tx).await.unwrap();
 
+    // A template that keeps the person, the merged person and the bystander as preview people.
+    let template = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO templates (id, workspace_id, name, channel, category) \
+         VALUES ($1, $2, 'Seeded', 'email', 'marketing')",
+    )
+    .bind(template)
+    .bind(ws.as_uuid())
+    .execute(pool)
+    .await
+    .unwrap();
+    for saved in [person, merged, bystander] {
+        sqlx::query(
+            "INSERT INTO template_preview_people (template_id, workspace_id, person_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(template)
+        .bind(ws.as_uuid())
+        .bind(saved)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     // A conflict between the bystander and the person.
     let bystander_record: Uuid = sqlx::query_scalar(
         "SELECT id FROM source_records WHERE workspace_id = $1 AND record_key = '2'",

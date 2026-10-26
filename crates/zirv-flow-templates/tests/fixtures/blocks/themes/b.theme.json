@@ -1,0 +1,12 @@
+{
+  "primary": "#b10101",
+  "text": "#b20202",
+  "background": "#b30303",
+  "link": "#b40404",
+  "button": "#b50505",
+  "button_text": "#b60606",
+  "content_width": 720,
+  "font": "verdana",
+  "button_radius": 14,
+  "link_underline": true
+}

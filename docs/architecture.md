@@ -1671,6 +1671,9 @@ Block mode runs step 4 per text field (the literal text of a plain field is esca
 map-order dependence, so equal inputs give equal bytes. Golden tests and the
 preview-equals-send test rely on this.
 
+As built (#303): the renderer and the validator resolve nothing; the caller passes `RenderExtras`. A theme is in effect only when the document's `theme` is not `none` and `RenderExtras.theme` is set. With `theme: "none"` any theme in the extras is ignored and the bytes are those of the settings; `{"id": ...}` with no theme passed is `broken_theme_reference` (blocking at validation, the typed error at render); `"default"` with no theme passed renders with the settings and no footer. A theme in effect replaces the settings: `background` is the background colour, `text` the text colour, `link` the link colour with `link_underline` as the link `text-decoration`, `button` and `button_text` the button colours with `button_radius` as the button `border-radius`, `content_width` the width, `font` the font stack, and `primary` the heading colour (headings keep their colour without a theme). A `web_font_url` is an `mj-font` in the head named after the first family of the stack, which stays the fallback. A section's own `background_color` and a divider's own `color` still apply over the theme; code-mode HTML and MJML ignore a theme. Where a theme is in effect the context gains `theme.primary`, `text`, `background`, `link`, `button`, `button_text`, `name` (from `RenderExtras.theme_name`) and `logo_url` (absent without a logo asset URL); any other `theme.*` name, and every `theme.*` name with no theme in effect, is `unknown_merge_field`. When a theme is in effect, `footer` is `"theme"` and the theme has a `footer_snippet`, the snippet's blocks become one last section with the id `theme-footer`; no content for it is `broken_snippet_reference`. The id `theme-footer` is reserved: a document that uses it gets `duplicate_block_id`. A `snippet` block renders the blocks of `RenderExtras.snippets[snippet_id]` in its place, at the top level or in a section column, and its own `visible_if` decides whether it renders; no content is `broken_snippet_reference`. Validation runs over this effective content (the unsubscribe link may come from a snippet or the footer, merge fields are checked inside both), and an issue inside a snippet or the footer has a path that names the snippet block or `theme-footer`, then the inner block (`/blocks/block/<snippet block>/block/<inner>/<field>`). `blocks_to_mjml` ignores a theme and refuses a snippet block.
+
+
 ### 11.6 Validation
 
 - **Blocks publish:** a merge field unknown to the registry or event catalog; MiniJinja syntax errors; a `marketing` email without an unsubscribe link (own or from the theme footer); a missing sender identity; a broken reference (snippet, asset, theme, segment in a condition), checked on the effective content after the theme footer is appended; a document failing its schema or the sanitizer; raw HTML that `mrml` cannot parse; a webhook body that is not valid JSON after a sample render.
@@ -1690,7 +1693,7 @@ preview-equals-send test rely on this.
 
 - **Versions:** drafts are editable; publishing creates an immutable version. `action.send` references the template, not a version, and sends its current published version at send time, so a typo fix needs no flow republish. Publishing a template, snippet or theme returns the active flows that use it. Version history and where-used are available for templates, snippets and themes. A message row records `theme_id`, `theme_version` and `snippet_versions` (snippet id to version) beside `template_version`, and a test send records them too.
 - **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`; until M8 introduces that grant, owners and admins only) or a sample person built from registry types, at desktop and mobile widths (#307). The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks with their reasons and validation results.
-- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge.
+- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge. As built (#308): `template_preview_people` (migration 0064; `template_id`, `workspace_id`, `person_id`, `added_by`, `created_at`; primary key `(template_id, person_id)`) holds at most 20 rows per template, checked under the template row lock (`preview_people_limit`, 409). `GET`, `POST` and `DELETE /{person_id}` on `/templates/{id}/preview-people` are Admin only and audited as `template.preview_person_added` and `template.preview_person_removed` with ids only; a person already saved answers 200 and writes no second row or audit. The list shows each person with the strongest identifier masked as the people search masks it. The preview endpoint is unchanged: only an Admin previews a real person. A merge moves the loser's rows to the survivor in the merge transaction and drops a row when the survivor is already saved on that template.
 - **Assistant template drafts (#309):** a template tool (the ninth in the registry) drafts email copy, subject variants, block layouts and translations. The draft is an `ai_drafts` row of kind `template`, validated by template validation with bounded repair before it is stored. The response carries the field diff and a render diff at desktop and mobile widths. Accepting writes the template's ordinary draft after validation passes again and never publishes. An accepted translation updates only the current draft, including its `lang`; saving it as a new template is a separate marketer action.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
 - **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
@@ -2363,20 +2366,21 @@ database clock), so they hold across instances. The reservation is one transacti
 lock on the workspace: it counts every row, `pending` ones included, and inserts a `pending` row
 whose cost is the worst case (one input token per byte of the request text plus framing, the full
 output cap), and admits the call only when the month's spend plus that cost stays within the budget,
-so concurrent calls cannot all pass the gates and real spend never exceeds the budget. The call then
-runs in a task of its own, so a dropped handler cannot leave the row pending, and the row is
-finished with the real tokens and cost. A panic marks it `abandoned`; a process that dies mid-call
-leaves it `pending`, and the next reservation of the workspace marks `pending` rows older than the
-client timeout plus a margin `abandoned`. Both keep the worst-case cost, which is conservative and
-intended. Personal data is a
-distinct request content type (`Personal`), and a request builder at `SchemaOnly` privacy returns
-`PersonalDataNotAllowed` for it, so the check does not depend on the caller. Untrusted content is
-fenced in `<untrusted_data>` delimiters, with a system notice added whenever it appears. Bounded
-repair sends each attempt through the same gates. `ai_calls` has no column that can hold content
-(a test lists its columns); `ai_transcripts` carries `expires_at`, and the
-`maintenance.ai_transcripts` job, scheduled hourly by the migration, deletes expired rows in batches.
-Erasing a person deletes the workspace's transcripts whose text contains their ids or identifier
-values, ignoring case, in the erase transaction.
+so concurrent calls cannot all pass the gates. A provider that reports usage above either bound can
+overrun the budget by the calls in flight. The reported usage is still recorded and increments
+`zirv_flow_ai_provider_faults_total{feature,reason="usage_over_reservation"}`, with a content-free
+warning. The call then runs in a task of its own, so a dropped handler cannot leave the row pending,
+and the row is finished with the real tokens and cost. A panic marks it `abandoned`; a process that
+dies mid-call leaves it `pending`, and the next reservation of the workspace marks `pending` rows
+older than the client timeout plus a margin `abandoned`. Both keep the worst-case cost, which is
+conservative and intended. Personal data is a distinct request content type (`Personal`), and a
+request builder at `SchemaOnly` privacy returns `PersonalDataNotAllowed` for it, so the check does
+not depend on the caller. Untrusted content is fenced in `<untrusted_data>` delimiters, with a
+system notice added whenever it appears. Bounded repair sends each attempt through the same gates.
+`ai_calls` has no column that can hold content (a test lists its columns); `ai_transcripts` carries
+`expires_at`, and the `maintenance.ai_transcripts` job, scheduled hourly by the migration, deletes
+expired rows in batches. Erasing a person deletes the workspace's transcripts whose text contains
+their ids or identifier values, ignoring case, in the erase transaction.
 
 As built (M3, #93): the two dispatch residuals are closed. The reservation now runs in the same
 spawned task as the provider call, so a dropped handler cannot leave a reserved row without a
@@ -2717,8 +2721,8 @@ identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
 segment memberships, enrollments, step executions, enrollment waits, flow entries, messages, test-send log entries,
 person-scoped decision records, stored assistant transcripts, pending
-and dead forwarding payloads and pending exports, and clear saved preview-person
-references; (4) call `erase` on forwarding and delivery destinations that
+and dead forwarding payloads and pending exports, and delete saved preview-person
+rows (`template_preview_people`); (4) call `erase` on forwarding and delivery destinations that
 declare it and record results; (5) delete the person; (6) write an audit entry
 without personal data. Templates,
 snippets, themes and assets hold no personal data by design. Each milestone

@@ -11,6 +11,7 @@ use hashbrown::HashSet;
 use serde::{Deserialize, Serialize};
 use zirv_flow_core::segment::pointer_push;
 
+use super::look::THEME_FOOTER_ID;
 use crate::document::Category;
 use crate::issue::{Issue, code};
 
@@ -568,7 +569,8 @@ pub(crate) fn check_shape(content: &BlocksContent) -> Vec<Issue> {
                 .with_message("a language tag such as `en` or `da-DK`"),
         );
     }
-    let mut seen: HashSet<&str> = HashSet::new();
+    // The theme footer takes this id at render, so a document may not use it.
+    let mut seen: HashSet<&str> = HashSet::from([THEME_FOOTER_ID]);
     for section in &content.sections {
         let at = |field: &str| block_at(&section.id, Some(field));
         check_id(&section.id, &mut seen, &mut issues);
@@ -1021,5 +1023,21 @@ pub(crate) mod tests {
         assert_eq!(font_css("Arial"), None);
         assert_eq!(Align::Center.css(), "center");
         assert_eq!(heading("x").id(), "x");
+    }
+
+    #[test]
+    fn the_theme_footer_id_is_reserved_for_the_document() {
+        let mut content = BlocksContent::new("Hi");
+        content.sections.push(Section {
+            id: THEME_FOOTER_ID.into(),
+            background_color: None,
+            padding: None,
+            columns: vec![Vec::new()],
+            visible_if: None,
+        });
+        let issues = check_shape(&content);
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].code, code::DUPLICATE_BLOCK_ID);
+        assert_eq!(issues[0].at, "/blocks/block/theme-footer");
     }
 }

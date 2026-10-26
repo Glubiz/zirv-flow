@@ -1,5 +1,5 @@
 //! Message templates (architecture 11.6, 11.7 and 15): drafts, validation, publish into immutable
-//! versions, where-used and preview.
+//! versions, where-used, preview and saved preview people.
 //!
 //! Permissions (ruling 43163028): `Read` reads, `Write` saves drafts and previews a sample
 //! person, `Admin` publishes, archives and previews a real person (until the `view_pii` grant
@@ -11,6 +11,7 @@
 
 pub(crate) mod crud;
 pub(crate) mod preview;
+pub(crate) mod preview_people;
 pub(crate) mod publish;
 pub(crate) mod where_used;
 

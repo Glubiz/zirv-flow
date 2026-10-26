@@ -6,11 +6,13 @@
 //! content-type registry in `zirv-flow-templates`, so this module never sees a content type and a
 //! new one changes no table.
 //!
-//! None of these tables is person-scoped: a template holds no person, address or trait value, so
-//! the erasure scan has nothing to look for in them. Saved preview people are not stored (M7).
+//! Only `template_preview_people` is person-scoped: the people an admin saves to preview a template
+//! as. The erasure deletes its rows and a merge moves them to the survivor. The other tables hold
+//! no person, address or trait value.
 
 mod catalog;
 mod crud;
+mod preview_people;
 mod publish;
 mod where_used;
 
@@ -19,6 +21,11 @@ pub use crud::{
     NewTemplate, Template, TemplateDraft, TemplateError, TemplatePatch, archive_template,
     create_template, document_sender, find_template, find_template_draft, list_templates,
     save_template_draft, update_template,
+};
+pub(crate) use preview_people::move_to_survivor;
+pub use preview_people::{
+    MAX_PREVIEW_PEOPLE, PreviewPerson, PreviewPersonError, add_preview_person, list_preview_people,
+    remove_preview_person,
 };
 pub use publish::{
     LockedTemplate, TemplateVersion, TemplateVersionSummary, find_template_version,
