@@ -31,6 +31,17 @@ export interface ProblemDetails {
   snippetTemplates?: NamedRef[];
   /** The themes that use a snippet (`snippet_in_use`). */
   snippetThemes?: NamedRef[];
+  /** The live templates a snippet or theme version would stop from sending (`snippet_breaks_templates`, `theme_breaks_templates`). */
+  templates?: BrokenTemplate[];
+  /** How many templates there are in all; `templates` lists the first few. */
+  total?: number;
+}
+
+/** A live template a new version would break, with the codes of its blocking issues. */
+export interface BrokenTemplate {
+  id: string;
+  name: string;
+  codes: string[];
 }
 
 /** A thing a problem names, by id and name. */
@@ -69,6 +80,8 @@ export class ApiError extends Error {
   readonly templateIssues: ProblemTemplateIssue[];
   readonly snippetTemplates: NamedRef[];
   readonly snippetThemes: NamedRef[];
+  readonly templates: BrokenTemplate[];
+  readonly total: number;
 
   constructor(problem: ProblemDetails) {
     super(problem.detail || problem.title);
@@ -85,6 +98,8 @@ export class ApiError extends Error {
     this.templateIssues = problem.templateIssues ?? [];
     this.snippetTemplates = problem.snippetTemplates ?? [];
     this.snippetThemes = problem.snippetThemes ?? [];
+    this.templates = problem.templates ?? [];
+    this.total = problem.total ?? this.templates.length;
   }
 }
 
@@ -111,6 +126,8 @@ export function problemFrom(body: unknown, response: Response): ApiError {
       templateIssues: templateIssues(body["template_issues"]),
       snippetTemplates: namedRefs(body["snippet_templates"]),
       snippetThemes: namedRefs(body["snippet_themes"]),
+      templates: brokenTemplates(body["templates"]),
+      ...(typeof body["total"] === "number" ? { total: body["total"] } : {}),
     });
   }
   return new ApiError({
@@ -176,6 +193,16 @@ function namedRefs(value: unknown): NamedRef[] {
     if (!isRecord(entry)) return [];
     const { id, name } = entry;
     return typeof id === "string" && typeof name === "string" ? [{ id, name }] : [];
+  });
+}
+
+function brokenTemplates(value: unknown): BrokenTemplate[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry: unknown) => {
+    if (!isRecord(entry)) return [];
+    const { id, name, codes } = entry;
+    if (typeof id !== "string" || typeof name !== "string" || !Array.isArray(codes)) return [];
+    return [{ id, name, codes: codes.filter((code): code is string => typeof code === "string") }];
   });
 }
 

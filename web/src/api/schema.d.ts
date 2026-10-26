@@ -3031,7 +3031,13 @@ export interface paths {
          *     blocks), and each asset image must name a live asset of the workspace; a snippet with no block
          *     is refused as `missing_content`. A theme logo image is accepted: the template or theme that
          *     holds the snippet checks it. A blocking issue is a 422
-         *     `snippet_invalid` that lists every issue and writes nothing. The response lists the templates,
+         *     `snippet_invalid` that lists every issue and writes nothing. The live templates whose current
+         *     version renders with the snippet (a snippet block, or a theme footer) are validated with the
+         *     draft in place of the published version, at most 200 in template id order; past 200 the publish
+         *     goes ahead on the result for the first 200. A blocking issue in one of them, such as a footer
+         *     without an unsubscribe link in a marketing template, is a 422 `snippet_breaks_templates` that
+         *     lists up to 20 of them with their issue codes and the total, and writes nothing. Warnings do
+         *     not refuse. The response lists the templates,
          *     themes and active flows that use the snippet. Audited as `snippet.published`.
          */
         post: operations["publish_snippet"];
@@ -3915,7 +3921,12 @@ export interface paths {
          *     blocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the
          *     footer a snippet of the workspace that is not archived and has a published version
          *     (`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue
-         *     and writes nothing. The logo's asset reference is written with the version. The response lists
+         *     and writes nothing. The live templates that name the theme, or follow it while it is the
+         *     default, are validated with the draft in place of the published version, at most 200 in
+         *     template id order; past 200 the publish goes ahead on the result for the first 200. A blocking
+         *     issue in one of them, such as a removed footer in a marketing template, is a 422
+         *     `theme_breaks_templates` that lists up to 20 of them with their issue codes and the total, and
+         *     writes nothing. Warnings do not refuse. The logo's asset reference is written with the version. The response lists
          *     the templates and active flows that use the theme. Audited as `theme.published`.
          */
         post: operations["publish_theme"];
@@ -4656,6 +4667,14 @@ export interface components {
              *     appended.
              */
             batch: components["schemas"]["BatchItemRequest"][];
+        };
+        /** @description A live template that a new snippet or theme version would stop from sending. */
+        BrokenTemplateProblem: {
+            /** @description The codes of its blocking issues with the new version. */
+            codes: string[];
+            /** Format: uuid */
+            id: string;
+            name: string;
         };
         BucketBody: {
             /** Format: date-time */
@@ -8013,7 +8032,17 @@ export interface components {
              *     and where, never a value from the document.
              */
             template_issues?: components["schemas"]["TemplateIssueProblem"][] | null;
+            /**
+             * @description The live templates a snippet or theme version would stop from sending
+             *     (`snippet_breaks_templates`, `theme_breaks_templates`), at most 20.
+             */
+            templates?: components["schemas"]["BrokenTemplateProblem"][] | null;
             title: string;
+            /**
+             * Format: int32
+             * @description How many templates `templates` is the first of.
+             */
+            total?: number | null;
             /**
              * @description The `x-trace-id` of the failed request; look it up with
              *     `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
@@ -23253,7 +23282,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft has blocking issues (`snippet_invalid`, with `template_issues`) */
+            /** @description The draft has blocking issues (`snippet_invalid`, with `template_issues`), or would stop live templates from sending (`snippet_breaks_templates`, with `templates` and `total`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -27023,7 +27052,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft has blocking issues (`theme_invalid`, with `template_issues`) */
+            /** @description The draft has blocking issues (`theme_invalid`, with `template_issues`), or would stop live templates from sending (`theme_breaks_templates`, with `templates` and `total`) */
             422: {
                 headers: {
                     [name: string]: unknown;
