@@ -388,6 +388,10 @@ pub async fn complete_job<'e>(
 ///
 /// `error` is truncated to 2 KB and must never contain payload values. For a workspace
 /// job the same statement appends a `job.attempt` decision, `failed` or `exhausted`.
+///
+/// The `locked` CTE takes the row first: when an erasure's `purge_on_release` mark commits while
+/// this waits, the lock rechecks against the newest row version, so the flag it returns (not the
+/// statement snapshot's) picks between the delete and the requeue.
 pub async fn fail_job<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
@@ -396,8 +400,12 @@ pub async fn fail_job<'e>(
     error: &str,
 ) -> Result<Option<FailOutcome>, StoreError> {
     let state: Option<String> = sqlx::query_scalar(
-        "WITH purged AS ( \
-             DELETE FROM jobs WHERE id = $1 AND lease_token = $2 AND purge_on_release \
+        "WITH locked AS ( \
+             SELECT purge_on_release FROM jobs \
+             WHERE id = $1 AND lease_token = $2 FOR NO KEY UPDATE), \
+         purged AS ( \
+             DELETE FROM jobs WHERE id = $1 AND lease_token = $2 \
+               AND (SELECT purge_on_release FROM locked) \
              RETURNING id), \
          updated AS ( \
              UPDATE jobs SET \
@@ -408,7 +416,7 @@ pub async fn fail_job<'e>(
                 payload = CASE WHEN attempts >= max_attempts AND kind = 'destination.erase' \
                                THEN payload - 'external_key' ELSE payload END, \
                 last_error = $4, lease_token = NULL, lease_expires_at = NULL, locked_by = NULL \
-             WHERE id = $1 AND lease_token = $2 AND NOT purge_on_release \
+             WHERE id = $1 AND lease_token = $2 AND NOT (SELECT purge_on_release FROM locked) \
              RETURNING id, workspace_id, kind, payload, state, attempts, trace_id, cause_kind, \
                        cause_id), \
          settled AS ( \
