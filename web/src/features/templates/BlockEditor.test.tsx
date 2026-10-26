@@ -7,6 +7,7 @@ import { renderRoute } from "../../test/renderFeature";
 import { drafts, previewBody, templateDetail, templateRoutes, SENDER_ID, TEMPLATE_ID, WS, type Doc, type Issue } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
 import { DEFAULT_STYLE } from "./blocks/document";
+import { readDocument, startingDocument } from "./model";
 
 const WAIT = { timeout: 4000 };
 const BASE = `${WS}/templates/${TEMPLATE_ID}`;
@@ -15,7 +16,7 @@ function mount() {
   return renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
 }
 
-function blocksDocument(sections: unknown[] = [], overrides: Doc = {}, schema = 1): Doc {
+function blocksDocument(sections: unknown[] = [], overrides: Doc = {}, schema = 2): Doc {
   return {
     schema,
     channel: "email",
@@ -55,7 +56,7 @@ describe("building with blocks", () => {
     expect(screen.getByText("Blocks template")).toBeInTheDocument();
   });
 
-  it("inserts every block type, edits its settings and saves the v1 document", async () => {
+  it("inserts every block type, edits its settings and saves the schema 2 document", async () => {
     const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument()) }));
     const user = userEvent.setup();
     mount();
@@ -104,7 +105,7 @@ describe("building with blocks", () => {
       expect(JSON.stringify(lastDraft(calls))).toContain("mine");
     }, WAIT);
     expect(lastDraft(calls)).toEqual({
-      schema: 1,
+      schema: 2,
       channel: "email",
       mode: "blocks",
       blocks: {
@@ -120,7 +121,7 @@ describe("building with blocks", () => {
               [
                 { type: "heading", id: "heading-1", level: 1, text: "Welcome" },
                 { type: "text", id: "text-1", content: "<p>Hello <b>there</b></p>" },
-                { type: "image", id: "image-1", src: "https://cdn.example/a.png", alt: "A logo" },
+                { type: "image", id: "image-1", src: { url: "https://cdn.example/a.png" }, alt: "A logo" },
                 { type: "button", id: "button-1", label: "Button!", url: "https://shop.example", align: "center" },
                 { type: "divider", id: "divider-1", color: "#cccccc" },
                 { type: "spacer", id: "spacer-1", height: 40 },
@@ -317,7 +318,7 @@ describe("validation, preview and publish", () => {
 
 describe("a newer schema", () => {
   it("opens read-only with a notice and offers no editing", async () => {
-    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[heading("a", "A")]] }], {}, 2)) }));
+    const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument([{ id: "s", columns: [[heading("a", "A")]] }], {}, 3)) }));
     mount();
 
     expect(await screen.findByText(/written by a newer version of the editor/)).toBeInTheDocument();
@@ -325,6 +326,79 @@ describe("a newer schema", () => {
     expect(screen.queryByRole("button", { name: /^Remove / })).toBeNull();
     await new Promise((resolve) => setTimeout(resolve, 700));
     expect(drafts(calls)).toHaveLength(0);
+  });
+});
+
+describe("a schema 2 document", () => {
+  const rich = (): Doc =>
+    blocksDocument(
+      [
+        {
+          id: "s",
+          visible_if: { all: [] },
+          columns: [
+            [
+              { type: "heading", id: "h", level: 2, text: "Hi", visible_if: { any: [1] } },
+              { type: "image", id: "i", src: { asset: "0192b1a4-7c3e-7000-8000-00000000b001" }, alt: "Logo" },
+              { type: "snippet", id: "n", snippet_id: "0192b1a4-7c3e-7000-8000-00000000c001" },
+            ],
+          ],
+        },
+      ],
+      {},
+      2,
+    );
+
+  it("carries the theme, the footer, conditions and snippet blocks through an edit untouched", async () => {
+    const document = rich();
+    (document["blocks"] as Doc)["theme"] = { id: "0192b1a4-7c3e-7000-8000-00000000d001" };
+    (document["blocks"] as Doc)["footer"] = "none";
+    const calls = mockApi(templateRoutes({ detail: detailOf(document) }));
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByText(/Snippet 0192b1a4-7c3e-7000-8000-00000000c001/)).toBeInTheDocument();
+    await user.click(await screen.findByRole("group", { name: "Heading block 1" }));
+    const field = await screen.findByRole("textbox", { name: "Heading text" });
+    await user.click(field);
+    await user.paste("!");
+
+    await waitFor(() => expect(JSON.stringify(lastDraft(calls))).toContain("Hi!"), WAIT);
+    const saved = lastDraft(calls) as unknown as { schema: number; blocks: Doc & { sections: { visible_if: unknown; columns: Doc[][] }[] } };
+    expect(saved.schema).toBe(2);
+    expect(saved.blocks["theme"]).toEqual({ id: "0192b1a4-7c3e-7000-8000-00000000d001" });
+    expect(saved.blocks["footer"]).toBe("none");
+    expect(saved.blocks.sections[0]?.visible_if).toEqual({ all: [] });
+    const blocks = saved.blocks.sections[0]?.columns[0] ?? [];
+    expect(blocks[0]?.["visible_if"]).toEqual({ any: [1] });
+    expect(blocks[1]?.["src"]).toEqual({ asset: "0192b1a4-7c3e-7000-8000-00000000b001" });
+    expect(blocks[2]).toEqual({ type: "snippet", id: "n", snippet_id: "0192b1a4-7c3e-7000-8000-00000000c001" });
+  });
+
+  it("shows an asset image read-only and edits the address of a url image", async () => {
+    mockApi(templateRoutes({ detail: detailOf(rich()) }));
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("group", { name: "Image block 2" }));
+    expect(await screen.findByRole("textbox", { name: "Image source" })).toHaveAttribute("readonly");
+    expect(screen.queryByRole("textbox", { name: "Image address" })).toBeNull();
+  });
+
+  it("starts a new document at schema 2 with the default theme and the theme footer", () => {
+    const starting = startingDocument("email", "blocks", "marketing") as { schema: number; blocks: Doc };
+    expect(starting.schema).toBe(2);
+    expect(starting.blocks["theme"]).toBe("default");
+    expect(starting.blocks["footer"]).toBe("theme");
+  });
+
+  it("reads a schema 1 document as one with no theme and no footer and an image url", () => {
+    const old = { schema: 1, channel: "email", mode: "blocks", blocks: { subject: "S", sections: [{ id: "s", columns: [[{ type: "image", id: "i", src: "https://a.example/x.png", alt: "" }]]}] } };
+    const read = readDocument(old);
+    expect(read.kind === "blocks" && read.content.theme).toBe("none");
+    expect(read.kind === "blocks" && read.content.footer).toBe("none");
+    expect(read.kind === "blocks" && read.content.sections[0]?.columns[0]?.[0]).toMatchObject({ src: { url: "https://a.example/x.png" } });
+    expect(read.kind === "blocks" && read.newer).toBe(false);
   });
 });
 
@@ -443,7 +517,7 @@ describe("review fixes", () => {
   });
 
   it("offers no conversion for a document of a newer schema", async () => {
-    mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 2)) }));
+    mockApi(templateRoutes({ detail: detailOf(blocksDocument([], {}, 3)) }));
     const user = userEvent.setup();
     mount();
 

@@ -1,6 +1,7 @@
 //! HTTP API for zirv-flow.
 
 pub mod admin;
+mod assets;
 mod assistant;
 mod auth;
 mod consent;
@@ -62,6 +63,7 @@ use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use tokio::net::TcpListener;
 
+pub use assets::AssetLimits;
 pub use assistant::{
     AiConfig, AiConfigError, AiModelConfig, AiProviderConfig, CaseReport, DispatchError,
     Dispatcher, EvaluationError, dispatch, evaluate_assistant,
@@ -101,6 +103,9 @@ fn routes() -> Router<AppState> {
         )
         // The public routes of a sent message: no `Principal` and no CSRF, the signed token
         // authorises the one message (see `tracking`).
+        // The public file of an uploaded image: no `Principal`, the hash of the bytes is the
+        // address (see `assets::serve`).
+        .route("/a/{file}", get(assets::serve::serve))
         .route("/t/o/{token}", get(tracking::open))
         .route("/t/c/{token}", get(tracking::click))
         .route(
@@ -771,6 +776,16 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/privacy/settings",
             get(privacy::settings::get).put(privacy::settings::put),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/assets",
+            get(assets::crud::list)
+                .post(assets::upload::upload)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/assets/{id}",
+            get(assets::crud::get).delete(assets::crud::remove),
         )
         .route(
             "/api/v1/workspaces/{ws}/imports",

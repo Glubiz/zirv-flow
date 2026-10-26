@@ -1641,6 +1641,12 @@ the snippet block, and blocks are never removed.
   - The response carries immutable cache headers, `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`.
   - `asset_references` are written at publish (template, theme and snippet versions). An asset with a published reference cannot be deleted, because sent emails keep pointing at it.
 
+As built (#306): the store keeps `assets` (the bytes in `bytea`, the SHA-256, extension, type, size, width, height, name; unique per workspace over the live hash) and `asset_references` (workspace, asset, owner kind `template`, `theme` or `snippet`, owner id, version; migration 0060). Neither table has a person column, so the erasure scan and merge skip them. `record_references(conn, workspace, owner_kind, owner_id, version, &[AssetId])` is what the publish paths of templates, themes and snippets call inside their publish transaction; it share-locks each live asset row of that workspace, and an asset of another workspace is refused as missing.
+- **Routes:** `POST /api/v1/workspaces/{ws}/assets?name=` (Write; the raw image as the body, its own `Content-Type`; 201, or 200 with the existing row when the workspace already has the same bytes; audit `asset.uploaded` with id, name and size), `GET .../assets` (Read; newest first with `limit` and `before`, the reference count per asset, `used_bytes`, `limit_bytes` and `max_file_bytes` for a quota bar), `GET .../assets/{id}` (Read; adds `used_by`), `DELETE .../assets/{id}` (Admin; audit `asset.deleted`). A delete sets `deleted_at` and empties `bytes` in one statement.
+- **Codes:** `asset_type_unsupported` (415, the declared type is not PNG, JPEG, GIF or WebP, judged before the body is read; SVG included), `asset_type_mismatch` (415, the magic bytes are another type, no image, or a cut-off header), `asset_too_large` (413, by `Content-Length` first, then while streaming), `asset_quota_exceeded` (413, checked with the insert under a per-workspace advisory lock), `asset_dimensions_exceeded` (422, over 8192 px a side or 40 megapixels, read from the header only), `asset_in_use` (409, the owners in the detail).
+- **Limits:** `assets.max_file_bytes` (5 MiB) and `assets.max_workspace_bytes` (1 GiB). Large senders should put a CDN or caching proxy in front of `/a/`.
+- **Serving:** `GET /a/{sha256}.{ext}` without authentication, from any live row with that hash and the extension of its type (`png`, `jpg`, `gif`, `webp`). Headers: the row's `Content-Type`, `Cache-Control: public, max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox`, `Content-Disposition: inline`. Anything else under `/a/` is a plain 404, never the web app. `asset_url(public_url, sha256, ext)` in the store builds the URL; without `server.public_url` it is the relative path.
+
 ### 11.4 Personalization and conditions
 
 - **Merge tags:** a picker fed by the field registry (traits by type), the event catalog (trigger event properties), the brand theme (a Theme group: colours, logo URL, name; the `theme.*` merge values exist wherever a theme is in effect) and system values (unsubscribe and preference URLs) inserts MiniJinja expressions such as `{{ person.first_name | default("there") }}`. The sandbox is unchanged: no filesystem or network, fuel, recursion and output limits, strict undefined, HTML autoescape in HTML fields.
@@ -1758,8 +1764,29 @@ migrates to the expected document and renders byte-identically. The builder
 refuses a document whose schema is newer than the server's.
 
 The v1 to v2 migration (#302) sets `theme: "none"` and `footer: "none"`, keeps
-`settings`, and turns each image `url` into `src: {"url"}`, so a migrated document renders
+`settings`, and turns each image `src` string into `src: {"url"}`, so a migrated document renders
 byte-identically. A new document starts with `theme: "default"` and `footer: "theme"`.
+
+**As built (schema 2, #302).** `zirv-flow-templates::migrate` holds `v1_to_v2` and
+`migrate_to_current`, pure functions over the JSON value. Schema 2 adds `theme`
+(`"default"`, `{"id"}`, `"none"`), `footer` (`"theme"`, `"none"`), `visible_if` on sections
+and blocks, the `snippet` block, the image `src` (`{"asset"}`, `{"url"}`, `{"theme": "logo"}`)
+and typed reserved `sms`, `push` and `in_app` contents. The v1 to v2 migration writes
+`theme: "none"` and `footer: "none"`, keeps `settings`, and turns each image `src` string into
+`{"url"}`, so a migrated document renders byte-identically (golden files in
+`tests/fixtures/blocks/migrations/`). Stored-read rule: every place that turns a stored document
+into a `TemplateDocument` goes through `parse_template_document`, which migrates in memory and
+refuses a newer schema with `unsupported_schema`; the API draft routes, preview, publish,
+convert, the send job and the webhook call all use it. A draft is saved at schema 2 and served at
+schema 2; a published version stays as saved and is served migrated. New blocking codes: `condition_too_large`,
+`broken_asset_reference`, `broken_theme_reference`, `broken_snippet_reference` (every snippet
+block until #303 renders it), `snippet_section`, `snippet_nested`, `snippet_condition`,
+`not_convertible` and `condition_unsupported` (any `visible_if`, until #307 supplies condition
+results to preview, test send and send); new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
+`condition_unresolved`, `broken_asset_reference`, `broken_theme_reference`. `RenderExtras`
+(theme, snippets, condition results, asset URLs) rides on the `email` and `validate` render
+requests; `validate_theme` and `validate_snippet` run in the pool as `validate_theme` and
+`validate_snippet` requests.
 
 ### 11.9 Render isolation
 

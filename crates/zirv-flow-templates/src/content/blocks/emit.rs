@@ -9,7 +9,8 @@
 use std::convert::Infallible;
 
 use super::model::{
-    Align, Block, BlocksContent, Button, Heading, Image, RawHtml, Section, Settings, font_css,
+    Align, Block, BlocksContent, Button, Heading, Image, ImageSrc, RawHtml, Section, Settings,
+    font_css,
 };
 use super::sanitize::{Cleaned, sanitize_source};
 use super::tags::escape_literals;
@@ -42,6 +43,10 @@ pub(crate) trait Fields {
     fn rich(&mut self, source: &str) -> Result<Cleaned, Self::Error>;
     /// A raw HTML field.
     fn raw(&mut self, source: &str) -> Result<String, Self::Error>;
+    /// The URL of an image: its `src` variant resolved.
+    fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, Self::Error>;
+    /// Whether the section or block `id`, which holds a `visible_if`, is shown.
+    fn visible(&mut self, id: &str) -> Result<bool, Self::Error>;
 }
 
 /// The result of an emit: the MJML and the text part.
@@ -49,6 +54,8 @@ pub(crate) trait Fields {
 pub(crate) struct Emitted {
     pub(crate) mjml: String,
     pub(crate) text: String,
+    /// The ids of the sections and blocks a false `visible_if` dropped, in document order.
+    pub(crate) hidden: Vec<String>,
 }
 
 /// The fields as they are written: the literal text is escaped for MJML and the tags stay.
@@ -75,6 +82,19 @@ impl Fields for Sources {
     fn raw(&mut self, source: &str) -> Result<String, Infallible> {
         Ok(source.to_owned())
     }
+
+    /// Only a URL has a source to keep; the conversion refuses any other variant before it walks.
+    fn image_source(&mut self, src: &ImageSrc) -> Result<Plain, Infallible> {
+        match src {
+            ImageSrc::Url(url) => self.plain(url),
+            ImageSrc::Asset(_) | ImageSrc::Theme(_) => self.plain(""),
+        }
+    }
+
+    /// The conversion refuses a document with a condition before it walks.
+    fn visible(&mut self, _id: &str) -> Result<bool, Infallible> {
+        Ok(true)
+    }
 }
 
 /// The heading font size for a level, in pixels.
@@ -96,6 +116,7 @@ pub(crate) fn emit<F: Fields>(
     let settings = &content.settings;
     let mut mjml = String::new();
     let mut text: Vec<String> = Vec::new();
+    let mut hidden: Vec<String> = Vec::new();
 
     mjml.push_str("<mjml");
     if let Some(lang) = content.lang.as_deref().map(str::trim)
@@ -127,7 +148,11 @@ pub(crate) fn emit<F: Fields>(
         settings.background_color, settings.content_width
     ));
     for section in &content.sections {
-        emit_section(section, settings, fields, &mut mjml, &mut text)?;
+        if section.visible_if.is_some() && !fields.visible(&section.id)? {
+            hidden.push(section.id.clone());
+            continue;
+        }
+        emit_section(section, settings, fields, &mut mjml, &mut text, &mut hidden)?;
     }
     mjml.push_str("</mj-body>\n</mjml>\n");
 
@@ -135,7 +160,7 @@ pub(crate) fn emit<F: Fields>(
     if !text.is_empty() {
         text.push('\n');
     }
-    Ok(Emitted { mjml, text })
+    Ok(Emitted { mjml, text, hidden })
 }
 
 fn emit_section<F: Fields>(
@@ -144,6 +169,7 @@ fn emit_section<F: Fields>(
     fields: &mut F,
     mjml: &mut String,
     text: &mut Vec<String>,
+    hidden: &mut Vec<String>,
 ) -> Result<(), F::Error> {
     mjml.push_str("<mj-section");
     if let Some(color) = &section.background_color {
@@ -156,6 +182,10 @@ fn emit_section<F: Fields>(
     for column in &section.columns {
         mjml.push_str("<mj-column>\n");
         for block in column {
+            if block.visible_if().is_some() && !fields.visible(block.id())? {
+                hidden.push(block.id().to_owned());
+                continue;
+            }
             emit_block(block, settings, fields, mjml, text)?;
         }
         mjml.push_str("</mj-column>\n");
@@ -207,7 +237,7 @@ fn emit_block<F: Fields>(
             width,
             ..
         }) => {
-            let source = fields.url(src, UrlKind::ImageSource)?;
+            let source = fields.image_source(src)?;
             let alt = fields.plain(alt)?;
             mjml.push_str(&format!(
                 "<mj-image src=\"{}\" alt=\"{}\"",
@@ -246,6 +276,8 @@ fn emit_block<F: Fields>(
             ));
             push_text(text, &format!("{}: {}", label.text.trim(), url.text));
         }
+        // A snippet block is refused by the checks before any walk: nothing resolves it yet.
+        Block::Snippet(_) => {}
         Block::Divider(divider) => {
             mjml.push_str(&format!(
                 "<mj-divider border-width=\"1px\" border-color=\"{}\" />\n",
@@ -284,6 +316,7 @@ mod tests {
             background_color: Some("#eeeeee".into()),
             padding: Some("10px 0".into()),
             columns: vec![blocks],
+            visible_if: None,
         });
         content
     }
@@ -318,36 +351,43 @@ mod tests {
                 level: 2,
                 text: "Big & bold".into(),
                 align: Some(Align::Center),
+                visible_if: None,
             }),
             Block::Text(RichText {
                 id: "t".into(),
                 content: "<p>Body <a href=\"https://a.example\">link</a></p>".into(),
                 align: None,
+                visible_if: None,
             }),
             Block::Image(Image {
                 id: "i".into(),
-                src: "https://a.example/i.png".into(),
+                src: ImageSrc::Url("https://a.example/i.png".into()),
                 alt: "Logo".into(),
                 href: Some("https://a.example".into()),
                 width: Some(300),
+                visible_if: None,
             }),
             Block::Button(Button {
                 id: "b".into(),
                 label: "Shop".into(),
                 url: "https://a.example/shop".into(),
                 align: Align::Right,
+                visible_if: None,
             }),
             Block::Divider(Divider {
                 id: "d".into(),
                 color: None,
+                visible_if: None,
             }),
             Block::Spacer(Spacer {
                 id: "p".into(),
                 height: 12,
+                visible_if: None,
             }),
             Block::RawHtml(RawHtml {
                 id: "r".into(),
                 html: "<b>raw</b>".into(),
+                visible_if: None,
             }),
         ]);
         let emitted = emit(&doc, &mut Sources).unwrap();
@@ -373,10 +413,11 @@ mod tests {
         let image = |alt: &str, href: Option<&str>| {
             Block::Image(Image {
                 id: "i".into(),
-                src: "https://a.example/i.png".into(),
+                src: ImageSrc::Url("https://a.example/i.png".into()),
                 alt: alt.into(),
                 href: href.map(str::to_owned),
                 width: None,
+                visible_if: None,
             })
         };
         let text = |block| emit(&content(vec![block]), &mut Sources).unwrap().text;
@@ -395,6 +436,7 @@ mod tests {
             label: "Go, {{ person.name | default(\"you\") }} & co".into(),
             url: "{{ system.unsubscribe_url }}".into(),
             align: Align::Center,
+            visible_if: None,
         })]);
         let emitted = emit(&doc, &mut Sources).unwrap();
         assert!(

@@ -43,7 +43,7 @@ fn not_found() -> Response {
 }
 
 fn respond(method: &Method, path: &str, lookup: impl Fn(&str) -> Option<Asset>) -> Response {
-    if path == "/api" || path.starts_with("/api/") {
+    if path == "/api" || path.starts_with("/api/") || path.starts_with("/a/") {
         return not_found();
     }
     if method != Method::GET && method != Method::HEAD {

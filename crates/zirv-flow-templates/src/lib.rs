@@ -20,27 +20,32 @@ mod document;
 mod error;
 mod issue;
 mod links;
+mod migrate;
 mod render;
+mod reserved;
 mod sandbox;
+mod theme;
 mod utm;
 mod validate;
 mod wire;
 
 pub use content::blocks::{
     Align, Block, BlocksContent, BlocksError, Button, ConvertError, Converted, Divider,
-    FONT_STACKS, Heading, Image, MAX_BLOCKS, MAX_COLUMNS, MAX_CONTENT_WIDTH, MAX_DOCUMENT_BYTES,
-    MAX_ID_BYTES, MAX_IMAGE_WIDTH, MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES,
-    MAX_SECTIONS, MAX_SPACER_HEIGHT, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, MIN_CONTENT_WIDTH,
-    PREHEADER_DISPLAY_CHARS, RawHtml, RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Spacer,
-    blocks_to_mjml, parse_template_document,
+    FONT_STACKS, FooterRef, Heading, Image, ImageSrc, MAX_BLOCKS, MAX_COLUMNS, MAX_CONDITION_BYTES,
+    MAX_CONDITION_DEPTH, MAX_CONTENT_WIDTH, MAX_DOCUMENT_BYTES, MAX_ID_BYTES, MAX_IMAGE_WIDTH,
+    MAX_LABEL_BYTES, MAX_RAW_HTML_BYTES, MAX_RICH_TEXT_BYTES, MAX_SECTIONS, MAX_SNIPPET_BLOCKS,
+    MAX_SPACER_HEIGHT, MAX_SUBJECT_SOURCE_BYTES, MAX_URL_BYTES, MIN_CONTENT_WIDTH,
+    PREHEADER_DISPLAY_CHARS, RawHtml, RichText, SUBJECT_DISPLAY_CHARS, Section, Settings, Snippet,
+    SnippetContent, Spacer, ThemeRef, ThemeSlot, blocks_to_mjml, conditions,
+    parse_template_document, validate_snippet,
 };
 pub use content::{
     ContentError, RenderKind, TemplateContent, content_type, content_type_ids, content_type_of,
-    validate_document,
+    validate_document, validate_document_with,
 };
 pub use context::{
-    MessageContext, RESERVED_EMAIL, RenderContext, SAMPLE_EMAIL, SAMPLE_PREFERENCES_URL,
-    SAMPLE_UNSUBSCRIBE_URL, SystemValues,
+    MessageContext, RESERVED_EMAIL, RenderContext, RenderExtras, SAMPLE_EMAIL,
+    SAMPLE_PREFERENCES_URL, SAMPLE_UNSUBSCRIBE_URL, SystemValues,
 };
 pub use document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
@@ -48,15 +53,24 @@ pub use document::{
 pub use error::RenderError;
 pub use issue::{FieldCatalog, Issue, Severity, code, severity_of};
 pub use links::{Hooks, INERT_TOKEN, Tracking, rewrite_links, unsubscribe_headers};
-pub use render::{Rendered, RenderedWebhook, apply_tracking, render_email, render_webhook};
+pub use migrate::{migrate_to_current, v1_to_v2};
+pub use render::{
+    HiddenBlock, Rendered, RenderedWebhook, apply_tracking, render_email, render_email_with,
+    render_webhook,
+};
+pub use reserved::{
+    InAppContent, PushContent, SMS_SEGMENT_WARNING, SmsContent, SmsEncoding, SmsSegments,
+    sms_segments, validate_in_app, validate_push, validate_sms,
+};
 pub use sandbox::{
     FUEL, MAX_HEADER_COUNT, MAX_HEADER_VALUE_BYTES, MAX_HEADERS_BYTES, MAX_HTML_BYTES,
     MAX_SOURCE_BYTES, MAX_SUBJECT_BYTES, MAX_TEXT_BYTES, MAX_WEBHOOK_BODY_BYTES, RECURSION_LIMIT,
 };
+pub use theme::{ThemeTokens, contrast_ratio, validate_theme};
 pub use utm::{
     MAX_DOMAINS, MAX_PATTERN_BYTES, PLACEHOLDERS, PatternError, UtmPlan, UtmTags, UtmValues,
     expand as expand_utm_pattern, normalize_domain, slug as utm_slug, tag_url,
     validate_pattern as validate_utm_pattern,
 };
-pub use validate::validate;
+pub use validate::{validate, validate_with};
 pub use wire::{RenderRequest, RenderResponse};

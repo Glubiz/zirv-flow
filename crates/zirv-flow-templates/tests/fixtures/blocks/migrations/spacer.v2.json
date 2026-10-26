@@ -1,0 +1,40 @@
+{
+  "blocks": {
+    "category": "transactional",
+    "footer": "none",
+    "lang": "en",
+    "preheader": "A preview for {{ person.name }}",
+    "sections": [
+      {
+        "columns": [
+          [
+            {
+              "id": "h1",
+              "level": 2,
+              "text": "Above",
+              "type": "heading"
+            },
+            {
+              "height": 40,
+              "id": "sp1",
+              "type": "spacer"
+            },
+            {
+              "id": "h2",
+              "level": 2,
+              "text": "Below",
+              "type": "heading"
+            }
+          ]
+        ],
+        "id": "s1"
+      }
+    ],
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "subject": "Hi {{ person.name }}",
+    "theme": "none"
+  },
+  "channel": "email",
+  "mode": "blocks",
+  "schema": 2
+}
