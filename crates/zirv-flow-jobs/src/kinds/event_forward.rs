@@ -140,7 +140,7 @@ impl JobKind for EventForward {
         let driver = registry
             .get(&destination.kind)
             .filter(|driver| driver.spec().capabilities.channels.contains(&CHANNEL));
-        purge_delivered(ctx.conn(), destination_id, DELIVERED_RETENTION, PURGE_LIMIT).await?;
+        purge_delivered(&pool, destination_id, DELIVERED_RETENTION, PURGE_LIMIT).await?;
 
         let mut credential: Option<Result<Credential, Verdict>> = None;
         for _ in 0..ROUNDS {
@@ -647,6 +647,42 @@ mod tests {
                 .await
                 .unwrap()
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_purge_commits_its_rows_and_markers_before_the_job_transaction_ends(pool: PgPool) {
+        let env = Env::new(pool, "purge", "ok").await;
+        env.order().await;
+        sqlx::query(
+            "UPDATE forwarding_outbox SET state = 'delivered', payload = '{}',
+             updated_at = now() - interval '8 days'",
+        )
+        .execute(&env.pool)
+        .await
+        .unwrap();
+        let claimed = env.claim().await.unwrap();
+        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(IngestSettings {
+            pool: env.pool.clone(),
+            redaction_key: None,
+            batch_size: 1,
+            shards: 1,
+        });
+
+        EventForward
+            .run(&mut ctx, claimed.payload.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
+        assert_eq!(
+            env.count("SELECT count(*) FROM erasure_handled_markers")
+                .await,
+            1
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
     }
 
     #[sqlx::test]

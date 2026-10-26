@@ -4531,6 +4531,14 @@ mod tests {
     ) {
         let (env, messages) = concurrent_sends(pool, 16, zirv_flow_store::CapMode::Skip).await;
 
+        // A token grant can outlive its one-second lease under load. The cap winner then
+        // stays pending with a rate-limit deferral; run its queued copy before checking endings.
+        while let Some((_, _, run_at, _)) = env.send_jobs().await.into_iter().next() {
+            env.clock.set(run_at);
+            env.due().await;
+            env.attempt().await.unwrap();
+        }
+
         let mut ended = Vec::new();
         for id in &messages {
             let message = env.message(*id).await;

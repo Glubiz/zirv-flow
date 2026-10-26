@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use hashbrown::HashSet;
 use serde_json::Value;
-use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
+use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
@@ -436,9 +436,9 @@ pub async fn forwarding_report(
 
 /// Deletes up to `limit` delivered rows of `destination` older than `retention`, and writes the
 /// handled marker of each (person, destination) pair they leave (`privacy::handled_markers`), in
-/// the same statement. Returns the number deleted.
+/// the same statement, committed on the pool. Returns the number deleted.
 pub async fn purge_delivered(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     destination: Uuid,
     retention: Duration,
     limit: i64,
@@ -450,7 +450,7 @@ pub async fn purge_delivered(
         .bind(destination)
         .bind(retention.as_secs_f64())
         .bind(limit)
-        .fetch_one(connection)
+        .fetch_one(pool)
         .await
         .map_err(StoreError::query)?;
     Ok(u64::try_from(deleted).unwrap_or(0))
@@ -1421,7 +1421,7 @@ mod tests {
         .execute(&mut *connection)
         .await
         .unwrap();
-        let purged = purge_delivered(&mut connection, destination, DELIVERED_RETENTION, 10)
+        let purged = purge_delivered(&pool, destination, DELIVERED_RETENTION, 10)
             .await
             .unwrap();
         assert_eq!(purged, 2);
