@@ -52,6 +52,7 @@
 
 pub(crate) mod deliver;
 pub(crate) mod gates;
+pub(crate) mod inputs;
 mod payload;
 mod policy;
 mod quiet;
@@ -112,6 +113,8 @@ struct Trail {
     reason: Option<&'static str>,
     rule: Option<String>,
     template_version: Option<i32>,
+    /// The theme and snippet versions the message was rendered with, once it was rendered.
+    rendered_with: Option<Box<inputs::Versions>>,
     sender: Option<Uuid>,
     category: Option<String>,
     /// The delivery attempts the destination saw.
@@ -129,6 +132,7 @@ impl Trail {
             reason: None,
             rule: None,
             template_version: None,
+            rendered_with: None,
             sender: None,
             category: None,
             attempts,
@@ -349,10 +353,27 @@ async fn decide(
         }),
     )
     .await?;
+    let Ok(document) = render::document_of(&version.document) else {
+        return Ok(trail.fail_unsent(resuming, "render", render::RENDER_ERROR));
+    };
+    let resolved = match inputs::resolve(
+        ctx.conn(),
+        workspace,
+        &document,
+        inputs::Subject::Person(job.person),
+        tracker.as_ref().map(|tracker| tracker.base.as_str()),
+        now,
+    )
+    .await?
+    {
+        Ok(resolved) => resolved,
+        Err(reason) => return Ok(trail.fail_unsent(resuming, "render", reason)),
+    };
     let tracked = match render::render(
         pool_for_render.as_ref(),
-        version.document,
+        &document,
         &context,
+        &resolved.extras,
         tracked,
         &recorded,
         utm.as_ref(),
@@ -362,6 +383,7 @@ async fn decide(
         Ok(tracked) => tracked,
         Err(reason) => return Ok(trail.fail_unsent(resuming, "render", reason)),
     };
+    trail.rendered_with = Some(Box::new(resolved.versions));
     // The links are recorded before delivery in a statement of their own, so the redirect works
     // for whichever attempt the person receives and a retry writes the same rows.
     record_message_links(&pool, workspace, job.message, &tracked.links).await?;
@@ -624,6 +646,9 @@ async fn start_message(pool: &PgPool, job: &SendJob, now: OffsetDateTime) -> Res
         node: &job.node,
         template: job.template,
         template_version: None,
+        theme_id: None,
+        theme_version: None,
+        snippet_versions: None,
         destination: job.destination,
         sender_identity: None,
         category: None,
@@ -777,6 +802,20 @@ async fn write_end(
         node: &job.node,
         template: job.template,
         template_version: trail.template_version,
+        theme_id: trail
+            .rendered_with
+            .as_ref()
+            .and_then(|with| with.theme)
+            .map(|(id, _)| id),
+        theme_version: trail
+            .rendered_with
+            .as_ref()
+            .and_then(|with| with.theme)
+            .map(|(_, version)| version),
+        snippet_versions: trail
+            .rendered_with
+            .as_ref()
+            .map(|with| &with.snippet_versions),
         destination: job.destination,
         sender_identity: trail.sender,
         category: trail.category.as_deref(),
@@ -1744,8 +1783,9 @@ mod tests {
                 .unwrap();
             let tracked = render::render(
                 Some(&render_pool),
-                page(&urls),
+                &render::document_of(&page(&urls)).unwrap(),
                 &context,
+                &Default::default(),
                 Some(&tracker),
                 &recorded,
                 None,
@@ -1800,9 +1840,17 @@ mod tests {
         let mut context = zirv_flow_render::RenderContext::default();
         context.message.id = Uuid::now_v7().to_string();
 
-        let sent = render::render(Some(&render_pool), stored, &context, None, &[], None)
-            .await
-            .unwrap();
+        let sent = render::render(
+            Some(&render_pool),
+            &render::document_of(&stored).unwrap(),
+            &context,
+            &Default::default(),
+            None,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
 
         // The schema 1 bytes: the golden render of the same blocks, without any theme or footer.
         let expected = zirv_flow_templates::render_email(
@@ -5157,5 +5205,409 @@ mod tests {
             again.status, "sent",
             "the person's current address is not suppressed"
         );
+    }
+
+    // The theme, snippet and condition inputs of a block email (#307).
+
+    impl Env {
+        /// A snippet with its first version published; returns its id.
+        async fn snippet(&self, name: &str, text: &str) -> Uuid {
+            let id = Uuid::now_v7();
+            let mut connection = self.pool.acquire().await.unwrap();
+            zirv_flow_store::create_snippet(
+                &mut connection,
+                self.ws,
+                &zirv_flow_store::NewSnippet {
+                    id,
+                    name: name.to_owned(),
+                    content: snippet_content(text),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            drop(connection);
+            self.publish_snippet(id).await;
+            id
+        }
+
+        async fn publish_snippet(&self, id: Uuid) -> i32 {
+            let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+            let locked = zirv_flow_store::lock_snippet(&mut tx, self.ws, id)
+                .await
+                .unwrap();
+            let (_, version) = zirv_flow_store::publish_snippet(
+                &mut tx,
+                self.ws,
+                &locked,
+                &json!([]),
+                None,
+                &TraceContext::root(Cause::api("publish")),
+            )
+            .await
+            .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            version.version
+        }
+
+        async fn edit_snippet(&self, id: Uuid, text: &str) {
+            let mut connection = self.pool.acquire().await.unwrap();
+            zirv_flow_store::save_snippet_draft(
+                &mut connection,
+                self.ws,
+                id,
+                &snippet_content(text),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+
+        /// A theme, published unless `publish` is false; returns its id.
+        async fn theme(&self, name: &str, tokens: Value, publish: bool) -> Uuid {
+            let id = Uuid::now_v7();
+            let mut connection = self.pool.acquire().await.unwrap();
+            zirv_flow_store::create_theme(
+                &mut connection,
+                self.ws,
+                &zirv_flow_store::NewTheme {
+                    id,
+                    name: name.to_owned(),
+                    tokens,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+            if publish {
+                let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
+                let locked = zirv_flow_store::lock_theme(&mut tx, self.ws, id)
+                    .await
+                    .unwrap();
+                zirv_flow_store::publish_theme(
+                    &mut tx,
+                    self.ws,
+                    &locked,
+                    &json!([]),
+                    None,
+                    &TraceContext::root(Cause::api("publish")),
+                )
+                .await
+                .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+            }
+            id
+        }
+
+        /// A published transactional block email with `theme` and these blocks in one section.
+        async fn block_template(&self, theme: Value, blocks: Value) -> Uuid {
+            let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+                "subject": "Hello", "sender": self.sender, "lang": "en",
+                "category": "transactional", "theme": theme,
+                "sections": [{"id": "main", "columns": [blocks]}]
+            }});
+            self.template_of("transactional", document).await
+        }
+
+        async fn rendered_with(&self, id: Uuid) -> (Option<Uuid>, Option<i32>, Option<Value>) {
+            sqlx::query_as(
+                "SELECT theme_id, theme_version, snippet_versions FROM messages WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        fn last_html(&self) -> String {
+            self.sent().last().unwrap().payload["html"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    }
+
+    fn snippet_content(text: &str) -> Value {
+        json!({"blocks": [{"type": "heading", "id": "h", "level": 2, "text": text}]})
+    }
+
+    fn snippet_block(id: Uuid) -> Value {
+        json!({"type": "snippet", "id": "s", "snippet_id": id})
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_new_snippet_version_is_used_by_the_next_send_and_each_message_keeps_its_own(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "snipver").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        let snippet = env.snippet("Offer", "OFFER ONE").await;
+        let template = env
+            .block_template(json!("none"), json!([snippet_block(snippet)]))
+            .await;
+
+        let first = env.send(person, template).await;
+        let first_html = env.last_html();
+        // Preview and send resolve the inputs and render with the same calls, so the sent bytes
+        // are the bytes of a render of the resolved inputs.
+        let stored: Value = sqlx::query_scalar(
+            "SELECT document FROM template_versions WHERE template_id = $1 AND version = 1",
+        )
+        .bind(template)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let document = render::document_of(&stored).unwrap();
+        let mut connection = env.pool.acquire().await.unwrap();
+        let resolved = inputs::resolve(
+            &mut connection,
+            env.ws,
+            &document,
+            inputs::Subject::Person(person),
+            Some(PUBLIC_URL),
+            env.clock.now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(connection);
+        let mut context = zirv_flow_render::RenderContext::default();
+        context
+            .person
+            .insert("email".into(), json!("ada@example.com"));
+        context.message.id = first.id.to_string();
+        let expected = zirv_flow_templates::render_email_with(
+            &document,
+            &context,
+            &zirv_flow_render::Hooks::untracked(),
+            &resolved.extras,
+        )
+        .unwrap();
+        assert_eq!(first_html, expected.html);
+        env.edit_snippet(snippet, "OFFER TWO").await;
+        assert_eq!(env.publish_snippet(snippet).await, 2);
+        let second = env.send(person, template).await;
+        let second_html = env.last_html();
+
+        assert_eq!(
+            (first.status.as_str(), second.status.as_str()),
+            ("sent", "sent")
+        );
+        assert!(first_html.contains("OFFER ONE") && !first_html.contains("OFFER TWO"));
+        assert!(second_html.contains("OFFER TWO") && !second_html.contains("OFFER ONE"));
+        let key = snippet.to_string();
+        assert_eq!(
+            env.rendered_with(first.id).await,
+            (None, None, Some(json!({ key.clone(): 1 })))
+        );
+        assert_eq!(
+            env.rendered_with(second.id).await,
+            (None, None, Some(json!({ key: 2 })))
+        );
+        assert_eq!(first.template_version, second.template_version);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_theme_footer_and_version_apply_and_none_sends_without_them_whatever_the_default(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "themed").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        let footer = env.snippet("Footer", "FOOTER TEXT").await;
+        let theme = env
+            .theme(
+                "Brand",
+                json!({"primary": "#aa0000", "footer_snippet": footer}),
+                true,
+            )
+            .await;
+        let mut connection = env.pool.acquire().await.unwrap();
+        zirv_flow_store::set_default_theme(&mut connection, env.ws, theme)
+            .await
+            .unwrap();
+        drop(connection);
+        let body = json!([{"type": "text", "id": "t", "content": "<p>Hi</p>"}]);
+        let followed = env.block_template(json!("default"), body.clone()).await;
+        let named = env.block_template(json!({"id": theme}), body.clone()).await;
+        let none = env.block_template(json!("none"), body.clone()).await;
+        let mut unfooted = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hello", "sender": env.sender, "lang": "en", "category": "transactional",
+            "theme": {"id": theme}, "footer": "none",
+            "sections": [{"id": "main", "columns": [body]}]
+        }});
+        let unfooted = env.template_of("transactional", unfooted.take()).await;
+
+        let with_default = env.send(person, followed).await;
+        let default_html = env.last_html();
+        let with_named = env.send(person, named).await;
+        let without = env.send(person, none).await;
+        let bare_html = env.last_html();
+        let without_footer = env.send(person, unfooted).await;
+        let unfooted_html = env.last_html();
+
+        assert!(default_html.contains("FOOTER TEXT") && default_html.contains("#aa0000"));
+        let used = (Some(theme), Some(1), Some(json!({ footer.to_string(): 1 })));
+        assert_eq!(env.rendered_with(with_default.id).await, used);
+        assert_eq!(env.rendered_with(with_named.id).await, used);
+        assert!(!bare_html.contains("FOOTER TEXT") && !bare_html.contains("#aa0000"));
+        assert_eq!(
+            env.rendered_with(without.id).await,
+            (None, None, Some(json!({})))
+        );
+        assert!(!unfooted_html.contains("FOOTER TEXT"));
+        assert_eq!(
+            env.rendered_with(without_footer.id).await,
+            (Some(theme), Some(1), Some(json!({}))),
+            "the footer that was not rendered is not recorded"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn archived_snippets_and_named_themes_still_send_and_unpublished_ones_fail_the_render(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "archived").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        let snippet = env.snippet("Old offer", "OLD OFFER").await;
+        let theme = env
+            .theme("Old brand", json!({"primary": "#aa0000"}), true)
+            .await;
+        let draft_snippet = Uuid::now_v7();
+        let mut connection = env.pool.acquire().await.unwrap();
+        zirv_flow_store::create_snippet(
+            &mut connection,
+            env.ws,
+            &zirv_flow_store::NewSnippet {
+                id: draft_snippet,
+                name: "Draft".into(),
+                content: snippet_content("DRAFT"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let draft_theme = env
+            .theme("Draft brand", json!({"primary": "#00aa00"}), false)
+            .await;
+        let ok = env
+            .block_template(json!({"id": theme}), json!([snippet_block(snippet)]))
+            .await;
+        let no_snippet = env
+            .block_template(json!("none"), json!([snippet_block(draft_snippet)]))
+            .await;
+        let no_theme = env
+            .block_template(
+                json!({"id": draft_theme}),
+                json!([{"type": "text", "id": "t", "content": "<p>Hi</p>"}]),
+            )
+            .await;
+        // The archive guard refuses a snippet a template still holds, so the archive is written
+        // directly: a send must resolve an archived snippet by its current version regardless.
+        sqlx::query("UPDATE snippets SET archived_at = now() WHERE id = $1")
+            .bind(snippet)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        zirv_flow_store::archive_theme(&mut connection, env.ws, theme)
+            .await
+            .unwrap();
+        drop(connection);
+
+        let sent = env.send(person, ok).await;
+        let missing_snippet = env.send(person, no_snippet).await;
+        let missing_theme = env.send(person, no_theme).await;
+
+        assert_eq!(sent.status, "sent");
+        assert!(env.last_html().contains("OLD OFFER"));
+        for refused in [&missing_snippet, &missing_theme] {
+            assert_eq!(
+                (refused.status.as_str(), refused.reason.as_deref()),
+                ("failed", Some("render_error"))
+            );
+        }
+        assert_eq!(env.sent().len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_conditioned_block_is_sent_to_a_person_who_meets_it_and_left_out_for_one_who_does_not(
+        pool: PgPool,
+    ) {
+        let mut env = Env::new(pool, "visible").await;
+        env.render = Some(start_pool("serve", "").await);
+        let pro = env.person("pro@example.com").await;
+        let free = env.person("free@example.com").await;
+        for (person, plan) in [(pro, "pro"), (free, "free")] {
+            sqlx::query("UPDATE people SET traits = $2 WHERE id = $1")
+                .bind(person)
+                .bind(json!({ "plan": plan }))
+                .execute(&env.pool)
+                .await
+                .unwrap();
+        }
+        zirv_flow_store::create_trait_definition(
+            &env.pool,
+            env.ws,
+            &zirv_flow_store::NewTraitDefinition {
+                key: "plan".into(),
+                trait_type: zirv_flow_core::people::TraitType::String,
+                precedence: zirv_flow_core::people::Precedence::Latest,
+                source_order: Vec::new(),
+                pii: false,
+                channel_address: false,
+                inferred: false,
+                description: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let template = env
+            .block_template(
+                json!("none"),
+                json!([
+                    {"type": "heading", "id": "promo", "level": 2, "text": "PRO ONLY",
+                     "visible_if": {"trait": "plan", "op": "eq", "value": "pro"}},
+                    {"type": "heading", "id": "all", "level": 2, "text": "FOR EVERYONE"}
+                ]),
+            )
+            .await;
+
+        env.send(pro, template).await;
+        let to_pro = env.last_html();
+        env.send(free, template).await;
+        let to_free = env.last_html();
+
+        assert!(to_pro.contains("PRO ONLY") && to_pro.contains("FOR EVERYONE"));
+        assert!(!to_free.contains("PRO ONLY") && to_free.contains("FOR EVERYONE"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_condition_that_no_longer_compiles_fails_the_render_and_sends_nothing(pool: PgPool) {
+        let mut env = Env::new(pool, "badcond").await;
+        env.render = Some(start_pool("serve", "").await);
+        let person = env.person("ada@example.com").await;
+        let template = env
+            .block_template(
+                json!("none"),
+                json!([{"type": "heading", "id": "promo", "level": 2, "text": "X",
+                        "visible_if": {"trait": "gone", "op": "eq", "value": "pro"}}]),
+            )
+            .await;
+
+        let message = env.send(person, template).await;
+
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("render_error"))
+        );
+        assert!(env.sent().is_empty());
     }
 }

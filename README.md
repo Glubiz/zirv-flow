@@ -1998,7 +1998,8 @@ codes (`kafka_connect_failed`, `kafka_tls_failed`, `kafka_auth_failed`, `kafka_t
 SASL password lives in plain memory inside the client while it runs and cannot be wiped there.
 
 **Limits.** JSON only (no Avro, Protobuf or schema registry), no consumer groups, no producing,
-no topic patterns. At most 1 MiB is fetched per partition per request. Messages are checked after
+no topic patterns. Gzip, Snappy and LZ4 compression only: a zstd-compressed batch fails the read
+until the Kafka client moves to a fixed zstd (#338). At most 1 MiB is fetched per partition per request. Messages are checked after
 decompression only for the 1 MiB record limit.
 
 ### Source freshness

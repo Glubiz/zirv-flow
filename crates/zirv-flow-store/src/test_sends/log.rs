@@ -1,6 +1,6 @@
 //! The test-send log: one row per test send, reserved under the rate limit, ended by the job.
 
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgPool};
 use time::{Duration, OffsetDateTime};
@@ -77,6 +77,11 @@ pub struct TestSend {
     pub id: Uuid,
     pub template_id: Uuid,
     pub template_version: Option<i32>,
+    /// What the job rendered with, set when it renders: the theme in effect, its version and the
+    /// snippet versions by snippet id.
+    pub theme_id: Option<Uuid>,
+    pub theme_version: Option<i32>,
+    pub snippet_versions: Option<Value>,
     pub member_id: Option<Uuid>,
     pub destination_id: Uuid,
     pub sender_identity_id: Uuid,
@@ -95,6 +100,9 @@ struct Row {
     id: Uuid,
     template_id: Uuid,
     template_version: Option<i32>,
+    theme_id: Option<Uuid>,
+    theme_version: Option<i32>,
+    snippet_versions: Option<Value>,
     member_id: Option<Uuid>,
     destination_id: Uuid,
     sender_identity_id: Uuid,
@@ -113,6 +121,9 @@ impl Row {
             id: self.id,
             template_id: self.template_id,
             template_version: self.template_version,
+            theme_id: self.theme_id,
+            theme_version: self.theme_version,
+            snippet_versions: self.snippet_versions,
             member_id: self.member_id,
             destination_id: self.destination_id,
             sender_identity_id: self.sender_identity_id,
@@ -127,7 +138,7 @@ impl Row {
     }
 }
 
-const COLUMNS: &str = "id, template_id, template_version, member_id, destination_id, \
+const COLUMNS: &str = "id, template_id, template_version, theme_id, theme_version, \n    snippet_versions, member_id, destination_id, \
     sender_identity_id, recipient_hash, recipient_member_id, render_context, outcome, reason, created_at, \
     completed_at";
 
@@ -363,6 +374,30 @@ pub async fn finish_test_send(
     Ok(done.rows_affected() > 0)
 }
 
+/// Records what a `queued` test send was rendered with: the theme in effect and the version of
+/// each snippet by snippet id (an object). A test send writes no `messages` row, so this is where
+/// its versions live. False when the row is not `queued` any more.
+pub async fn record_test_send_versions(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+    theme: Option<(Uuid, i32)>,
+    snippet_versions: &Value,
+) -> Result<bool, StoreError> {
+    let done = sqlx::query(
+        "UPDATE test_sends SET theme_id = $3, theme_version = $4, snippet_versions = $5          WHERE workspace_id = $1 AND id = $2 AND outcome = 'queued'",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .bind(theme.map(|(theme, _)| theme))
+    .bind(theme.map(|(_, version)| version))
+    .bind(snippet_versions)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected() > 0)
+}
+
 /// The reason of a row whose job is dead or gone.
 pub const ABANDONED: &str = "abandoned";
 
@@ -579,6 +614,55 @@ mod tests {
             jobs, 12,
             "a reservation is a row and a job, a refusal neither"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_versions_a_test_send_rendered_with_are_kept_on_its_row_until_it_ends(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool).await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let now = datetime!(2031-05-06 07:00 UTC);
+        let TestSendReservation::Reserved(send) = reserve(&pool, &new(ws, None, now, &trace)).await
+        else {
+            panic!("not reserved");
+        };
+        let theme = Uuid::now_v7();
+        let snippet = Uuid::now_v7().to_string();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let recorded = record_test_send_versions(
+            &mut connection,
+            ws,
+            send.id,
+            Some((theme, 3)),
+            &json!({ snippet.clone(): 2 }),
+        )
+        .await
+        .unwrap();
+        finish_test_send(
+            &mut connection,
+            ws,
+            send.id,
+            TestSendOutcome::Sent,
+            None,
+            now,
+        )
+        .await
+        .unwrap();
+        let late = record_test_send_versions(&mut connection, ws, send.id, None, &json!({}))
+            .await
+            .unwrap();
+        let row = find_test_send(&mut connection, ws, send.id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(recorded);
+        assert!(!late, "an ended row is not changed");
+        assert_eq!((row.theme_id, row.theme_version), (Some(theme), Some(3)));
+        assert_eq!(row.snippet_versions, Some(json!({ snippet: 2 })));
     }
 
     #[sqlx::test]

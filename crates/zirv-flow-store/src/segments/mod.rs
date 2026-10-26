@@ -5,6 +5,7 @@
 //! content and the SQL.
 
 mod catalog;
+mod condition;
 mod crud;
 mod cycle;
 mod data_age;
@@ -19,6 +20,7 @@ pub use catalog::{
     CatalogDetails, CatalogSnapshot, EventDetail, PropertyDetail, TopicDetail, TraitDetail,
     read_segment_catalog, segment_catalog, segment_catalog_details,
 };
+pub use condition::{CompiledCondition, evaluate_conditions};
 pub use crud::{
     CADENCE_MINUTES, DEFAULT_CADENCE_MINUTES, NewSegment, NewSegmentVersion, Segment, SegmentError,
     SegmentPatch, SegmentVersion, archive_segment, create_segment, find_segment,

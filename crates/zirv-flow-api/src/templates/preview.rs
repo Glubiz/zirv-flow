@@ -15,10 +15,11 @@ use uuid::Uuid;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::TemplateFieldCatalog;
 use zirv_flow_templates::{
-    Hooks, Issue, RenderContext, RenderKind, TemplateDocument, Tracking, UtmPlan, UtmValues,
-    content_type_of,
+    Hooks, Issue, RenderContext, RenderExtras, RenderKind, TemplateDocument, Tracking, UtmPlan,
+    UtmValues, content_type_of,
 };
 
+use super::inputs::{Subject, resolve};
 use super::{authorize_render, field_catalog, issue_problems, stored_document};
 use crate::AppState;
 use crate::admin;
@@ -70,6 +71,17 @@ pub(crate) struct TemplatePreviewBody {
     body: Option<String>,
     /// The same checks a publish makes, against the workspace's fields now.
     issues: Vec<TemplateIssueProblem>,
+    /// The sections and blocks this person does not see because their `visible_if` was false.
+    hidden_blocks: Vec<HiddenBlockBody>,
+}
+
+/// A section or block left out of the render, and why.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct HiddenBlockBody {
+    /// The id of the section or block.
+    id: String,
+    /// Which condition was not met, by name; never a value.
+    reason: String,
 }
 
 /// The rendered parts of a preview.
@@ -79,6 +91,7 @@ struct Rendered {
     text: Option<String>,
     headers: Vec<TemplateHeaderBody>,
     body: Option<String>,
+    hidden: Vec<String>,
 }
 
 fn headers_of(headers: Vec<(String, String)>) -> Vec<TemplateHeaderBody> {
@@ -94,6 +107,7 @@ async fn render(
     kind: RenderKind,
     doc: &TemplateDocument,
     context: &RenderContext,
+    extras: &RenderExtras,
     utm: Option<&UtmPlan>,
 ) -> Result<Rendered, ApiError> {
     match kind {
@@ -105,7 +119,7 @@ async fn render(
                 utm: utm.map(UtmPlan::tags),
             };
             let email = pool
-                .render_email(doc, context, &hooks)
+                .render_email_with(doc, context, &hooks, extras)
                 .await
                 .map_err(|failure| ApiError::render_failed(&failure))?;
             Ok(Rendered {
@@ -114,6 +128,7 @@ async fn render(
                 text: Some(email.text),
                 headers: headers_of(email.headers),
                 body: None,
+                hidden: email.hidden.into_iter().map(|block| block.id).collect(),
             })
         }
         RenderKind::Webhook => {
@@ -127,6 +142,7 @@ async fn render(
                 text: None,
                 headers: headers_of(webhook.headers),
                 body: Some(webhook.body),
+                hidden: Vec::new(),
             })
         }
     }
@@ -208,6 +224,20 @@ pub(crate) async fn preview(
             )
         }
     };
+    let now = state.clock.now(&mut tx).await?;
+    let subject = match person_id {
+        Some(person) => Subject::Person(person),
+        None => Subject::Sample(&context),
+    };
+    let inputs = resolve(
+        &mut tx,
+        workspace.id,
+        &doc,
+        subject,
+        state.public_url(),
+        now,
+    )
+    .await?;
     if let Some(person) = person_id {
         // A real person's values were read for this preview: record who looked, never the values.
         admin::audit(
@@ -252,26 +282,45 @@ pub(crate) async fn preview(
     let pool = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
-    let issues: Vec<Issue> = pool
-        .validate(&doc, &catalog)
+    let mut issues: Vec<Issue> = pool
+        .validate_with(&doc, &catalog, &inputs.extras)
         .await
         .map_err(|failure| ApiError::render_failed(&failure))?;
+    issues.extend(inputs.issues.iter().cloned());
     let blocked = issues.iter().any(Issue::is_blocking);
     let rendered = if blocked {
         None
     } else {
-        Some(render(pool, content.render_kind(), &doc, &context, utm.as_ref()).await?)
+        Some(
+            render(
+                pool,
+                content.render_kind(),
+                &doc,
+                &context,
+                &inputs.extras,
+                utm.as_ref(),
+            )
+            .await?,
+        )
     };
-    let (subject, html, text, headers, rendered_body) = match rendered {
+    let (subject, html, text, headers, rendered_body, hidden) = match rendered {
         Some(parts) => (
             parts.subject,
             parts.html,
             parts.text,
             parts.headers,
             parts.body,
+            parts.hidden,
         ),
-        None => (None, None, None, Vec::new(), None),
+        None => (None, None, None, Vec::new(), None, Vec::new()),
     };
+    let hidden_blocks = hidden
+        .into_iter()
+        .map(|id| HiddenBlockBody {
+            reason: inputs.reasons.get(&id).cloned().unwrap_or_default(),
+            id,
+        })
+        .collect();
     Ok(Json(TemplatePreviewBody {
         source,
         version: body.version,
@@ -284,6 +333,7 @@ pub(crate) async fn preview(
         headers,
         body: rendered_body,
         issues: issue_problems(&issues),
+        hidden_blocks,
     }))
 }
 

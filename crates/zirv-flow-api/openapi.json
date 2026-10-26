@@ -33404,6 +33404,24 @@
           }
         }
       },
+      "HiddenBlockBody": {
+        "type": "object",
+        "description": "A section or block left out of the render, and why.",
+        "required": [
+          "id",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The id of the section or block."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Which condition was not met, by name; never a value."
+          }
+        }
+      },
       "HistoryBody": {
         "type": "object",
         "required": [
@@ -34597,6 +34615,17 @@
             ],
             "description": "The code a skipped or failed message ended with, such as `no_consent`.",
             "example": "no_consent"
+          },
+          "rendered_with": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedWithBody",
+                "description": "The theme and snippet versions the message was rendered with."
+              }
+            ]
           },
           "status": {
             "type": "string",
@@ -36279,6 +36308,51 @@
               "format": "uuid"
             },
             "description": "At most 1000."
+          }
+        }
+      },
+      "RenderedVersionBody": {
+        "type": "object",
+        "description": "A theme or snippet and the version a message was rendered with.",
+        "required": [
+          "id",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "RenderedWithBody": {
+        "type": "object",
+        "description": "What a message was rendered with, beyond its template version. Present once the message was\nrendered.",
+        "required": [
+          "snippets"
+        ],
+        "properties": {
+          "snippets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenderedVersionBody"
+            },
+            "description": "The snippets it used, by id."
+          },
+          "theme": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedVersionBody",
+                "description": "The theme in effect; none when the email had no theme."
+              }
+            ]
           }
         }
       },
@@ -40052,7 +40126,8 @@
           "content_type",
           "rendered",
           "headers",
-          "issues"
+          "issues",
+          "hidden_blocks"
         ],
         "properties": {
           "body": {
@@ -40072,6 +40147,13 @@
               "$ref": "#/components/schemas/TemplateHeaderBody"
             },
             "description": "An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers."
+          },
+          "hidden_blocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HiddenBlockBody"
+            },
+            "description": "The sections and blocks this person does not see because their `visible_if` was false."
           },
           "html": {
             "type": [
@@ -40152,11 +40234,19 @@
         "description": "The new version and the template after the publish.",
         "required": [
           "template",
-          "version"
+          "version",
+          "used_by"
         ],
         "properties": {
           "template": {
             "$ref": "#/components/schemas/TemplateBody"
+          },
+          "used_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TemplateUseBody"
+            },
+            "description": "The active flows that send this template, which now send the new version."
           },
           "version": {
             "$ref": "#/components/schemas/TemplateVersionBody"
