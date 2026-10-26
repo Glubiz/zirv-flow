@@ -7118,6 +7118,13 @@ export interface components {
              */
             reason: string;
         };
+        /** @description A section or block left out of the render, and why. */
+        HiddenBlockBody: {
+            /** @description The id of the section or block. */
+            id: string;
+            /** @description Which condition was not met, by name; never a value. */
+            reason: string;
+        };
         HistoryBody: {
             /** @description Newest first. */
             entries: components["schemas"]["HistoryEntryBody"][];
@@ -7598,6 +7605,7 @@ export interface components {
              * @example no_consent
              */
             reason?: string | null;
+            rendered_with?: null | components["schemas"]["RenderedWithBody"];
             /**
              * @description `pending`, `sending`, `sent`, `skipped` or `failed`.
              * @example skipped
@@ -8312,6 +8320,22 @@ export interface components {
         RemoveMembersRequest: {
             /** @description At most 1000. */
             person_ids: string[];
+        };
+        /** @description A theme or snippet and the version a message was rendered with. */
+        RenderedVersionBody: {
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            version: number;
+        };
+        /**
+         * @description What a message was rendered with, beyond its template version. Present once the message was
+         *     rendered.
+         */
+        RenderedWithBody: {
+            /** @description The snippets it used, by id. */
+            snippets: components["schemas"]["RenderedVersionBody"][];
+            theme?: null | components["schemas"]["RenderedVersionBody"];
         };
         ReplayBody: {
             dry_run: boolean;
@@ -9795,6 +9819,8 @@ export interface components {
             content_type: string;
             /** @description An email's extra headers (`List-Unsubscribe` for marketing mail) or a webhook's headers. */
             headers: components["schemas"]["TemplateHeaderBody"][];
+            /** @description The sections and blocks this person does not see because their `visible_if` was false. */
+            hidden_blocks: components["schemas"]["HiddenBlockBody"][];
             /** @description An email's HTML, with inert tracking links. */
             html?: string | null;
             /** @description The same checks a publish makes, against the workspace's fields now. */
@@ -9832,6 +9858,8 @@ export interface components {
         /** @description The new version and the template after the publish. */
         TemplatePublishedBody: {
             template: components["schemas"]["TemplateBody"];
+            /** @description The active flows that send this template, which now send the new version. */
+            used_by: components["schemas"]["TemplateUseBody"][];
             version: components["schemas"]["TemplateVersionBody"];
         };
         /** @description The theme the draft follows: `default`, `none`, or the theme it names. */

@@ -9,14 +9,17 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_core::{Cause, TraceContext, UserId, WorkspaceId};
+use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    PgPool, SenderError, Template, TemplateVersion, TemplateVersionSummary, require_verified_sender,
+    AssetOwnerKind, AssetReferenceError, SenderError, Template, TemplateUse, TemplateVersion,
+    TemplateVersionSummary, require_verified_sender,
 };
-use zirv_flow_templates::{Issue, content_type_of, migrate_to_current};
+use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
 
 use super::crud::TemplateBody;
+use super::inputs::{Subject, resolve};
+use super::where_used::TemplateUseBody;
 use super::{field_catalog, issue_problems, stored_document, template_error};
 use crate::AppState;
 use crate::admin::{self, Context};
@@ -106,6 +109,8 @@ fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
 pub(crate) struct TemplatePublishedBody {
     template: TemplateBody,
     version: TemplateVersionBody,
+    /// The active flows that send this template, which now send the new version.
+    used_by: Vec<TemplateUseBody>,
 }
 
 /// Validates the draft and publishes it as the next version, or changes nothing. Audited as
@@ -116,15 +121,19 @@ pub(crate) struct TemplatePublishedBody {
 /// and it publishes only if the draft is still the revision that was validated: a draft saved in
 /// the meantime is a 409 `template_draft_changed`, and nothing is written.
 pub(crate) async fn publish_template(
-    pool: &PgPool,
+    state: &AppState,
     render: &RenderPool,
     context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
-) -> Result<(Template, TemplateVersion), ApiError> {
-    let (draft, catalog) = {
-        let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
+) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
+    let (draft, catalog, inputs) = {
+        let mut connection = state
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal())?;
         let template = zirv_flow_store::find_template(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
@@ -137,16 +146,28 @@ pub(crate) async fn publish_template(
         let catalog = field_catalog(
             zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
         );
-        (draft, catalog)
+        let doc = stored_document(&draft.document)?;
+        let now = state.clock.now(&mut connection).await?;
+        let inputs = resolve(
+            &mut connection,
+            workspace,
+            &doc,
+            Subject::Nobody,
+            state.public_url(),
+            now,
+        )
+        .await?;
+        (draft, catalog, inputs)
     };
     let doc = stored_document(&draft.document)?;
     content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
     // A template's sample render allocates like any render, so it runs in the render host, never
     // in this process.
-    let issues: Vec<Issue> = render
-        .validate(&doc, &catalog)
+    let mut issues: Vec<Issue> = render
+        .validate_with(&doc, &catalog, &inputs.extras)
         .await
         .map_err(|failure| ApiError::render_failed(&failure))?;
+    issues.extend(inputs.issues.iter().cloned());
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::template_invalid(issue_problems(&issues)));
     }
@@ -155,7 +176,7 @@ pub(crate) async fn publish_template(
         trace_id: request_trace().trace_id,
         cause: Cause::definition_change(id),
     };
-    let mut tx = zirv_flow_store::begin(pool).await?;
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
         .await
         .map_err(template_error)?;
@@ -191,6 +212,37 @@ pub(crate) async fn publish_template(
     )
     .await
     .map_err(template_error)?;
+    // Only the assets the template itself names: a snippet and a theme are referenced by their
+    // own versions.
+    let mut ids: Vec<Uuid> = extras_needs(&doc)
+        .assets
+        .iter()
+        .filter(|spelled| inputs.loaded.assets.contains_key(*spelled))
+        .filter_map(|spelled| spelled.parse().ok())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let named: Vec<AssetId> = ids.into_iter().map(AssetId::from_uuid).collect();
+    zirv_flow_store::record_references(
+        &mut tx,
+        workspace,
+        AssetOwnerKind::Template,
+        id,
+        version.version,
+        &named,
+    )
+    .await
+    .map_err(|error| match error {
+        // The asset was deleted after the check and before the lock.
+        AssetReferenceError::Missing(_) => {
+            ApiError::template_invalid(issue_problems(&[Issue::new(
+                code::BROKEN_ASSET_REFERENCE,
+                "/blocks",
+            )
+            .with_message("an image names an asset that was deleted")]))
+        }
+        AssetReferenceError::Store(error) => error.into(),
+    })?;
     admin::audit(
         &mut tx,
         context,
@@ -200,8 +252,13 @@ pub(crate) async fn publish_template(
         json!({ "name": template.name, "version": version.version, "warnings": issues.len() }),
     )
     .await?;
+    let used = zirv_flow_store::template_where_used(&mut *tx, workspace, id)
+        .await?
+        .into_iter()
+        .filter(|used| used.active && used.flow_state != "archived")
+        .collect();
     zirv_flow_store::commit(tx).await?;
-    Ok((template, version))
+    Ok((template, version, used))
 }
 
 /// Publishes the draft as the next immutable version. The draft is validated against the
@@ -238,8 +295,8 @@ pub(crate) async fn publish(
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
-    let (template, version) = publish_template(
-        &state.pool,
+    let (template, version, used) = publish_template(
+        &state,
         render,
         &principal.context(),
         workspace.id,
@@ -252,6 +309,7 @@ pub(crate) async fn publish(
         Json(TemplatePublishedBody {
             template: TemplateBody::from(&template),
             version: TemplateVersionBody::from(&version),
+            used_by: used.iter().map(TemplateUseBody::from).collect(),
         }),
     ))
 }

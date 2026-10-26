@@ -818,6 +818,10 @@ else's data.
   egress policy (16.1). Values are JSON only in v1; Avro and Protobuf with a
   schema registry come post-1.0 (OQ-31). The `rskafka` TLS and compression
   features are validated on both musl release architectures (amd64, arm64).
+  Its zstd feature is off: `rskafka` 0.6 pins `zstd` 0.13, which has
+  RUSTSEC-2026-0391, 0398, 0403 and 0410, and 0403 is reachable from broker
+  bytes. Gzip, Snappy and LZ4 batches read; a zstd batch fails the read. It
+  returns once `rskafka` moves to `zstd` 0.14.3 or later (#338).
 
 As built (M3, Kafka): `kafka` is one module and one registry line in `zirv-flow-connectors`; a stream
 is a topic, in the new `stream` sync mode, and the record key is the message key (virtual field
@@ -1667,6 +1671,10 @@ As built (#306): the store keeps `assets` (the bytes in `bytea`, the SHA-256, ex
 - **`ConditionEvaluator`:** built in the store's segments module (#307): N conditions for one person in one call, compiled and run through `run_person_batch`. The flow branch (`flow_step.rs` `branch`) moves onto it, so a flow and a template evaluate conditions the same way. The send or preview handler calls it and passes the results to the renderer.
 - **Preview reasons:** for a real person, the reasons a block is hidden come from the reference evaluator (explain, 8.3). For a sample person, the reference evaluator runs the conditions over the sample snapshot, where the sample is in no segment.
 
+As built (#307): the evaluator is split across two crates because the store depends only on `zirv-flow-core` and `zirv-flow-segments` is pure (5.1). `zirv_flow_segments::compile_condition` (and `parse_condition`) parse a stored condition as the segment wire form with `"v": 1` added, validate it against the catalog and lower it to SQL; a `ConditionError` carries the issues and says whether one is `unknown_segment`. `zirv_flow_store::evaluate_conditions(conn, workspace, person, &[CompiledCondition])` runs the compiled queries (a `SqlQuery`) for one person as one statement, `SELECT ARRAY[EXISTS (...), ...]`, with each condition's placeholders moved past the previous ones and `$1` (the workspace) shared, in the caller's transaction, and returns one bool each (no query for zero conditions); it takes no `now`, because the compile fixed it. The flow branch compiles and evaluates through the pair with its results unchanged. A block's `visible_if` is validated in `api` (preview, publish) and `jobs` (send, test send): a condition that does not validate is `invalid_condition` at `/blocks/block/<id>/visible_if` (`/blocks/sections/<id>/visible_if` for a section), and one naming a missing segment is `broken_segment_reference`. `condition_unsupported` is gone. The marketing unsubscribe check renders the document a second time with every condition false, so a link inside a conditioned block or section does not count.
+
+The render inputs load in `zirv_flow_store::load_render_inputs` (documents, tokens and contents stay opaque JSON): the theme through `effective_theme` (a named archived theme resolves, an unpublished or unknown one is none, `theme: "none"` loads nothing), the current published version of each snippet the document names plus the theme footer (an archived snippet resolves, an unpublished one is missing), and the URL of each live asset the document, its snippets and the theme logo name, built on the public URL. `zirv_flow_templates::extras_needs` lists what a document names and `render_extras` turns the loaded JSON into `RenderExtras`, so `api` and `jobs` share both halves. Preview and publish build asset URLs on `server.public_url` exactly as a send does, so an `http` public URL gives the same outcome in both (the renderer takes `https` asset URLs only, so an image of an asset is a `broken_asset_reference`). Only when `server.public_url` is unset, where a send has no usable URL either, does preview use a host that never resolves so the image can still be shown. Preview answers `hidden_blocks: [{id, reason}]`; the reason names the first unmet condition, never a value. Publish validates with the effective theme, snippets and catalog, writes `asset_references` for the assets the template itself names, and answers `used_by`, the active flows that send the template. Migration 0063 adds `theme_id`, `theme_version` and `snippet_versions` (snippet id to version) to `messages` and `test_sends`; the send job writes them with the ending of the message and the test send job on its row once it renders, and the person message log shows them as `rendered_with`. None of the columns holds a person, so the erasure scan and the merge are unchanged.
+
 ### 11.5 Rendering pipeline
 
 1. Load the template version, the theme in effect (named, or the workspace default) and the current published versions of the theme and of the snippets the document references, and evaluate the document's `visible_if` conditions for the person (11.4).
@@ -1808,8 +1816,9 @@ convert, the send job and the webhook call all use it. A draft is saved at schem
 schema 2; a published version stays as saved and is served migrated. New blocking codes: `condition_too_large`,
 `broken_asset_reference`, `broken_theme_reference`, `broken_snippet_reference` (every snippet
 block until #303 renders it), `snippet_section`, `snippet_nested`, `snippet_condition`,
-`not_convertible` and `condition_unsupported` (any `visible_if`, until #307 supplies condition
-results to preview, test send and send); new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
+`not_convertible`, `invalid_condition` and `broken_segment_reference` (a `visible_if` that does not
+validate, or that names a missing segment; `api` and `jobs` raise them, #307; the interim
+`condition_unsupported` no longer exists); new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
 `condition_unresolved`, `broken_asset_reference`, `broken_theme_reference`. `RenderExtras`
 (theme, snippets, condition results, asset URLs) rides on the `email` and `validate` render
 requests; `validate_theme` and `validate_snippet` run in the pool as `validate_theme` and

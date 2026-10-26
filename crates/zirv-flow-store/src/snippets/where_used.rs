@@ -88,7 +88,7 @@ async fn default_footer_snippets(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
 ) -> Result<Vec<Uuid>, StoreError> {
-    let named: Vec<String> = sqlx::query_scalar(
+    let named: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT d.tokens ->> 'footer_snippet' FROM workspace_default_theme w \
             JOIN themes t ON t.id = w.theme_id AND t.archived_at IS NULL \
             JOIN theme_drafts d ON d.theme_id = t.id WHERE w.workspace_id = $1 \
@@ -102,7 +102,11 @@ async fn default_footer_snippets(
     .fetch_all(connection)
     .await
     .map_err(StoreError::query)?;
-    Ok(named.iter().filter_map(|id| id.parse().ok()).collect())
+    Ok(named
+        .iter()
+        .flatten()
+        .filter_map(|id| id.parse().ok())
+        .collect())
 }
 
 /// How many templates of the workspace, not archived, use each snippet: they hold a block for it in
@@ -578,6 +582,25 @@ mod tests {
         let listed = used(&pool, ws, footer.id).await.templates.len();
         assert_eq!(listed, 2);
         assert_eq!(after, Some(i64::try_from(listed).unwrap()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_default_theme_without_a_footer_leaves_the_counts_to_the_blocks(pool: PgPool) {
+        use crate::themes::tests_support::{create as create_theme, publish as publish_theme};
+        let ws = workspace(&pool, "one").await;
+        let snippet = create(&pool, ws, "Offer").await;
+        let holder = create_template(&pool, ws, "Holder").await;
+        set_draft(&pool, ws, holder.id, &holding(snippet.id, false)).await;
+        let theme = create_theme(&pool, ws, "Plain").await;
+        publish_theme(&pool, ws, theme.id).await;
+        crate::set_default_theme(&mut pool.acquire().await.unwrap(), ws, theme.id)
+            .await
+            .unwrap();
+
+        let counts = snippet_template_counts(&pool, ws).await.unwrap();
+
+        assert_eq!(counts.get(&snippet.id), Some(&1));
     }
 
     #[sqlx::test]

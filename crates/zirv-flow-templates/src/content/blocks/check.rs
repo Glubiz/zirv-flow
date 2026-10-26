@@ -390,16 +390,6 @@ pub(crate) fn validate(
     {
         return issues;
     }
-    // #307 removes this when the evaluator supplies condition results.
-    for (id, _) in conditions(content) {
-        issues.push(
-            Issue::new(
-                code::CONDITION_UNSUPPORTED,
-                block_at(id, Some("visible_if")),
-            )
-            .with_message("Visibility conditions can't be published yet."),
-        );
-    }
     let (look, broken) = Look::resolve(content, extras);
     check_references(content, extras, &look, broken, &mut issues);
 
@@ -626,6 +616,29 @@ fn display_length(
     }
 }
 
+/// Whether the unsubscribe link survives every condition being false: a link inside a section or
+/// block with a `visible_if` may be hidden from a person, so it does not count.
+fn links_when_hidden(
+    content: &BlocksContent,
+    look: &Look<'_>,
+    env: &minijinja::Environment<'static>,
+    values: &minijinja::Value,
+    extras: &RenderExtras,
+) -> bool {
+    let all = conditions(content);
+    if all.is_empty() {
+        return true;
+    }
+    let mut hidden = extras.clone();
+    hidden
+        .conditions
+        .extend(all.into_iter().map(|(id, _)| (id.to_owned(), false)));
+    // A render that fails here is reported by the render above.
+    build(content, look, env, values, &hidden, false)
+        .map(|built| links_to(&built.html, SAMPLE_UNSUBSCRIBE_URL))
+        .unwrap_or(true)
+}
+
 /// Render the whole document against the sample context, as a send would, and check what comes
 /// out: the unsubscribe link, the size, and whether `mrml` accepted the MJML.
 fn check_sample_render(
@@ -641,7 +654,8 @@ fn check_sample_render(
     match build(content, look, env, &values, extras, false) {
         Ok(built) => {
             if content.category == Category::Marketing
-                && !links_to(&built.html, SAMPLE_UNSUBSCRIBE_URL)
+                && !(links_to(&built.html, SAMPLE_UNSUBSCRIBE_URL)
+                    && links_when_hidden(content, look, env, &values, extras))
             {
                 issues.push(Issue::new(code::MISSING_UNSUBSCRIBE, AT));
             }
@@ -1763,27 +1777,38 @@ mod tests {
     }
 
     #[test]
-    fn a_condition_on_a_section_or_block_blocks_publishing_for_now() {
-        let none = newsletter_with(|_| {});
-        assert_eq!(codes_with(&none, &RenderExtras::default()), Vec::new());
+    fn a_condition_on_a_section_or_block_no_longer_blocks_publishing() {
         let doc = newsletter_with(|v| {
             v["blocks"]["sections"][0]["visible_if"] = serde_json::json!({"all": []});
             v["blocks"]["sections"][1]["columns"][0][1]["visible_if"] =
                 serde_json::json!({"all": []});
         });
-        assert_eq!(
-            codes_with(&doc, &RenderExtras::default()),
-            [
-                (
-                    "condition_unsupported",
-                    "/blocks/block/hero/visible_if".to_owned()
-                ),
-                (
-                    "condition_unsupported",
-                    "/blocks/block/intro_text/visible_if".to_owned()
-                ),
-            ]
-        );
+        assert_eq!(codes_with(&doc, &RenderExtras::default()), Vec::new());
+    }
+
+    #[test]
+    fn an_unsubscribe_link_inside_a_conditioned_block_or_section_does_not_count() {
+        let missing = |doc: &TemplateDocument| {
+            codes_with(doc, &RenderExtras::default())
+                .iter()
+                .any(|(code, _)| *code == "missing_unsubscribe")
+        };
+        let plain = newsletter_with(|_| {});
+        let block = newsletter_with(|v| {
+            v["blocks"]["sections"][4]["columns"][0][0]["visible_if"] =
+                serde_json::json!({"all": []});
+        });
+        let section = newsletter_with(|v| {
+            v["blocks"]["sections"][4]["visible_if"] = serde_json::json!({"all": []});
+        });
+        let elsewhere = newsletter_with(|v| {
+            v["blocks"]["sections"][1]["visible_if"] = serde_json::json!({"all": []});
+        });
+
+        assert!(!missing(&plain));
+        assert!(missing(&block));
+        assert!(missing(&section));
+        assert!(!missing(&elsewhere));
     }
 
     #[test]

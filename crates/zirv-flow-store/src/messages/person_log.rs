@@ -73,6 +73,11 @@ pub struct LoggedMessage {
     pub template_id: Uuid,
     pub template_name: Option<String>,
     pub template_version: Option<i32>,
+    /// The theme in effect when the message was rendered, and its version.
+    pub theme_id: Option<Uuid>,
+    pub theme_version: Option<i32>,
+    /// Snippet id to the version rendered; none when the message was not rendered.
+    pub snippet_versions: Option<Value>,
     pub category: Option<String>,
     pub flow_id: Option<Uuid>,
     pub flow_name: Option<String>,
@@ -114,6 +119,9 @@ struct Row {
     template_id: Uuid,
     template_name: Option<String>,
     template_version: Option<i32>,
+    theme_id: Option<Uuid>,
+    theme_version: Option<i32>,
+    snippet_versions: Option<Value>,
     category: Option<String>,
     flow_id: Option<Uuid>,
     flow_name: Option<String>,
@@ -131,7 +139,7 @@ struct Row {
 }
 
 /// The columns and the joins up to the send job's kind, which is bound next.
-const SELECT: &str = "SELECT m.id, m.enrollment_id, m.created_at, m.completed_at, m.template_id,         t.name AS template_name, m.template_version, m.category, m.flow_id, f.name AS flow_name,         m.flow_version, m.node_id,         (SELECT jsonb_path_query_first(v.graph, '$.nodes[*] ? (@.id == $id).name',                 jsonb_build_object('id', m.node_id)) #>> '{}'            FROM flow_versions v           WHERE v.workspace_id = m.workspace_id AND v.flow_id = m.flow_id             AND v.version = m.flow_version) AS node_name,         m.destination_id, d.name AS destination_name, m.status, m.reason, m.deciding_rule,         m.gate_results,         CASE WHEN j.rate THEN 'rate_limit' WHEN k.hold THEN h.gate END AS wait_why,         CASE WHEN j.rate THEN j.run_at WHEN k.hold THEN COALESCE(j.run_at, h.until) END             AS wait_until      FROM messages m      LEFT JOIN templates t ON t.workspace_id = m.workspace_id AND t.id = m.template_id      LEFT JOIN flows f ON f.workspace_id = m.workspace_id AND f.id = m.flow_id      LEFT JOIN destinations d ON d.workspace_id = m.workspace_id AND d.id = m.destination_id      LEFT JOIN LATERAL (         SELECT jb.run_at,                COALESCE(jsonb_typeof(jb.payload -> 'first_wait') = 'string'                    OR (jb.payload -> 'first_wait' IS NULL                        AND jsonb_typeof(jb.payload -> 'deferrals') = 'number'                        AND (jb.payload ->> 'deferrals')::numeric > 0), false) AS rate           FROM jobs jb          WHERE m.status = 'pending' AND jb.workspace_id = m.workspace_id AND jb.kind = ";
+const SELECT: &str = "SELECT m.id, m.enrollment_id, m.created_at, m.completed_at, m.template_id,         t.name AS template_name, m.template_version, m.theme_id, m.theme_version, m.snippet_versions, m.category, m.flow_id, f.name AS flow_name,         m.flow_version, m.node_id,         (SELECT jsonb_path_query_first(v.graph, '$.nodes[*] ? (@.id == $id).name',                 jsonb_build_object('id', m.node_id)) #>> '{}'            FROM flow_versions v           WHERE v.workspace_id = m.workspace_id AND v.flow_id = m.flow_id             AND v.version = m.flow_version) AS node_name,         m.destination_id, d.name AS destination_name, m.status, m.reason, m.deciding_rule,         m.gate_results,         CASE WHEN j.rate THEN 'rate_limit' WHEN k.hold THEN h.gate END AS wait_why,         CASE WHEN j.rate THEN j.run_at WHEN k.hold THEN COALESCE(j.run_at, h.until) END             AS wait_until      FROM messages m      LEFT JOIN templates t ON t.workspace_id = m.workspace_id AND t.id = m.template_id      LEFT JOIN flows f ON f.workspace_id = m.workspace_id AND f.id = m.flow_id      LEFT JOIN destinations d ON d.workspace_id = m.workspace_id AND d.id = m.destination_id      LEFT JOIN LATERAL (         SELECT jb.run_at,                COALESCE(jsonb_typeof(jb.payload -> 'first_wait') = 'string'                    OR (jb.payload -> 'first_wait' IS NULL                        AND jsonb_typeof(jb.payload -> 'deferrals') = 'number'                        AND (jb.payload ->> 'deferrals')::numeric > 0), false) AS rate           FROM jobs jb          WHERE m.status = 'pending' AND jb.workspace_id = m.workspace_id AND jb.kind = ";
 
 /// The waiting-time part of the query: the pending message's live send job, its latest gate
 /// hold, and whether that hold is in force. A rate-limit wait needs the job's `first_wait`, or, in the older payload that has none, a deferral (as `SendJob::parse` reads it); a
@@ -331,6 +339,9 @@ pub async fn load_person_message_log(
                 template_id: row.template_id,
                 template_name: row.template_name,
                 template_version: row.template_version,
+                theme_id: row.theme_id,
+                theme_version: row.theme_version,
+                snippet_versions: row.snippet_versions,
                 category: row.category,
                 flow_id: row.flow_id,
                 flow_name: row.flow_name,
@@ -430,6 +441,9 @@ mod tests {
                 node: "mail",
                 template: Uuid::from_u128(1 + u128::from(index == 4)),
                 template_version: Some(1),
+                theme_id: None,
+                theme_version: None,
+                snippet_versions: None,
                 destination: Uuid::from_u128(9),
                 sender_identity: None,
                 category: Some("marketing"),
@@ -539,6 +553,9 @@ mod tests {
                 node: "mail",
                 template: Uuid::from_u128(1),
                 template_version: Some(1),
+                theme_id: None,
+                theme_version: None,
+                snippet_versions: None,
                 destination: Uuid::from_u128(9),
                 sender_identity: None,
                 category: None,
