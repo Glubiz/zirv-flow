@@ -38,6 +38,7 @@ use crate::segments::{self, SegmentSchemas};
 use crate::sending;
 use crate::session::{self, SessionBody, SignInRequest, UserBody};
 use crate::setup::{self, SetupRequest, SetupStatus};
+use crate::snippets;
 use crate::sources;
 use crate::templates;
 use crate::traces::{self, CauseBody, DecisionBody, TraceBody};
@@ -173,6 +174,17 @@ use crate::workspaces::{
         segments::members::refresh,
         segments::explain::explain,
         segments::preview::preview,
+        snippets::crud::list,
+        snippets::crud::create,
+        snippets::crud::get,
+        snippets::crud::update,
+        snippets::crud::archive,
+        snippets::crud::put_draft,
+        snippets::preview::preview,
+        snippets::publish::publish,
+        snippets::publish::versions,
+        snippets::publish::version,
+        snippets::where_used::where_used,
         templates::crud::list,
         templates::crud::create,
         templates::crud::get,
@@ -513,6 +525,21 @@ use crate::workspaces::{
         SegmentSampleBody,
         segments::preview::DataAgeBody,
         segments::preview::DataSourceBody,
+        snippets::crud::SnippetBody,
+        snippets::crud::SnippetDraftBody,
+        snippets::crud::SnippetDetailBody,
+        snippets::crud::CreateSnippetRequest,
+        snippets::crud::UpdateSnippetRequest,
+        snippets::crud::SaveSnippetDraftRequest,
+        snippets::publish::SnippetVersionBody,
+        snippets::publish::SnippetVersionSummaryBody,
+        snippets::publish::SnippetPublishedBody,
+        snippets::where_used::SnippetUsedByBody,
+        snippets::where_used::SnippetTemplateBody,
+        snippets::where_used::SnippetThemeBody,
+        snippets::where_used::SnippetFlowBody,
+        snippets::preview::SnippetPreviewRequest,
+        snippets::preview::SnippetPreviewBody,
         templates::crud::TemplateBody,
         templates::crud::TemplateDraftBody,
         templates::crud::TemplateDetailBody,

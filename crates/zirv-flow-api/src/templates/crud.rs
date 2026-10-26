@@ -224,7 +224,7 @@ fn invalid(field: &'static str, message: &'static str) -> ApiError {
     ValidationError::new(field, message).into()
 }
 
-fn check_name(name: &str) -> Result<&str, ApiError> {
+pub(crate) fn check_name(name: &str) -> Result<&str, ApiError> {
     let name = name.trim();
     let length = name.chars().count();
     if length == 0 || length > MAX_NAME_CHARS || name.chars().any(char::is_control) {
