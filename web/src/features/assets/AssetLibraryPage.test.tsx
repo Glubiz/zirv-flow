@@ -22,7 +22,7 @@ function asRole(role: "admin" | "member" | null, list = listBody([A, B]), more: 
     "GET /api/v1/workspaces/ws1/members": () => json(role === null ? [] : members(role, user.id)),
     [`GET ${WS}/assets`]: () => json(list),
     [`GET ${WS}/assets/${A.id}`]: () => json({ ...A, used_by: [] }),
-    [`GET ${WS}/assets/${B.id}`]: () => json({ ...B, references: 2, used_by: [{ kind: "template", id: "t-1", version: 6 }, { kind: "theme", id: "th-1", version: 3 }] }),
+    [`GET ${WS}/assets/${B.id}`]: () => json({ ...B, references: 2, used_by: [{ kind: "template", id: "t-1", version: 6, name: "Order shipped", archived: false }, { kind: "theme", id: "th-1", version: 3, name: null, archived: false }, { kind: "snippet", id: "sn-1", version: 1, name: "Footer", archived: true }] }),
     ...more,
   });
 }
@@ -226,9 +226,23 @@ describe("the details sheet", () => {
     expect(within(sheet).getByText(new Date("2026-10-12T09:00:00Z").toLocaleDateString())).toBeInTheDocument();
     expect(within(sheet).getByText(/^0202020…|^02020202…0202$/)).toBeInTheDocument();
     expect(within(sheet).getByRole("button", { name: "Copy link" })).toBeInTheDocument();
-    expect(await within(sheet).findByRole("link", { name: "Template" })).toHaveAttribute("href", "/w/ws1/templates/t-1");
-    expect(within(sheet).getByRole("link", { name: "Theme" })).toHaveAttribute("href", "/w/ws1/themes/th-1");
+    expect(await within(sheet).findByRole("link", { name: "Order shipped" })).toHaveAttribute("href", "/w/ws1/templates/t-1");
     expect(within(sheet).getByText("template · v6")).toBeInTheDocument();
+  });
+
+  it("names each owner, marks an archived one, and falls back to the kind when the name is null", async () => {
+    asRole("admin");
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: /banner\.jpg/ }));
+
+    const sheet = await screen.findByRole("dialog", { name: "banner.jpg" });
+    expect(await within(sheet).findByRole("link", { name: "Footer" })).toHaveAttribute("href", "/w/ws1/snippets/sn-1");
+    expect(within(sheet).getByText("snippet · v1 · archived")).toBeInTheDocument();
+    expect(within(sheet).getByRole("link", { name: "Theme" })).toHaveAttribute("href", "/w/ws1/themes/th-1");
+    expect(within(sheet).getByText("theme · v3")).toBeInTheDocument();
+    expect(within(sheet).queryByText("template · v6 · archived")).not.toBeInTheDocument();
   });
 
   it("reads where an image is used again after a delete race, so the sheet does not claim it is unused", async () => {
@@ -236,7 +250,7 @@ describe("the details sheet", () => {
     asRole("admin", listBody([A, B]), {
       [`GET ${WS}/assets/${A.id}`]: () => {
         reads += 1;
-        return json({ ...A, used_by: reads > 1 ? [{ kind: "template", id: "t-9", version: 2 }] : [] });
+        return json({ ...A, used_by: reads > 1 ? [{ kind: "template", id: "t-9", version: 2, name: null, archived: false }] : [] });
       },
       [`DELETE ${WS}/assets/${A.id}`]: () => problem(409, "In use", "A published version uses it", undefined, "asset_in_use"),
     });

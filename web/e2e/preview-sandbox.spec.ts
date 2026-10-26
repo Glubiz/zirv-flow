@@ -37,7 +37,7 @@ test("a script in a raw HTML block never runs in the preview, and the detection 
   await openTemplates(page);
   await page.getByRole("button", { name: "New template" }).first().click();
   await page.getByLabel("Name").fill("Sandbox check");
-  await page.getByLabel("Category").selectOption("transactional");
+  await page.getByRole("button", { name: "Transactional" }).click();
   await page.getByLabel(/^Blocks/).check();
   await page.getByRole("button", { name: "Create template" }).click();
 

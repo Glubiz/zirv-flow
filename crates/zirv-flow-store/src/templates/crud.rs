@@ -187,25 +187,6 @@ pub async fn find_template<'e>(
     .map_err(StoreError::query)
 }
 
-/// The workspace's templates by name; archived ones only when asked for.
-pub async fn list_templates<'e>(
-    executor: impl PgExecutor<'e>,
-    workspace: WorkspaceId,
-    include_archived: bool,
-) -> Result<Vec<Template>, StoreError> {
-    sqlx::query_as(concat!(
-        "SELECT ",
-        template_columns!(),
-        " FROM templates WHERE workspace_id = $1 AND ($2 OR archived_at IS NULL) \
-          ORDER BY lower(name), id"
-    ))
-    .bind(workspace.as_uuid())
-    .bind(include_archived)
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)
-}
-
 /// The draft of a template of the workspace.
 pub async fn find_template_draft<'e>(
     executor: impl PgExecutor<'e>,
@@ -248,6 +229,27 @@ pub(super) async fn lock_live_template(
     Ok(held)
 }
 
+/// Share-locks the templates of the workspace among `ids`, in id order, until the transaction ends.
+/// A flow publish takes them before it checks that the templates it names are usable: an archive
+/// in progress (which holds the row exclusively) makes the publish wait and then see the template
+/// archived, and a publish in progress makes an archive wait and then see the flow. An id that
+/// names no template is skipped.
+pub async fn lock_templates_shared(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    ids: &[Uuid],
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "SELECT id FROM templates WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR SHARE",
+    )
+    .bind(workspace.as_uuid())
+    .bind(ids)
+    .fetch_all(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
+}
+
 /// Changes the given settings of a template that is not archived.
 pub async fn update_template(
     connection: &mut PgConnection,
@@ -283,7 +285,7 @@ pub async fn save_template_draft(
     lock_live_template(connection, workspace, id).await?;
     let draft = sqlx::query_as(concat!(
         "UPDATE template_drafts SET document = $3, revision = revision + 1, updated_by = $4, \
-            updated_at = now() WHERE workspace_id = $1 AND template_id = $2 RETURNING ",
+            updated_at = now(), checks = NULL WHERE workspace_id = $1 AND template_id = $2 RETURNING ",
         draft_columns!()
     ))
     .bind(workspace.as_uuid())
@@ -334,6 +336,14 @@ mod tests {
 
     use super::*;
     use crate::templates::tests_support::*;
+    use crate::templates::{TemplateListQuery, list_templates};
+
+    fn all() -> TemplateListQuery {
+        TemplateListQuery {
+            include_archived: true,
+            ..TemplateListQuery::default()
+        }
+    }
 
     #[test]
     fn a_documents_sender_is_read_where_its_content_type_keeps_it() {
@@ -393,9 +403,11 @@ mod tests {
         assert!(duplicate.unwrap_err().is_conflict());
         assert!(elsewhere.is_ok());
         assert!(reused.is_ok());
-        let live = list_templates(&pool, ws, false).await.unwrap();
+        let live = list_templates(&pool, ws, &TemplateListQuery::default())
+            .await
+            .unwrap();
         assert_eq!(live.len(), 1);
-        assert_eq!(list_templates(&pool, ws, true).await.unwrap().len(), 2);
+        assert_eq!(list_templates(&pool, ws, &all()).await.unwrap().len(), 2);
     }
 
     #[sqlx::test]
@@ -596,7 +608,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert!(list_templates(&pool, two, true).await.unwrap().is_empty());
+        assert!(list_templates(&pool, two, &all()).await.unwrap().is_empty());
         assert!(matches!(
             save_template_draft(&mut connection, two, template.id, &document("x"), None).await,
             Err(TemplateError::NotFound)
@@ -605,5 +617,34 @@ mod tests {
             archive_template(&mut connection, two, template.id).await,
             Err(TemplateError::NotFound)
         ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn shared_locks_coexist_skip_unknown_ids_and_hold_back_an_archive(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let first = create(&pool, ws, "First").await;
+        let second = create(&pool, ws, "Second").await;
+        let ids = [second.id, Uuid::now_v7(), first.id];
+        let mut one = pool.acquire().await.unwrap();
+        let mut two = pool.acquire().await.unwrap();
+        let mut sharing = crate::begin(&pool).await.unwrap();
+        lock_templates_shared(&mut sharing, ws, &ids).await.unwrap();
+
+        // Another share lock does not wait.
+        let mut also = crate::begin(&pool).await.unwrap();
+        lock_templates_shared(&mut also, ws, &ids).await.unwrap();
+        // An exclusive lock does: it times out while the share locks are held.
+        sqlx::query("SET lock_timeout = '200ms'")
+            .execute(&mut *one)
+            .await
+            .unwrap();
+        let blocked = archive_template(&mut one, ws, first.id).await;
+        assert!(blocked.is_err());
+        crate::commit(sharing).await.unwrap();
+        crate::commit(also).await.unwrap();
+        let archived = archive_template(&mut two, ws, first.id).await;
+
+        assert!(archived.is_ok());
     }
 }

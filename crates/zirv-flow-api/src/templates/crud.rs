@@ -11,13 +11,16 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::{UserId, ValidationError, WorkspaceId};
 use zirv_flow_store::{
-    NewTemplate, PgPool, Template, TemplateDraft, TemplatePatch, create_template as store_create,
+    NewTemplate, PgPool, Template, TemplateDraft, TemplateListQuery, TemplatePatch, TemplateSort,
+    TemplateStatus, TemplateSummary, TemplateTheme, TemplateThemeFilter,
+    create_template as store_create,
 };
 use zirv_flow_templates::{
     Category, Channel, EmailContent, Mode, Syntax, TemplateDocument, blocks_to_mjml,
     content_type_of, migrate_to_current,
 };
 
+use super::publish::{publish_inputs, publish_issues};
 use super::{
     category_name, channel_name, check_matches, issue_problems, name_taken, parse_document,
     skeleton, stored_document, template_error,
@@ -27,9 +30,13 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::consent::bool_param;
 use crate::json::ApiJson;
-use crate::problem::{ApiError, Problem};
+use crate::problem::{ApiError, FlowRefProblem, Problem};
 
 const MAX_NAME_CHARS: usize = 100;
+
+/// How long a draft save waits for its validation before it answers without checks, so a busy
+/// render pool never holds the editor.
+const CHECKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The channel of a template. Only the two with a registered content type can be made.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ToSchema)]
@@ -117,6 +124,80 @@ impl From<&Template> for TemplateBody {
             created_by: template.created_by,
             created_at: template.created_at,
             updated_at: template.updated_at,
+        }
+    }
+}
+
+/// The counts of the issues the draft's last validation found.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateChecksBody {
+    blocking: i32,
+    warnings: i32,
+}
+
+/// A theme choice that names no theme row.
+#[derive(Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TemplateThemeChoice {
+    /// Follows the workspace default theme.
+    Default,
+    /// Follows no theme: code mode, a webhook, or a block email that names none.
+    None,
+}
+
+/// A theme a block email names.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateNamedTheme {
+    id: Uuid,
+    name: String,
+}
+
+/// The theme the draft follows: `default`, `none`, or the theme it names.
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+pub(crate) enum TemplateThemeBody {
+    Choice(TemplateThemeChoice),
+    Named(TemplateNamedTheme),
+}
+
+/// A template in the library list: the template and the facts the library shows.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateListItemBody {
+    #[serde(flatten)]
+    template: TemplateBody,
+    /// The draft differs from the current version; false before the first publish.
+    draft_changed: bool,
+    /// The draft's last validation; null when it has not been checked.
+    checks: Option<TemplateChecksBody>,
+    /// How many active flows send the template.
+    active_flows: i64,
+    theme: TemplateThemeBody,
+    /// The email of the member who saved the draft last; null for an API key or a removed member.
+    edited_by_email: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schema(value_type = String, format = DateTime)]
+    edited_at: OffsetDateTime,
+}
+
+impl TemplateListItemBody {
+    fn new(summary: &TemplateSummary, active_flows: i64) -> Self {
+        Self {
+            template: TemplateBody::from(&summary.template),
+            draft_changed: summary.draft_changed,
+            checks: summary
+                .checks
+                .map(|(blocking, warnings)| TemplateChecksBody { blocking, warnings }),
+            active_flows,
+            theme: match &summary.theme {
+                TemplateTheme::Default => TemplateThemeBody::Choice(TemplateThemeChoice::Default),
+                TemplateTheme::None => TemplateThemeBody::Choice(TemplateThemeChoice::None),
+                TemplateTheme::Named { id, name } => TemplateThemeBody::Named(TemplateNamedTheme {
+                    id: *id,
+                    name: name.clone(),
+                }),
+            },
+            edited_by_email: summary.edited_by_email.clone(),
+            edited_at: summary.edited_at,
         }
     }
 }
@@ -442,6 +523,59 @@ pub(crate) async fn convert_draft_to_mjml(
     Ok((template, draft))
 }
 
+/// Validates the saved draft once, exactly as a publish does (the same catalog, render inputs and checks), and stores the issue counts on it. This runs
+/// after the save committed and never fails it: a document the renderer cannot read, a render pool
+/// that is down or a validation that fails leaves the checks empty and logs a warning with ids only.
+pub(crate) async fn record_checks(state: &AppState, workspace: WorkspaceId, draft: &TemplateDraft) {
+    let Some(pool) = state.render_pool() else {
+        tracing::warn!(template = %draft.template_id, "draft checks skipped: no render pool");
+        return;
+    };
+    let Ok(doc) = stored_document(&draft.document) else {
+        tracing::warn!(template = %draft.template_id, "draft checks skipped: unreadable document");
+        return;
+    };
+    let found = tokio::time::timeout(CHECKS_TIMEOUT, async {
+        let mut connection = state
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal())?;
+        let (catalog, inputs) = publish_inputs(state, &mut connection, workspace, &doc).await?;
+        drop(connection);
+        publish_issues(pool, &doc, &catalog, &inputs).await
+    })
+    .await;
+    let issues = match found {
+        Ok(Ok(issues)) => issues,
+        Ok(Err(error)) => {
+            tracing::warn!(template = %draft.template_id, "draft checks skipped: {}", error.detail());
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(template = %draft.template_id, "draft checks skipped: timed out");
+            return;
+        }
+    };
+    let blocking = issues.iter().filter(|issue| issue.is_blocking()).count();
+    let counts = (
+        i32::try_from(blocking).unwrap_or(i32::MAX),
+        i32::try_from(issues.len() - blocking).unwrap_or(i32::MAX),
+    );
+    if let Err(error) = zirv_flow_store::set_template_draft_checks(
+        &state.pool,
+        workspace,
+        draft.template_id,
+        draft.revision,
+        counts.0,
+        counts.1,
+    )
+    .await
+    {
+        tracing::warn!(template = %draft.template_id, "draft checks not stored: {error}");
+    }
+}
+
 /// Archives a template and audits it as `template.archived`.
 pub(crate) async fn archive_template(
     pool: &PgPool,
@@ -453,6 +587,19 @@ pub(crate) async fn archive_template(
     let template = zirv_flow_store::archive_template(&mut tx, workspace, id)
         .await
         .map_err(template_error)?;
+    // Nothing is written while an active flow still sends the template.
+    let blocking = zirv_flow_store::active_published_flows(&mut *tx, workspace, id).await?;
+    if !blocking.is_empty() {
+        return Err(ApiError::template_in_use(
+            blocking
+                .into_iter()
+                .map(|used| FlowRefProblem {
+                    flow_id: used.flow_id,
+                    flow_name: used.flow_name,
+                })
+                .collect(),
+        ));
+    }
     let draft = zirv_flow_store::find_template_draft(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::internal)?;
@@ -469,7 +616,58 @@ pub(crate) async fn archive_template(
     Ok((template, draft))
 }
 
-/// The workspace's live templates by name; archived ones with `archived=true`.
+/// The `GET /templates` parameters other than `archived`, checked. An unknown value is a 400 that
+/// names the parameter.
+fn list_query(query: &str) -> Result<TemplateListQuery, ApiError> {
+    let mut parsed = TemplateListQuery {
+        include_archived: bool_param(query, "archived")?,
+        ..TemplateListQuery::default()
+    };
+    let bad = |name: &str| ApiError::bad_request(format!("{name} is not a known value"));
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "q" => {
+                let term = value.trim();
+                parsed.search = (!term.is_empty()).then(|| term.to_owned());
+            }
+            "channel" => {
+                parsed.channel = match value.as_ref() {
+                    "email" | "webhook" => Some(value.into_owned()),
+                    _ => return Err(bad("channel")),
+                };
+            }
+            "status" => {
+                parsed.status = Some(match value.as_ref() {
+                    "live" => TemplateStatus::Live,
+                    "changes" => TemplateStatus::Changes,
+                    "draft" => TemplateStatus::Draft,
+                    "archived" => TemplateStatus::Archived,
+                    _ => return Err(bad("status")),
+                });
+            }
+            "theme" => {
+                parsed.theme = Some(match value.as_ref() {
+                    "default" => TemplateThemeFilter::Default,
+                    "none" => TemplateThemeFilter::None,
+                    other => TemplateThemeFilter::Id(other.parse().map_err(|_| bad("theme"))?),
+                });
+            }
+            "sort" => {
+                parsed.sort = match value.as_ref() {
+                    "edited" => TemplateSort::Edited,
+                    "name" => TemplateSort::Name,
+                    "most_used" => TemplateSort::MostUsed,
+                    _ => return Err(bad("sort")),
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(parsed)
+}
+
+/// The workspace's templates for the library, newest edit first; archived ones with
+/// `archived=true` or `status=archived`.
 #[utoipa::path(
     get,
     operation_id = "list_templates",
@@ -477,11 +675,16 @@ pub(crate) async fn archive_template(
     tag = "templates",
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
-        ("archived" = Option<bool>, Query, description = "Include archived templates; default false")
+        ("archived" = Option<bool>, Query, description = "Include archived templates; default false"),
+        ("q" = Option<String>, Query, description = "A case-insensitive substring of the name, the draft's subject or a merge field the draft uses"),
+        ("channel" = Option<String>, Query, description = "`email` or `webhook`"),
+        ("status" = Option<String>, Query, description = "`live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates"),
+        ("theme" = Option<String>, Query, description = "A theme id, `default` or `none`"),
+        ("sort" = Option<String>, Query, description = "`edited` (the default), `name` or `most_used` (non-test messages in the last 30 days)")
     ),
     responses(
-        (status = 200, description = "The templates", body = Vec<TemplateBody>),
-        (status = 400, description = "archived is not true or false", body = Problem, content_type = "application/problem+json"),
+        (status = 200, description = "The templates", body = Vec<TemplateListItemBody>),
+        (status = 400, description = "archived is not true or false, or another parameter has an unknown value", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -493,11 +696,20 @@ pub(crate) async fn list(
     principal: Principal,
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<TemplateBody>>, ApiError> {
+) -> Result<Json<Vec<TemplateListItemBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
-    let archived = bool_param(query.as_deref().unwrap_or_default(), "archived")?;
-    let templates = zirv_flow_store::list_templates(&state.pool, workspace.id, archived).await?;
-    Ok(Json(templates.iter().map(TemplateBody::from).collect()))
+    let query = list_query(query.as_deref().unwrap_or_default())?;
+    let templates = zirv_flow_store::list_templates(&state.pool, workspace.id, &query).await?;
+    let counts = zirv_flow_store::template_active_flow_counts(&state.pool, workspace.id).await?;
+    Ok(Json(
+        templates
+            .iter()
+            .map(|summary| {
+                let active = counts.get(&summary.template.id).copied().unwrap_or(0);
+                TemplateListItemBody::new(summary, active)
+            })
+            .collect(),
+    ))
 }
 
 /// Creates a template with its first draft. Audited as `template.created`.
@@ -629,7 +841,7 @@ pub(crate) async fn update(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The template is already archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The template is already archived (`code` is `template_archived`), or an active flow still sends it (`code` is `template_in_use`, with the flows in `flows`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -651,7 +863,9 @@ pub(crate) async fn archive(
 
 /// Replaces the template's draft. The draft is not validated beyond being a template document of
 /// the template's channel and category with a registered content type: a template is edited in
-/// steps, and the publish checks it. Audited as `template.draft_saved`.
+/// steps, and the publish checks it. After the save commits the draft is validated once and its
+/// issue counts stored (`checks` in the template list); a validation that cannot run leaves them
+/// empty and never fails the save. Audited as `template.draft_saved`.
 #[utoipa::path(
     put,
     operation_id = "save_template_draft",
@@ -688,6 +902,7 @@ pub(crate) async fn put_draft(
         body,
     )
     .await?;
+    record_checks(&state, workspace.id, &draft).await;
     Ok(Json(TemplateDetailBody::new(&template, &draft)))
 }
 
@@ -727,12 +942,77 @@ pub(crate) async fn convert_draft(
         principal.user_id(),
     )
     .await?;
+    record_checks(&state, workspace.id, &draft).await;
     Ok(Json(TemplateDetailBody::new(&template, &draft)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_parameters_are_read_and_an_unknown_value_names_its_parameter() {
+        let query = list_query("q=%20sale%20&channel=email&status=changes&sort=most_used").unwrap();
+        assert_eq!(query.search.as_deref(), Some("sale"));
+        assert_eq!(query.channel.as_deref(), Some("email"));
+        assert_eq!(query.status, Some(TemplateStatus::Changes));
+        assert_eq!(query.sort, TemplateSort::MostUsed);
+        assert!(!query.include_archived);
+        let id = Uuid::now_v7();
+        assert_eq!(
+            list_query(&format!("theme={id}")).unwrap().theme,
+            Some(TemplateThemeFilter::Id(id))
+        );
+        assert_eq!(
+            list_query("theme=none").unwrap().theme,
+            Some(TemplateThemeFilter::None)
+        );
+        assert!(list_query("archived=true").unwrap().include_archived);
+        assert!(list_query("q=").unwrap().search.is_none());
+        for name in ["channel", "status", "theme", "sort"] {
+            let error = list_query(&format!("{name}=nope")).unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+            assert!(error.detail().contains(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_list_item_serializes_the_theme_as_a_word_or_an_object() {
+        let summary = |theme| TemplateSummary {
+            template: Template {
+                id: Uuid::nil(),
+                name: "T".into(),
+                channel: "email".into(),
+                category: "marketing".into(),
+                utm: "inherit".into(),
+                sender_identity_id: None,
+                current_version: None,
+                archived_at: None,
+                created_by: None,
+                created_at: OffsetDateTime::UNIX_EPOCH,
+                updated_at: OffsetDateTime::UNIX_EPOCH,
+            },
+            draft_changed: false,
+            checks: Some((1, 2)),
+            theme,
+            edited_by_email: None,
+            edited_at: OffsetDateTime::UNIX_EPOCH,
+        };
+        let json = |theme| serde_json::to_value(TemplateListItemBody::new(&summary(theme), 3));
+
+        let default = json(TemplateTheme::Default).unwrap();
+        let named = json(TemplateTheme::Named {
+            id: Uuid::nil(),
+            name: "Brand".into(),
+        })
+        .unwrap();
+
+        assert_eq!(default["theme"], "default");
+        assert_eq!(named["theme"]["name"], "Brand");
+        assert_eq!(default["checks"], json!({"blocking": 1, "warnings": 2}));
+        assert_eq!(default["active_flows"], 3);
+        assert_eq!(default["name"], "T");
+    }
 
     #[test]
     fn a_name_is_trimmed_and_bounded_to_100_characters() {

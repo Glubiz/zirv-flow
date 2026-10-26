@@ -36,6 +36,8 @@ macro_rules! follows_default {
     };
 }
 
+pub(crate) use follows_default;
+
 /// Whether the document in `$doc` names the theme in `$2`.
 macro_rules! names_theme {
     ($doc:literal) => {
