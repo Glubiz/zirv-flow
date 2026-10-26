@@ -104,7 +104,7 @@ describe("making a template", () => {
     expect(email["syntax"]).toBe("mjml");
   });
 
-  it("makes a block template with the v1 block document and no blocks", async () => {
+  it("makes a block template with the schema 2 block document and no blocks", async () => {
     const calls = mockApi(routes());
     const { user, dialog } = await openDialog();
 
@@ -113,7 +113,7 @@ describe("making a template", () => {
 
     await waitFor(() => expect(created(calls)).toHaveLength(1));
     expect(created(calls)[0]?.["document"]).toMatchObject({
-      schema: 1,
+      schema: 2,
       channel: "email",
       mode: "blocks",
       blocks: { subject: "", category: "marketing", sections: [] },
