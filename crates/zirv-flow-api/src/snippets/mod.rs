@@ -74,7 +74,7 @@ pub(crate) fn parse_content(value: &Value) -> Result<SnippetContent, ApiError> {
     })
 }
 
-fn issue(code: &'static str, at: String, message: &str) -> Issue {
+pub(super) fn issue(code: &'static str, at: String, message: &str) -> Issue {
     Issue {
         code,
         severity: severity_of(code),
@@ -95,12 +95,10 @@ pub(crate) struct Checked {
 /// The checks only the API can make, because they read the workspace or know the caller: a snippet
 /// holds at least one block, and each `{"asset"}` image names a live asset of the workspace. A
 /// theme logo image is not refused: the template or theme that holds the snippet owns that check.
-/// A preview has no theme (`theme_is_set` false), so there it is an issue, as a missing asset is.
 pub(crate) async fn check_references(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     content: &SnippetContent,
-    theme_is_set: bool,
 ) -> Result<Checked, ApiError> {
     let mut checked = Checked {
         issues: Vec::new(),
@@ -120,11 +118,6 @@ pub(crate) async fn check_references(
         let at = format!("/blocks/block/{}/src", image.id);
         match &image.src {
             ImageSrc::Url(_) => {}
-            ImageSrc::Theme(_) if !theme_is_set => checked.issues.push(issue(
-                code::BROKEN_THEME_REFERENCE,
-                at,
-                "the preview has no theme, so it cannot show the theme logo",
-            )),
             ImageSrc::Theme(_) => {}
             ImageSrc::Asset(named) => {
                 let live = match named.parse::<Uuid>() {

@@ -3002,8 +3002,10 @@ export interface paths {
         put?: never;
         /**
          * Renders the draft or a version of a snippet for the sample person. A snippet with blocking
-         *     issues, including an asset that is missing, is not rendered: the response lists the issues and
-         *     `rendered` is false. A render that fails its limits (memory, deadline) or whose host dies is a
+         *     issues is not rendered: the response lists the issues and `rendered` is false. A theme logo
+         *     image, which the preview has no theme for, and an image of a missing or deleted asset are shown
+         *     as stand-in images, each with a warning (`broken_theme_reference`, `broken_asset_reference`) at
+         *     the block's path. A render that fails its limits (memory, deadline) or whose host dies is a
          *     problem document, and the next preview works.
          */
         post: operations["preview_snippet"];

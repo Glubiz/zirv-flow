@@ -136,7 +136,7 @@ pub(crate) async fn publish_snippet(
             zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
         );
         let content = parse_content(&draft.content)?;
-        let checked = check_references(&mut connection, workspace, &content, true).await?;
+        let checked = check_references(&mut connection, workspace, &content).await?;
         (draft, catalog, content, checked)
     };
     let mut issues: Vec<Issue> = render

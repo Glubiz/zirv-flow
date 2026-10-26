@@ -471,7 +471,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_theme_logo_image_publishes_and_the_themeless_preview_reports_it(pool: PgPool) {
+    async fn a_theme_logo_image_publishes_and_previews_with_a_warning(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f
             .create(
@@ -493,8 +493,11 @@ mod tests {
             published.body
         );
         assert_eq!(preview.status, StatusCode::OK, "{:?}", preview.body);
-        assert_eq!(preview.body["rendered"], false);
+        assert_eq!(preview.body["rendered"], true, "{:?}", preview.body);
+        assert!(preview.body["html"].is_string());
         assert_eq!(preview.body["issues"][0]["code"], "broken_theme_reference");
+        assert_eq!(preview.body["issues"][0]["severity"], "warning");
+        assert_eq!(preview.body["issues"][0]["at"], "/blocks/block/i/src");
     }
 
     #[sqlx::test]
@@ -710,7 +713,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn preview_renders_the_blocks_with_the_asset_urls_and_reports_a_missing_asset(
+    async fn preview_renders_the_blocks_with_the_asset_urls_and_warns_of_a_deleted_asset(
         pool: PgPool,
     ) {
         let f = fixture(&pool).await;
@@ -761,12 +764,40 @@ mod tests {
                 .contains("Preview marker")
         );
         assert_eq!(missing.status, StatusCode::OK);
-        assert_eq!(missing.body["rendered"], false);
-        assert!(missing.body["html"].is_null());
+        assert_eq!(missing.body["rendered"], true, "{:?}", missing.body);
+        assert!(missing.body["html"].is_string());
         assert_eq!(missing.body["issues"][0]["code"], "broken_asset_reference");
+        assert_eq!(missing.body["issues"][0]["severity"], "warning");
         assert_eq!(version.body["source"], "version");
         assert_eq!(version.body["rendered"], true);
         assert_eq!(no_version.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_deleted_asset_previews_with_a_warning_and_still_refuses_to_publish(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let (asset, _) = f.asset("photo", b"soon-deleted").await;
+        let id = f
+            .create(
+                "Photo",
+                json!({"blocks": [{"type": "image", "id": "i", "alt": "x",
+                                   "src": {"asset": asset.to_string()}}]}),
+            )
+            .await;
+        let deleted = f.admin("DELETE", &format!("/assets/{asset}"), None).await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{:?}", deleted.body);
+
+        let preview = f
+            .admin("POST", &format!("/snippets/{id}/preview"), Some(json!({})))
+            .await;
+        let published = f.publish(&id).await;
+
+        assert_eq!(preview.body["rendered"], true, "{:?}", preview.body);
+        assert_eq!(preview.body["issues"][0]["code"], "broken_asset_reference");
+        assert_eq!(preview.body["issues"][0]["severity"], "warning");
+        assert_eq!(published.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(published.body["code"], "snippet_invalid");
     }
 
     #[sqlx::test]

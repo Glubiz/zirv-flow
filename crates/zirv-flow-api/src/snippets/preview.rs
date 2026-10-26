@@ -12,11 +12,11 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_store::{Asset, asset_url};
 use zirv_flow_templates::{
-    Block, BlocksContent, Category, FooterRef, Hooks, Issue, RenderContext, RenderExtras, Section,
-    SnippetContent, TemplateDocument, ThemeRef, Tracking,
+    Block, BlocksContent, Category, FooterRef, Hooks, ImageSrc, Issue, RenderContext, RenderExtras,
+    Section, Severity, SnippetContent, TemplateDocument, ThemeRef, Tracking, code,
 };
 
-use super::{check_references, parse_content};
+use super::{check_references, issue, parse_content};
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
@@ -69,6 +69,42 @@ fn sample_document(blocks: Vec<Block>) -> TemplateDocument {
     TemplateDocument::email_blocks(content)
 }
 
+/// The stand-in for the theme logo in a preview, which has no theme.
+const THEME_LOGO_STAND_IN: &str = "https://preview.sample.invalid/theme-logo.png";
+
+/// The stand-in for an asset that is missing or deleted.
+const MISSING_ASSET_STAND_IN: &str = "https://preview.sample.invalid/missing-asset.png";
+
+/// Swaps each theme logo image and each image of a missing asset for a stand-in URL, so the
+/// preview still renders, and reports each swap as a warning at the block's path. The issue codes
+/// are the publish codes; only the severity differs, in this response alone.
+fn soften_references(content: &mut SnippetContent, live: &[(String, Asset)]) -> Vec<Issue> {
+    let mut issues = Vec::new();
+    for block in &mut content.blocks {
+        let Block::Image(image) = block else {
+            continue;
+        };
+        let (reason, stand_in, kind) = match &image.src {
+            ImageSrc::Theme(_) => (
+                "the preview has no theme, so a stand-in image is shown",
+                THEME_LOGO_STAND_IN,
+                code::BROKEN_THEME_REFERENCE,
+            ),
+            ImageSrc::Asset(named) if !live.iter().any(|(live, _)| live == named) => (
+                "the asset does not exist or was deleted, so a stand-in image is shown",
+                MISSING_ASSET_STAND_IN,
+                code::BROKEN_ASSET_REFERENCE,
+            ),
+            _ => continue,
+        };
+        let mut found = issue(kind, format!("/blocks/block/{}/src", image.id), reason);
+        found.severity = Severity::Warning;
+        issues.push(found);
+        image.src = ImageSrc::Url(stand_in.to_owned());
+    }
+    issues
+}
+
 /// The URL of each named asset, by the id as the block spells it.
 fn asset_urls(assets: &[(String, Asset)], public_url: Option<&str>) -> RenderExtras {
     let base = public_url
@@ -85,8 +121,10 @@ fn asset_urls(assets: &[(String, Asset)], public_url: Option<&str>) -> RenderExt
 }
 
 /// Renders the draft or a version of a snippet for the sample person. A snippet with blocking
-/// issues, including an asset that is missing, is not rendered: the response lists the issues and
-/// `rendered` is false. A render that fails its limits (memory, deadline) or whose host dies is a
+/// issues is not rendered: the response lists the issues and `rendered` is false. A theme logo
+/// image, which the preview has no theme for, and an image of a missing or deleted asset are shown
+/// as stand-in images, each with a warning (`broken_theme_reference`, `broken_asset_reference`) at
+/// the block's path. A render that fails its limits (memory, deadline) or whose host dies is a
 /// problem document, and the next preview works.
 #[utoipa::path(
     post,
@@ -117,7 +155,7 @@ pub(crate) async fn preview(
 ) -> Result<Json<SnippetPreviewBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
     let id: Uuid = path_id(&id)?;
-    let (content, source, checked, catalog) = {
+    let (mut content, source, checked, catalog) = {
         let mut connection = state
             .pool
             .acquire()
@@ -149,7 +187,7 @@ pub(crate) async fn preview(
         let catalog = field_catalog(
             zirv_flow_store::read_template_field_catalog(&mut connection, workspace.id).await?,
         );
-        let checked = check_references(&mut connection, workspace.id, &content, false).await?;
+        let checked = check_references(&mut connection, workspace.id, &content).await?;
         (content, source, checked, catalog)
     };
     let pool = state
@@ -159,7 +197,15 @@ pub(crate) async fn preview(
         .validate_snippet(&content, &catalog)
         .await
         .map_err(|failure| ApiError::render_failed(&failure))?;
-    issues.extend(checked.issues.iter().cloned());
+    // A missing asset is reported by the softening below, as a warning.
+    issues.extend(
+        checked
+            .issues
+            .iter()
+            .filter(|issue| issue.code != code::BROKEN_ASSET_REFERENCE)
+            .cloned(),
+    );
+    issues.extend(soften_references(&mut content, &checked.assets));
     let blocked = issues.iter().any(Issue::is_blocking);
     let (html, text) = if blocked {
         (None, None)
@@ -252,6 +298,55 @@ mod tests {
                 Some(format!("{INERT_ASSET_HOST}/a/{hex}.png").as_str())
             );
         }
+    }
+
+    #[test]
+    fn a_theme_logo_and_a_missing_asset_become_stand_ins_with_warnings() {
+        let live_id = "11111111-1111-7111-8111-111111111111";
+        let mut content = parse_content(&json!({"blocks": [
+            {"type": "image", "id": "logo", "alt": "x", "src": {"theme": "logo"}},
+            {"type": "image", "id": "gone", "alt": "x", "src": {"asset": "missing"}},
+            {"type": "image", "id": "kept", "alt": "x", "src": {"asset": live_id}},
+            {"type": "image", "id": "web", "alt": "x", "src": {"url": "https://example.com/a.png"}}
+        ]}))
+        .unwrap();
+        let live = vec![(live_id.to_owned(), asset(1))];
+
+        let issues = soften_references(&mut content, &live);
+
+        let summary: Vec<(&str, &str, Severity)> = issues
+            .iter()
+            .map(|i| (i.code, i.at.as_str(), i.severity))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (
+                    "broken_theme_reference",
+                    "/blocks/block/logo/src",
+                    Severity::Warning
+                ),
+                (
+                    "broken_asset_reference",
+                    "/blocks/block/gone/src",
+                    Severity::Warning
+                ),
+            ]
+        );
+        let srcs: Vec<&ImageSrc> = content
+            .blocks
+            .iter()
+            .filter_map(|b| {
+                if let Block::Image(i) = b {
+                    Some(&i.src)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(srcs[0], &ImageSrc::Url(THEME_LOGO_STAND_IN.to_owned()));
+        assert_eq!(srcs[1], &ImageSrc::Url(MISSING_ASSET_STAND_IN.to_owned()));
+        assert_eq!(srcs[2], &ImageSrc::Asset(live_id.to_owned()));
     }
 
     #[test]
