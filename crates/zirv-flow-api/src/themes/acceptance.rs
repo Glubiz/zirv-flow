@@ -680,14 +680,14 @@ mod tests {
             .admin("GET", &format!("/themes/{brand}/where-used"), None)
             .await;
 
-        assert_eq!(ids(&before.body["named_templates"]), [named.clone()]);
+        assert_eq!(ids(&before.body["named_templates"]), [named.as_str()]);
         assert!(
             before.body["default_templates"]
                 .as_array()
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(ids(&after.body["named_templates"]), [named.clone()]);
+        assert_eq!(ids(&after.body["named_templates"]), [named.as_str()]);
         assert_eq!(
             ids(&after.body["default_templates"]),
             [absent, follows.clone()]
@@ -746,8 +746,8 @@ mod tests {
         f.admin("PUT", "/themes/default", Some(json!({"theme_id": theme})))
             .await;
 
-        assert_eq!(ids(&draft_only.body["themes"]), [theme.clone()]);
-        assert_eq!(ids(&not_default.body["themes"]), [theme.clone()]);
+        assert_eq!(ids(&draft_only.body["themes"]), [theme.as_str()]);
+        assert_eq!(ids(&not_default.body["themes"]), [theme.as_str()]);
         assert!(not_default.body["templates"].as_array().unwrap().is_empty());
         assert_eq!(ids(&as_default.body["templates"]), [follows]);
         assert_eq!(
