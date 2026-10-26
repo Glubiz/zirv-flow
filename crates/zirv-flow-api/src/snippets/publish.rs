@@ -121,7 +121,7 @@ pub(crate) async fn publish_snippet(
     id: Uuid,
     published_by: Option<UserId>,
 ) -> Result<(Snippet, SnippetVersion, SnippetUse), ApiError> {
-    let (draft, catalog, checked) = {
+    let (draft, catalog, content, checked) = {
         let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
         let snippet = zirv_flow_store::find_snippet(&mut *connection, workspace, id)
             .await?
@@ -137,9 +137,8 @@ pub(crate) async fn publish_snippet(
         );
         let content = parse_content(&draft.content)?;
         let checked = check_references(&mut connection, workspace, &content, true).await?;
-        (draft, catalog, (content, checked))
+        (draft, catalog, content, checked)
     };
-    let (content, checked) = checked;
     let mut issues: Vec<Issue> = render
         .validate_snippet(&content, &catalog)
         .await

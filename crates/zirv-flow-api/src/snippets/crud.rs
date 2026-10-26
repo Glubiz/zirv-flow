@@ -176,10 +176,7 @@ async fn rename_snippet(
     let mut tx = zirv_flow_store::begin(pool).await?;
     let snippet = zirv_flow_store::update_snippet(&mut tx, workspace, id, &patch)
         .await
-        .map_err(|error| match error {
-            zirv_flow_store::SnippetError::Store(error) => name_taken(error),
-            other => snippet_error(other),
-        })?;
+        .map_err(snippet_error)?;
     let draft = zirv_flow_store::find_snippet_draft(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::internal)?;

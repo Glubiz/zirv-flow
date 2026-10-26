@@ -171,6 +171,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::*;
+    use crate::find_snippet;
     use crate::snippets::save_snippet_draft;
     use crate::snippets::tests_support::*;
     use crate::templates::tests_support::{trace, workspace};
@@ -294,6 +295,4 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!((all[0].version, all[0].warnings), (1, 2));
     }
-
-    use crate::find_snippet;
 }
