@@ -994,4 +994,44 @@ mod tests {
         assert_eq!(refused.body["templates"][0]["id"], json!(marketing));
         assert_eq!(f.count("SELECT count(*) FROM snippet_versions").await, 1);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_naming_an_archived_theme_still_blocks_a_footer_without_the_link(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = f.create("Footer", unsubscribe_content()).await;
+        assert_eq!(f.publish(&footer).await.status, StatusCode::CREATED);
+        let theme = f
+            .admin(
+                "POST",
+                "/themes",
+                Some(json!({"name": "Brand", "tokens": {"footer_snippet": footer}})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/themes/{theme}/publish"), None)
+            .await;
+        let named = f
+            .live_template(
+                "Named",
+                "marketing",
+                json!({"id": theme}),
+                section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"})),
+            )
+            .await;
+        let archived = f.admin("DELETE", &format!("/themes/{theme}"), None).await;
+        f.put_draft(&footer, heading("No link"), None).await;
+
+        let refused = f.publish(&footer).await;
+
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "snippet_breaks_templates");
+        assert_eq!(refused.body["templates"][0]["id"], json!(named));
+    }
 }

@@ -176,15 +176,17 @@ async fn held_counts(
 
 /// The themes of the workspace, not archived, that name the snippet as their footer, by name. With
 /// `published_only`, only a theme whose current version does; else a draft naming it counts too.
+/// With `with_archived`, an archived theme counts too, because it still renders its footer.
 pub(super) async fn themes_using<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     snippet: Uuid,
     published_only: bool,
+    with_archived: bool,
 ) -> Result<Vec<SnippetThemeUse>, StoreError> {
     sqlx::query_as(
         "SELECT t.id, t.name FROM themes t \
-         WHERE t.workspace_id = $1 AND t.archived_at IS NULL AND ( \
+         WHERE t.workspace_id = $1 AND ($4 OR t.archived_at IS NULL) AND ( \
             (NOT $3 AND EXISTS (SELECT 1 FROM theme_drafts d WHERE d.theme_id = t.id \
                 AND d.tokens ->> 'footer_snippet' = $2)) \
             OR EXISTS (SELECT 1 FROM theme_versions v WHERE v.theme_id = t.id \
@@ -194,6 +196,7 @@ pub(super) async fn themes_using<'e>(
     .bind(workspace.as_uuid())
     .bind(snippet.to_string())
     .bind(published_only)
+    .bind(with_archived)
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)
@@ -209,7 +212,7 @@ pub async fn snippet_where_used(
     snippet: Uuid,
 ) -> Result<SnippetUse, StoreError> {
     let mut templates = templates_holding(&mut *connection, workspace, snippet).await?;
-    let themes = themes_using(&mut *connection, workspace, snippet, false).await?;
+    let themes = themes_using(&mut *connection, workspace, snippet, false, false).await?;
     let mut default_in_use = false;
     for theme in &themes {
         default_in_use |= is_default_theme(&mut *connection, workspace, theme.id).await?;
@@ -242,7 +245,7 @@ pub async fn snippet_where_used(
 
 /// The templates, not archived, whose current published version renders with the snippet: those
 /// that hold a block for it, and those that use a theme whose current version has it as the
-/// footer (a named theme, or the default theme for the templates that follow it). By template id.
+/// footer (a named theme, archived or not, or the default theme for the templates that follow it). By template id.
 pub async fn snippet_live_templates(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
@@ -254,7 +257,7 @@ pub async fn snippet_live_templates(
         .filter(|template| template.in_current)
         .map(|template| (template.id, template.name))
         .collect();
-    for theme in themes_using(&mut *connection, workspace, snippet, true).await? {
+    for theme in themes_using(&mut *connection, workspace, snippet, true, true).await? {
         for template in theme_live_templates(&mut *connection, workspace, theme.id).await? {
             live.insert(template.id, template.name);
         }
