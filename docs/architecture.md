@@ -1565,23 +1565,36 @@ versioned JSON, edited in the React builder and rendered server-side in Rust per
 channel (ADR-006). Preview and send call the same renderer
 (`zirv-flow-templates`). v1.0 builds email and webhook content. SMS, push and
 in-app content types are defined in the schema from day one, and their builders
-ship with those channels after 1.0. M6 ships HTML and MJML code templates and the
-builder core (block document v1, its renderer and the WYSIWYG block editor); M7
-adds themes, snippets, assets, visibility conditions, the webhook payload editor
-and assistant drafting on the same renderer. Rendering runs in an isolated child
+ship with those channels after 1.0. M6 ships HTML and MJML code templates, the
+builder core (block document v1, its renderer and the WYSIWYG block editor) and the
+webhook payload editor; M7 adds block document schema 2, themes, snippets, assets,
+visibility conditions and assistant drafting on the same renderer. Rendering runs in an isolated child
 process (11.9).
 
 ### 11.1 Content model
 
 ```json
-{ "schema": 1, "channel": "email", "mode": "blocks",
-  "blocks": { "subject": "{{ person.first_name | default('Hi') }}, your order shipped",
+{ "schema": 2, "channel": "email", "mode": "blocks",
+  "blocks": { "theme": "default", "footer": "theme",
+              "subject": "{{ person.first_name | default('Hi') }}, your order shipped",
               "preheader": "Tracking inside", "sender": "snd_0192f4a1", "lang": "en",
               "category": "marketing",
-              "settings": { "content_width": 600, "font_family": "arial" },
               "sections": [ { "id": "intro",
-                              "columns": [[ { "type": "heading", "id": "title", "level": 1, "text": "On its way" } ]] } ] } }
+                              "columns": [[ { "type": "heading", "id": "title", "level": 1, "text": "On its way" },
+                            { "type": "image", "id": "logo", "alt": "Shop", "src": { "theme": "logo" } },
+                            { "type": "snippet", "id": "sig", "snippet_id": "snp_0192f4b7" } ]] } ] } }
 ```
+
+Schema 2 adds these fields to the blocks content:
+
+- `theme`: `"default"` (follow the workspace default theme; what a new document starts with), `{"id": <theme id>}` (a named theme) or `"none"` (the document's own `settings` apply, exactly as schema 1 renders them). The `settings` object styles the document only when no theme is in effect: with `"none"`, or when it follows the default and the workspace has no default theme.
+- `footer`: `"theme"` (default) or `"none"`; see the footer append in 11.3.
+- `visible_if` on a section or block: a bounded segment-AST condition (11.4).
+- The `snippet` block (`snippet_id`; 11.2).
+- The image `src`, one of `{"asset": <id>}`, `{"url": "https://..."}` (kept so migrated documents render unchanged) or `{"theme": "logo"}` (the theme's logo).
+- Typed contents for the reserved channels `sms`, `push` and `in_app`, with their length rules: they validate and can never be published.
+
+Reads accept schemas 1 and 2 and migrate in memory (11.8); a newer schema is refused.
 
 The block content sits in its own `blocks` object beside the code content (`email`), so a code document reads and writes exactly as before. Every section and block has a stable `id` (letters, digits, `_`, `-`; unique in the document) that validation issues and the editor address it by. Every object refuses a field it does not define and the block list refuses a `type` it does not know (typed errors `unknown_field` and `unknown_block`), so a document a newer editor wrote is an error and never silently loses content. A document holds at most 50 sections, 500 blocks and 400 000 bytes of text, with per-field bounds (a heading, label or alt text 1 000 bytes, a URL 2 048, rich text 50 000, raw HTML 100 000). Over a limit is a blocking issue.
 
@@ -1589,49 +1602,57 @@ The block content sits in its own `blocks` object beside the code content (`emai
 |---------|--------------|-------------|
 | `email` | Subject, preheader, sender identity, reply-to, `lang`, body as blocks or as code (HTML + text) | Block builder, code mode |
 | `webhook` | Headers and a JSON body template; the destination supplies URL and signing | Payload editor (11.7) |
-| `sms` | Text and sender id, with encoding and segment-length rules | Reserved: validated, not publishable |
-| `push` | Title, body, image, deep link, data | Reserved |
-| `in_app` | Title, body, image, call to action | Reserved |
+| `sms` | Text and sender id, with encoding and segment-length rules | Reserved: validated, never publishable |
+| `push` | Title, body, image, deep link, data | Reserved: validated, never publishable |
+| `in_app` | Title, body, image, call to action | Reserved: validated, never publishable |
 
-- Every document carries an integer `schema`. The server reads older schemas through migrations (11.8) and refuses newer ones.
+- Every document carries an integer `schema` (currently 2). The server reads older schemas through migrations (11.8) and refuses newer ones.
 - `mode` is `blocks` or `code`. Code mode is the escape hatch and is HTML (raw HTML + text with MiniJinja) or MJML (MJML source with MiniJinja, plus a text part). The registered content types are `html`, `mjml` and `blocks` for email, and `webhook`. Conversion is one-way: blocks to MJML code keeps merge tags; code to blocks is never offered.
-- Reserved channel types define typed fields and length rules now, so content and validation keep their shape when those builders ship.
+- Reserved channel types define typed fields and length rules now (schema 2, #302), so content and validation keep their shape when those builders ship.
 
 ### 11.2 Email block set v1
 
 | Block | Content | Notes |
 |-------|---------|-------|
 | `section` | Row of 1 to 3 columns, each a list of blocks; background, padding | Columns stack on narrow screens; sections do not nest |
-| `heading` | Level 1 to 3, text | Document settings (theme in M7) |
+| `heading` | Level 1 to 3, text | Theme tokens, or the document `settings` when the theme is `none` |
 | `text` | Rich text: paragraphs, bold, italic, underline, links, lists, line breaks | Sanitized against an allowlist (`ammonia`: `p b strong i em u a ul ol li br`; `href` only, `https`, `http`, `mailto` or a leading merge tag) at validation, and again on the MiniJinja output at render |
-| `image` | `https` URL (asset reference in M7), alt text, optional link, width | From the asset library (11.3) in M7 |
+| `image` | `src` (an asset, an `https` URL or the theme logo), alt text, optional link, width | Assets come from the asset library (11.3, #306); an `https` URL stays valid so migrated documents render unchanged |
 | `button` | Label, URL, alignment | Theme colours |
 | `divider`, `spacer` | Style; height | |
 | `raw_html` | The marketer's own HTML | Passed through as `mj-raw`; never rendered unsandboxed in the app (16.1) |
-| `snippet` | Reference to a snippet | Resolved at render time to the snippet's current published version |
+| `snippet` | Reference to a snippet, a block list (#305) | Resolved at render time to the snippet's current published version; the block may carry `visible_if` |
 
-Per-document `settings` stand in for the M7 brand theme: background, text, link and button colours (`#rgb` or `#rrggbb`), a content width of 480 to 800 pixels (default 600) and a font stack from a fixed web-safe list (`arial`, `helvetica`, `verdana`, `tahoma`, `trebuchet`, `georgia`, `times`, `courier`).
+Themes (11.3, #304) apply to block documents only; code-mode HTML and MJML get no theme. When a document's `theme` is `none`, its per-document `settings` style it: background, text, link and button colours (`#rgb` or `#rrggbb`), a content width of 480 to 800 pixels (default 600) and a font stack from a fixed web-safe list (`arial`, `helvetica`, `verdana`, `tahoma`, `trebuchet`, `georgia`, `times`, `courier`).
 
 Any block may carry a visibility condition (11.4). Styling is limited to theme
 tokens and a small set of spacing and alignment values. The set grows only
-under the block-set growth policy (OQ-23).
+under the block-set growth policy (OQ-23, decided in 21.1): M7 adds only
+the snippet block, and blocks are never removed.
 
 ### 11.3 Brand theme, snippets, assets
 
-- **Brand theme:** one per workspace, versioned: colours (primary, text, background, link), font stacks (web-safe, optional web font URL), logo asset, default footer snippet (postal address, unsubscribe link). Blocks reference theme tokens, so a theme change restyles templates at their next render without republishing.
-- **Snippets:** versioned block lists (legal footer, signature). Snippets cannot contain snippet references, so there are no cycles. Templates render a snippet's current published version; publishing a snippet lists the templates and active flows that use it.
-- **Assets:** raster images only (PNG, JPEG, GIF, WebP; no SVG), with the type sniffed from the bytes rather than taken from the client, and per-file and per-workspace limits (OQ-21). The baseline (ADR-003) stores them in Postgres and serves them content-addressed from `server.public_url` under `/a/` with immutable cache headers and `nosniff`. An asset referenced by any published version cannot be deleted, because sent emails keep pointing at it. S3-compatible object storage is an optional later add-on; large sends should put a CDN or caching proxy in front of `/a/`.
+- **Brand themes (#304):** several per workspace, versioned, one of them the default. A template picks a theme or follows the default (the `theme` field, 11.1). A theme holds colours (primary, text, background, link), font stacks (web-safe, optional web font URL), a logo asset, link and button styles, and a default footer snippet (postal address, unsubscribe link). Blocks reference theme tokens, so a theme change restyles templates at their next render without republishing; changing the workspace default changes only templates that follow it. The theme editor previews the theme and warns when a colour pair is below WCAG AA (OQ-22).
+- **Theme footer:** a blocks email that uses a theme (it follows the default or names one) gets the theme's footer snippet appended as its last section at render, unless the document says `footer: "none"`. The editor shows it as a locked last section with a remove action. A change to the theme's footer changes every such email at its next render. Publish validation inspects the effective rendered content, so a document that opts out must supply its own unsubscribe link.
+- **Snippets (#305):** versioned block lists (legal footer, signature) with no sections, no snippet blocks (so there are no cycles) and no `visible_if` inside. Templates render a snippet's current published version; the `snippet` block in a template may carry `visible_if`. Publishing a snippet lists the templates and active flows that use it.
+- **Assets (#306):** raster images only (PNG, JPEG, GIF, WebP). Limits and the storage decision are OQ-21 (21.1).
+  - Rows are per workspace in PostgreSQL (ADR-003) and served at `/a/{sha256}.{ext}` from `server.public_url`, where the hash is the SHA-256 of the bytes and any live row with that hash serves it.
+  - The upload is a raw streamed body, as the CSV import does (no multipart). The type is sniffed from the magic bytes and must match the declared type; SVG is refused. The pixel size is read from the header before any decode.
+  - The response carries immutable cache headers, `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`.
+  - `asset_references` are written at publish (template, theme and snippet versions). An asset with a published reference cannot be deleted, because sent emails keep pointing at it.
 
 ### 11.4 Personalization and conditions
 
-- **Merge tags:** a picker fed by the field registry (traits by type), the event catalog (trigger event properties), the brand theme and system values (unsubscribe and preference URLs) inserts MiniJinja expressions such as `{{ person.first_name | default("there") }}`. The sandbox is unchanged: no filesystem or network, fuel, recursion and output limits, strict undefined, HTML autoescape in HTML fields.
-- **Visibility conditions:** a block may carry a segment-AST condition ("in segment VIP", "country is DK"). The renderer lists a template's conditions; the send or preview handler evaluates them for the person in one call through the existing `ConditionEvaluator` and passes the results in. Preview shows which blocks are hidden and why, using explain (8.3).
+- **Merge tags:** a picker fed by the field registry (traits by type), the event catalog (trigger event properties), the brand theme (a Theme group: colours, logo URL, name; the `theme.*` merge values exist wherever a theme is in effect) and system values (unsubscribe and preference URLs) inserts MiniJinja expressions such as `{{ person.first_name | default("there") }}`. The sandbox is unchanged: no filesystem or network, fuel, recursion and output limits, strict undefined, HTML autoescape in HTML fields.
+- **Visibility conditions:** a section or block may carry a segment-AST condition in `visible_if` ("in segment VIP", "country is DK"). The condition is opaque, bounded JSON to `zirv-flow-templates`: the crate lists a document's conditions and takes their results as an input, so it needs no new crate edge (5.1). The API and jobs parse and validate conditions with `zirv-flow-segments`, with issue paths `/blocks/block/<id>/visible_if`.
+- **`ConditionEvaluator`:** built in the store's segments module (#307): N conditions for one person in one call, compiled and run through `run_person_batch`. The flow branch (`flow_step.rs` `branch`) moves onto it, so a flow and a template evaluate conditions the same way. The send or preview handler calls it and passes the results to the renderer.
+- **Preview reasons:** for a real person, the reasons a block is hidden come from the reference evaluator (explain, 8.3). For a sample person, the reference evaluator runs the conditions over the sample snapshot, where the sample is in no segment.
 
 ### 11.5 Rendering pipeline
 
-1. Load the template version and the current published theme and snippet versions.
+1. Load the template version, the theme in effect (named, or the workspace default) and the current published versions of the theme and of the snippets the document references, and evaluate the document's `visible_if` conditions for the person (11.4).
 2. Migrate the document to the current schema in memory (11.8).
-3. Resolve snippets, apply theme tokens, drop blocks whose condition is false.
+3. Resolve snippets, bind the `theme.*` values and theme tokens (none for `theme: "none"`, code mode or webhooks), append the theme footer snippet as the last section unless `footer` is `"none"`, and drop sections and blocks whose condition is false.
 4. Render every text field (subject, preheader, text, labels, URLs, alt text) through MiniJinja with the person and trigger context.
 5. Emit MJML and render it to responsive HTML with the `mrml` crate.
 6. Generate the text part from the block tree (headings, paragraphs, links as `label: url`), not by scraping the HTML.
@@ -1640,15 +1661,15 @@ under the block-set growth policy (OQ-23).
 HTML code mode runs steps 4 (on the whole HTML and text) and 7. MJML code mode runs
 step 4 over the whole MJML source and the text part, then step 5 (`mrml` with its
 include loaders disabled; a parse error is a blocking validation issue), then 7.
-Block mode runs step 4 per text field (the literal text of a plain field is escaped for MJML first, rich text is sanitized before and after the render, a rendered link URL must still be `https`, `http` or `mailto`), then step 5 over the MJML emitted from the tree and step 6 from the tree, then 7; `blocks_to_mjml` is the same emission with the merge tags kept, so its MJML rendered through the MJML code path gives the block render's HTML bytes. Webhook content renders as in 11.7. Every step runs inside the render host (11.9). Output is deterministic: no clock reads, random ids or
+Block mode runs step 4 per text field (the literal text of a plain field is escaped for MJML first, rich text is sanitized before and after the render, a rendered link URL must still be `https`, `http` or `mailto`), then step 5 over the MJML emitted from the tree and step 6 from the tree, then 7; `blocks_to_mjml` is the same emission with the merge tags kept, so its MJML rendered through the MJML code path gives the block render's HTML bytes. Webhook content renders as in 11.7. The theme, the snippets and the condition results are inputs of the render, not lookups inside it (#303). Every step runs inside the render host (11.9). Output is deterministic: no clock reads, random ids or
 map-order dependence, so equal inputs give equal bytes. Golden tests and the
 preview-equals-send test rely on this.
 
 ### 11.6 Validation
 
-- **Blocks publish:** a merge field unknown to the registry or event catalog; MiniJinja syntax errors; a `marketing` email without an unsubscribe link (own or from the theme footer); a missing sender identity; a broken reference (snippet, asset, theme, segment in a condition); a document failing its schema or the sanitizer; raw HTML that `mrml` cannot parse; a webhook body that is not valid JSON after a sample render.
+- **Blocks publish:** a merge field unknown to the registry or event catalog; MiniJinja syntax errors; a `marketing` email without an unsubscribe link (own or from the theme footer); a missing sender identity; a broken reference (snippet, asset, theme, segment in a condition), checked on the effective content after the theme footer is appended; a document failing its schema or the sanitizer; raw HTML that `mrml` cannot parse; a webhook body that is not valid JSON after a sample render.
 - **Block paths:** an issue on a block document names the block, `/blocks/block/<id>` plus the field when one applies (`/blocks/block/cta/url`), and a field of the document itself as `/blocks/<field>` (`/blocks/subject`, `/blocks/settings/link_color`). A problem of the whole message, such as a missing unsubscribe link, is `/blocks`. Document shape, limit and URL problems are the blocking codes `blocks_limit`, `duplicate_block_id`, `invalid_block_id`, `invalid_columns`, `invalid_setting`, `invalid_url` and `sanitizer_rejected` (rich text the allowlist would change).
-- **Warns:** images without alt text (`image_without_alt`), a subject over 78 or a preheader over 110 characters (`subject_too_long`, `preheader_too_long`); HTML size near the clipping threshold of common mail clients (about 100 KB); missing `lang`; subject or preheader beyond typical display length; links not using `https`.
+- **Warns:** a theme colour pair below WCAG AA contrast (4.5:1 for text, links and normal-size button text; 3:1 only for large text); images without alt text (`image_without_alt`), a subject over 78 or a preheader over 110 characters (`subject_too_long`, `preheader_too_long`); HTML size near the clipping threshold of common mail clients (about 100 KB); missing `lang`; subject or preheader beyond typical display length; links not using `https`.
 
 **As built (block editor, #239).**
 
@@ -1661,8 +1682,10 @@ preview-equals-send test rely on this.
 
 ### 11.7 Versions, preview, test sends, webhook payloads
 
-- **Versions:** drafts are editable; publishing creates an immutable version. `action.send` references the template, not a version, and sends its current published version at send time, so a typo fix needs no flow republish. Publishing shows the active flows that use the template. Version history and where-used are available for templates and snippets.
-- **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`; until M8 introduces that grant, owners and admins only) or a sample person built from registry types, at desktop and mobile widths. The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks and validation results.
+- **Versions:** drafts are editable; publishing creates an immutable version. `action.send` references the template, not a version, and sends its current published version at send time, so a typo fix needs no flow republish. Publishing a template, snippet or theme returns the active flows that use it. Version history and where-used are available for templates, snippets and themes. A message row records `theme_id`, `theme_version` and `snippet_versions` (snippet id to version) beside `template_version`, and a test send records them too.
+- **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`; until M8 introduces that grant, owners and admins only) or a sample person built from registry types, at desktop and mobile widths (#307). The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks with their reasons and validation results.
+- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge.
+- **Assistant template drafts (#309):** a template tool (the ninth in the registry) drafts email copy, subject variants, block layouts and translations. The draft is an `ai_drafts` row of kind `template`, validated by template validation with bounded repair before it is stored. The response carries the field diff and a render diff at desktop and mobile widths. Accepting writes the template's ordinary draft after validation passes again and never publishes. An accepted translation updates only the current draft, including its `lang`; saving it as a new template is a separate marketer action.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
 - **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
 
@@ -1728,10 +1751,15 @@ preview-equals-send test rely on this.
 ### 11.8 Document schema migrations
 
 A migration is a pure function from schema `N` to `N + 1`, and reads chain them.
-Published versions are stored as saved and never rewritten; drafts are upgraded
-when saved. Each migration ships with golden tests: a schema-`N` fixture
+Reads accept schemas 1 and 2 and migrate in memory; a newer schema is refused.
+Drafts are saved as the current schema; published versions are stored as saved,
+never rewritten, and migrated when read. Each migration ships with golden tests: a schema-`N` fixture
 migrates to the expected document and renders byte-identically. The builder
 refuses a document whose schema is newer than the server's.
+
+The v1 to v2 migration (#302) sets `theme: "none"` and `footer: "none"`, keeps
+`settings`, and turns each image `src` string into `src: {"url"}`, so a migrated document renders
+byte-identically. A new document starts with `theme: "default"` and `footer: "theme"`.
 
 **As built (schema 2, #302).** `zirv-flow-templates::migrate` holds `v1_to_v2` and
 `migrate_to_current`, pure functions over the JSON value. Schema 2 adds `theme`
@@ -1744,10 +1772,11 @@ and typed reserved `sms`, `push` and `in_app` contents. The v1 to v2 migration w
 into a `TemplateDocument` goes through `parse_template_document`, which migrates in memory and
 refuses a newer schema with `unsupported_schema`; the API draft routes, preview, publish,
 convert, the send job and the webhook call all use it. A draft is saved at schema 2 and served at
-schema 2; a published version stays as saved. New blocking codes: `condition_too_large`,
+schema 2; a published version stays as saved and is served migrated. New blocking codes: `condition_too_large`,
 `broken_asset_reference`, `broken_theme_reference`, `broken_snippet_reference` (every snippet
-block until #303 renders it), `snippet_section`, `snippet_nested`, `snippet_condition` and
-`not_convertible`; new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
+block until #303 renders it), `snippet_section`, `snippet_nested`, `snippet_condition`,
+`not_convertible` and `condition_unsupported` (any `visible_if`, until #307 supplies condition
+results to preview, test send and send); new warnings `low_contrast` and `sms_many_segments`. Render-time errors:
 `condition_unresolved`, `broken_asset_reference`, `broken_theme_reference`. `RenderExtras`
 (theme, snippets, condition results, asset URLs) rides on the `email` and `validate` render
 requests; `validate_theme` and `validate_snippet` run in the pool as `validate_theme` and
@@ -2233,7 +2262,7 @@ schema. The registry contains workspace-scoped reads and draft creation only:
 |----------|----------------|------------------------------------|
 | Segment AST | Draft or explain a segment | Segment parser/compiler; diff plus preview count and sample |
 | Flow graph | Draft or explain a flow | Flow publish validation (`core::flow`); graph diff plus simulation summary (test-mode walks of synthetic persons, 9.4) |
-| Template document | Draft copy, subject variants, layout or translation | Template validation; rendered diff at desktop/mobile widths |
+| Template document | Draft copy, subject variants, layout or translation (template tool, #309) | Template validation; rendered diff at desktop/mobile widths |
 | Source field mapping | Draft mappings from schema and samples | Mapping schema and sample dry run; field-by-field diff |
 | HTTP connector manifest | Draft a manifest from pasted API documentation | Manifest schema and mock/test-connection preview |
 | Trace | Explain a trace tree in plain language | Read-only trace API; cited decision-record ids |
@@ -2832,7 +2861,8 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | `templates` | Golden render corpus per block and per channel; representative email layouts validated through `mrml`; preview-equals-send byte test (tracking tokens excluded); golden tests per document schema migration; sanitizer allowlist tests |
 | Causality | Trace-completeness integration fixtures for every derived action and cause; job retry and failure trees; assertions that decision records contain ids and reasons but no personal-data values |
 | Assistant | Deterministic fake provider and recorded tool calls in CI; tool-registry allowlist, RBAC/workspace isolation, no-PII context, budget/rate-limit, bounded repair, prompt-injection and draft-only tests. Golden-prompt evaluations against real configured providers run manually or nightly, never as a CI gate. |
-| API and web | Handler tests on real Postgres, RBAC matrix, OpenAPI drift check; SPA type check and unit tests, browser end-to-end tests from M5 |
+| API and web | Handler tests on real Postgres, RBAC matrix, OpenAPI drift check; SPA type check and unit tests, browser end-to-end tests from M7 (next row) |
+| Browser end-to-end | Playwright (`@playwright/test`, Chromium only) in `web/e2e` (#315, #316). A test-only server binary behind a cargo feature (like the bench-feature gate) boots the Rust e2e harness (`crates/zirv-flow/src/e2e/`) on a port with the fixture DNS resolver and the in-process SMTP sink, and seeds a workspace, an owner, a verified domain, a sender, an SMTP destination and the allowlist. A test-only route exposes the sink's captured messages. A CI job runs it. One test builds the reference newsletter through the UI with a theme, a snippet and an uploaded asset, test-sends it, and compares the captured HTML with the preview render, normalising only the tracking tokens; another puts a script in a raw HTML block and checks in the real browser that it never runs in the app preview |
 | Performance | Load generator and benchmarks per milestone slice; full validation in M8 |
 | Gates | The M0 CI gates (fmt, clippy, nextest, test-presence, advisory security scan) apply to every PR; from M1, the crate-dependency allowlist, purity check and frontend import-boundary lint in section 5.5 are also required |
 
@@ -2862,7 +2892,7 @@ replica for preview and explain (deferred, 8.3), event rollups (OQ-2), then the 
 | Waiting enrollments; timer lateness | 10 million; p99 < 60 s at that volume (M5 measures at 1 million, M8 at 10 million) |
 | Job throughput | 1,000 jobs/s claimed and completed |
 | Send throughput | 300 messages/s per deployment, provider limits permitting |
-| Template render, typical block email (about 20 blocks, conditions pre-evaluated) | p95 < 50 ms per message |
+| Template render, typical block email (about 20 blocks, conditions pre-evaluated) | p95 < 50 ms per message (render benchmark, #317) |
 
 **As measured (M2).** The ingestion rows were measured on a development machine, not the reference
 hardware, at three sizes of the zirv-flow stack (2, 4 and 8 vCPU) in
@@ -2984,15 +3014,29 @@ they were ruled as their capabilities were added to the plan.
 | OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? Decided in M1: OIDC SSO through any compliant provider, with Keycloak as the reference. | Closed (M1) |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
-| OQ-21 | Asset limits: per-file size, per-workspace quota, and when object storage becomes required rather than optional | M7 |
-| OQ-22 | Dark-mode handling: themed dark variants, or rely on client inversion with contrast checks? | M7 |
-| OQ-23 | Block-set growth policy: what evidence and process add a block, given each block is a permanent migration commitment | M7 |
-| OQ-24 | Localization: multi-language variants per template selected by a person trait, in v1.0 or post-1.0? | M7 |
 | OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
 
 ### 21.1 Decided questions
+
+- **OQ-21:** Asset limits. Per file 5 MiB and per workspace 1 GiB, both config keys; at most 8192
+  px per side and 40 megapixels, read from the image header before any decode. PostgreSQL is the only
+  asset store in v1.0; S3-compatible object storage stays an optional post-1.0 add-on and is never
+  required. Large senders put a CDN or caching proxy in front of `/a/`.
+- **OQ-22:** No dark variants in v1.0; the email relies on client inversion. The theme editor and publish
+  validation warn when a theme colour pair is below WCAG AA: 4.5:1 for text, links and normal-size button
+  text, and 3:1 only for large text. Output stays deterministic, so the warnings cannot guarantee
+  readability after a client inverts colours, and the documentation says so.
+- **OQ-23:** A block is added only with an ADR naming the need that existing blocks, snippets and raw
+  HTML cannot meet; a document schema bump with a pure migration and golden tests; MJML emission
+  through `mrml` with golden tests; and a client-matrix pass under the #253 process. Blocks are never
+  removed: a retired block leaves the palette and still renders. M7 adds only the `snippet` block.
+- **OQ-24:** Localization is post-1.0. A template has one language (its `lang`), and a flow picks
+  per-language templates with a branch on a language trait. Accepting an assistant translation updates
+  only the current template draft, including its `lang`; saving it as a new template is a separate
+  marketer action. Variant storage, send-time language selection and fallback rules are deferred to
+  post-1.0.
 
 - **OQ-2:** No per-person daily rollup for v1. Event aggregates compile to a grouped
   set over `events` (workspace, name, window, property filters, `GROUP BY person_id
