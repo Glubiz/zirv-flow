@@ -3716,6 +3716,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What one version sent: its non-test message count and the theme and snippet versions those
+         *     messages recorded.
+         */
+        get: operations["get_template_version_stats"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/templates/{id}/where-used": {
         parameters: {
             query?: never;
@@ -8651,6 +8671,12 @@ export interface components {
         SaveTemplateDraftRequest: {
             /** @description The content document. */
             document: Record<string, never>;
+            /**
+             * Format: int32
+             * @description The draft revision the caller read. When given and the draft has been saved since, the save
+             *     is a 409 `template_draft_revision_mismatch` and writes nothing. Absent saves unconditionally.
+             */
+            revision?: number | null;
         };
         SaveThemeDraftRequest: {
             /**
@@ -9934,6 +9960,18 @@ export interface components {
             /** @description The warnings found when it was published; a blocking issue refuses the publish. */
             warnings: components["schemas"]["TemplateIssueProblem"][];
         };
+        /** @description What one template version sent. */
+        TemplateVersionStatsBody: {
+            /**
+             * Format: int64
+             * @description The non-test messages sent with the version.
+             */
+            messages: number;
+            /** @description Whether more combinations exist than `renders` lists. */
+            more: boolean;
+            /** @description The distinct theme and snippet combinations, most used first, at most 20. */
+            renders: components["schemas"]["VersionRenderBody"][];
+        };
         /** @description One published version in the history list: no document, which `GET .../versions/{n}` returns. */
         TemplateVersionSummaryBody: {
             /**
@@ -10642,6 +10680,23 @@ export interface components {
             nodes: components["schemas"]["NodeCountBody"][];
             /** Format: int32 */
             version: number;
+        };
+        /** @description One theme and snippet combination recorded on the messages sent with a version. */
+        VersionRenderBody: {
+            /**
+             * Format: int64
+             * @description The non-test messages with this combination.
+             */
+            count: number;
+            /** @description Snippet id to the version number used. */
+            snippet_versions: Record<string, never>;
+            /**
+             * Format: uuid
+             * @description The theme in effect, or none.
+             */
+            theme_id?: string | null;
+            /** Format: int32 */
+            theme_version?: number | null;
         };
         /** @description A wait the walk went into. */
         WaitBody: {
@@ -25544,7 +25599,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is archived (`code` is `template_archived`) */
+            /** @description The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -26197,6 +26252,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TemplateVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_template_version_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The messages sent with the version and their theme and snippet versions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateVersionStatsBody"];
                 };
             };
             /** @description Not authenticated */

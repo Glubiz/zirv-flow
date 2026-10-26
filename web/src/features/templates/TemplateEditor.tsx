@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { Link, useNavigate } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
@@ -9,7 +9,6 @@ import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
 import { SenderOptionsProvider } from "./senderOptions";
-import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
 import {
   asBody,
@@ -46,14 +45,13 @@ interface Props {
 export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Props) {
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
-  const [params] = useSearchParams();
-  const [tab, setTab] = useState<Tab>(() => (params.get("tab") === "versions" ? "versions" : "editor"));
+  const [tab, setTab] = useState<Tab>("editor");
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
-  const [leaveFor, setLeaveFor] = useState<"test" | "publish" | null>(null);
+  const [leaveFor, setLeaveFor] = useState<"test" | "publish" | "history" | null>(null);
   const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
@@ -190,7 +188,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   }
 
   /** Saves the draft first, so the page it opens works on what the editor shows. */
-  async function openPage(page: "test" | "publish") {
+  async function openPage(page: "test" | "publish" | "history") {
     if (await flush()) setLeaveFor(page);
   }
 
@@ -221,7 +219,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           <Pill tone={status.tone}>{status.label}</Pill>
           <span className="faint">{modeLabel(doc)}</span>
         </span>
-        <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={setTab} />
+        <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={(next) => (next === "versions" ? void openPage("history") : setTab(next))} />
         <div className="fl-status" role="status">
           {!editable ? (
             <span className="muted">{archived ? "This template is archived. You can look at it but not change it." : "You can look at this template but not change it."}</span>
@@ -285,7 +283,6 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           )}
         </div>
       ) : null}
-      {tab === "versions" ? <VersionsView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {converting ? (
         <ConvertDialog workspaceId={workspaceId} templateId={template.id} flush={flush} onClose={() => setConverting(false)} onConverted={converted} />

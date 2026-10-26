@@ -133,12 +133,12 @@ describe("the other template fixes", () => {
 
     const editor = await screen.findByRole("tab", { name: "Editor" });
     editor.focus();
-    await user.keyboard("{ArrowRight}");
-
-    const versions = screen.getByRole("tab", { name: "Versions" });
-    expect(versions).toHaveAttribute("aria-selected", "true");
-    expect(versions).toHaveFocus();
     await user.keyboard("{ArrowLeft}");
+
+    const used = screen.getByRole("tab", { name: "Where used" });
+    expect(used).toHaveAttribute("aria-selected", "true");
+    expect(used).toHaveFocus();
+    await user.keyboard("{ArrowRight}");
     expect(screen.getByRole("tab", { name: "Editor" })).toHaveFocus();
   });
 });
