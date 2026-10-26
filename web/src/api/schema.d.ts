@@ -386,9 +386,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or
-         *     `flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few
-         *     synthetic people) with the assistant: the model is asked, its answer validated
+         * Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,
+         *     `segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a
+         *     `simulation` of a few synthetic people; a template draft names its template in `template_id`
+         *     and its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns
+         *     `renders`, the template's draft and the result rendered for the sample person) with the
+         *     assistant: the model is asked, its answer validated
          *     with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
          *     repairs. The answer is the validated draft with its diff against the saved version and a dry
          *     run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
@@ -4314,6 +4317,9 @@ export interface components {
             /** Format: uuid */
             source_id?: string | null;
             stream?: string | null;
+            template?: null | components["schemas"]["TemplateDetailBody"];
+            /** Format: uuid */
+            template_id?: string | null;
         };
         AddMembersBody: {
             /** @description People newly added. */
@@ -5914,12 +5920,18 @@ export interface components {
             /** @description For an invalid draft, the problems of the last attempt. */
             issues: components["schemas"]["DraftIssue"][];
             kind: components["schemas"]["DraftKindBody"];
+            renders?: null | components["schemas"]["TemplateRendersBody"];
             simulation?: null | components["schemas"]["SimulationBody"];
             /**
              * @description `valid`, or `invalid` when no attempt passed validation: then there is no `content` and
              *     the draft cannot be accepted.
              */
             status: string;
+            /**
+             * @description For the template task `subject_variants`: the subjects offered, the first of which is in
+             *     the document. Empty for every other draft.
+             */
+            subject_variants: string[];
         };
         /**
          * @description One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
@@ -5935,7 +5947,7 @@ export interface components {
          * @description What a draft is of.
          * @enum {string}
          */
-        DraftKindBody: "mapping" | "manifest" | "segment" | "flow";
+        DraftKindBody: "mapping" | "manifest" | "segment" | "flow" | "template";
         /** @description What to draft. */
         DraftRequest: {
             /**
@@ -5975,6 +5987,13 @@ export interface components {
             source_id?: string | null;
             /** @description The stream whose mapping is drafted. Required for a mapping, refused for a manifest. */
             stream?: string | null;
+            task?: null | components["schemas"]["TemplateTask"];
+            /**
+             * Format: uuid
+             * @description For a template: the template whose draft is changed. Required for a template, refused for
+             *     the others.
+             */
+            template_id?: string | null;
         };
         /** @description What the draft does on real data: the #87 preview of a mapping, or the sample of a manifest. */
         DryRunBody: {
@@ -8308,6 +8327,12 @@ export interface components {
             /** @description At most 1000. */
             person_ids: string[];
         };
+        /** @description One rendered email: the parts of a preview. */
+        RenderedEmailBody: {
+            html?: string | null;
+            subject?: string | null;
+            text?: string | null;
+        };
         /** @description A theme or snippet and the version a message was rendered with. */
         RenderedVersionBody: {
             /** Format: uuid */
@@ -9812,6 +9837,16 @@ export interface components {
             used_by: components["schemas"]["TemplateUseBody"][];
             version: components["schemas"]["TemplateVersionBody"];
         };
+        /** @description A template draft before and after the change, both rendered for the sample person. */
+        TemplateRendersBody: {
+            after?: null | components["schemas"]["RenderedEmailBody"];
+            before?: null | components["schemas"]["RenderedEmailBody"];
+        };
+        /**
+         * @description What the marketer asks the assistant to do to a template.
+         * @enum {string}
+         */
+        TemplateTask: "copy" | "subject_variants" | "block_layout" | "translation";
         /** @description One flow with a version that names the template. */
         TemplateUseBody: {
             /** @description Whether the version the flow runs now is one of them. */
