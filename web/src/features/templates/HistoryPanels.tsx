@@ -85,7 +85,8 @@ interface DetailsProps {
   /** Null for the draft, which nobody published. */
   author: string | null;
   document: unknown;
-  stats: Resource<Stats | null>;
+  /** The version's stats; null for the draft, which has none. */
+  stats: Resource<Stats | null> | null;
   themeName: string | null;
   snippets: readonly { id: string; name: string }[];
   snippetNames: ReadonlyMap<string, string>;
@@ -99,9 +100,7 @@ export function DetailsPanel({ workspaceId, title, author, document, stats, them
         {title}
       </h2>
       <Fact label="Published by">{author ?? "Not published"}</Fact>
-      <Fact label="Sent">
-        {stats.status === "loading" ? "Counting" : stats.status === "error" ? "Could not count" : stats.data === null ? "—" : `${stats.data.messages.toLocaleString("en")} ${stats.data.messages === 1 ? "message" : "messages"}`}
-      </Fact>
+      {stats === null ? null : <Fact label="Sent">{stats.status === "loading" ? "Counting" : stats.status === "error" ? "Could not count" : stats.data === null ? "—" : `${stats.data.messages.toLocaleString("en")} ${stats.data.messages === 1 ? "message" : "messages"}`}</Fact>}
       <Fact label="Theme">{themeText(themeChoice(document), themeName)}</Fact>
       <Fact label="Snippets">
         {snippets.length === 0 ? (
@@ -116,8 +115,8 @@ export function DetailsPanel({ workspaceId, title, author, document, stats, them
           </span>
         )}
       </Fact>
-      {stats.status === "error" ? <ErrorState {...describeError(stats.error)} onRetry={stats.reload} /> : null}
-      {stats.status === "ready" && stats.data !== null && stats.data.renders.length > 0 ? (
+      {stats?.status === "error" ? <ErrorState {...describeError(stats.error)} onRetry={stats.reload} /> : null}
+      {stats?.status === "ready" && stats.data !== null && stats.data.renders.length > 0 ? (
         <>
           <p className="faint">Each message records the theme and snippet versions it was sent with.</p>
           <ul className="list-plain hv-renders" aria-label="Versions it was sent with">

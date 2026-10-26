@@ -70,6 +70,18 @@ describe("the Versions and use page", () => {
     expect(within(rows[2] as HTMLElement).getByText(/An API key/)).toBeInTheDocument();
   });
 
+  it("shows the Sent fact for a version and not for the draft", async () => {
+    mockApi(routes());
+    const user = userEvent.setup();
+    mount();
+
+    expect(await screen.findByRole("heading", { name: "Draft" })).toBeInTheDocument();
+    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Version 2/ }));
+
+    expect(await screen.findByText("Sent")).toBeInTheDocument();
+  });
+
   it("renders a chosen version as the chosen person and says how many messages it sent", async () => {
     const calls = mockApi(routes());
     const user = userEvent.setup();

@@ -328,7 +328,7 @@ function Facts({ workspaceId, templateId, selected, draft, author, snippetNames 
       title={typeof selected === "number" ? `Version ${selected}` : "Draft"}
       author={author}
       document={document}
-      stats={stats}
+      stats={typeof selected === "number" ? stats : null}
       themeName={theme.status === "ready" && theme.data ? theme.data.name : null}
       snippets={snippetIds(document).map((id) => ({ id, name: snippetNames.get(id) ?? "A snippet" }))}
       snippetNames={snippetNames}
