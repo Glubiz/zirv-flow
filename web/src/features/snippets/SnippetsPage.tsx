@@ -5,9 +5,9 @@ import { ApiError, client, describeError, unwrap, type ErrorSummary, type NamedR
 import { Button, Dialog, EmptyState, InlineError, LibraryNav, PageHeader, Panel, ResourceView, TextField } from "../../ui";
 import { plural } from "../../ui/format";
 import { useSnippetAccess } from "./access";
-import { usersOf, type Snippet } from "./model";
+import type { Snippet } from "./model";
 import { SnippetUserList } from "./SnippetUsers";
-import { useSnippetUsedBy, useSnippets } from "./useSnippets";
+import { useSnippets } from "./useSnippets";
 
 export function SnippetsPage() {
   const { ws = "" } = useParams();
@@ -85,9 +85,7 @@ function SnippetList({ workspaceId }: { workspaceId: string }) {
                           {gone ? <span className="faint"> (archived)</span> : null}
                         </td>
                         <td>{snippet.current_version ? `v${snippet.current_version}` : "Draft"}</td>
-                        <td>
-                          <UsedByCount workspaceId={workspaceId} snippetId={snippet.id} />
-                        </td>
+                        <td>{plural(snippet.used_by_templates, "template", "templates")}</td>
                         <td className="num">
                           {access.canAdmin && !gone ? (
                             <Button aria-label={`Archive ${snippet.name}`} onClick={() => setArchiving(snippet)}>
@@ -118,14 +116,6 @@ function SnippetList({ workspaceId }: { workspaceId: string }) {
       ) : null}
     </div>
   );
-}
-
-/** How many templates, themes and active flows use a snippet. */
-function UsedByCount({ workspaceId, snippetId }: { workspaceId: string; snippetId: string }) {
-  const used = useSnippetUsedBy(workspaceId, snippetId);
-  if (used.status === "loading") return <span className="faint">…</span>;
-  if (used.status === "error") return <span className="faint">Unknown</span>;
-  return <span>{plural(usersOf(workspaceId, used.data).length, "use", "uses")}</span>;
 }
 
 function NewSnippetDialog({ workspaceId, onClose }: { workspaceId: string; onClose: () => void }) {

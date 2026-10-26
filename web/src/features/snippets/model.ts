@@ -1,6 +1,7 @@
 import type { components } from "../../api";
 
 export type Snippet = components["schemas"]["SnippetBody"];
+export type SnippetListItem = components["schemas"]["SnippetListItemBody"];
 export type SnippetDetail = components["schemas"]["SnippetDetailBody"];
 export type SnippetUsedBy = components["schemas"]["SnippetUsedByBody"];
 export type SnippetVersion = components["schemas"]["SnippetVersionBody"];

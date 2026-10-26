@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { json, mockApi } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
-import { SNIPPET_ID, snippetBody, snippetRoutes, templateUse, usedBy, WS } from "../../test/snippetsApi";
+import { SNIPPET_ID, snippetBody, snippetRoutes, WS } from "../../test/snippetsApi";
 import { SnippetsPage } from "./SnippetsPage";
 
 function mount() {
@@ -21,9 +21,12 @@ function refusal(status: number, body: Record<string, unknown>) {
 describe("the snippet list", () => {
   it("lists name, version and how many things use each snippet", async () => {
     mockApi({
-      ...snippetRoutes({ uses: usedBy({ templates: [templateUse(1), templateUse(2)], themes: [{ id: "th1", name: "Footer theme" }] }) }),
-      [`GET ${WS}/snippets`]: () => json([snippetBody({ current_version: 3 }), snippetBody({ id: "s2", name: "Other note" })]),
-      [`GET ${WS}/snippets/s2/where-used`]: () => json(usedBy()),
+      ...snippetRoutes(),
+      [`GET ${WS}/snippets`]: () =>
+        json([
+          { ...snippetBody({ current_version: 3 }), used_by_templates: 2 },
+          { ...snippetBody({ id: "s2", name: "Other note" }), used_by_templates: 1 },
+        ]),
     });
     mount();
 
@@ -31,8 +34,8 @@ describe("the snippet list", () => {
     expect(within(table).getByRole("link", { name: "Shipping promise" })).toHaveAttribute("href", `/w/ws1/snippets/${SNIPPET_ID}`);
     expect(within(table).getByText("v3")).toBeInTheDocument();
     expect(within(table).getByText("Draft")).toBeInTheDocument();
-    expect(await within(table).findByText("3 uses")).toBeInTheDocument();
-    expect(await within(table).findByText("0 uses")).toBeInTheDocument();
+    expect(within(table).getByText("2 templates")).toBeInTheDocument();
+    expect(within(table).getByText("1 template")).toBeInTheDocument();
   });
 
   it("shows an empty state, and an error with a retry", async () => {

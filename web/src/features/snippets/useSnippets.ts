@@ -1,8 +1,8 @@
 import { client, unwrap, useResource, type Resource } from "../../api";
-import type { Snippet } from "./model";
+import type { SnippetListItem } from "./model";
 
 /** The workspace's snippets by name; the archived ones too when asked. */
-export function useSnippets(workspaceId: string, archived = false): Resource<Snippet[]> {
+export function useSnippets(workspaceId: string, archived = false): Resource<SnippetListItem[]> {
   return useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/snippets", { params: { path: { ws: workspaceId }, query: { archived } } })),
     [workspaceId, archived],

@@ -69,7 +69,7 @@ export function snippetRoutes({ role = "admin", detail, preview, uses = usedBy()
   return {
     ...actorRoutes,
     ...catalogRoutes(),
-    [`GET ${WS}/snippets`]: () => json([current]),
+    [`GET ${WS}/snippets`]: () => json([{ ...current, used_by_templates: 0 }]),
     [`GET ${BASE}`]: () => json(current),
     [`PUT ${BASE}/draft`]: async (request) => {
       const body = (await request.json()) as { content: Doc; revision?: number | null };
