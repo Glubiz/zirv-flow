@@ -1,9 +1,26 @@
 import type { DragEvent } from "react";
+import { Link } from "react-router";
 
-import { Button, EmptyState } from "../../../ui";
+import { Button, EmptyState, MenuButton, Pill } from "../../../ui";
+import { describeCondition } from "../../segments";
 import { FieldIssues } from "../IssueList";
-import { issuesAt, type TemplateIssue } from "../model";
-import { blockLabel, canDrop, moveBlock, type Block, type BlocksContent, type Drag, type Drop, type Section } from "./document";
+import type { TemplateIssue } from "../model";
+import { blockLabel, canDrop, isEditableCondition, issuesOf, moveBlock, type Block, type BlocksContent, type Drag, type Drop, type Section, type VisibleIf } from "./document";
+
+/** What the canvas knows of the snippets a document holds, by id. */
+export type SnippetNames = ReadonlyMap<string, { name: string; version: number | null; archived: boolean }>;
+
+/** The theme footer as the last, locked item of a document. */
+export interface FooterView {
+  /** The theme it comes from. */
+  theme: string;
+  /** Whether it was taken out of this email. */
+  removed: boolean;
+  /** Marketing email needs an unsubscribe link; without the footer the email must carry its own. */
+  marketing: boolean;
+  onRemove: () => void;
+  onRestore: () => void;
+}
 
 interface Props {
   content: BlocksContent;
@@ -18,10 +35,25 @@ interface Props {
   onRemove: (kind: "block" | "section", id: string) => void;
   /** One column of blocks with no section chrome: how a snippet is laid out. */
   flat?: boolean;
+  /** The workspace, for the link that opens a snippet. Absent where blocks cannot be snippets. */
+  workspaceId?: string;
+  snippets?: SnippetNames;
+  /** The theme footer, when a theme is in effect. */
+  footer?: FooterView;
+}
+
+/** The badge a conditional block or section carries: short, with the whole condition on hover. */
+function ConditionBadge({ condition }: { condition: VisibleIf | undefined }) {
+  if (condition == null) return null;
+  return (
+    <span className="be-badge" title={isEditableCondition(condition) ? describeCondition(condition) : "A condition this editor cannot show"}>
+      Only when…
+    </span>
+  );
 }
 
 /** A line of words that stands for a block on the canvas. The block is never rendered here; the preview is the server's. */
-function summary(block: Block): string {
+function summary(block: Block, snippets: SnippetNames | undefined): string {
   switch (block.type) {
     case "heading":
       return block.text === "" ? "Empty heading" : block.text;
@@ -43,7 +75,7 @@ function summary(block: Block): string {
     case "raw_html":
       return block.html === "" ? "Empty HTML" : `${block.html.length} characters of your own HTML`;
     case "snippet":
-      return `Snippet ${block.snippet_id} (locked)`;
+      return snippets?.get(block.snippet_id)?.name ?? `Snippet ${block.snippet_id} (locked)`;
   }
 }
 
@@ -106,13 +138,14 @@ export function BlockCanvas(props: Props) {
     const label = blockLabel(block.type);
     const number = ordinals.get(block.id) ?? 0;
     const name = `${label} block ${number}`;
-    const own = issuesAt(props.issues, `/blocks/block/${block.id}`);
+    const own = issuesOf(props.issues, block.id);
+    const held = block.type === "snippet" ? props.snippets?.get(block.snippet_id) : undefined;
     const chosen = props.selected === block.id;
     return (
       <div
         role="group"
         aria-label={name}
-        className={chosen ? "be-block be-block-on" : "be-block"}
+        className={[chosen ? "be-block be-block-on" : "be-block", block.type === "snippet" ? "be-snippet" : ""].filter(Boolean).join(" ")}
         data-block-id={block.id}
         tabIndex={0}
         onFocus={() => props.onSelect(block.id)}
@@ -127,7 +160,9 @@ export function BlockCanvas(props: Props) {
       >
         <div className="be-bar">
           {readOnly ? null : handle(name, { kind: "block", id: block.id })}
-          <span className="strong">{label}</span>
+          {block.type === "snippet" ? null : <span className="strong">{label}</span>}
+          {block.type === "snippet" ? <Pill tone="neutral">Snippet</Pill> : null}
+          <ConditionBadge condition={block.visible_if} />
           {chosen ? <span className="faint">selected</span> : null}
           {readOnly ? null : (
             <span className="be-actions">
@@ -143,7 +178,19 @@ export function BlockCanvas(props: Props) {
             </span>
           )}
         </div>
-        <p className="be-summary">{summary(block)}</p>
+        <p className="be-summary">
+          {summary(block, props.snippets)}
+          {held && held.version !== null ? <span className="faint"> · version {held.version}</span> : null}
+          {held?.archived ? <span className="faint"> · Archived</span> : null}
+          {block.type === "snippet" && held && props.workspaceId ? (
+            <>
+              {" "}
+              <Link to={`/w/${props.workspaceId}/snippets/${block.snippet_id}`} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+                Open snippet
+              </Link>
+            </>
+          ) : null}
+        </p>
         <FieldIssues issues={own} />
         <span hidden data-position={`${index + 1}/${siblings}`} />
       </div>
@@ -161,6 +208,7 @@ export function BlockCanvas(props: Props) {
             {name} settings
           </button>
           <span className="faint">{section.columns.length === 1 ? "1 column" : `${section.columns.length} columns`}</span>
+          <ConditionBadge condition={section.visible_if} />
           {readOnly ? null : (
             <span className="be-actions">
               <Button data-move="up" aria-label={`Move ${name} up`} onClick={() => props.onMove("section", section.id, "up")} disabled={index === 0}>
@@ -175,7 +223,7 @@ export function BlockCanvas(props: Props) {
             </span>
           )}
         </div>
-        <FieldIssues issues={issuesAt(props.issues, `/blocks/block/${section.id}`)} />
+        <FieldIssues issues={issuesOf(props.issues, section.id)} />
         <div className="be-columns" style={{ gridTemplateColumns: `repeat(${section.columns.length}, minmax(0, 1fr))` }}>
           {section.columns.map((column, c) => (
             <div key={c} role="group" aria-label={`${name}, column ${c + 1}`} className="be-column">
@@ -190,6 +238,39 @@ export function BlockCanvas(props: Props) {
             </div>
           ))}
         </div>
+      </div>
+    );
+  }
+
+  function footerView(footer: FooterView) {
+    const menu = readOnly ? null : (
+      <span className="be-actions">
+        <MenuButton
+          label="Theme footer actions"
+          buttonClassName="btn"
+          buttonContent={<span aria-hidden="true">⋯</span>}
+          entries={footer.removed ? [{ key: "restore", label: "Restore", onSelect: footer.onRestore }] : [{ key: "remove", label: "Remove", onSelect: footer.onRemove }]}
+        />
+      </span>
+    );
+    return (
+      <div className={footer.removed ? "be-footer be-footer-off" : "be-footer"} role="group" aria-label="Theme footer">
+        <div className="be-bar">
+          <span className="be-lock" role="img" aria-label="Locked: it stays the last item">
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <rect x="3" y="7" width="10" height="7" rx="1.5" />
+              <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
+            </svg>
+          </span>
+          <span className="strong">Theme footer · from {footer.theme}</span>
+          {footer.removed ? <span className="faint">removed from this email</span> : null}
+          {menu}
+        </div>
+        {footer.removed && footer.marketing ? (
+          <p className="notice" role="status">
+            Without the theme footer, a marketing email needs its own unsubscribe link.
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -214,6 +295,7 @@ export function BlockCanvas(props: Props) {
       <div className="be-canvas" aria-label="Canvas">
         <EmptyState title="No blocks yet">Add a section from the palette, then add blocks to its columns. You can also drag from the palette onto the canvas.</EmptyState>
         {slot({ kind: "root", index: 0 }, "Start of the document")}
+        {props.footer ? footerView(props.footer) : null}
       </div>
     );
   }
@@ -226,6 +308,7 @@ export function BlockCanvas(props: Props) {
           {slot({ kind: "root", index: index + 1 }, `After section ${index + 1}`)}
         </div>
       ))}
+      {props.footer ? footerView(props.footer) : null}
     </div>
   );
 }

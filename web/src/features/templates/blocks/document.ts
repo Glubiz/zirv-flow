@@ -1,5 +1,7 @@
 /** The block document, schema 2, as the editor builds it (architecture 11.2). The shape is the server's; nothing here adds a field. */
 
+import { AGG_FNS, type ConditionNode } from "../../segments";
+
 export const BLOCKS_SCHEMA = 2;
 export const MAX_SECTIONS = 50;
 export const MAX_BLOCKS = 500;
@@ -7,11 +9,11 @@ export const MAX_COLUMNS = 3;
 
 export type Align = "left" | "center" | "right";
 
-/** Where an image gets its address. Only `url` is edited here; the others are shown and carried through. */
+/** Where an image gets its address: a library image, an https address, or the logo of the theme in effect. */
 export type ImageSrc = { url: string } | { asset: string } | { theme: "logo" };
 
-/** A condition the server evaluates. The editor never reads it; it carries it through untouched. */
-export type VisibleIf = unknown;
+/** A condition the server evaluates: a node of the segment AST. */
+export type VisibleIf = ConditionNode;
 
 export interface HeadingBlock {
   type: "heading";
@@ -63,7 +65,7 @@ export interface RawHtmlBlock {
   html: string;
   visible_if?: VisibleIf;
 }
-/** A reference to a snippet. The editor shows it as a locked placeholder and keeps it as it was read. */
+/** A reference to a snippet. The editor shows it as a read-only card; its blocks are edited in the snippet. */
 export interface SnippetBlock {
   type: "snippet";
   id: string;
@@ -92,16 +94,19 @@ export interface DocumentStyle {
   button_text_color: string;
 }
 
+/** The theme a document follows: the workspace default, none (its own style), or a named theme. */
+export type ThemeRef = "default" | "none" | { id: string };
+/** Whether the theme's footer is the last item of the email. */
+export type FooterRef = "theme" | "none";
+
 export interface BlocksContent {
   subject: string;
   preheader: string;
   sender?: string;
   lang?: string;
   category: "marketing" | "transactional";
-  /** `"default"`, `"none"` or `{ id }`; carried through as read. */
-  theme?: unknown;
-  /** `"theme"` or `"none"`; carried through as read. */
-  footer?: unknown;
+  theme?: ThemeRef;
+  footer?: FooterRef;
   settings: DocumentStyle;
   sections: Section[];
 }
@@ -128,7 +133,7 @@ export const FONT_STACKS: readonly { id: string; label: string }[] = [
   { id: "courier", label: "Courier New" },
 ];
 
-/** The blocks the palette offers. A snippet block is not one of them yet. */
+/** The blocks the palette adds by a click or a drag. A snippet block is added through its picker. */
 export type PaletteType = Exclude<BlockType, "snippet">;
 
 export const BLOCK_TYPES: readonly { type: PaletteType; label: string }[] = [
@@ -161,8 +166,70 @@ function record(value: unknown): Record<string, unknown> {
 /** A schema 1 image has its address as a string in `src`; the editor works on the schema 2 shape. */
 function readBlock(block: Block): Block {
   const raw = block as unknown as Record<string, unknown>;
-  if (raw["type"] === "image" && typeof raw["src"] === "string") return { ...raw, src: { url: raw["src"] } } as unknown as Block;
-  return block;
+  const read = raw["visible_if"] === null ? omit(raw, "visible_if") : raw;
+  if (read["type"] === "image" && typeof read["src"] === "string") return { ...read, src: { url: read["src"] } } as unknown as Block;
+  return read as unknown as Block;
+}
+
+const CONDITION_KEYS = ["all", "any", "not", "trait", "event", "list", "segment", "consent", "messages", "identifier"];
+
+/** Whether the condition editor can show `value`: a plain object with exactly one known operator key, checked down the tree. */
+export function isEditableCondition(value: unknown): value is VisibleIf {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const keys = Object.keys(value).filter((key) => CONDITION_KEYS.includes(key));
+  const node = value as Record<string, unknown>;
+  const key = keys[0];
+  if (keys.length !== 1 || key === undefined) return false;
+  const inner = node[key];
+  switch (key) {
+    case "all":
+    case "any":
+      return Array.isArray(inner) && inner.every(isEditableCondition);
+    case "not":
+      return isEditableCondition(inner);
+    case "trait":
+      return typeof inner === "string" && typeof node["op"] === "string";
+    case "event":
+      return (
+        typeof inner === "string" &&
+        (node["where"] === undefined || (Array.isArray(node["where"]) && node["where"].every(isPropertyFilter))) &&
+        (node["agg"] === undefined || isAggregate(node["agg"])) &&
+        (node["window"] === undefined || isWindow(node["window"]))
+      );
+    case "consent":
+      return isPlainObject(inner) && typeof inner["status"] === "string" && isOptionalText(inner["channel"]) && isOptionalText(inner["topic"]);
+    case "messages":
+      return (
+        isPlainObject(inner) &&
+        typeof inner["channel"] === "string" &&
+        isAggregate(inner["agg"]) &&
+        (inner["dimensions"] === undefined || (isPlainObject(inner["dimensions"]) && Object.values(inner["dimensions"]).every((entry) => typeof entry === "string"))) &&
+        (inner["window"] === undefined || isWindow(inner["window"]))
+      );
+    default:
+      return typeof inner === "string";
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOptionalText(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isPropertyFilter(value: unknown): boolean {
+  return isPlainObject(value) && typeof value["prop"] === "string" && typeof value["op"] === "string";
+}
+
+function isAggregate(value: unknown): boolean {
+  return isPlainObject(value) && AGG_FNS.some((fn) => fn === value["fn"]) && typeof value["op"] === "string" && (value["prop"] === undefined || typeof value["prop"] === "string");
+}
+
+function isWindow(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  return typeof value["last"] === "string" || typeof value["since_trait"] === "string" || (Array.isArray(value["between"]) && value["between"].every((end) => typeof end === "string"));
 }
 
 /** Reads the `blocks` object of a stored document. A value that is not shaped like the document gives what can be read; the server decides what is valid. */
@@ -176,14 +243,16 @@ export function readContent(value: unknown): BlocksContent {
   }
   const sections = Array.isArray(raw["sections"]) ? (raw["sections"] as unknown[]) : [];
   const content: BlocksContent = {
+    ...raw,
     subject: typeof raw["subject"] === "string" ? raw["subject"] : "",
     preheader: typeof raw["preheader"] === "string" ? raw["preheader"] : "",
     category: raw["category"] === "transactional" ? "transactional" : "marketing",
-    settings: style as unknown as DocumentStyle,
+    settings: { ...settings, ...style } as unknown as DocumentStyle,
     sections: sections.map((section) => {
       const entry = record(section);
       const columns = Array.isArray(entry["columns"]) ? (entry["columns"] as unknown[]) : [];
       const read: Section = {
+        ...entry,
         id: typeof entry["id"] === "string" ? entry["id"] : "",
         columns: columns.map((column) =>
           Array.isArray(column) ? ((column as unknown[]).filter((block) => typeof block === "object" && block !== null) as Block[]).map(readBlock) : [],
@@ -191,14 +260,14 @@ export function readContent(value: unknown): BlocksContent {
       };
       if (typeof entry["background_color"] === "string") read.background_color = entry["background_color"];
       if (typeof entry["padding"] === "string") read.padding = entry["padding"];
-      if (entry["visible_if"] !== undefined) read.visible_if = entry["visible_if"];
+      if (entry["visible_if"] == null) delete read.visible_if;
       return read;
     }),
   };
   if (typeof raw["sender"] === "string") content.sender = raw["sender"];
   if (typeof raw["lang"] === "string") content.lang = raw["lang"];
-  if (raw["theme"] !== undefined) content.theme = raw["theme"];
-  if (raw["footer"] !== undefined) content.footer = raw["footer"];
+  if (raw["theme"] !== undefined) content.theme = raw["theme"] as ThemeRef;
+  if (raw["footer"] !== undefined) content.footer = raw["footer"] as FooterRef;
   return content;
 }
 
@@ -426,9 +495,23 @@ export function placeNewBlock(content: BlocksContent, selected: string | null): 
   return { base: content, place: { section, column: 0, index: content.sections[section]?.columns[0]?.length ?? 0 } };
 }
 
-/** The id in a block pointer `/blocks/block/<id>[/field]`, or null for any other place. */
+/** The id in a block or section pointer `/blocks/block/<id>[/field]` or `/blocks/sections/<id>[/field]`, or null for any other place. */
 export function issueBlockId(at: string): string | null {
-  const prefix = "/blocks/block/";
-  if (!at.startsWith(prefix)) return null;
-  return at.slice(prefix.length).split("/")[0] ?? null;
+  const prefix = ["/blocks/block/", "/blocks/sections/"].find((entry) => at.startsWith(entry));
+  return prefix === undefined ? null : (at.slice(prefix.length).split("/")[0] ?? null);
+}
+
+/** The issues that point at the block or section `id`, under either pointer form. */
+export function issuesOf<T extends { at: string }>(issues: readonly T[], id: string): T[] {
+  return issues.filter((issue) => issueBlockId(issue.at) === id);
+}
+
+/** `value` with `visible_if` set, or removed when `condition` is undefined. */
+export function withVisibleIf<T extends { visible_if?: VisibleIf }>(value: T, condition: VisibleIf | undefined): T {
+  return condition === undefined ? omit(value, "visible_if") : { ...value, visible_if: condition };
+}
+
+/** A new snippet block for the published snippet `snippetId`. */
+export function newSnippetBlock(snippetId: string, content: BlocksContent): SnippetBlock {
+  return { type: "snippet", id: freshId("snippet", content), snippet_id: snippetId };
 }

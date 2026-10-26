@@ -54,6 +54,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
+  const [goTo, setGoTo] = useState<{ id: string; n: number } | undefined>(undefined);
   const [publishing, setPublishing] = useState(false);
   const [testing, setTesting] = useState(false);
   const [converting, setConverting] = useState(false);
@@ -261,7 +262,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
           {canWrite ? (
             <PreviewPane
               templateId={template.id}
@@ -272,6 +273,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               canAdmin={canAdmin}
               person={person}
               onPerson={setPerson}
+              onGoToBlock={doc.kind === "blocks" ? (id) => setGoTo((last) => ({ id, n: (last?.n ?? 0) + 1 })) : undefined}
             />
           ) : (
             <p className="muted">Members of the workspace can preview a template.</p>
