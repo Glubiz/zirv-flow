@@ -21891,7 +21891,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`)",
+            "description": "The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -37307,6 +37307,14 @@
           "document": {
             "type": "object",
             "description": "The content document."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision the caller read. When given and the draft has been saved since, the save\nis a 409 `template_draft_revision_mismatch` and writes nothing. Absent saves unconditionally."
           }
         }
       },

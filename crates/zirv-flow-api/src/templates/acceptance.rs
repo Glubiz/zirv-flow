@@ -2950,4 +2950,35 @@ mod tests {
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
         assert_eq!(stranger.status, StatusCode::NOT_FOUND);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_that_names_a_stale_revision_is_a_409_and_writes_nothing(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("First", "one")).await;
+        let uri = format!("/{id}/draft");
+
+        let current = f
+            .lead(
+                "PUT",
+                &uri,
+                Some(json!({"document": email_doc("Second", "two"), "revision": 1})),
+            )
+            .await;
+        let stale = f
+            .lead(
+                "PUT",
+                &uri,
+                Some(json!({"document": email_doc("Third", "three"), "revision": 1})),
+            )
+            .await;
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+
+        assert_eq!(current.status, StatusCode::OK, "{:?}", current.body);
+        assert_eq!(current.body["draft"]["revision"], 2);
+        assert_eq!(stale.status, StatusCode::CONFLICT);
+        assert_eq!(stale.body["code"], "template_draft_revision_mismatch");
+        assert_eq!(read.body["draft"]["revision"], 2);
+        assert_eq!(read.body["draft"]["document"], email_doc("Second", "two"));
+    }
 }

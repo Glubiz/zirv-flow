@@ -795,6 +795,18 @@ impl ApiError {
         }
     }
 
+    /// A draft save that names a revision other than the current one: the draft was saved by
+    /// someone else since the caller read it.
+    pub(crate) fn template_draft_revision_mismatch() -> Self {
+        Self {
+            code: Some("template_draft_revision_mismatch"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the draft was saved by someone else; read it again",
+            )
+        }
+    }
+
     /// A save or publish of the consent policy that names a draft revision other than the current
     /// one: the draft was saved by someone else since the caller read it.
     pub(crate) fn consent_policy_revision_mismatch() -> Self {
