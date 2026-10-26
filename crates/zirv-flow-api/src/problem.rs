@@ -43,6 +43,9 @@ pub struct Problem {
     /// and where, never a value from the document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template_issues: Option<Vec<TemplateIssueProblem>>,
+    /// The templates whose drafts hold a block for a snippet (`snippet_in_use`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet_templates: Option<Vec<SegmentRefProblem>>,
 }
 
 /// One issue of a flow.
@@ -115,6 +118,8 @@ struct SegmentExtra {
     flow_issues: Option<Vec<FlowIssueProblem>>,
     /// The issues of a template document (`template_invalid`).
     template_issues: Option<Vec<TemplateIssueProblem>>,
+    /// The templates that use a snippet (`snippet_in_use`).
+    snippet_templates: Option<Vec<SegmentRefProblem>>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -838,6 +843,73 @@ impl ApiError {
         }
     }
 
+    /// A snippet that does not pass the publish checks: every blocking issue and warning with its
+    /// code and place.
+    pub(crate) fn snippet_invalid(issues: Vec<TemplateIssueProblem>) -> Self {
+        Self {
+            code: Some("snippet_invalid"),
+            segment: Some(Box::new(SegmentExtra {
+                template_issues: Some(issues),
+                ..SegmentExtra::default()
+            })),
+            ..Self::unprocessable("the snippet is not valid")
+        }
+    }
+
+    /// A snippet content that is not a block list at all, which a draft cannot hold.
+    pub(crate) fn snippet_malformed(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("snippet_malformed"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
+    /// A write to an archived snippet.
+    pub(crate) fn snippet_archived() -> Self {
+        Self {
+            code: Some("snippet_archived"),
+            ..Self::new(StatusCode::CONFLICT, "the snippet is archived")
+        }
+    }
+
+    /// A publish whose draft was saved again while it was being validated.
+    pub(crate) fn snippet_draft_changed() -> Self {
+        Self {
+            code: Some("snippet_draft_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
+    /// A draft save that names a revision other than the current one: the draft was saved by
+    /// someone else since the caller read it.
+    pub(crate) fn snippet_revision_mismatch() -> Self {
+        Self {
+            code: Some("snippet_revision_mismatch"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "the snippet draft is not at the revision named; read it again",
+            )
+        }
+    }
+
+    /// An archive of a snippet that template drafts still hold, with those templates.
+    pub(crate) fn snippet_in_use(templates: Vec<SegmentRefProblem>) -> Self {
+        Self {
+            code: Some("snippet_in_use"),
+            segment: Some(Box::new(SegmentExtra {
+                snippet_templates: Some(templates),
+                ..SegmentExtra::default()
+            })),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "template drafts still use the snippet; remove it from them first",
+            )
+        }
+    }
+
     /// A template that already keeps the most saved preview people.
     pub(crate) fn preview_people_limit() -> Self {
         Self {
@@ -997,6 +1069,10 @@ impl IntoResponse for ApiError {
                 .segment
                 .as_mut()
                 .and_then(|extra| extra.template_issues.take()),
+            snippet_templates: self
+                .segment
+                .as_mut()
+                .and_then(|extra| extra.snippet_templates.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
