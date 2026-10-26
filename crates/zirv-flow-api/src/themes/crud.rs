@@ -59,6 +59,19 @@ impl From<&Theme> for ThemeBody {
     }
 }
 
+/// A theme in the list, with what a card shows.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ThemeListItemBody {
+    #[serde(flatten)]
+    theme: ThemeBody,
+    /// The current version's tokens, or the draft's while the theme has never been published.
+    #[schema(value_type = Object)]
+    tokens: Value,
+    /// How many templates, not archived, use the theme: their draft or current version names it,
+    /// and, for the default theme, they follow the default.
+    used_by_templates: i64,
+}
+
 /// The one editable copy of a theme's tokens.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ThemeDraftBody {
@@ -265,7 +278,7 @@ pub(crate) async fn archive_theme(
         ("archived" = Option<bool>, Query, description = "Include archived themes; default false")
     ),
     responses(
-        (status = 200, description = "The themes", body = Vec<ThemeBody>),
+        (status = 200, description = "The themes", body = Vec<ThemeListItemBody>),
         (status = 400, description = "archived is not true or false", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
@@ -278,11 +291,23 @@ pub(crate) async fn list(
     principal: Principal,
     Path(ws): Path<String>,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<ThemeBody>>, ApiError> {
+) -> Result<Json<Vec<ThemeListItemBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let archived = bool_param(query.as_deref().unwrap_or_default(), "archived")?;
     let themes = zirv_flow_store::list_themes(&state.pool, workspace.id, archived).await?;
-    Ok(Json(themes.iter().map(ThemeBody::from).collect()))
+    let mut tokens =
+        zirv_flow_store::list_theme_tokens(&state.pool, workspace.id, archived).await?;
+    let counts = zirv_flow_store::theme_template_counts(&state.pool, workspace.id).await?;
+    Ok(Json(
+        themes
+            .iter()
+            .map(|theme| ThemeListItemBody {
+                theme: ThemeBody::from(theme),
+                tokens: tokens.remove(&theme.id).unwrap_or(Value::Null),
+                used_by_templates: counts.get(&theme.id).copied().unwrap_or(0),
+            })
+            .collect(),
+    ))
 }
 
 /// Creates a theme with its first draft. Audited as `theme.created`.
