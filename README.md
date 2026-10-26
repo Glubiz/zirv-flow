@@ -635,8 +635,9 @@ is kept for a later replay and is never returned.
 admin sets within `events.min_retention_days` and `events.max_retention_days`; rejects for
 `events.reject_retention_days`. A daily job (03:17 UTC) deletes what is past its limit in
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
-records of events that no longer exist. The scheduler leader creates the partitions for this
-and next month.
+records of events that no longer exist. Each batch and each partition drop commits separately,
+with its handled markers, so a failed run keeps completed work and the next run continues.
+The scheduler leader creates the partitions for this and next month.
 ## Event debugger and explorer
 
 Under **Events** in the web UI, **Debugger**, **Explorer** and **Rejects** show what the event

@@ -15,9 +15,12 @@ impl JobKind for EventsRetention {
     const KIND: &'static str = "events.retention";
 
     async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
+        let Some(pool) = ctx.pool() else {
+            return Err(JobError::new("the worker has no pool to retain events on"));
+        };
         let settings = *ctx.event_retention();
-        let now = database_now(&mut *ctx.conn()).await?;
-        let report = apply_event_retention(ctx.conn(), &settings, now).await?;
+        let now = database_now(pool).await?;
+        let report = apply_event_retention(pool, &settings, now).await?;
         info!(
             events_deleted = report.events_deleted,
             partitions_dropped = report.partitions_dropped,
@@ -89,15 +92,22 @@ mod tests {
         .unwrap();
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
 
-        let mut ctx = JobContext::new(&mut tx, &claimed).with_event_retention(EventRetention {
-            default_days: 365,
-            ..EventRetention::default()
-        });
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_event_retention(EventRetention {
+                default_days: 365,
+                ..EventRetention::default()
+            });
         EventsRetention
             .run(&mut ctx, claimed.payload.clone())
             .await
             .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
+        tx.rollback().await.unwrap();
 
         let ages: Vec<i64> = sqlx::query_scalar(
             "SELECT (extract(epoch FROM now() - occurred_at) / 86400)::bigint FROM events",

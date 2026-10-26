@@ -2160,7 +2160,8 @@ before and after on the same input.
   back without spending an attempt. When rows remain, the job leaves its successor, due at the
   earliest `next_attempt_at`. It never calls `enqueue_arrivals` and never writes an event. The
   leader gives a destination with waiting rows and no job a new one. Delivered rows are purged
-  after seven days.
+  after seven days, with their handled markers committed on the worker's pool before delivery
+  calls, independently of the job's transaction.
 - **Re-drive.** `POST .../forwarding/re-drive` sets one row (dead or pending), a destination's dead
   rows or every dead row of the workspace to `pending`, due now, with the cycle's attempts moved
   into `attempt_offset`, and ensures a job. It starts no flow.
@@ -2706,6 +2707,15 @@ job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28.
 Assistant transcripts are not stored unless a workspace opts in to a 1 to 30
 day window (default 7), which a retention job purges (13.4, OQ-26).
 
+`events.retention` commits each batch of event deletes, ingest rejects, dedupe records and
+test-send log rows on the worker's pool, independently of the job's transaction. Event deletes
+and their handled markers remain one statement. Each partition drop and its markers commit in
+one separate transaction: it takes `lock_retention_overrides` before reading the cutoff and
+holds the lock through the drop, serialising with override changes. No row locks carry across
+batches. A failed run keeps completed batches; the next run continues, counting only what that
+run removes. The delivered outbox purge uses the pool too, releasing its locks before delivery
+calls.
+
 As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs with their kinds,
 status, requester, trace); it is the one table the erasure scan skips on purpose.
 `POST /privacy/erasures` records the request and enqueues `privacy.erase` in one transaction;
@@ -2808,7 +2818,8 @@ the result per destination.
   A purge and an erasure of the same person can deadlock, because the purge's marker key takes the
   person row after it deleted the evidence and `delete_person` locks the person row first; Postgres
   aborts one of them. The aborted erasure job retries and plans from the committed markers, the
-  aborted purge rolls back and runs again on its next pass, and no data is lost either way.
+  aborted purge batch rolls back and runs again on its next pass; earlier batches stay committed,
+  and no data is lost either way.
 
 Segment membership rows (6) join the erasure scan and `delete_person` in M4: both remove a
 person's rows, current and closed. A merge does not delete them: it closes the merged person's
