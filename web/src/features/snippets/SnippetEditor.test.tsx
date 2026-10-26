@@ -72,6 +72,34 @@ describe("the block editor in snippet mode", () => {
     expect(within(banner).getByRole("button", { name: "Reload" })).toBeInTheDocument();
   });
 
+  it("sends the revision the last save returned with the next save", async () => {
+    const calls = mockApi(snippetRoutes());
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Add heading block" }));
+    await waitFor(() => expect(saves(calls)).toHaveLength(1), WAIT);
+    await user.click(screen.getByRole("button", { name: "Add text block" }));
+    await waitFor(() => expect(saves(calls)).toHaveLength(2), WAIT);
+
+    expect(saves(calls).map((sent) => sent.revision)).toEqual([1, 2]);
+  });
+
+  it("makes no further save after a revision conflict, even on leaving", async () => {
+    const calls = mockApi(snippetRoutes({ save: () => refusal(409, { code: "snippet_revision_mismatch" }) }));
+    const user = userEvent.setup();
+    const { unmount } = mount();
+
+    await user.click(await screen.findByRole("button", { name: "Add heading block" }));
+    await screen.findByRole("alert", undefined, WAIT);
+    await user.click(screen.getByRole("button", { name: "Add text block" }));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(saves(calls)).toHaveLength(1);
+  });
+
   it("shows preview warnings as issues and still renders the preview", async () => {
     mockApi(
       snippetRoutes({
