@@ -5,8 +5,8 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde_json::json;
 use zirv_flow_store::{
-    DeleteAssetError, asset_owners, begin, commit, delete_asset, find_asset, list_assets,
-    workspace_asset_bytes,
+    AssetOwner, DeleteAssetError, asset_owners, begin, commit, delete_asset, find_asset,
+    list_assets, workspace_asset_bytes,
 };
 
 use super::{AssetBody, AssetDetailBody, AssetsBody, parse_page};
@@ -14,6 +14,19 @@ use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
+
+/// The refusal to delete an asset that published versions use, naming them.
+fn in_use(owners: &[AssetOwner]) -> ApiError {
+    let users: Vec<String> = owners
+        .iter()
+        .map(|owner| format!("{} {} v{}", owner.owner_kind, owner.owner_id, owner.version))
+        .collect();
+    ApiError::new(
+        StatusCode::CONFLICT,
+        format!("used by {}", users.join(", ")),
+    )
+    .with_code("asset_in_use")
+}
 
 /// The workspace's images, newest first, with the bytes they take and the limit for them.
 #[utoipa::path(
@@ -130,19 +143,7 @@ pub(crate) async fn remove(
         .await
         .map_err(|error| match error {
             DeleteAssetError::NotFound => ApiError::not_found(),
-            DeleteAssetError::InUse(owners) => {
-                let users: Vec<String> = owners
-                    .iter()
-                    .map(|owner| {
-                        format!("{} {} v{}", owner.owner_kind, owner.owner_id, owner.version)
-                    })
-                    .collect();
-                ApiError::new(
-                    StatusCode::CONFLICT,
-                    format!("used by {}", users.join(", ")),
-                )
-                .with_code("asset_in_use")
-            }
+            DeleteAssetError::InUse(owners) => in_use(&owners),
             DeleteAssetError::Store(error) => error.into(),
         })?;
     admin::audit(
@@ -156,4 +157,25 @@ pub(crate) async fn remove(
     .await?;
     commit(tx).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+
+    #[test]
+    fn an_asset_in_use_is_a_409_naming_its_users() {
+        let id = Uuid::now_v7();
+        let error = in_use(&[AssetOwner {
+            owner_kind: "theme".into(),
+            owner_id: id,
+            version: 2,
+        }]);
+
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.code(), Some("asset_in_use"));
+        assert_eq!(error.detail(), format!("used by theme {id} v2"));
+    }
 }

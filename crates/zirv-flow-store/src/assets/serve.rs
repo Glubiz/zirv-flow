@@ -31,3 +31,47 @@ pub async fn find_served_asset<'e>(
         bytes,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::assets::delete_asset;
+    use crate::assets::tests_support::{upload, workspace};
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn serving_finds_a_live_asset_in_any_workspace_by_hash_and_extension(pool: PgPool) {
+        let one = workspace(&pool, "one").await;
+        let two = workspace(&pool, "two").await;
+        let first = upload(&pool, one, "a", b"shared").await.asset;
+        let second = upload(&pool, two, "a", b"shared").await.asset;
+
+        let served = find_served_asset(&pool, &first.sha256, "png")
+            .await
+            .unwrap();
+        assert_eq!(served.unwrap().bytes, b"shared");
+        assert!(
+            find_served_asset(&pool, &first.sha256, "gif")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut connection = pool.acquire().await.unwrap();
+        delete_asset(&mut connection, one, first.id).await.unwrap();
+        assert!(
+            find_served_asset(&pool, &first.sha256, "png")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        delete_asset(&mut connection, two, second.id).await.unwrap();
+        assert!(
+            find_served_asset(&pool, &first.sha256, "png")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

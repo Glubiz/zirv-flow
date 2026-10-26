@@ -57,3 +57,58 @@ pub async fn record_references(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::assets::tests_support::{upload, workspace};
+    use crate::assets::{asset_owners, delete_asset};
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn recording_a_reference_twice_keeps_one_row_and_a_deleted_asset_is_refused(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let asset = upload(&pool, ws, "a", b"bytes").await.asset;
+        let owner = Uuid::now_v7();
+        let mut connection = pool.acquire().await.unwrap();
+        for _ in 0..2 {
+            record_references(
+                &mut connection,
+                AssetOwnerKind::Template,
+                owner,
+                1,
+                &[AssetId::from_uuid(asset.id)],
+            )
+            .await
+            .unwrap();
+        }
+        record_references(
+            &mut connection,
+            AssetOwnerKind::Template,
+            owner,
+            2,
+            &[AssetId::from_uuid(asset.id)],
+        )
+        .await
+        .unwrap();
+
+        let owners = asset_owners(&pool, asset.id).await.unwrap();
+
+        assert_eq!(owners.iter().map(|o| o.version).collect::<Vec<_>>(), [1, 2]);
+        let gone = upload(&pool, ws, "b", b"other").await.asset;
+        delete_asset(&mut connection, ws, gone.id).await.unwrap();
+        let refused = record_references(
+            &mut connection,
+            AssetOwnerKind::Snippet,
+            owner,
+            1,
+            &[AssetId::from_uuid(gone.id)],
+        )
+        .await;
+        assert!(matches!(refused, Err(AssetReferenceError::Missing(_))));
+    }
+}

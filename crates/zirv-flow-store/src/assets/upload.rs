@@ -110,3 +110,70 @@ pub async fn store_asset(
         references: 0,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::PgPool;
+
+    use super::*;
+    use crate::assets::tests_support::{upload, workspace};
+    use crate::assets::workspace_asset_bytes;
+    use crate::{begin, commit};
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_same_bytes_in_one_workspace_return_the_existing_row(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+
+        let first = upload(&pool, ws, "a", b"bytes").await;
+        let again = upload(&pool, ws, "b", b"bytes").await;
+        let elsewhere = upload(&pool, other, "a", b"bytes").await;
+
+        assert!(first.created);
+        assert!(!again.created);
+        assert_eq!(again.asset.id, first.asset.id);
+        assert_eq!(again.asset.name, "a");
+        assert!(elsewhere.created);
+        assert_ne!(elsewhere.asset.id, first.asset.id);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn two_parallel_uploads_at_the_quota_edge_admit_one(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let attempt = |bytes: &'static [u8]| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = begin(&pool).await.unwrap();
+                let result = store_asset(
+                    &mut tx,
+                    ws,
+                    &NewAsset {
+                        name: "x",
+                        ext: "png",
+                        content_type: "image/png",
+                        bytes,
+                        width: 1,
+                        height: 1,
+                        created_by: None,
+                    },
+                    8,
+                )
+                .await;
+                commit(tx).await.unwrap();
+                result
+            }
+        };
+
+        let (one, two) = tokio::join!(attempt(b"aaaaaa"), attempt(b"bbbbbb"));
+
+        let admitted = [&one, &two].iter().filter(|r| r.is_ok()).count();
+        let refused = [&one, &two]
+            .iter()
+            .filter(|r| matches!(r, Err(AssetError::QuotaExceeded)))
+            .count();
+        assert_eq!((admitted, refused), (1, 1));
+        assert_eq!(workspace_asset_bytes(&pool, ws).await.unwrap(), 6);
+    }
+}
