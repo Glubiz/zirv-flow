@@ -29,14 +29,20 @@ pub(crate) enum Subject<'a> {
     Sample(&'a RenderContext),
 }
 
-/// The extras and what to record about them.
+/// What a message was rendered with, to record.
 #[derive(Debug)]
-pub(crate) struct Resolved {
-    pub(crate) extras: RenderExtras,
+pub(crate) struct Versions {
     /// The theme in effect and its version.
     pub(crate) theme: Option<(Uuid, i32)>,
     /// Snippet id to the version rendered, as an object.
     pub(crate) snippet_versions: Value,
+}
+
+/// The extras and what to record about them.
+#[derive(Debug)]
+pub(crate) struct Resolved {
+    pub(crate) extras: RenderExtras,
+    pub(crate) versions: Versions,
 }
 
 fn request_of(doc: &TemplateDocument) -> ExtrasRequest {
@@ -124,8 +130,10 @@ pub(crate) async fn resolve(
         .collect::<Map<_, _>>();
     Ok(Ok(Resolved {
         extras,
-        theme: loaded.theme.map(|theme| (theme.theme_id, theme.version)),
-        snippet_versions: Value::Object(snippet_versions),
+        versions: Versions {
+            theme: loaded.theme.map(|theme| (theme.theme_id, theme.version)),
+            snippet_versions: Value::Object(snippet_versions),
+        },
     }))
 }
 

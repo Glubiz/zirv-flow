@@ -114,7 +114,7 @@ struct Trail {
     rule: Option<String>,
     template_version: Option<i32>,
     /// The theme and snippet versions the message was rendered with, once it was rendered.
-    rendered_with: Option<inputs::Resolved>,
+    rendered_with: Option<Box<inputs::Versions>>,
     sender: Option<Uuid>,
     category: Option<String>,
     /// The delivery attempts the destination saw.
@@ -383,7 +383,7 @@ async fn decide(
         Ok(tracked) => tracked,
         Err(reason) => return Ok(trail.fail_unsent(resuming, "render", reason)),
     };
-    trail.rendered_with = Some(resolved);
+    trail.rendered_with = Some(Box::new(resolved.versions));
     // The links are recorded before delivery in a statement of their own, so the redirect works
     // for whichever attempt the person receives and a retry writes the same rows.
     record_message_links(&pool, workspace, job.message, &tracked.links).await?;

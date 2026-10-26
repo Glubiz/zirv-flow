@@ -12,8 +12,8 @@ use uuid::Uuid;
 use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    AssetOwnerKind, AssetReferenceError, Clock, PgPool, SenderError, Template, TemplateUse,
-    TemplateVersion, TemplateVersionSummary, require_verified_sender,
+    AssetOwnerKind, AssetReferenceError, SenderError, Template, TemplateUse, TemplateVersion,
+    TemplateVersionSummary, require_verified_sender,
 };
 use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
 
@@ -121,17 +121,19 @@ pub(crate) struct TemplatePublishedBody {
 /// and it publishes only if the draft is still the revision that was validated: a draft saved in
 /// the meantime is a 409 `template_draft_changed`, and nothing is written.
 pub(crate) async fn publish_template(
-    pool: &PgPool,
+    state: &AppState,
     render: &RenderPool,
     context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
-    clock: &Clock,
-    public_url: Option<&str>,
 ) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
     let (draft, catalog, inputs) = {
-        let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
+        let mut connection = state
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal())?;
         let template = zirv_flow_store::find_template(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
@@ -145,13 +147,13 @@ pub(crate) async fn publish_template(
             zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
         );
         let doc = stored_document(&draft.document)?;
-        let now = clock.now(&mut connection).await?;
+        let now = state.clock.now(&mut connection).await?;
         let inputs = resolve(
             &mut connection,
             workspace,
             &doc,
             Subject::Nobody,
-            public_url,
+            state.public_url(),
             now,
         )
         .await?;
@@ -174,7 +176,7 @@ pub(crate) async fn publish_template(
         trace_id: request_trace().trace_id,
         cause: Cause::definition_change(id),
     };
-    let mut tx = zirv_flow_store::begin(pool).await?;
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
         .await
         .map_err(template_error)?;
@@ -294,14 +296,12 @@ pub(crate) async fn publish(
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
     let (template, version, used) = publish_template(
-        &state.pool,
+        &state,
         render,
         &principal.context(),
         workspace.id,
         path_id(&id)?,
         principal.user_id(),
-        &state.clock,
-        state.public_url(),
     )
     .await?;
     Ok((

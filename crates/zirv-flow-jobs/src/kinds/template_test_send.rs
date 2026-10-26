@@ -323,8 +323,8 @@ async fn decide(
         ctx.conn(),
         workspace,
         row.id,
-        resolved.theme,
-        &resolved.snippet_versions,
+        resolved.versions.theme,
+        &resolved.versions.snippet_versions,
     )
     .await?;
     let mut rendered = tracked.rendered;
