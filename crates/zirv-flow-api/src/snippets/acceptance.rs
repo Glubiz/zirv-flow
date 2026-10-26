@@ -1034,4 +1034,43 @@ mod tests {
         assert_eq!(refused.body["code"], "snippet_breaks_templates");
         assert_eq!(refused.body["templates"][0]["id"], json!(named));
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_live_template_whose_published_document_no_longer_parses_does_not_block(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let snippet = f.create("Legal", unsubscribe_content()).await;
+        assert_eq!(f.publish(&snippet).await.status, StatusCode::CREATED);
+        let stale = f.template_holding("Stale", &snippet).await;
+        let mut document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hi", "category": "marketing", "sections": [{"id": "s", "columns": [[
+                {"type": "snippet", "id": "sn", "snippet_id": snippet}]]}]}});
+        document["unknown_field"] = json!(true);
+        let template: Uuid = stale.parse().unwrap();
+        sqlx::query(
+            "INSERT INTO template_versions (workspace_id, template_id, version, document,                 validation, trace_id)              SELECT workspace_id, template_id, 1, $2, '[]'::jsonb, gen_random_uuid()              FROM template_drafts WHERE template_id = $1",
+        )
+        .bind(template)
+        .bind(&document)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+            .bind(template)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        f.put_draft(&snippet, heading("Plain"), None).await;
+
+        let published = f.publish(&snippet).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+    }
 }

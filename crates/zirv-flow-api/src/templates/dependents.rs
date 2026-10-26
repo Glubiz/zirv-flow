@@ -66,7 +66,11 @@ pub(crate) async fn broken_by(
             else {
                 continue;
             };
-            let doc = stored_document(&version.document)?;
+            // A version that no longer parses, or whose content type is unsupported, cannot send
+            // anyway, so it is no reason to refuse this publish.
+            let Ok(doc) = stored_document(&version.document) else {
+                continue;
+            };
             if content_type_of(&doc).is_err() {
                 continue;
             }
