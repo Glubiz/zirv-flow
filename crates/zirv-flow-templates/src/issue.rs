@@ -50,8 +50,8 @@ pub mod code {
     pub const SNIPPET_NESTED: &str = "snippet_nested";
     pub const SNIPPET_CONDITION: &str = "snippet_condition";
     pub const NOT_CONVERTIBLE: &str = "not_convertible";
-    // #307 removes this when the evaluator supplies condition results.
-    pub const CONDITION_UNSUPPORTED: &str = "condition_unsupported";
+    pub const INVALID_CONDITION: &str = "invalid_condition";
+    pub const BROKEN_SEGMENT_REFERENCE: &str = "broken_segment_reference";
     // Warnings: the document can be published.
     pub const MISSING_LANG: &str = "missing_lang";
     pub const INSECURE_LINK: &str = "insecure_link";
@@ -65,7 +65,7 @@ pub mod code {
     pub const SMS_MANY_SEGMENTS: &str = "sms_many_segments";
 
     /// Every code that blocks publishing.
-    pub const BLOCKING: [&str; 38] = [
+    pub const BLOCKING: [&str; 39] = [
         UNSUPPORTED_SCHEMA,
         UNSUPPORTED_CHANNEL,
         UNSUPPORTED_MODE,
@@ -103,7 +103,8 @@ pub mod code {
         SNIPPET_NESTED,
         SNIPPET_CONDITION,
         NOT_CONVERTIBLE,
-        CONDITION_UNSUPPORTED,
+        INVALID_CONDITION,
+        BROKEN_SEGMENT_REFERENCE,
     ];
 
     /// Every code that only warns.
@@ -187,7 +188,7 @@ impl<'de> Deserialize<'de> for Issue {
 }
 
 impl Issue {
-    pub(crate) fn new(code: &'static str, at: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, at: impl Into<String>) -> Self {
         Self {
             code,
             severity: severity_of(code),
@@ -197,7 +198,7 @@ impl Issue {
         }
     }
 
-    pub(crate) fn with_message(mut self, message: impl Into<String>) -> Self {
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
         self
     }

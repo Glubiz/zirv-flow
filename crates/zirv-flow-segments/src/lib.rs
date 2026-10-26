@@ -8,6 +8,7 @@
 mod bounds;
 mod catalog;
 mod compile;
+mod condition;
 mod deps;
 mod evaluate;
 #[cfg(any(test, feature = "test-support"))]
@@ -27,6 +28,7 @@ mod validate;
 pub use bounds::event_lower_bounds;
 pub use catalog::Catalog;
 pub use compile::{CompiledSegment, compile, compile_policy};
+pub use condition::{ConditionError, compile_condition, parse_condition};
 pub use deps::Deps;
 pub use evaluate::{EvalNode, Evaluation, Observed, Outcome, evaluate, evaluate_policy};
 pub use normalize::normalize;

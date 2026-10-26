@@ -149,6 +149,11 @@ pub struct NewMessage<'a> {
     pub node: &'a str,
     pub template: Uuid,
     pub template_version: Option<i32>,
+    /// The theme in effect when the message was rendered, and its version.
+    pub theme_id: Option<Uuid>,
+    pub theme_version: Option<i32>,
+    /// Snippet id to the version rendered; `None` until the message is rendered.
+    pub snippet_versions: Option<&'a Value>,
     pub destination: Uuid,
     pub sender_identity: Option<Uuid>,
     pub category: Option<&'a str>,
@@ -177,6 +182,9 @@ pub struct Message {
     pub node_id: String,
     pub template_id: Uuid,
     pub template_version: Option<i32>,
+    pub theme_id: Option<Uuid>,
+    pub theme_version: Option<i32>,
+    pub snippet_versions: Option<Value>,
     pub destination_id: Uuid,
     pub sender_identity_id: Option<Uuid>,
     pub category: Option<String>,
@@ -194,8 +202,8 @@ pub struct Message {
 }
 
 pub(crate) const COLUMNS: &str = "id, workspace_id, person_id, enrollment_id, flow_id, flow_version, \
-    node_id, template_id, template_version, destination_id, sender_identity_id, category, \
-    channel, topic_id, dimensions, status, reason, deciding_rule, gate_results, test, attempts, \
+    node_id, template_id, template_version, theme_id, theme_version, snippet_versions, \
+    destination_id, sender_identity_id, category, channel, topic_id, dimensions, status, reason, deciding_rule, gate_results, test, attempts, \
     created_at, completed_at";
 
 /// Writes the message and says whether this call changed it.
@@ -232,7 +240,7 @@ async fn write_message<'e>(
     let dimensions = json!(new.dimensions);
     let completed = new.status.has_ended().then_some(new.now);
     let written = sqlx::query(
-        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule,             gate_results = COALESCE((SELECT jsonb_agg(entry) FROM jsonb_array_elements(messages.gate_results) AS entry                                      WHERE CASE WHEN $22 THEN NOT (entry ->> 'gate' = 'delivery' AND entry ->> 'result' IN ('in_flight', 'unconfirmed')) ELSE entry ->> 'result' = 'deferred' END), '[]'::jsonb)                            || EXCLUDED.gate_results,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status IN ('pending', 'sending') \n            AND EXCLUDED.status NOT IN ('pending', 'sending')",
+        "INSERT INTO messages             (id, workspace_id, person_id, enrollment_id, flow_id, flow_version, node_id,              template_id, template_version, destination_id, sender_identity_id, category,              topic_id, dimensions, status, reason, deciding_rule, gate_results, attempts,              created_at, completed_at, theme_id, theme_version, snippet_versions)          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,                  $18, $19, $20, $21, $23, $24, $25)          ON CONFLICT (id) DO UPDATE SET             template_version = EXCLUDED.template_version,             theme_id = CASE WHEN EXCLUDED.snippet_versions IS NULL THEN messages.theme_id ELSE EXCLUDED.theme_id END,             theme_version = CASE WHEN EXCLUDED.snippet_versions IS NULL THEN messages.theme_version ELSE EXCLUDED.theme_version END,             snippet_versions = COALESCE(EXCLUDED.snippet_versions, messages.snippet_versions),             sender_identity_id = EXCLUDED.sender_identity_id, category = EXCLUDED.category,             status = EXCLUDED.status, reason = EXCLUDED.reason,             deciding_rule = EXCLUDED.deciding_rule,             gate_results = COALESCE((SELECT jsonb_agg(entry) FROM jsonb_array_elements(messages.gate_results) AS entry                                      WHERE CASE WHEN $22 THEN NOT (entry ->> 'gate' = 'delivery' AND entry ->> 'result' IN ('in_flight', 'unconfirmed')) ELSE entry ->> 'result' = 'deferred' END), '[]'::jsonb)                            || EXCLUDED.gate_results,             attempts = EXCLUDED.attempts, completed_at = EXCLUDED.completed_at          WHERE messages.status IN ('pending', 'sending') \n            AND EXCLUDED.status NOT IN ('pending', 'sending')",
     )
     .bind(new.id)
     .bind(new.workspace.as_uuid())
@@ -256,6 +264,9 @@ async fn write_message<'e>(
     .bind(new.now)
     .bind(completed)
     .bind(keep_gates)
+    .bind(new.theme_id)
+    .bind(new.theme_version)
+    .bind(new.snippet_versions)
     .execute(executor)
     .await
     .map_err(StoreError::query)?
@@ -540,6 +551,9 @@ mod tests {
                 node: "mail",
                 template: Uuid::from_u128(1),
                 template_version: Some(1),
+                theme_id: None,
+                theme_version: None,
+                snippet_versions: None,
                 destination: Uuid::from_u128(2),
                 sender_identity: None,
                 category: Some("transactional"),
@@ -633,6 +647,9 @@ mod tests {
             node: "mail",
             template: Uuid::from_u128(1),
             template_version: None,
+            theme_id: None,
+            theme_version: None,
+            snippet_versions: None,
             destination: Uuid::from_u128(2),
             sender_identity: None,
             category: None,
@@ -723,6 +740,9 @@ mod tests {
             node: "mail",
             template: Uuid::from_u128(1),
             template_version: None,
+            theme_id: None,
+            theme_version: None,
+            snippet_versions: None,
             destination: Uuid::from_u128(2),
             sender_identity: None,
             category: None,
@@ -764,6 +784,80 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_theme_and_snippet_versions_are_written_with_the_ending_and_never_wiped(
+        pool: sqlx::PgPool,
+    ) {
+        use zirv_flow_core::{Slug, WorkspaceName};
+        let ws = crate::create_workspace(
+            &pool,
+            &WorkspaceName::parse("versions").unwrap(),
+            &Slug::parse("versions").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dimensions = Dimensions::new();
+        let id = Uuid::now_v7();
+        let theme = Uuid::now_v7();
+        let used = json!({ Uuid::now_v7().to_string(): 2 });
+        let message = |status, rendered: bool| NewMessage {
+            id,
+            workspace: ws,
+            person,
+            enrollment: Uuid::now_v7(),
+            flow: None,
+            flow_version: None,
+            node: "mail",
+            template: Uuid::from_u128(1),
+            template_version: Some(1),
+            theme_id: rendered.then_some(theme),
+            theme_version: rendered.then_some(3),
+            snippet_versions: rendered.then_some(&used),
+            destination: Uuid::from_u128(2),
+            sender_identity: None,
+            category: None,
+            topic: None,
+            dimensions: &dimensions,
+            status,
+            reason: None,
+            deciding_rule: None,
+            gates: &[],
+            attempts: 1,
+            now: OffsetDateTime::now_utc(),
+        };
+        insert_message(&pool, &message(MessageStatus::Pending, false))
+            .await
+            .unwrap();
+        let pending = find_message(&pool, ws, id).await.unwrap().unwrap();
+
+        insert_message(&pool, &message(MessageStatus::Sent, true))
+            .await
+            .unwrap();
+        let sent = find_message(&pool, ws, id).await.unwrap().unwrap();
+
+        assert_eq!(
+            (
+                pending.theme_id,
+                pending.theme_version,
+                pending.snippet_versions
+            ),
+            (None, None, None)
+        );
+        assert_eq!(
+            (sent.theme_id, sent.theme_version, sent.snippet_versions),
+            (Some(theme), Some(3), Some(used))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_in_flight_note_is_written_with_the_sending_mark_and_cleared_alone(
         pool: sqlx::PgPool,
     ) {
@@ -797,6 +891,9 @@ mod tests {
                 node: "mail",
                 template: Uuid::from_u128(1),
                 template_version: None,
+                theme_id: None,
+                theme_version: None,
+                snippet_versions: None,
                 destination: Uuid::from_u128(2),
                 sender_identity: None,
                 category: None,

@@ -18,6 +18,7 @@ mod content;
 mod context;
 mod document;
 mod error;
+mod extras;
 mod issue;
 mod links;
 mod migrate;
@@ -51,6 +52,7 @@ pub use document::{
     Category, Channel, EmailContent, Mode, SCHEMA_VERSION, Syntax, TemplateDocument, WebhookContent,
 };
 pub use error::RenderError;
+pub use extras::{ExtrasNeeds, Loaded, ThemeNeed, extras_needs, render_extras};
 pub use issue::{FieldCatalog, Issue, Severity, code, severity_of};
 pub use links::{Hooks, INERT_TOKEN, Tracking, rewrite_links, unsubscribe_headers};
 pub use migrate::{migrate_to_current, v1_to_v2};
