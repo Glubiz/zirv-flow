@@ -1410,7 +1410,7 @@ async fn apply_template(
         .await
         .map_err(template_error)?;
     if Some(digest(&template_stamp(locked.draft()))) != draft.base_digest {
-        return Err(ApiError::template_draft_changed());
+        return Err(ApiError::template_draft_changed_since_assistant_draft());
     }
     let document = check_draft(locked.template(), content)?;
     let saved = zirv_flow_store::save_template_draft(
