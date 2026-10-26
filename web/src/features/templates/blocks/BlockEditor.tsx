@@ -146,8 +146,9 @@ function Editor(props: Props & { scope: ThemeScope; snippetNames: SnippetNames }
     requested.current = goTo.n;
     setSelected(goTo.id);
     setTab("block");
-    const own = pane.current?.querySelector<HTMLElement>(`[data-block-id="${goTo.id}"], [data-section-id="${goTo.id}"]`);
-    own?.scrollIntoView({ block: "center" });
+    const target = pane.current?.querySelector<HTMLElement>(`[data-block-id="${goTo.id}"], [data-section-id="${goTo.id}"] > .be-bar [data-section-settings]`);
+    target?.scrollIntoView({ block: "center" });
+    target?.focus({ preventScroll: true });
   }, [goTo]);
 
   function commit(next: BlocksContent) {

@@ -948,6 +948,7 @@ describe("hidden blocks in the preview", () => {
 
     expect(await screen.findByRole("textbox", { name: "Heading text" })).toHaveValue("Bye");
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+    expect(screen.getByRole("group", { name: "Heading block 2" })).toHaveFocus();
   });
 
   it("shows a line only when something is hidden", async () => {
