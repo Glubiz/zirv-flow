@@ -393,10 +393,19 @@ pub async fn abandon_orphaned_test_sends(
     .map_err(StoreError::query)
 }
 
-/// Deletes the rows older than the retention as of `now`, in batches; how many.
+/// Deletes the rows older than the retention as of `now`, committing each batch on the pool;
+/// returns how many.
 pub async fn delete_test_sends_before(
-    connection: &mut PgConnection,
+    pool: &PgPool,
     now: OffsetDateTime,
+) -> Result<u64, StoreError> {
+    delete_test_sends_in_batches(pool, now, BATCH).await
+}
+
+async fn delete_test_sends_in_batches(
+    pool: &PgPool,
+    now: OffsetDateTime,
+    batch_size: i64,
 ) -> Result<u64, StoreError> {
     let mut total = 0;
     loop {
@@ -407,13 +416,13 @@ pub async fn delete_test_sends_before(
         )
         .bind(now)
         .bind(TEST_SEND_RETENTION_MONTHS)
-        .bind(BATCH)
-        .execute(&mut *connection)
+        .bind(batch_size)
+        .execute(pool)
         .await
         .map_err(StoreError::query)?
         .rows_affected();
         total += deleted;
-        if i64::try_from(deleted).unwrap_or(i64::MAX) < BATCH {
+        if i64::try_from(deleted).unwrap_or(i64::MAX) < batch_size {
             return Ok(total);
         }
     }
@@ -671,12 +680,7 @@ mod tests {
         assert!(is_test_send(&pool, recent.id).await.unwrap());
         assert!(!is_test_send(&pool, Uuid::now_v7()).await.unwrap());
 
-        assert_eq!(
-            delete_test_sends_before(&mut connection, now)
-                .await
-                .unwrap(),
-            1
-        );
+        assert_eq!(delete_test_sends_before(&pool, now).await.unwrap(), 1);
         let gone = delete_test_sends_by_hash(&mut connection, ws, &[vec![1; 32]])
             .await
             .unwrap();
@@ -687,6 +691,42 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_later_retention_batch_keeps_the_first_test_send_delete(pool: PgPool) {
+        let ws = workspace(&pool).await;
+        let trace = TraceContext::root(Cause::api("t"));
+        let now = datetime!(2031-05-06 07:00 UTC);
+        for _ in 0..2 {
+            reserve(&pool, &new(ws, None, now - Duration::days(400), &trace)).await;
+        }
+        sqlx::raw_sql(
+            "CREATE SEQUENCE retention_batches;
+             CREATE FUNCTION fail_later_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 IF nextval('retention_batches') > 1 THEN
+                     RAISE EXCEPTION 'later test send batch failed';
+                 END IF;
+                 RETURN NULL;
+             END $$;
+             CREATE TRIGGER fail_later_batch BEFORE DELETE ON test_sends
+             FOR EACH STATEMENT EXECUTE FUNCTION fail_later_batch()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let error = delete_test_sends_in_batches(&pool, now, 1)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("later test send batch failed"));
+        let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM test_sends")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1, "the first test send batch committed");
     }
 
     #[sqlx::test]

@@ -1117,16 +1117,14 @@ mod tests {
     /// Runs the event retention as of a time long after everything the tests wrote.
     async fn purge_events(pool: &PgPool) -> u64 {
         let later = OffsetDateTime::now_utc() + time::Duration::days(4000);
-        let mut connection = pool.acquire().await.unwrap();
-        crate::apply_event_retention(&mut connection, &crate::EventRetention::default(), later)
+        crate::apply_event_retention(pool, &crate::EventRetention::default(), later)
             .await
             .unwrap()
             .events_deleted
     }
 
     async fn purge_outbox(pool: &PgPool, destination: Uuid) -> u64 {
-        let mut connection = pool.acquire().await.unwrap();
-        crate::purge_delivered(&mut connection, destination, std::time::Duration::ZERO, 100)
+        crate::purge_delivered(pool, destination, std::time::Duration::ZERO, 100)
             .await
             .unwrap()
     }
@@ -1343,24 +1341,44 @@ mod tests {
         let synced = destination(&pool, ws, "synced").await;
         sync_outcome(&pool, ws, synced, person).await;
         let request = request_for(&pool, ws, person).await;
-        // The purge has deleted the evidence and written the marker, and has not committed.
+        // Hold one purge batch open after its delete and marker insert.
         let mut purge = begin(&pool).await.unwrap();
-        crate::apply_event_retention(
-            &mut purge,
-            &crate::EventRetention::default(),
-            OffsetDateTime::now_utc() + time::Duration::days(4000),
-        )
+        let purge_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *purge)
+            .await
+            .unwrap();
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(crate::privacy::delete_and_mark(
+            &format!(
+                "DELETE FROM events e WHERE e.person_id = $1 RETURNING {}",
+                crate::privacy::event_columns("e")
+            ),
+        )))
+        .bind(person)
+        .fetch_one(&mut *purge)
         .await
         .unwrap();
         let erasure = {
             let pool = pool.clone();
             tokio::spawn(async move { erase_for(&pool, ws, request, &[synced]).await })
         };
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-        assert!(
-            !erasure.is_finished(),
-            "the erasure waits for the person row the marker key holds"
-        );
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                 WHERE datname = current_database() AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(purge_pid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            assert!(
+                !erasure.is_finished(),
+                "the erasure waits for the person row the marker key holds"
+            );
+            tokio::task::yield_now().await;
+        }
 
         commit(purge).await.unwrap();
         erasure.await.unwrap();
