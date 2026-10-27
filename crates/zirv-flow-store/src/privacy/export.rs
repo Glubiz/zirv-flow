@@ -8,7 +8,8 @@ use std::io::Write;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use futures_util::TryStreamExt;
+use futures_util::{Stream, TryStreamExt};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
@@ -410,33 +411,27 @@ impl From<StoreError> for Abort {
     }
 }
 
+impl From<serde_json::Error> for Abort {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Store(StoreError::query(sqlx::Error::Encode(error.into())))
+    }
+}
+
 /// Counts the JSON bytes of the rows a document takes, so collection stops at the cap.
 struct Budget {
     max: u64,
     used: u64,
-    /// How many values were charged.
-    #[cfg(test)]
-    taken: u64,
 }
 
 impl Budget {
     fn new(max: u64) -> Self {
-        Self {
-            max,
-            used: 0,
-            #[cfg(test)]
-            taken: 0,
-        }
+        Self { max, used: 0 }
     }
 
     fn take(&mut self, row: &Value) -> Result<(), Abort> {
         let mut counter = Counter(0);
         // Counting cannot fail.
         let _ = serde_json::to_writer(&mut counter, row);
-        #[cfg(test)]
-        {
-            self.taken += 1;
-        }
         self.used = self.used.saturating_add(counter.0).saturating_add(1);
         if self.used > self.max {
             return Err(Abort::TooLarge);
@@ -484,11 +479,13 @@ async fn person_document(
         .format(&Rfc3339)
         .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
     let mut budget = Budget::new(max_bytes);
-    budget.take(&json!({
-        "format": EXPORT_FORMAT,
-        "generated_at": generated_at,
-        "person": { "id": current, "merged_ids": merged },
-    }))?;
+    // The empty document carries every key, delimiter and the envelope; the rows and the merged
+    // ids are charged on top of it.
+    budget.take(&serde_json::to_value(ExportDocument::empty(
+        &generated_at,
+        current,
+    ))?)?;
+    budget.take(&json!(merged))?;
     let mut section = Section {
         connection,
         workspace,
@@ -677,36 +674,96 @@ async fn person_document(
         )
         .await?;
 
-    Ok(Some(json!({
-        "format": EXPORT_FORMAT,
-        "generated_at": generated_at,
-        "person": {
-            "id": current,
-            "merged_ids": merged,
-            "profile": profile,
-            "identities": identities,
-            "source_records": source_records,
-            "events": events,
-            "consent": consent,
-            "consent_history": consent_history,
-            "lists": lists,
-            "segments": segments,
-            "list_history": list_history,
-            "merges": merges,
-            "identity_conflicts": identity_conflicts,
-            "enrollments": enrollments,
-            "step_executions": step_executions,
-            "enrollment_waits": enrollment_waits,
-            "flow_entries": flow_entries,
-            "messages": messages,
-            "message_links": message_links,
-            "forwarding_outbox": forwarding_outbox,
-            "erasure_handled_markers": erasure_handled_markers,
-            "ingest_rejects": ingest_rejects,
-            "decision_records": decision_records,
-            "template_preview_people": template_preview_people,
+    let document = ExportDocument {
+        format: EXPORT_FORMAT,
+        generated_at: &generated_at,
+        person: ExportPerson {
+            id: current,
+            merged_ids: merged,
+            profile,
+            sections: Sections {
+                identities,
+                source_records,
+                events,
+                consent,
+                consent_history,
+                lists,
+                segments,
+                list_history,
+                merges,
+                identity_conflicts,
+                enrollments,
+                step_executions,
+                enrollment_waits,
+                flow_entries,
+                messages,
+                message_links,
+                forwarding_outbox,
+                erasure_handled_markers,
+                ingest_rejects,
+                decision_records,
+                template_preview_people,
+            },
+        },
+    };
+    Ok(Some(serde_json::to_value(document)?))
+}
+
+/// The shape of the document. The budget charges the empty one, so a key can never go uncounted.
+#[derive(Serialize)]
+struct ExportDocument<'a> {
+    format: &'static str,
+    generated_at: &'a str,
+    person: ExportPerson<'a>,
+}
+
+#[derive(Serialize)]
+struct ExportPerson<'a> {
+    id: Uuid,
+    merged_ids: Vec<&'a Uuid>,
+    profile: Value,
+    #[serde(flatten)]
+    sections: Sections,
+}
+
+#[derive(Default, Serialize)]
+struct Sections {
+    identities: Vec<Value>,
+    source_records: Vec<Value>,
+    events: Vec<Value>,
+    consent: Vec<Value>,
+    consent_history: Vec<Value>,
+    lists: Vec<Value>,
+    segments: Vec<Value>,
+    list_history: Vec<Value>,
+    merges: Vec<Value>,
+    identity_conflicts: Vec<Value>,
+    enrollments: Vec<Value>,
+    step_executions: Vec<Value>,
+    enrollment_waits: Vec<Value>,
+    flow_entries: Vec<Value>,
+    messages: Vec<Value>,
+    message_links: Vec<Value>,
+    forwarding_outbox: Vec<Value>,
+    erasure_handled_markers: Vec<Value>,
+    ingest_rejects: Vec<Value>,
+    decision_records: Vec<Value>,
+    template_preview_people: Vec<Value>,
+}
+
+impl<'a> ExportDocument<'a> {
+    fn empty(generated_at: &'a str, person: Uuid) -> Self {
+        Self {
+            format: EXPORT_FORMAT,
+            generated_at,
+            person: ExportPerson {
+                id: person,
+                merged_ids: Vec::new(),
+                profile: Value::Null,
+                sections: Sections::default(),
+            },
         }
-    })))
+    }
 }
 
 /// Reads sections of one person's group.
@@ -741,7 +798,7 @@ impl Section<'_> {
         let mut events = Vec::new();
         let mut after: Option<(OffsetDateTime, Uuid)> = None;
         loop {
-            let mut stream = sqlx::query_as::<_, (OffsetDateTime, Uuid, Value)>(
+            let mut stream = sqlx::query_as::<_, EventRow>(
                 "SELECT occurred_at, id, to_jsonb(t) FROM ( \
                     SELECT id, name, schema_version, occurred_at, received_at, properties, \
                            source, message_id, trace_id, validation_state, validation_reasons, \
@@ -757,13 +814,8 @@ impl Section<'_> {
             .bind(after.map(|(_, id)| id))
             .bind(EVENT_BATCH)
             .fetch(&mut *self.connection);
-            let mut in_batch = 0;
-            while let Some((at, id, event)) = stream.try_next().await.map_err(StoreError::query)? {
-                self.budget.take(&event)?;
-                events.push(event);
-                after = Some((at, id));
-                in_batch += 1;
-            }
+            let in_batch =
+                consume_events(&mut stream, &mut self.budget, &mut events, &mut after).await?;
             if in_batch < EVENT_BATCH {
                 return Ok(events);
             }
@@ -771,11 +823,36 @@ impl Section<'_> {
     }
 }
 
+type EventRow = (OffsetDateTime, Uuid, Value);
+
+/// Charges and collects events from `stream` until it ends or the budget is spent. Stops polling
+/// at the first row past the cap. Returns how many events it took.
+async fn consume_events<S>(
+    stream: &mut S,
+    budget: &mut Budget,
+    events: &mut Vec<Value>,
+    after: &mut Option<(OffsetDateTime, Uuid)>,
+) -> Result<i64, Abort>
+where
+    S: Stream<Item = Result<EventRow, sqlx::Error>> + Unpin,
+{
+    let mut taken = 0;
+    while let Some((at, id, event)) = stream.try_next().await.map_err(StoreError::query)? {
+        budget.take(&event)?;
+        events.push(event);
+        *after = Some((at, id));
+        taken += 1;
+    }
+    Ok(taken)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Read;
 
     use flate2::read::GzDecoder;
+
+    use futures_util::StreamExt;
 
     use super::*;
     use crate::privacy::testing::{
@@ -1095,28 +1172,74 @@ mod tests {
         .unwrap();
     }
 
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn events_past_the_cap_stop_the_read_before_the_rest_are_fetched(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        seed_many_events(&pool, ws, person, 2500).await;
-        let mut connection = pool.acquire().await.unwrap();
-        let people = [person];
-        let mut section = Section {
-            connection: &mut connection,
-            workspace: ws,
-            people: &people,
-            budget: Budget::new(2000),
-        };
+    #[tokio::test]
+    async fn events_past_the_cap_stop_polling_the_stream() {
+        let polled = std::cell::Cell::new(0_u32);
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let mut stream = futures_util::stream::iter(0..1000).map(|n| {
+            polled.set(polled.get() + 1);
+            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": n})))
+        });
+        // Each row charges 8 to 9 bytes, so a cap of 100 is passed by the 13th.
+        let mut budget = Budget::new(100);
+        let mut events = Vec::new();
+        let mut after = None;
 
-        let result = section.events().await;
+        let result = consume_events(&mut stream, &mut budget, &mut events, &mut after).await;
 
         assert!(matches!(result, Err(Abort::TooLarge)));
-        assert!(
-            section.budget.taken < 50,
-            "{} events were read",
-            section.budget.taken
-        );
+        assert_eq!(events.len(), 12);
+        assert_eq!(polled.get(), 13);
+    }
+
+    #[tokio::test]
+    async fn events_within_the_cap_are_all_taken_and_the_last_is_remembered() {
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let last = Uuid::from_u128(7);
+        let mut stream = futures_util::stream::iter(vec![
+            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": 1}))),
+            Ok((at, last, json!({"n": 2}))),
+        ]);
+        let mut budget = Budget::new(1000);
+        let mut events = Vec::new();
+        let mut after = None;
+
+        let taken = consume_events(&mut stream, &mut budget, &mut events, &mut after)
+            .await
+            .unwrap();
+
+        assert_eq!(taken, 2);
+        assert_eq!(after, Some((at, last)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_document_over_the_cap_only_by_its_keys_fails_with_export_too_large(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let document = person_document(&mut connection, ws, person, u64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        let size = serde_json::to_vec(&document).unwrap().len() as u64;
+        // The rows alone charge well under the document: the keys and delimiters make the rest.
+        let under = person_document(&mut connection, ws, person, size - 1).await;
+
+        assert!(matches!(under, Err(Abort::TooLarge)));
+    }
+
+    #[test]
+    fn the_empty_document_names_every_section() {
+        let document =
+            serde_json::to_value(ExportDocument::empty("2026-01-01T00:00:00Z", Uuid::nil()))
+                .unwrap();
+
+        let person = document["person"].as_object().unwrap();
+        for (name, _) in EXPORT_SECTIONS {
+            assert!(person.contains_key(*name), "{name}");
+        }
+        assert!(person["profile"].is_null());
+        assert_eq!(person["events"], json!([]));
     }
 
     #[sqlx::test]
@@ -1148,7 +1271,7 @@ mod tests {
             .await
             .unwrap();
         let alone = requested(&pool, ws, survivor).await;
-        let fits = built_with_cap(&pool, ws, alone.id, 600).await;
+        let fits = built_with_cap(&pool, ws, alone.id, 1500).await;
         for _ in 0..30 {
             sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
                 .bind(Uuid::now_v7())
@@ -1160,7 +1283,7 @@ mod tests {
         }
         let with_merged = requested(&pool, ws, survivor).await;
 
-        let too_large = built_with_cap(&pool, ws, with_merged.id, 600).await;
+        let too_large = built_with_cap(&pool, ws, with_merged.id, 1500).await;
 
         assert!(matches!(fits, BuildOutcome::Built { .. }), "{fits:?}");
         assert_eq!(too_large, BuildOutcome::TooLarge);
