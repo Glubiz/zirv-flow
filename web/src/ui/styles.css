@@ -4655,3 +4655,15 @@ main:focus {
     text-align: left;
   }
 }
+
+@media (max-width: 560px) {
+  .checks {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    gap: 0;
+  }
+
+  .check {
+    min-height: 44px;
+  }
+}
