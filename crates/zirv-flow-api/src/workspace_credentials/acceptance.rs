@@ -727,12 +727,24 @@ mod tests {
         let not_ours = test(json!({"destination_id": elsewhere})).await;
         let unknown = test(json!({"destination_id": Uuid::now_v7()})).await;
 
-        assert_eq!(denied.status, StatusCode::OK, "{:?}", denied.body);
-        assert_eq!(denied.body["ok"], false);
+        assert_eq!(
+            denied.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            denied.body
+        );
+        assert_eq!(
+            denied.headers[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        assert_eq!(denied.body["status"], 422);
         assert_eq!(denied.body["code"], "egress_denied");
-        let text = denied.body.to_string();
-        assert!(!text.contains("10.0.0.5"), "the host is not named: {text}");
-        assert!(!text.contains("http"), "no URL: {text}");
+        assert!(denied.body.get("ok").is_none());
+        for reply in [&denied, &none, &both, &not_ours, &unknown] {
+            let text = format!("{} {:?}", reply.body, reply.headers);
+            assert!(!text.contains("10.0.0.5"), "the host is not named: {text}");
+            assert!(!text.contains("http"), "no URL: {text}");
+        }
         for refused in [&none, &both, &not_ours, &unknown] {
             assert_eq!(
                 refused.status,
@@ -744,10 +756,13 @@ mod tests {
         let read = fx
             .as_admin("GET", &format!("/credentials/{id}"), None)
             .await;
+        assert_eq!(read.status, StatusCode::OK, "{:?}", read.body);
         assert_eq!(
-            read.body["last_test_outcome"], "failed",
-            "a failed check is recorded"
+            read.body["last_test_outcome"],
+            Value::Null,
+            "an egress refusal returns before recording a credential test"
         );
+        assert_eq!(read.body["last_tested_at"], Value::Null);
     }
 
     #[sqlx::test]

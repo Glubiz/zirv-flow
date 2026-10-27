@@ -252,10 +252,20 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_rule_cannot_be_created_for_a_private_webhook(pool: PgPool) {
-        use zirv_flow_core::{Keyring, MasterKey};
+        use zirv_flow_core::{HmacRoot, Keyring, MasterKey, deployment_key_aad, seal};
+        use zirv_flow_store::secrets;
 
         let mut fx = fixture(&pool).await;
         let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        let root = HmacRoot::bootstrap_from(keys.current()).to_secret_bytes();
+        let sealed = seal(
+            &keys,
+            root.expose(),
+            &deployment_key_aad(secrets::HMAC_ROOT),
+        );
+        secrets::insert_hmac_root_if_absent(&pool, &sealed)
+            .await
+            .unwrap();
         fx.router = router(AppState::new(pool.clone(), Arc::new(String::new)).with_keyring(keys));
         let credential = fx.as_admin("POST", "/credentials", Some(json!({
             "kind": "custom", "name": "Signing", "schema": {"fields": [
