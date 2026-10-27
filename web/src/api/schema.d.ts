@@ -59,6 +59,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The instance audit rows (sign-ins, user creation, key rotation), newest first, with the
+         *     same filters and paging as the workspace log. Instance owner only.
+         */
+        get: operations["list_instance_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/audit/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Exports the instance audit rows like the workspace export. Instance owner only. Audited as
+         *     `audit.exported`.
+         */
+        get: operations["export_instance_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/destination-kinds": {
         parameters: {
             query?: never;
@@ -568,6 +608,67 @@ export interface paths {
          *     version uses it. Workspace admins only. Audited as `asset.deleted`.
          */
         delete: operations["delete_asset"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The workspace's audit log, newest first, filtered and keyset-paged. Needs the workspace admin
+         *     role. Filters: `action` (a listed action, or an area such as `flow.`), `actor_kind`,
+         *     `actor_id`, `object_kind`, `object_id`, `from` (inclusive) and `to` (exclusive) on the time
+         *     of the row, and `request_id`.
+         */
+        get: operations["list_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/audit/actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The audit actions, grouped by area, for a filter menu. Needs the workspace admin role. */
+        get: operations["list_audit_actions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/audit/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Exports the workspace's audit log, newest first, as `format=ndjson` (default) or `csv`, with
+         *     the filters of the list. The body is streamed in batches, so the size is unbounded. A CSV cell
+         *     that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'`. Needs
+         *     the workspace admin role. Audited as `audit.exported`.
+         */
+        get: operations["export_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -4729,6 +4830,55 @@ export interface components {
             members: number;
             /** Format: uuid */
             segment_id: string;
+        };
+        AuditActionsBody: {
+            areas: components["schemas"]["AuditAreaBody"][];
+        };
+        AuditAreaBody: {
+            actions: string[];
+            /**
+             * @description The text before the dot; pass `<area>.` as `action` to filter by area.
+             * @example flow
+             */
+            area: string;
+        };
+        /** @description One audit row. */
+        AuditEntryBody: {
+            /** @example flow.published */
+            action: string;
+            /** Format: uuid */
+            actor_id?: string | null;
+            /**
+             * @description `user`, `api_key`, `system` or `anonymous`.
+             * @example user
+             */
+            actor_kind: string;
+            /** Format: int64 */
+            id: number;
+            /** Format: uuid */
+            object_id?: string | null;
+            object_kind?: string | null;
+            /** Format: date-time */
+            occurred_at: string;
+            request_id?: string | null;
+            /** @description Ids and counts only; never an email, a name or a secret. */
+            summary: Record<string, never>;
+            /**
+             * @description The trace of the request, which opens at the trace page: 32 lowercase hex characters.
+             *     Null on rows from before traces were recorded and on rows written outside a request.
+             */
+            trace_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Null for an instance row such as a sign-in.
+             */
+            workspace_id?: string | null;
+        };
+        AuditPageBody: {
+            /** @description Newest first. */
+            entries: components["schemas"]["AuditEntryBody"][];
+            /** @description Pass as `cursor` for the next page; null when there is none. */
+            next_cursor?: string | null;
         };
         /** @description One item of a batch: an identify or a track, named in `type`. */
         BatchItemRequest: {
@@ -11116,6 +11266,140 @@ export interface operations {
             };
         };
     };
+    list_instance_audit: {
+        parameters: {
+            query?: {
+                /** @description Rows per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
+                /** @description A listed action, or an area followed by a dot */
+                action?: string;
+                /** @description user, api_key, system or anonymous */
+                actor_kind?: string;
+                /** @description The acting user or key */
+                actor_id?: string;
+                /** @description The kind of object acted on */
+                object_kind?: string;
+                /** @description The object acted on */
+                object_id?: string;
+                /** @description RFC 3339; rows at or after it */
+                from?: string;
+                /** @description RFC 3339; rows before it */
+                to?: string;
+                /** @description The request that caused the row */
+                request_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of instance audit rows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPageBody"];
+                };
+            };
+            /** @description A parameter is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not the instance owner, or an API key */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    export_instance_audit: {
+        parameters: {
+            query?: {
+                /** @description ndjson (default) or csv */
+                format?: string;
+                /** @description A listed action, or an area followed by a dot */
+                action?: string;
+                /** @description user, api_key, system or anonymous */
+                actor_kind?: string;
+                /** @description The acting user or key */
+                actor_id?: string;
+                /** @description The kind of object acted on */
+                object_kind?: string;
+                /** @description The object acted on */
+                object_id?: string;
+                /** @description RFC 3339; rows at or after it */
+                from?: string;
+                /** @description RFC 3339; rows before it */
+                to?: string;
+                /** @description The request that caused the row */
+                request_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rows, newest first, one per line */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                };
+            };
+            /** @description A parameter is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not the instance owner, or an API key */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     list_destination_kinds: {
         parameters: {
             query?: never;
@@ -13006,6 +13290,214 @@ export interface operations {
             };
             /** @description asset_in_use: published versions use the asset */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_audit: {
+        parameters: {
+            query?: {
+                /** @description Rows per page, 1 to 200; default 50 */
+                limit?: number;
+                /** @description The next_cursor of the previous page */
+                cursor?: string;
+                /** @description A listed action, or an area followed by a dot */
+                action?: string;
+                /** @description user, api_key, system or anonymous */
+                actor_kind?: string;
+                /** @description The acting user or key */
+                actor_id?: string;
+                /** @description The kind of object acted on */
+                object_kind?: string;
+                /** @description The object acted on */
+                object_id?: string;
+                /** @description RFC 3339; rows at or after it */
+                from?: string;
+                /** @description RFC 3339; rows before it */
+                to?: string;
+                /** @description The request that caused the row */
+                request_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of audit rows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPageBody"];
+                };
+            };
+            /** @description A parameter is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_audit_actions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every action an audit row may carry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditActionsBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    export_audit: {
+        parameters: {
+            query?: {
+                /** @description ndjson (default) or csv */
+                format?: string;
+                /** @description A listed action, or an area followed by a dot */
+                action?: string;
+                /** @description user, api_key, system or anonymous */
+                actor_kind?: string;
+                /** @description The acting user or key */
+                actor_id?: string;
+                /** @description The kind of object acted on */
+                object_kind?: string;
+                /** @description The object acted on */
+                object_id?: string;
+                /** @description RFC 3339; rows at or after it */
+                from?: string;
+                /** @description RFC 3339; rows before it */
+                to?: string;
+                /** @description The request that caused the row */
+                request_id?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rows, newest first, one per line */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                };
+            };
+            /** @description A parameter is malformed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a key without the admin scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
