@@ -418,7 +418,8 @@ fn routes() -> Router<AppState> {
         )
         .route(
             "/api/v1/workspaces/{ws}/templates/{id}/preview",
-            post(templates::preview::preview),
+            post(templates::preview::preview)
+                .layer(axum::middleware::map_response(templates::preview::headers)),
         )
         .route(
             "/api/v1/workspaces/{ws}/templates/{id}/preview-people",

@@ -1253,7 +1253,9 @@ impl From<crate::admin::AdminError> for ApiError {
             },
             AdminError::Store(error) => error.into(),
             AdminError::Slot(error) => crate::people::slots::slot_problem(&error),
-            AdminError::Secret(_) => Self::internal(),
+            AdminError::Secret(_) | AdminError::Ledger(_) | AdminError::Merge(_) => {
+                Self::internal()
+            }
             AdminError::Utm { code, detail } => Self {
                 code: Some(code),
                 ..Self::unprocessable(detail)

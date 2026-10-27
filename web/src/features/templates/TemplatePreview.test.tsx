@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { json, mockApi, problem } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { previewBody, previews, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
+import { previewDocument } from "../../ui";
 import { TemplatePage } from "./TemplatePage";
 
 function mount() {
@@ -19,7 +20,7 @@ describe("the preview", () => {
     mount();
 
     const frame = await screen.findByTitle("Preview of the message");
-    expect(frame).toHaveAttribute("srcdoc", "<p>Hi Aarhus</p>");
+    expect(frame).toHaveAttribute("srcdoc", previewDocument("<p>Hi Aarhus</p>"));
     expect(screen.getByText("Hello")).toBeInTheDocument();
   });
 
@@ -43,11 +44,11 @@ describe("the preview", () => {
     const user = userEvent.setup();
     mount();
 
-    expect(await screen.findByTitle("Preview of the message")).toHaveAttribute("srcdoc", "<p>render 1</p>");
+    expect(await screen.findByTitle("Preview of the message")).toHaveAttribute("srcdoc", previewDocument("<p>render 1</p>"));
     await user.click(await screen.findByRole("textbox", { name: /source/ }));
     await user.paste("x");
 
-    await waitFor(() => expect(screen.getByTitle("Preview of the message")).toHaveAttribute("srcdoc", "<p>render 2</p>"), WAIT);
+    await waitFor(() => expect(screen.getByTitle("Preview of the message")).toHaveAttribute("srcdoc", previewDocument("<p>render 2</p>")), WAIT);
     expect(previews(calls)).toHaveLength(2);
   });
 

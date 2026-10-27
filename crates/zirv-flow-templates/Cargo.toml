@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
 ammonia.workspace = true
@@ -16,5 +17,9 @@ serde.workspace = true
 serde_json.workspace = true
 zirv-flow-core.workspace = true
 
+[features]
+test-support = []
+
 [dev-dependencies]
 proptest.workspace = true
+zirv-flow-core = { workspace = true, features = ["test-support"] }

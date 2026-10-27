@@ -6,6 +6,8 @@
 //! entries and exits, their events and decisions, the segment's `computed_*` columns and the
 //! refreshes of the segments that reference this one all commit together.
 
+use std::time::Instant;
+
 use serde_json::Value;
 use zirv_flow_segments::{Catalog, Param, TraitStorage, compile, parse_and_validate};
 use zirv_flow_store::{
@@ -92,6 +94,7 @@ impl JobKind for SegmentRefresh {
         let trace = membership_trace(cause, &job_trace, segment_id, version.trace_id);
         let members = sql_query(compiled.members_sql());
         let job = (ctx.job_id(), ctx.attempts());
+        let started = Instant::now();
         let outcome = apply_refresh(
             ctx.conn(),
             &RefreshApply {
@@ -107,6 +110,7 @@ impl JobKind for SegmentRefresh {
             },
         )
         .await?;
+        record_refresh(started, outcome.entered + outcome.exited);
         tracing::info!(
             entered = outcome.entered,
             exited = outcome.exited,
@@ -115,6 +119,15 @@ impl JobKind for SegmentRefresh {
         );
         Ok(())
     }
+}
+
+/// Records `zirv_flow_segment_refresh_seconds`, the time `apply_refresh` took, and
+/// `zirv_flow_segment_refresh_people`, how many people entered or left the segment. Neither has a
+/// label: no segment or workspace names a series.
+fn record_refresh(started: Instant, people: i64) {
+    metrics::histogram!("zirv_flow_segment_refresh_seconds")
+        .record(started.elapsed().as_secs_f64());
+    metrics::histogram!("zirv_flow_segment_refresh_people").record(people as f64);
 }
 
 /// The compiler's catalog from the store's snapshot.
@@ -623,6 +636,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(records[0].cause, request.cause);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_refresh_records_its_duration_and_how_many_people_it_moved(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool).await;
+        define_trait(&pool, ws, "plan").await;
+        let (clock, _) = manual(OffsetDateTime::now_utc());
+        let seg = create(
+            &pool,
+            ws,
+            "Plan",
+            json!({"op": "eq", "trait": "plan", "value": "pro", "v": 1}),
+            &TraceContext::root(Cause::api("save")),
+        )
+        .await;
+        person(&pool, ws, "pro@example.com", "pro").await;
+        person(&pool, ws, "other@example.com", "pro").await;
+
+        run(
+            &pool,
+            ws,
+            seg.id,
+            "save",
+            TraceContext::root(Cause::api("job")),
+            &clock,
+        )
+        .await;
+        run(
+            &pool,
+            ws,
+            seg.id,
+            "schedule",
+            TraceContext::root(Cause::api("job")),
+            &clock,
+        )
+        .await;
+
+        let output = handle.render();
+        let sample = |name: &str| {
+            output.lines().find_map(|line| {
+                line.strip_prefix(name)?
+                    .strip_prefix(' ')?
+                    .parse::<f64>()
+                    .ok()
+            })
+        };
+        assert_eq!(
+            sample("zirv_flow_segment_refresh_seconds_count"),
+            Some(2.0),
+            "{output}"
+        );
+        assert_eq!(
+            sample("zirv_flow_segment_refresh_people_count"),
+            Some(2.0),
+            "{output}"
+        );
+        assert_eq!(
+            sample("zirv_flow_segment_refresh_people_sum"),
+            Some(2.0),
+            "{output}"
+        );
     }
 
     #[sqlx::test]

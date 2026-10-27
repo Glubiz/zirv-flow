@@ -12,6 +12,8 @@ pub mod events;
 pub mod flow;
 pub mod forwarding;
 pub mod freshness;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fuzz;
 mod ids;
 pub mod mapping;
 pub mod password;

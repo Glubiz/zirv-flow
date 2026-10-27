@@ -1,7 +1,7 @@
 import { Link } from "react-router";
 
 import { describeError, type components, type ErrorSummary, type Resource } from "../../api";
-import { Button, EmptyState, ErrorState, InlineError, LoadingState } from "../../ui";
+import { Button, EmptyState, ErrorState, InlineError, LoadingState, previewDocument } from "../../ui";
 import { formatDateTime } from "../../ui/format";
 import { issueBlockId } from "./blocks/document";
 import type { Change } from "./diff";
@@ -235,7 +235,7 @@ export function Frame({ title, check, marks, onRetry }: { title: string; check: 
   if (preview.html == null) return <pre className="fl-code tp-text">{preview.body ?? ""}</pre>;
   return (
     <div className="tp-frame">
-      <iframe title={title} sandbox="" srcDoc={withOutlines(preview.html, marks)} className="tp-iframe" />
+      <iframe title={title} sandbox="" srcDoc={previewDocument(withOutlines(preview.html, marks))} className="tp-iframe" />
     </div>
   );
 }

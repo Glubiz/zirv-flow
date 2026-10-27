@@ -199,8 +199,12 @@ pub async fn enqueue<'e>(executor: impl PgExecutor<'e>, job: &NewJob) -> Result<
                  trace_id, cause_kind, cause_id) \
              VALUES ($1, $2, $3, $4, $5, COALESCE($6, now()), $7, $8, $9, $10, $11) \
              ON CONFLICT DO NOTHING \
-             RETURNING kind) \
-         SELECT pg_notify($12, kind) FROM inserted",
+             RETURNING kind), \
+         notified AS ( \
+             SELECT pg_notify($12, kind) FROM inserted \
+             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = inserted.kind \
+                               AND run_at <= now())) \
+         SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n",
     )
     .bind(Uuid::new_v4())
     .bind(job.workspace_id.map(|id| id.as_uuid()))
@@ -264,7 +268,10 @@ pub async fn enqueue_many<'e>(
                        unique_key, trace_id, cause_kind, cause_id) \
              ON CONFLICT DO NOTHING \
              RETURNING kind), \
-         notified AS (SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k) \
+         notified AS ( \
+             SELECT pg_notify($12, k.kind) FROM (SELECT DISTINCT kind FROM inserted) k \
+             WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' AND kind = k.kind \
+                               AND run_at <= now())) \
          SELECT kind FROM inserted, (SELECT count(*) FROM notified) AS n",
     )
     .bind(&ids)
@@ -711,7 +718,11 @@ pub async fn retry_dead_job(
              WHERE id = $1 AND state = 'dead' \
              RETURNING id, workspace_id, kind, state, attempts, max_attempts, last_error, \
                        trace_id, cause_kind, cause_id, dead_at) \
-         SELECT updated.*, pg_notify($2, kind) AS notified FROM updated",
+         SELECT updated.*, \
+                CASE WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' \
+                                      AND kind = updated.kind AND run_at <= now()) \
+                     THEN pg_notify($2, kind) END AS notified \
+         FROM updated",
     )
     .bind(id)
     .bind(NOTIFY_CHANNEL)
@@ -895,6 +906,9 @@ fn truncate_error(error: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
     use serde_json::json;
     use sqlx::PgPool;
     use zirv_flow_core::{Slug, WorkspaceName};
@@ -1745,6 +1759,35 @@ mod tests {
         assert!(rows[1].1.is_none());
     }
 
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_live_enrollments_index_migration_accepts_the_index_built_by_hand(pool: PgPool) {
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 72)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE INDEX enrollments_live_idx ON enrollments (state, wake_at)              WHERE state IN ('active', 'waiting')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::migrate(&pool).await.unwrap();
+
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_indexes WHERE indexname = 'enrollments_live_idx'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, 1);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn depths_count_each_state_per_kind_and_age_only_runnable_ready_jobs(pool: PgPool) {
@@ -2054,5 +2097,354 @@ mod tests {
         zombie.commit().await.unwrap();
         let again = claim(&pool, &["a.kind"]).await.unwrap();
         assert_eq!(again.id, Uuid::from_u128(1));
+    }
+
+    /// How a stress producer enqueues.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Notify {
+        /// A plain insert, no `NOTIFY` at all (the control).
+        Never,
+        /// The pre-#298 statement: a `pg_notify` after every insert.
+        Always,
+        /// The production [`enqueue`].
+        Production,
+    }
+
+    #[derive(Debug)]
+    struct Stress {
+        commits_per_second: f64,
+        /// Share of samples in which at least one `COMMIT` waited on the database object lock.
+        sample_share: f64,
+        /// Share of in-flight `COMMIT` backends, over all samples, that were waiting.
+        commit_share: f64,
+        notifications: i64,
+    }
+
+    async fn stress(pool: &PgPool, mode: Notify, run_for: Duration) -> Stress {
+        const PRODUCERS: usize = 6;
+        const CONSUMERS: usize = 3;
+        sqlx::query("TRUNCATE jobs").execute(pool).await.unwrap();
+        let big = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(16)
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let mut listener = PgListener::connect_with(&big).await.unwrap();
+        listener.listen(NOTIFY_CHANNEL).await.unwrap();
+        let counter = tokio::spawn(async move {
+            let mut heard = 0_i64;
+            while listener.try_recv().await.is_ok() {
+                heard += 1;
+            }
+            heard
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let commits = Arc::new(AtomicU64::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..PRODUCERS {
+            let (pool, stop, commits) = (big.clone(), stop.clone(), commits.clone());
+            tasks.push(tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let mut tx = pool.begin().await.unwrap();
+                    match mode {
+                        Notify::Production => {
+                            enqueue(&mut *tx, &job("stress.kind")).await.unwrap();
+                        }
+                        Notify::Never | Notify::Always => {
+                            sqlx::query(
+                                "WITH inserted AS ( \
+                                     INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+                                     VALUES (gen_random_uuid(), 'stress.kind', '{}', gen_random_uuid(), \
+                                             'api', 'stress') RETURNING kind) \
+                                 SELECT CASE WHEN $1 THEN pg_notify($2, kind) END FROM inserted",
+                            )
+                            .bind(mode == Notify::Always)
+                            .bind(NOTIFY_CHANNEL)
+                            .execute(&mut *tx)
+                            .await
+                            .unwrap();
+                        }
+                    }
+                    tx.commit().await.unwrap();
+                    commits.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+        for _ in 0..CONSUMERS {
+            let (pool, stop) = (big.clone(), stop.clone());
+            tasks.push(tokio::spawn(async move {
+                while !stop.load(Ordering::Relaxed) {
+                    match claim_job(&pool, "stress", &["stress.kind"], LEASE, None)
+                        .await
+                        .unwrap()
+                    {
+                        Some(claimed) => {
+                            complete_job(&pool, claimed.id, claimed.lease_token)
+                                .await
+                                .unwrap();
+                        }
+                        None => tokio::time::sleep(Duration::from_millis(1)).await,
+                    }
+                }
+            }));
+        }
+        let started = std::time::Instant::now();
+        let (mut samples, mut waited, mut commit_backends, mut commit_waiters) =
+            (0_u64, 0_u64, 0_i64, 0_i64);
+        while started.elapsed() < run_for {
+            let (in_commit, waiting): (i64, i64) = sqlx::query_as(
+                "SELECT count(*) FILTER (WHERE a.query ILIKE 'COMMIT%'), \
+                        count(*) FILTER (WHERE a.query ILIKE 'COMMIT%' AND a.wait_event_type = 'Lock' \
+                                         AND a.wait_event = 'object') \
+                 FROM pg_stat_activity a \
+                 WHERE a.datname = current_database() AND a.pid <> pg_backend_pid() \
+                   AND a.state = 'active'",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            samples += 1;
+            waited += u64::from(waiting > 0);
+            commit_backends += in_commit;
+            commit_waiters += waiting;
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        stop.store(true, Ordering::Relaxed);
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let done = commits.load(Ordering::Relaxed);
+        big.close().await;
+        let notifications = counter.await.unwrap_or(-1);
+        let stress = Stress {
+            commits_per_second: done as f64 / elapsed,
+            sample_share: waited as f64 / samples.max(1) as f64,
+            commit_share: commit_waiters as f64 / commit_backends.max(1) as f64,
+            notifications,
+        };
+        eprintln!("stress {mode:?}: {stress:?} ({samples} samples)");
+        stress
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_NOTIFY to run the 18 s stress"]
+    async fn commits_do_not_wait_on_the_notify_lock_under_load(pool: PgPool) {
+        if std::env::var_os("ZIRV_FLOW_BENCH_NOTIFY").is_none() {
+            eprintln!("ZIRV_FLOW_BENCH_NOTIFY is not set: skipping the stress run");
+            return;
+        }
+        let run_for = Duration::from_secs(6);
+        let production = stress(&pool, Notify::Production, run_for).await;
+        let never = stress(&pool, Notify::Never, run_for).await;
+        let always = stress(&pool, Notify::Always, run_for).await;
+
+        eprintln!(
+            "RESULT never={:.0}/s share={:.3} | always={:.0}/s share={:.3} | production={:.0}/s share={:.3}",
+            never.commits_per_second,
+            never.commit_share,
+            always.commits_per_second,
+            always.commit_share,
+            production.commits_per_second,
+            production.commit_share,
+        );
+        assert!(never.sample_share < 0.02, "the control waits: {never:?}");
+        assert!(
+            always.commit_share > 0.2,
+            "a notify per commit no longer serialises commits: {always:?}"
+        );
+        assert!(
+            production.commit_share < 0.05,
+            "enqueue still serialises commits: {production:?}"
+        );
+        assert!(production.notifications * 20 < always.notifications.max(1));
+    }
+
+    /// Compares the three enqueue variants fairly: one discarded warm-up each, then
+    /// `ZIRV_FLOW_BENCH_NOTIFY_ROUNDS` rounds in a rotated order, `TRUNCATE jobs` before every run
+    /// (done by `stress`), once with the ready-kind index and once without it. Prints the median
+    /// and range of commits/s and the median lock-wait share; asserts nothing.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_NOTIFY_ROUNDS to measure"]
+    async fn the_enqueue_variants_compared_over_rotated_rounds(pool: PgPool) {
+        let Some(rounds) = std::env::var("ZIRV_FLOW_BENCH_NOTIFY_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&rounds| rounds > 0)
+        else {
+            eprintln!(
+                "ZIRV_FLOW_BENCH_NOTIFY_ROUNDS is not a positive count: skipping the comparison"
+            );
+            return;
+        };
+        let run_for = Duration::from_secs(6);
+        let variants = [Notify::Never, Notify::Always, Notify::Production];
+        for indexed in [true, false] {
+            if !indexed {
+                sqlx::query("DROP INDEX jobs_ready_kind_idx")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            for variant in variants {
+                stress(&pool, variant, run_for).await;
+            }
+            let mut results: Vec<(Notify, Vec<f64>, Vec<f64>)> = variants
+                .iter()
+                .map(|variant| (*variant, Vec::new(), Vec::new()))
+                .collect();
+            for round in 0..rounds {
+                for step in 0..variants.len() {
+                    let slot = (round + step) % variants.len();
+                    let run = stress(&pool, variants[slot], run_for).await;
+                    results[slot].1.push(run.commits_per_second);
+                    results[slot].2.push(run.commit_share);
+                }
+            }
+            for (variant, mut rates, mut shares) in results {
+                rates.sort_by(f64::total_cmp);
+                shares.sort_by(f64::total_cmp);
+                eprintln!(
+                    "SUMMARY index={indexed} {variant:?}: median {:.0}/s range {:.0}-{:.0} median share {:.3}",
+                    rates[rates.len() / 2],
+                    rates[0],
+                    rates[rates.len() - 1],
+                    shares[shares.len() / 2],
+                );
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_wake_check_uses_the_ready_kind_index_despite_a_large_backlog(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), 'big.kind', '{}', gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 5000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (FORMAT JSON) \
+             SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' \
+                                        AND kind = 'idle.kind' AND run_at <= now())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut indexes = Vec::new();
+        let mut stack = vec![&plan];
+        while let Some(node) = stack.pop() {
+            match node {
+                Value::Object(map) => {
+                    if let Some(Value::String(name)) = map.get("Index Name") {
+                        indexes.push(name.clone());
+                    }
+                    stack.extend(map.values());
+                }
+                Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+        assert_eq!(indexes, ["jobs_ready_kind_idx"], "{plan}");
+    }
+
+    async fn wait_for_notification(listener: &mut PgListener) -> Duration {
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), listener.recv())
+            .await
+            .expect("no wake-up within 5 seconds")
+            .unwrap();
+        started.elapsed()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_idle_queue_is_woken_as_fast_as_before(pool: PgPool) {
+        let mut listener = PgListener::connect_with(&pool).await.unwrap();
+        listener.listen(NOTIFY_CHANNEL).await.unwrap();
+
+        let before = std::time::Instant::now();
+        sqlx::query("SELECT pg_notify($1, 'a.kind')")
+            .bind(NOTIFY_CHANNEL)
+            .execute(&pool)
+            .await
+            .unwrap();
+        wait_for_notification(&mut listener).await;
+        let old = before.elapsed();
+
+        let before = std::time::Instant::now();
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        wait_for_notification(&mut listener).await;
+        let new = before.elapsed();
+
+        eprintln!("idle wake latency: old {old:?}, new {new:?}");
+        assert!(new < Duration::from_millis(500), "{new:?}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_busy_kind_skips_the_wake_but_other_kinds_and_idle_ones_still_wake(pool: PgPool) {
+        let mut listener = PgListener::connect_with(&pool).await.unwrap();
+        listener.listen(NOTIFY_CHANNEL).await.unwrap();
+        async fn heard(listener: &mut PgListener) -> bool {
+            tokio::time::timeout(Duration::from_millis(300), listener.recv())
+                .await
+                .is_ok()
+        }
+
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        assert!(heard(&mut listener).await, "the first job wakes");
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        assert!(
+            !heard(&mut listener).await,
+            "a backlog of the kind is already awake"
+        );
+        enqueue(&pool, &job("b.kind")).await.unwrap();
+        assert!(heard(&mut listener).await, "another kind wakes");
+
+        let mut later = job("c.kind");
+        later.run_at = Some(OffsetDateTime::now_utc() + time::Duration::hours(1));
+        enqueue(&pool, &later).await.unwrap();
+        let _ = heard(&mut listener).await;
+        enqueue(&pool, &job("c.kind")).await.unwrap();
+        assert!(heard(&mut listener).await, "a job due later is no backlog");
+
+        let mut rolled_back = pool.begin().await.unwrap();
+        enqueue(&mut *rolled_back, &job("d.kind")).await.unwrap();
+        rolled_back.rollback().await.unwrap();
+        assert!(!heard(&mut listener).await, "a rollback wakes nobody");
+        enqueue(&pool, &job("d.kind")).await.unwrap();
+        assert!(
+            heard(&mut listener).await,
+            "the retry after a rollback wakes"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn enqueue_many_wakes_only_idle_kinds(pool: PgPool) {
+        let mut listener = PgListener::connect_with(&pool).await.unwrap();
+        listener.listen(NOTIFY_CHANNEL).await.unwrap();
+        enqueue(&pool, &job("a.kind")).await.unwrap();
+        listener.recv().await.unwrap();
+
+        let inserted = enqueue_many(&pool, &[job("a.kind"), job("b.kind")])
+            .await
+            .unwrap();
+
+        assert_eq!(inserted, 2);
+        let woken = tokio::time::timeout(Duration::from_secs(2), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(woken.payload(), "b.kind");
+        let more = tokio::time::timeout(Duration::from_millis(300), listener.recv()).await;
+        assert!(more.is_err(), "a.kind is busy");
     }
 }

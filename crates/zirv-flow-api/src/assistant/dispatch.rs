@@ -436,8 +436,31 @@ impl Flight {
             "outcome" => outcome.as_str(),
         )
         .increment(1);
+        record_usage(self.feature, &finished);
         result
     }
+}
+
+/// Counts what a finished call used: `zirv_flow_ai_tokens_total{feature,direction}`,
+/// `zirv_flow_ai_estimated_cost_micros_total{feature}` and the `zirv_flow_ai_latency_seconds{feature}`
+/// histogram. The labels are the feature (a fixed name) and the direction (`input` or `output`):
+/// never a key, a model, a prompt or an output.
+fn record_usage(feature: &'static str, finished: &FinishedAiCall) {
+    for (direction, tokens) in [
+        ("input", finished.input_tokens),
+        ("output", finished.output_tokens),
+    ] {
+        metrics::counter!(
+            "zirv_flow_ai_tokens_total",
+            "feature" => feature,
+            "direction" => direction,
+        )
+        .increment(u64::from(tokens));
+    }
+    metrics::counter!("zirv_flow_ai_estimated_cost_micros_total", "feature" => feature)
+        .increment(u64::try_from(finished.estimated_cost_micros).unwrap_or(0));
+    metrics::histogram!("zirv_flow_ai_latency_seconds", "feature" => feature)
+        .record(f64::from(finished.latency_ms) / 1000.0);
 }
 
 /// Every repair attempt is a separate dispatch and passes the gates again.

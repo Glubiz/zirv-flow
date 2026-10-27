@@ -9,7 +9,7 @@ mod tests {
 
     use axum::Router;
     use axum::body::Body;
-    use axum::http::{Request, StatusCode, header};
+    use axum::http::{HeaderMap, Request, StatusCode, header};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use sqlx::PgPool;
@@ -35,6 +35,7 @@ mod tests {
 
     struct Reply {
         status: StatusCode,
+        headers: HeaderMap,
         body: Value,
         cookie: Option<String>,
     }
@@ -116,7 +117,8 @@ mod tests {
                 }
             }
         }
-        std::process::exit(i32::from(zirv_flow_render::host::run(None)));
+        let limit = (mode == "memory_limit").then_some(536_870_912);
+        std::process::exit(i32::from(zirv_flow_render::host::run(limit)));
     }
 
     async fn start_pool(mode: &str, deadline: Duration) -> RenderPool {
@@ -188,6 +190,7 @@ mod tests {
             .await
             .unwrap();
         let status = response.status();
+        let headers = response.headers().clone();
         let cookie = response
             .headers()
             .get(header::SET_COOKIE)
@@ -197,6 +200,7 @@ mod tests {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         Reply {
             status,
+            headers,
             body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
             cookie,
         }
@@ -2448,6 +2452,90 @@ mod tests {
         assert_eq!(version.body["version"], 1);
         assert_eq!(version.body["subject"], "Published");
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    }
+
+    fn assert_preview_headers(reply: &Reply) {
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(reply.headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert!(!reply.headers.contains_key(header::SET_COOKIE));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn previews_are_not_cached_or_sniffed_and_set_no_cookie(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Headers", email_doc("Hi", "x")).await;
+        let uri = f.templates(&format!("/{id}/preview"));
+        for auth in [Auth::Session(&f.lead), Auth::Key(&f.write)] {
+            let reply = f.call("POST", &uri, Some(json!({})), auth).await;
+            assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+            assert_eq!(reply.body["rendered"], true);
+            assert_preview_headers(&reply);
+        }
+        let refused = f.call("POST", &uri, Some(json!({})), Auth::Anonymous).await;
+        assert_eq!(refused.status, StatusCode::UNAUTHORIZED);
+        assert_preview_headers(&refused);
+
+        f.put_draft(&id, email_doc("Hi", "{{ person.nope }}")).await;
+        let blocked = f
+            .lead("POST", &format!("/{id}/preview"), Some(json!({})))
+            .await;
+        assert_eq!(blocked.status, StatusCode::OK);
+        assert_eq!(blocked.body["rendered"], false);
+        assert_preview_headers(&blocked);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_preview_that_doubles_a_string_hits_the_os_limit_and_the_next_preview_succeeds(
+        pool: PgPool,
+    ) {
+        if !cfg!(target_os = "linux") {
+            eprintln!("skipped: the OS memory limit is applied on Linux only");
+            return;
+        }
+        let render_pool = start_pool("memory_limit", Duration::from_secs(60)).await;
+        let f = fixture_with(&pool, Some(render_pool)).await;
+        let doubling = "{% set ns = namespace(s='xxxxxxxx') %}\
+            {% for i in range(60) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{{ ns.s | length }}";
+        let hostile = f.create("Memory limit", email_doc("Hi", doubling)).await;
+        let ordinary = f.create("Recovery", email_doc("Hi", "next preview")).await;
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let failed = f
+            .lead("POST", &format!("/{hostile}/preview"), Some(json!({})))
+            .await;
+        assert_eq!(
+            failed.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            failed.body
+        );
+        assert_eq!(
+            failed.headers[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        assert_eq!(failed.body["code"], "render_memory_limit");
+        assert_preview_headers(&failed);
+
+        let next = f
+            .lead("POST", &format!("/{ordinary}/preview"), Some(json!({})))
+            .await;
+        assert_eq!(next.status, StatusCode::OK, "{:?}", next.body);
+        assert_eq!(next.body["rendered"], true);
+        assert_eq!(next.body["subject"], "Hi");
+        assert!(next.body["html"].as_str().unwrap().contains("next preview"));
+        assert_preview_headers(&next);
+        let metrics = handle.render();
+        assert_eq!(
+            metrics
+                .lines()
+                .find(|line| line.starts_with("zirv_flow_render_restarts_total ")),
+            Some("zirv_flow_render_restarts_total 1"),
+            "{metrics}"
+        );
     }
 
     #[sqlx::test]
