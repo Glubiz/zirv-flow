@@ -135,6 +135,7 @@ impl Drop for Subscription {
             if slot.viewers == 0 {
                 slots.remove(&self.workspace);
             }
+            metrics::gauge!("zirv_flow_debugger_clients").decrement(1.0);
         }
     }
 }
@@ -175,6 +176,7 @@ impl DebuggerHub {
             return None;
         }
         slot.viewers += 1;
+        metrics::gauge!("zirv_flow_debugger_clients").increment(1.0);
         Some(Subscription {
             hub: Arc::clone(&self.inner),
             workspace,
@@ -596,6 +598,13 @@ async fn pump(mut viewer: Viewer, start: i64, reset: bool) {
     }
 }
 
+/// Records `zirv_flow_debugger_delivery_seconds`: from the feed row's `at` to the frame write.
+/// It is the server-side part only; the end-to-end figure counts from the inbox append.
+fn record_delivery(fed_at: time::OffsetDateTime) {
+    let seconds = (time::OffsetDateTime::now_utc() - fed_at).as_seconds_f64();
+    metrics::histogram!("zirv_flow_debugger_delivery_seconds").record(seconds.max(0.0));
+}
+
 /// Sends every row the viewer has not sent, then settles the watermark. False when the
 /// client is gone.
 async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -> bool {
@@ -630,13 +639,14 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
         .unwrap_or_default();
         let count = rows.len();
         for item in rows {
+            let fed_at = item.at;
             cursor.deliver(item.seq);
             cursor.advance(&present, Instant::now(), PATIENCE);
             match viewer
                 .frames
                 .try_send(item_frame(item, viewer.reveal, cursor.watermark))
             {
-                Ok(()) => {}
+                Ok(()) => record_delivery(fed_at),
                 Err(mpsc::error::TrySendError::Closed(_)) => return false,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     // Skip ahead rather than wait: a slow viewer must not hold anything.
@@ -879,6 +889,54 @@ mod tests {
 
         assert_eq!(hub.viewers(ws), 0);
         assert!(hub.inner.watched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_clients_gauge_follows_the_open_streams() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@127.0.0.1:1/zirv_flow")
+            .unwrap();
+        let hub = DebuggerHub::new(pool);
+        let (ws, other) = (WorkspaceId::new(), WorkspaceId::new());
+
+        let first = hub.subscribe(ws).unwrap();
+        let second = hub.subscribe(other).unwrap();
+        let open =
+            crate::test_support::metric_sample(&handle.render(), "zirv_flow_debugger_clients");
+        drop(first);
+        let after_one =
+            crate::test_support::metric_sample(&handle.render(), "zirv_flow_debugger_clients");
+        drop(second);
+        let after_all =
+            crate::test_support::metric_sample(&handle.render(), "zirv_flow_debugger_clients");
+
+        assert_eq!(
+            (open, after_one, after_all),
+            (Some(2.0), Some(1.0), Some(0.0))
+        );
+    }
+
+    #[test]
+    fn a_delivery_is_timed_from_the_feed_rows_time_and_never_below_zero() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_delivery(time::OffsetDateTime::now_utc() - time::Duration::seconds(2));
+            record_delivery(time::OffsetDateTime::now_utc() + time::Duration::hours(1));
+        });
+
+        let output = handle.render();
+        let series = |name| crate::test_support::metric_sample(&output, name);
+        assert_eq!(
+            series("zirv_flow_debugger_delivery_seconds_count"),
+            Some(2.0)
+        );
+        let total = series("zirv_flow_debugger_delivery_seconds_sum").unwrap();
+        assert!((2.0..3.0).contains(&total), "{output}");
     }
 
     #[tokio::test]

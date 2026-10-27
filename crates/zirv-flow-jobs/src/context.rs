@@ -1,5 +1,6 @@
 //! What a running handler sees of its job.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -38,10 +39,12 @@ pub struct JobContext<'a> {
     connection: &'a mut PgConnection,
     job: &'a ClaimedJob,
     event_retention: EventRetention,
+    export_max_bytes: u64,
     message_retention: MessageRetention,
     decision_retention: DecisionRetention,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
+    ledger_dir: Option<Arc<PathBuf>>,
     keyring: Option<Arc<Keyring>>,
     egress: Arc<EgressPolicy>,
     rate_limits: Arc<RateLimits>,
@@ -59,10 +62,12 @@ impl<'a> JobContext<'a> {
             connection,
             job,
             event_retention: EventRetention::default(),
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
             ingest: None,
             identifier_key: None,
+            ledger_dir: None,
             keyring: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
@@ -139,6 +144,17 @@ impl<'a> JobContext<'a> {
         &self.event_retention
     }
 
+    /// Gives the handler the operator's person export size cap.
+    pub(crate) fn with_export_max_bytes(mut self, bytes: u64) -> Self {
+        self.export_max_bytes = bytes;
+        self
+    }
+
+    /// The most uncompressed bytes a person export may hold.
+    pub fn export_max_bytes(&self) -> u64 {
+        self.export_max_bytes
+    }
+
     /// Gives the handler the operator's message retention settings.
     pub(crate) fn with_message_retention(mut self, settings: MessageRetention) -> Self {
         self.message_retention = settings;
@@ -170,6 +186,12 @@ impl<'a> JobContext<'a> {
     /// Gives the handler the key that hashes identifiers.
     pub(crate) fn with_identifier_key(mut self, key: Option<Arc<HmacKey>>) -> Self {
         self.identifier_key = key;
+        self
+    }
+
+    /// Gives the handler the directory the erasure ledger is copied to (`privacy.ledger_dir`).
+    pub(crate) fn with_ledger_dir(mut self, dir: Option<Arc<PathBuf>>) -> Self {
+        self.ledger_dir = dir;
         self
     }
 
@@ -221,6 +243,11 @@ impl<'a> JobContext<'a> {
     /// The key that hashes identifiers; none when the worker has no master key.
     pub(crate) fn identifier_key(&self) -> Option<Arc<HmacKey>> {
         self.identifier_key.clone()
+    }
+
+    /// Where completed erasures are copied; none when `privacy.ledger_dir` is unset.
+    pub(crate) fn ledger_dir(&self) -> Option<Arc<PathBuf>> {
+        self.ledger_dir.clone()
     }
 
     /// The ingest drain's settings; none when the worker was given no pool for them.

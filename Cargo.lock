@@ -5913,6 +5913,7 @@ name = "zirv-flow-store"
 version = "0.164.0"
 dependencies = [
  "flate2",
+ "futures-util",
  "hashbrown 0.17.1",
  "metrics",
  "metrics-exporter-prometheus",

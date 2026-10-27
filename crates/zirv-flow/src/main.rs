@@ -125,7 +125,15 @@ async fn run(
     }
 
     if let Command::Admin(admin_command) = &command {
-        if let AdminCommand::ReplayErasures { workspace } = admin_command {
+        if let AdminCommand::ExportLedger { out } = admin_command {
+            // Exporting reads the ledger table only: no key and no password.
+            let pool = match open_database(&config).await {
+                Ok(pool) => pool,
+                Err(message) => return database_error(stderr, message),
+            };
+            return run_export_ledger(out, &pool, stdout, stderr).await;
+        }
+        if let AdminCommand::ReplayErasures { workspace, from } = admin_command {
             // Replaying needs the HMAC root to hash identifiers, and no password.
             let keyring = match load_keyring(&config) {
                 Ok(keyring) => keyring,
@@ -145,7 +153,15 @@ async fn run(
                     return 2;
                 }
             };
-            return run_replay_erasures(workspace.as_deref(), &root, &pool, stdout, stderr).await;
+            return run_replay_erasures(
+                workspace.as_deref(),
+                from.as_deref(),
+                &root,
+                &pool,
+                stdout,
+                stderr,
+            )
+            .await;
         }
         if let AdminCommand::EvaluateAssistant { workspace, case } = admin_command {
             // Evaluating opens the provider key, so it needs the keyring, and no password.
@@ -383,6 +399,11 @@ async fn run_roles_reporting(
         .as_ref()
         .map(|secrets| Arc::clone(&secrets.hmac_root));
     let ops_bind = ops_bind(roles, config);
+    if roles.worker
+        && let Err(code) = check_ledger_dir(config)
+    {
+        return code;
+    }
     // A bad server configuration or a taken ops address stops the process before any role starts.
     let render_pool = if roles.serve || roles.worker {
         match start_render_pool(config).await {
@@ -458,6 +479,7 @@ async fn run_roles_reporting(
         worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
         worker_config.event_retention = config.events_retention();
+        worker_config.export_max_bytes = config.export_max_bytes();
         worker_config.message_retention = config.messages_retention();
         worker_config.decision_retention = config.decisions_retention();
         worker_config.redaction_key = hmac_root
@@ -466,6 +488,7 @@ async fn run_roles_reporting(
         worker_config.identifier_key = hmac_root
             .as_deref()
             .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Identifier)));
+        worker_config.ledger_dir = config.ledger_dir().map(|dir| Arc::new(dir.to_path_buf()));
         worker_config.public_url = config.public_url();
         worker_config.tracking_key = hmac_root
             .as_deref()
@@ -565,6 +588,23 @@ fn system_resolver() -> Option<Arc<dyn zirv_flow_jobs::DnsResolver>> {
 /// Starts the render-host children this process renders through: copies of this executable
 /// running the hidden `render-host` command. On failure it reports the problem and returns the
 /// exit code.
+/// With `privacy.ledger_dir` set, proves the directory takes a durable write and rename before any
+/// worker starts; refuses to start otherwise. Nothing is checked when the key is unset.
+fn check_ledger_dir(config: &Config) -> Result<(), u8> {
+    let Some(dir) = config.ledger_dir() else {
+        return Ok(());
+    };
+    zirv_flow_store::check_ledger_dir(dir).map_err(|error| {
+        error!(
+            key = "privacy.ledger_dir",
+            path = %dir.display(),
+            %error,
+            "privacy.ledger_dir cannot be written; fix the directory or unset the key"
+        );
+        1_u8
+    })
+}
+
 async fn start_render_pool(config: &Config) -> Result<zirv_flow_render::RenderPool, u8> {
     let program = std::env::current_exe().map_err(|error| {
         error!(%error, "could not find this executable to start the render host");
@@ -960,6 +1000,9 @@ async fn run_admin(
         AdminCommand::ReplayErasures { .. } => {
             unreachable!("replay-erasures is handled before the password is read")
         }
+        AdminCommand::ExportLedger { .. } => {
+            unreachable!("export-ledger is handled before the password is read")
+        }
         AdminCommand::RotateMasterKey => {
             unreachable!("rotate-master-key is handled before the password is read")
         }
@@ -1038,22 +1081,53 @@ async fn run_evaluate_assistant(
     }
 }
 
+async fn run_export_ledger(
+    out: &Path,
+    pool: &PgPool,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    match zirv_flow_api::admin::export_ledger(pool, out).await {
+        Ok(report) => {
+            let _ = writeln!(
+                stdout,
+                "exported {} ledger file(s) written, {} already there",
+                report.written, report.unchanged
+            );
+            0
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "error: admin: {error}");
+            1
+        }
+    }
+}
+
 async fn run_replay_erasures(
     workspace: Option<&str>,
+    from: Option<&Path>,
     root: &zirv_flow_store::HmacRoot,
     pool: &PgPool,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> u8 {
     let context = zirv_flow_api::admin::Context::system();
-    match zirv_flow_api::admin::replay_erasures(pool, &context, workspace, root).await {
+    match zirv_flow_api::admin::replay_erasures(pool, &context, workspace, root, from).await {
         Ok(report) => {
-            let _ = writeln!(
+            let _ = write!(
                 stdout,
                 "replayed {} erasure request(s): {} suppression(s) added, {} person(s) erased, \
                  {} pending inbox row(s) removed",
                 report.requests, report.suppressions, report.people, report.inbox_rows
             );
+            if from.is_some() {
+                let _ = write!(
+                    stdout,
+                    "; {} ledger entr(ies) merged, {} skipped for an unknown workspace",
+                    report.merged, report.skipped_workspaces
+                );
+            }
+            let _ = writeln!(stdout);
             0
         }
         Err(error) => {
@@ -1475,7 +1549,10 @@ endpoint = \"http://collector:4318/\""
     #[tokio::test]
     async fn replay_erasures_needs_the_master_key_and_asks_for_no_password() {
         let (code, output) = start_without_database(
-            Command::Admin(AdminCommand::ReplayErasures { workspace: None }),
+            Command::Admin(AdminCommand::ReplayErasures {
+                workspace: None,
+                from: None,
+            }),
             None,
         )
         .await;
@@ -1523,9 +1600,10 @@ endpoint = \"http://collector:4318/\""
         let mut stderr = Vec::new();
         let key = zirv_flow_store::HmacRoot::bootstrap_from(&key);
 
-        let code = run_replay_erasures(Some("ours"), &key, &pool, &mut stdout, &mut stderr).await;
+        let code =
+            run_replay_erasures(Some("ours"), None, &key, &pool, &mut stdout, &mut stderr).await;
         let unknown =
-            run_replay_erasures(Some("nope"), &key, &pool, &mut stdout, &mut stderr).await;
+            run_replay_erasures(Some("nope"), None, &key, &pool, &mut stdout, &mut stderr).await;
 
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
         assert_eq!(
@@ -1550,6 +1628,357 @@ endpoint = \"http://collector:4318/\""
             .map(|entry| entry.action)
             .collect();
         assert!(audited.contains(&"privacy.erasures_replayed".to_owned()));
+    }
+
+    struct LedgerDir(std::path::PathBuf);
+
+    impl LedgerDir {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("zirv-flow-ledger-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for LedgerDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ledger_config(dir: Option<&Path>) -> Config {
+        let mut env = database_env("postgres://localhost/database");
+        if let Some(dir) = dir {
+            env.push((
+                "ZIRV_FLOW_PRIVACY__LEDGER_DIR".into(),
+                format!("{:?}", dir.display().to_string()).into(),
+            ));
+        }
+        Config::load(None, env).unwrap()
+    }
+
+    #[test]
+    fn the_startup_check_passes_when_the_key_is_unset_or_the_directory_is_writable() {
+        let dir = LedgerDir::new();
+
+        assert_eq!(check_ledger_dir(&ledger_config(None)), Ok(()));
+        assert_eq!(check_ledger_dir(&ledger_config(Some(&dir.0))), Ok(()));
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_startup_check_refuses_an_unwritable_directory_naming_the_key_and_the_path() {
+        let dir = LedgerDir::new();
+        let not_a_directory = dir.0.join("plain-file");
+        fs::write(&not_a_directory, b"x").unwrap();
+        let (logs, _guard) = capture_logs();
+
+        for bad in [not_a_directory, dir.0.join("absent")] {
+            assert_eq!(check_ledger_dir(&ledger_config(Some(&bad))), Err(1));
+            let lines = logs.json_lines();
+            let last = lines.last().unwrap();
+            assert_eq!(last["level"], "ERROR");
+            assert_eq!(last["fields"]["key"], "privacy.ledger_dir");
+            assert_eq!(last["fields"]["path"], bad.display().to_string());
+        }
+    }
+
+    /// A scratch database on the server of `pool`, migrated, with the workspace when one is given.
+    async fn scratch_database(
+        pool: &PgPool,
+        workspace: zirv_flow_core::WorkspaceId,
+    ) -> (PgPool, String) {
+        let name = format!("zirv_flow_restore_{}", uuid::Uuid::now_v7().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+            .execute(pool)
+            .await
+            .unwrap();
+        let options = pool.connect_options().as_ref().clone().database(&name);
+        let scratch = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .unwrap();
+        zirv_flow_store::migrate(&scratch).await.unwrap();
+        sqlx::query("INSERT INTO workspaces (id, name, slug) VALUES ($1, 'ours', 'ours')")
+            .bind(workspace.as_uuid())
+            .execute(&scratch)
+            .await
+            .unwrap();
+        (scratch, name)
+    }
+
+    async fn drop_scratch(pool: &PgPool, scratch: PgPool, name: &str) {
+        scratch.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_ada(pool: &PgPool, ws: zirv_flow_core::WorkspaceId) -> uuid::Uuid {
+        let outcomes = zirv_flow_store::apply_profile_batch(
+            pool,
+            ws,
+            &[zirv_flow_store::ProfileRecord {
+                source: "crm".into(),
+                stream: "s".into(),
+                record_key: "1".into(),
+                identifiers: vec![("email".into(), "ada@example.com".into())],
+                traits: serde_json::Map::new(),
+                observed_at: time::OffsetDateTime::now_utc(),
+                trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+            }],
+        )
+        .await
+        .unwrap();
+        let zirv_flow_store::ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        person_id
+    }
+
+    async fn ours(pool: &PgPool) -> zirv_flow_core::WorkspaceId {
+        zirv_flow_store::create_workspace(
+            pool,
+            &zirv_flow_core::WorkspaceName::parse("ours").unwrap(),
+            &zirv_flow_core::Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replaying_from_a_directory_re_erases_a_person_a_restored_backup_brings_back(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let root =
+            zirv_flow_store::HmacRoot::bootstrap_from(&zirv_flow_store::MasterKey::generate());
+        let key = root.hmac_key(zirv_flow_store::HmacPurpose::Identifier);
+        let ws = ours(&pool).await;
+        let person = seed_ada(&pool, ws).await;
+        let trace = zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t"));
+        // The live database erases the person and copies the ledger entry to the directory.
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let request = zirv_flow_store::request_erasure(&mut tx, ws, person, &key, None, &trace)
+            .await
+            .unwrap()
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::erase_person(&mut tx, ws, request.id, &key, &[], &trace)
+            .await
+            .unwrap();
+        let entry = zirv_flow_store::find_ledger_entry(&mut tx, ws, request.id)
+            .await
+            .unwrap()
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let dir = LedgerDir::new();
+        zirv_flow_store::write_ledger_file(&dir.0, &entry).unwrap();
+        // An older backup: the same workspace and person, and no ledger row.
+        let (restored, name) = scratch_database(&pool, ws).await;
+        // The restore brings back the same person id.
+        let back = person;
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(back)
+            .bind(ws.as_uuid())
+            .execute(&restored)
+            .await
+            .unwrap();
+        let hash = zirv_flow_core::people::identifier_hash(
+            &key,
+            &zirv_flow_core::people::Identifier::parse("email", "ada@example.com").unwrap(),
+        );
+        assert!(
+            zirv_flow_store::find_person(&restored, ws, back)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !zirv_flow_store::is_suppressed(&restored, ws, &hash)
+                .await
+                .unwrap()
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_replay_erasures(
+            None,
+            Some(&dir.0),
+            &root,
+            &restored,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert!(
+            zirv_flow_store::find_person(&restored, ws, back)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            zirv_flow_store::is_suppressed(&restored, ws, &hash)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "replayed 1 erasure request(s): 1 suppression(s) added, 1 person(s) erased, \
+             0 pending inbox row(s) removed; 1 ledger entr(ies) merged, \
+             0 skipped for an unknown workspace\n"
+        );
+        drop_scratch(&pool, restored, &name).await;
+    }
+
+    fn ledger_entry(workspace: uuid::Uuid) -> zirv_flow_store::LedgerEntry {
+        zirv_flow_store::LedgerEntry {
+            format: zirv_flow_store::LEDGER_FORMAT.to_owned(),
+            id: uuid::Uuid::now_v7(),
+            workspace_id: workspace,
+            person_id: uuid::Uuid::now_v7(),
+            person_ids: Vec::new(),
+            identifier_hashes: vec!["07".repeat(32)],
+            identifier_kinds: vec!["email".to_owned()],
+            requested_by: None,
+            requested_at: time::OffsetDateTime::now_utc(),
+            completed_at: time::OffsetDateTime::now_utc(),
+            trace_id: uuid::Uuid::now_v7(),
+            restore_note: String::new(),
+        }
+    }
+
+    async fn ledger_rows(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM erasure_requests")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn replay_from_an_empty_a_good_and_a_corrupt_directory(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let root =
+            zirv_flow_store::HmacRoot::bootstrap_from(&zirv_flow_store::MasterKey::generate());
+        let ws = ours(&pool).await;
+        let empty = LedgerDir::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code =
+            run_replay_erasures(None, Some(&empty.0), &root, &pool, &mut stdout, &mut stderr).await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .ends_with("; 0 ledger entr(ies) merged, 0 skipped for an unknown workspace\n")
+        );
+
+        // A good file for this workspace and one for a workspace this database lacks.
+        let good = LedgerDir::new();
+        zirv_flow_store::write_ledger_file(&good.0, &ledger_entry(ws.as_uuid())).unwrap();
+        zirv_flow_store::write_ledger_file(&good.0, &ledger_entry(uuid::Uuid::now_v7())).unwrap();
+        let mut stdout = Vec::new();
+        let code =
+            run_replay_erasures(None, Some(&good.0), &root, &pool, &mut stdout, &mut stderr).await;
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .ends_with("; 1 ledger entr(ies) merged, 1 skipped for an unknown workspace\n")
+        );
+        assert_eq!(ledger_rows(&pool).await, 1);
+
+        // One corrupt file stops the command, naming it; the good file beside it is not merged.
+        let mixed = LedgerDir::new();
+        zirv_flow_store::write_ledger_file(&mixed.0, &ledger_entry(ws.as_uuid())).unwrap();
+        fs::write(mixed.0.join("broken.json"), b"{ not json").unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code =
+            run_replay_erasures(None, Some(&mixed.0), &root, &pool, &mut stdout, &mut stderr).await;
+        assert_eq!(code, 1);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "error: admin: broken.json is not a valid ledger file\n"
+        );
+        assert_eq!(ledger_rows(&pool).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn exporting_the_ledger_round_trips_into_a_fresh_database(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let root =
+            zirv_flow_store::HmacRoot::bootstrap_from(&zirv_flow_store::MasterKey::generate());
+        let ws = ours(&pool).await;
+        for status in ["completed", "pending"] {
+            sqlx::query(
+                "INSERT INTO erasure_requests \
+                    (id, workspace_id, person_id, identifier_hashes, identifier_kinds, status, \
+                     completed_at, trace_id) \
+                 VALUES (gen_random_uuid(), $1, gen_random_uuid(), $2, ARRAY['email'], $3, now(), \
+                         gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(vec![vec![7_u8; 32]])
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let dir = LedgerDir::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_export_ledger(&dir.0, &pool, &mut stdout, &mut stderr).await;
+
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "exported 1 ledger file(s) written, 0 already there\n"
+        );
+        let (fresh, name) = scratch_database(&pool, ws).await;
+        let code = run_replay_erasures(
+            None,
+            Some(&dir.0),
+            &root,
+            &fresh,
+            &mut Vec::new(),
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&stderr));
+        let completed: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM erasure_requests WHERE status = 'completed'")
+                .fetch_one(&fresh)
+                .await
+                .unwrap();
+        assert_eq!(completed, 1);
+        let mut stdout = Vec::new();
+        let again = run_export_ledger(&dir.0, &pool, &mut stdout, &mut stderr).await;
+        assert_eq!(again, 0);
+        assert_eq!(
+            String::from_utf8(stdout).unwrap(),
+            "exported 0 ledger file(s) written, 1 already there\n"
+        );
+        let missing =
+            run_export_ledger(&dir.0.join("absent"), &pool, &mut Vec::new(), &mut stderr).await;
+        assert_eq!(missing, 1);
+        drop_scratch(&pool, fresh, &name).await;
     }
 
     #[tokio::test]

@@ -125,6 +125,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](#render-host) |
 | `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
+| `privacy.export_max_bytes` | u64 | 268435456 | 1048576 to 4294967296; the most uncompressed JSON one person export may hold; past it the export fails with `export_too_large` |
+| `privacy.ledger_dir` | path | unset | a directory on storage shared by every worker where each completed erasure is also written as a file; see [After a restore](#privacy-ledger-dir) |
 | `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `tracking.prefetch_user_agents` | list of strings | `[]` | extra user-agent fragments (case-insensitive) that mark an open as automated, added to the generic markers; see [Tracking and unsubscribe links](#tracking-and-unsubscribe-links) |
@@ -159,7 +161,8 @@ Each secret gets its own random data key (XChaCha20-Poly1305), and the master
 key wraps that data key; the database holds only ciphertext, the wrapped key and
 the id of the wrapping master key. A database dump without the master key
 reveals no credential, and the API never returns one. A lost master key means
-the stored credentials must be entered again.
+the stored secrets must be created again, and every hash and tracking token made
+before is dead; see [Secrets and the master key](docs/operations/secrets.md).
 
 #### Workspace credentials
 
@@ -299,6 +302,92 @@ fail a request or job; spans are batched, a full queue drops spans, and the
 process flushes what is queued (up to 5 seconds) when it shuts down. The log
 output is the same with or without export. `log.filter` also decides which
 spans are exported, so a filter such as `warn` exports none.
+
+## Metrics
+
+`GET /metrics` serves Prometheus text with the `zirv_flow_` prefix. Label values come from
+closed sets (a route template, a kind, an outcome, a feature) or are ids; no email, phone, name,
+property value, key, prompt or model output is ever a label. The queue, enrollment, freshness,
+destination and dirty-set gauges are sampled by the scheduler leader, so they appear where the
+leader runs. The enrollment gauges read the live rows through `enrollments_live_idx` under a 5 second
+statement timeout; at 11 million live rows the count takes about half a second and the overdue-timer
+lookup well under a millisecond. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
+table.
+
+| Series | Type | Labels | What it measures |
+|--------|------|--------|------------------|
+| `zirv_flow_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests by matched route template |
+| `zirv_flow_http_request_duration_seconds` | histogram | `method`, `route` | HTTP request latency |
+| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state |
+| `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
+| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead` |
+| `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
+| `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
+| `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
+| `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages` or `decision_records` |
+| `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
+| `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
+| `zirv_flow_ingest_requests_total` | counter | `endpoint`, `status` | Ingestion requests |
+| `zirv_flow_ingest_items_total` | counter | `kind` | Items accepted into the inbox |
+| `zirv_flow_ingest_applied_total` | counter | `kind`, `outcome` | Inbox items applied, by validation outcome |
+| `zirv_flow_ingest_late_total` | counter | none | Events that arrived late |
+| `zirv_flow_ingest_inbox_age_seconds` | gauge | none | Age of the oldest unprocessed inbox row |
+| `zirv_flow_webhook_requests_total` | counter | `outcome` | Inbound webhook requests |
+| `zirv_flow_debugger_clients` | gauge | none | Open debugger streams on this process |
+| `zirv_flow_debugger_delivery_seconds` | histogram | none | Server side of debugger latency: from the feed row's `at` to the frame write. The end-to-end figure counts from the inbox append and is measured from `events.received_at` |
+| `zirv_flow_explorer_query_seconds` | histogram | `kind` | Explorer query duration; `kind` is `count`, `breakdown`, `list` or `export` |
+| `zirv_flow_explorer_timeouts_total` | counter | `kind` | Explorer queries that ran past their statement timeout (503 `query_timeout`) |
+| `zirv_flow_explorer_exports_total` | counter | none | Explorer exports started |
+| `zirv_flow_decision_append_seconds` | histogram | none | Time of one decision-log append call (a batch is one observation); records nothing in a `bench-no-decisions` build |
+| `zirv_flow_decision_log_bytes` | gauge | none | Total size of the decision-log partitions, refreshed by the `decisions.retention` job |
+| `zirv_flow_decision_log_partitions` | gauge | none | Decision-log partitions, the default one included |
+| `zirv_flow_sync_runs_total` | counter | `outcome` | Ended sync runs |
+| `zirv_flow_sync_run_duration_seconds` | histogram | none | Sync run duration |
+| `zirv_flow_sync_records_total` | counter | `outcome` | Records of committed sync batches |
+| `zirv_flow_sync_events_total` | counter | `outcome` | Events of committed sync batches |
+| `zirv_flow_stream_freshness_seconds` | gauge | `workspace`, `stream` | Age of a stream's data |
+| `zirv_flow_stream_state` | gauge | `workspace`, `stream` | 0 fresh, 1 stale, 2 failing |
+| `zirv_flow_streams` | gauge | `workspace`, `state` | Enabled streams in each state |
+| `zirv_flow_stream_lag_messages` | gauge | `workspace`, `stream` | Messages behind, for consumer streams |
+| `zirv_flow_source_requests_total` | counter | `source_type`, `outcome` | Source HTTP requests |
+| `zirv_flow_source_retries_total` | counter | `source_type`, `reason` | Source request retries |
+| `zirv_flow_source_oauth_total` | counter | `outcome` | Source token fetches |
+| `zirv_flow_source_rate_limit_wait_seconds_total` | gauge | `source_type` | Seconds spent waiting on a source's rate limit |
+| `zirv_flow_source_db_batches_total` | counter | `source_type` | Database source batches |
+| `zirv_flow_source_db_errors_total` | counter | `source_type`, `reason` | Database source errors |
+| `zirv_flow_kafka_fetches_total` | counter | `outcome` | Kafka fetches |
+| `zirv_flow_kafka_offset_resets_total` | counter | none | Kafka offset resets |
+| `zirv_flow_segment_refresh_seconds` | histogram | none | Duration of one `segment.refresh` |
+| `zirv_flow_segment_refresh_people` | histogram | none | People who entered or left the segment in one refresh |
+| `zirv_flow_segment_dirty_backlog` | gauge | none | People marked dirty, over all workspaces |
+| `zirv_flow_segment_dirty_age_seconds` | gauge | none | Age of the oldest dirty mark |
+| `zirv_flow_flow_enrollments_total` | counter | `trigger`, `outcome` | People a `flow.enroll` enrolled or found enrolled |
+| `zirv_flow_flow_enroll_skips_total` | counter | `trigger`, `reason` | Enrollments refused, by reason |
+| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting` |
+| `zirv_flow_enrollments_last_sample_timestamp_seconds` | gauge | none | Unix time of the last successful enrollment sample; alert on it going stale, since a failed sample leaves the gauges at their last values |
+| `zirv_flow_timer_lateness_seconds` | gauge | none | Age of the oldest `waiting` enrollment whose `wake_at` has passed; 0 with none |
+| `zirv_flow_timer_wake_lateness_seconds` | histogram | none | Time between a timer's `wake_at` and its `flow.step` running |
+| `zirv_flow_destination_queue_depth` | gauge | `workspace`, `destination` | Items waiting for delivery |
+| `zirv_flow_destination_queue_oldest_seconds` | gauge | `workspace`, `destination` | Age of the oldest waiting item |
+| `zirv_flow_destination_attempts_total` | counter | `workspace`, `destination` | Delivery attempts |
+| `zirv_flow_destination_outcomes_total` | counter | `workspace`, `destination`, `outcome` | Delivery attempts by outcome |
+| `zirv_flow_delivery_attempt_record_failures_total` | counter | `workspace` | Attempts whose record could not be written |
+| `zirv_flow_destination_forwarding_depth` | gauge | `workspace`, `destination` | Forwarding outbox rows waiting |
+| `zirv_flow_destination_forwarding_lag_seconds` | gauge | `workspace`, `destination` | How long the oldest outbox row has been past due |
+| `zirv_flow_destination_forwarding_dead_total` | counter | none | Outbox rows settled as dead letters |
+| `zirv_flow_provider_feedback_total` | counter | `outcome` | Provider feedback received |
+| `zirv_flow_render_duration_seconds` | histogram | `channel` | Template render duration |
+| `zirv_flow_render_wait_seconds` | histogram | none | Wait for a render host |
+| `zirv_flow_render_failures_total` | counter | `reason` | Failed renders |
+| `zirv_flow_render_restarts_total` | counter | none | Render host restarts |
+| `zirv_flow_ai_calls_total` | counter | `feature`, `outcome` | Assistant calls by feature and outcome |
+| `zirv_flow_ai_refusals_total` | counter | `reason` | Calls refused before the provider, including `budget_exceeded` |
+| `zirv_flow_ai_tokens_total` | counter | `feature`, `direction` | Tokens used; `direction` is `input` or `output` |
+| `zirv_flow_ai_estimated_cost_micros_total` | counter | `feature` | Estimated cost of finished calls, in micros |
+| `zirv_flow_ai_latency_seconds` | histogram | `feature` | Provider call latency |
+| `zirv_flow_ai_provider_faults_total` | counter | `feature`, `reason` | Provider replies outside the reserved bounds |
+| `zirv_flow_ai_draft_runs_total` | counter | `kind`, `outcome` | Draft runs |
+| `zirv_flow_ai_drafts_accepted_total` | counter | `kind` | Drafts a person accepted |
 
 ## Requirements and database migrations
 
@@ -1008,6 +1097,15 @@ destination, with an idempotency key that is stable across retries; a failing de
 and then shown as `failed`, and never blocks the erasure. The ledger is the one place that keeps the
 person id of an erased person, by design.
 
+The logs hold no identifier values: no email, phone, external id, name or trait value, in the
+message or in a span field, and no keyed hash of one. The end-to-end test
+`default_level_logs_hold_no_identifier_value_through_the_whole_privacy_scenario`
+(`crates/zirv-flow/src/e2e/privacy.rs`) captures the real JSON log layer at the default `info`
+level through ingest (including a refused batch and a rejected event), a profile read, 4xx and 5xx
+answers, an export and its download, a failing send, an erasure whose destination fails its erase
+call, and a replay. It then scans every line for each seeded value raw, lowercase, percent-encoded
+and as a prefix of its identifier hash. A control line proves the scan can fail.
+
 Erasure removes what was held or pending when it ran. Data that arrives while it runs, or after it,
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
 
@@ -1020,21 +1118,73 @@ request; see [CSV import](#csv-import).
 **After a restore.** Backups keep erased data until they age out, so after restoring a backup run
 
 ```sh
-zirv-flow admin replay-erasures [--workspace <slug>]
+zirv-flow admin replay-erasures [--workspace <slug>] [--from <ledger_dir>]
 ```
 
 before starting the workers. It needs the master key and no password, and prints counts only. For
 each completed ledger entry it re-adds the `erased` suppressions, erases every person id the erased group had (the survivor and the people merged
 into them) that the restore brought back, including a backup from before a merge, and removes pending inbox rows that name an erased identifier. It is safe to
-run again. Keeping a copy of the ledger outside the database is an open question in the
-architecture.
+run again.
+
+<a id="privacy-ledger-dir"></a>**The ledger outside the database.** A backup taken before an
+erasure holds neither the deletion nor the ledger row, so the replay above has nothing to replay.
+Set `privacy.ledger_dir` (or `ZIRV_FLOW_PRIVACY__LEDGER_DIR`) and the `privacy.erase` job also
+writes one JSON file per completed ledger entry, `<workspace_id>-<ledger_id>.json`
+(`zirv-flow.erasure-ledger/v1`), before the job returns: it writes a temporary file in the same
+directory, fsyncs it, renames it into place and fsyncs the directory. If the write fails the job
+fails, the erasure rolls back and the request stays pending for the retry, so an erasure is never
+complete without its file. A file holds ids, keyed hashes (hex), their kinds and times, never an
+identifier value. Operator duties:
+
+- Put the directory on storage shared by every worker that supports atomic rename and durable
+  writes, owned by the user the workers run as and mode `0700`; the files are created `0600` on
+  unix. At start-up a worker writes, fsyncs, renames and removes a probe file there and refuses to
+  start, naming `privacy.ledger_dir` and the path, if that fails.
+- Back the directory up apart from the database, so one restore cannot take both back in time.
+  The hashes are keyed with the deployment HMAC root, so restoring from the files also needs the
+  master key and the database's `deployment_keys` row.
+- After restoring a database, run `zirv-flow admin replay-erasures --from <dir>` before it serves
+  traffic or any worker starts. It validates every file first (one corrupt or unknown-format file
+  stops it, naming the file, before anything changes), adds the entries the database lacks as
+  completed, upgrades a request the backup still holds as pending or failed to completed (the file
+  records a completed erasure and wins; a completed row is left alone), skips and counts files
+  whose workspace does not exist, and then runs the replay. The counts include `merged` (added
+  and upgraded) and `skipped_workspaces`. A file whose ledger id belongs to a request of another
+  workspace in the database stops the merge before any change, naming the file. A request merged
+  or upgraded from a file runs only the replay: it does not make the destination erase calls and
+  does not erase AI transcripts, which is the existing limit of replay.
+- A hung `privacy.ledger_dir` stalls the erase jobs, and the row locks they hold, until the
+  file system returns, so the directory must be reliable storage.
+- If a retry of an erasure finds its file already there with other content (the person gained an
+  identity since the first attempt, or a pending request came back from an older backup), the job
+  writes the union of the two to the file and to the ledger row; the file never shrinks. A file that
+  is unreadable or invalid fails the job, which the worker logs naming the file. Both steps are safe to run again.
+- With the directory set, the recovery point for erasures is none: the file exists before the
+  erasure is reported complete. With it unset, nothing is written and the restore guarantee rests
+  on backups of the database alone.
+- `zirv-flow admin export-ledger --out <dir>` writes the same files for every completed entry in
+  the database, a snapshot that also covers erasures made before the key was set. It prints counts
+  and writes no audit entry.
+- The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
+  person id nor a ledger hash is out of its reach (#373).
 
 **Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one
 gzip-compressed JSON document, `zirv-flow.person-export/v1`: `person` holds `profile` (traits
 with their sources), `identities`, `source_records`, `events` (every partition, oldest first),
-`consent`, `consent_history`, `lists`, `list_history`, `merges` and `identity_conflicts`, with the
-data of merged people under the survivor. It is the one place values leave the system, so only
+`consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges` and
+`identity_conflicts`, then the flow and send side: `enrollments`, `step_executions`,
+`enrollment_waits`, `flow_entries`, `messages` and `message_links` (never the recipient hash or a
+rendered body), `forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
+payload; rows with no person are not reachable), `decision_records` and
+`template_preview_people`, with the data of merged people under the survivor. Left out on
+purpose, each checked by a test against every table with a person column: the change feed
+(`person_changes`), the export itself (`privacy_exports`), `event_dedupe`, the debugger buffer,
+`jobs` (copies of data already exported), the assistant's stored transcripts (free text found by
+needle on erase only, so an export cannot find it) and the suppression and erasure ledgers. The
+document may hold at most `privacy.export_max_bytes` of JSON before compression (default 256 MiB);
+a person over the cap ends as `failed` with the code `export_too_large` and nothing is stored.
+It is the one place values leave the system, so only
 workspace admins can list exports or download one, and every download is audited as
 `privacy.export_downloaded`. `GET .../privacy/exports/{id}/download` returns the file for 24 hours
 after the export is ready and then answers 410; the scheduler leader drops expired content
