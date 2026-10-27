@@ -34,7 +34,7 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 55] = [
+const CONFIG_KEYS: [&str; 56] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -84,6 +84,7 @@ const CONFIG_KEYS: [&str; 55] = [
     "sending.recheck_hours",
     "egress.allow",
     "tracking.prefetch_user_agents",
+    "privacy.ledger_dir",
     "ai.providers",
     "ai.rate_limit_per_user_per_minute",
     "ai.max_repair_attempts",
@@ -120,6 +121,8 @@ pub(crate) struct Config {
     egress: EgressConfig,
     #[serde(default)]
     tracking: TrackingConfig,
+    #[serde(default)]
+    privacy: PrivacyConfig,
     /// The model allowlist of the AI assistant; empty means the assistant is unavailable.
     #[serde(default)]
     ai: zirv_flow_api::AiConfig,
@@ -135,6 +138,16 @@ struct EgressConfig {
     /// entry naming exactly that address.
     #[serde(default)]
     allow: Vec<String>,
+}
+
+/// Privacy settings (architecture 16.3).
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivacyConfig {
+    /// A directory on storage shared by every worker where each completed erasure is also
+    /// written as a file, so it survives a restore of an older backup. Unset writes no file.
+    #[serde(default)]
+    ledger_dir: Option<PathBuf>,
 }
 
 /// Open and click tracking (architecture 10.2).
@@ -1201,6 +1214,11 @@ impl Config {
             },
             self.render.memory_limit_mib * 1024 * 1024,
         )
+    }
+
+    /// The directory of the erasure ledger files (`privacy.ledger_dir`), when set.
+    pub(crate) fn ledger_dir(&self) -> Option<&Path> {
+        self.privacy.ledger_dir.as_deref()
     }
 
     /// The operator's extra user-agent fragments for machine opens, lower-cased and trimmed.
@@ -2431,6 +2449,35 @@ prefetch_user_agents = [\" Example-Fetcher \", \"agent-x\"]
         assert_eq!(
             Config::load(None, env).unwrap().prefetch_user_agents(),
             ["agent-y"]
+        );
+    }
+
+    #[test]
+    fn the_ledger_dir_is_unset_by_default_and_read_from_a_file_or_the_environment() {
+        let defaults = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+        assert_eq!(defaults.ledger_dir(), None);
+
+        let file = TestFile::new(
+            "[database]
+url = \"postgres://localhost/database\"
+[privacy]
+ledger_dir = \"/mnt/ledger\"
+",
+        );
+        let from_file = Config::load(Some(&file.0), []).unwrap();
+        assert_eq!(from_file.ledger_dir(), Some(Path::new("/mnt/ledger")));
+
+        let mut env = database_env("postgres://localhost/database");
+        env.push((
+            "ZIRV_FLOW_PRIVACY__LEDGER_DIR".into(),
+            "\"/var/ledger\"".into(),
+        ));
+        let from_env = Config::load(None, env).unwrap();
+        assert_eq!(from_env.ledger_dir(), Some(Path::new("/var/ledger")));
+        assert!(
+            toml::to_string(&from_env)
+                .unwrap()
+                .contains("ledger_dir = \"/var/ledger\"")
         );
     }
 

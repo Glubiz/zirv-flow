@@ -125,6 +125,7 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `tracking.prefetch_user_agents` | list of strings | `[]` | extra user-agent fragments (case-insensitive) that mark an open as automated, added to the generic markers; see [Tracking and unsubscribe links](#tracking-and-unsubscribe-links) |
+| `privacy.ledger_dir` | path | unset | a directory on storage shared by every worker where each completed erasure is also written as a file; see [After a restore](#privacy-ledger-dir) |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -1013,14 +1014,55 @@ request; see [CSV import](#csv-import).
 **After a restore.** Backups keep erased data until they age out, so after restoring a backup run
 
 ```sh
-zirv-flow admin replay-erasures [--workspace <slug>]
+zirv-flow admin replay-erasures [--workspace <slug>] [--from <ledger_dir>]
 ```
 
 before starting the workers. It needs the master key and no password, and prints counts only. For
 each completed ledger entry it re-adds the `erased` suppressions, erases every person id the erased group had (the survivor and the people merged
 into them) that the restore brought back, including a backup from before a merge, and removes pending inbox rows that name an erased identifier. It is safe to
-run again. Keeping a copy of the ledger outside the database is an open question in the
-architecture.
+run again.
+
+<a id="privacy-ledger-dir"></a>**The ledger outside the database.** A backup taken before an
+erasure holds neither the deletion nor the ledger row, so the replay above has nothing to replay.
+Set `privacy.ledger_dir` (or `ZIRV_FLOW_PRIVACY__LEDGER_DIR`) and the `privacy.erase` job also
+writes one JSON file per completed ledger entry, `<workspace_id>-<ledger_id>.json`
+(`zirv-flow.erasure-ledger/v1`), before the job returns: it writes a temporary file in the same
+directory, fsyncs it, renames it into place and fsyncs the directory. If the write fails the job
+fails, the erasure rolls back and the request stays pending for the retry, so an erasure is never
+complete without its file. A file holds ids, keyed hashes (hex), their kinds and times, never an
+identifier value. Operator duties:
+
+- Put the directory on storage shared by every worker that supports atomic rename and durable
+  writes, owned by the user the workers run as and mode `0700`; the files are created `0600` on
+  unix. At start-up a worker writes, fsyncs, renames and removes a probe file there and refuses to
+  start, naming `privacy.ledger_dir` and the path, if that fails.
+- Back the directory up apart from the database, so one restore cannot take both back in time.
+  The hashes are keyed with the deployment HMAC root, so restoring from the files also needs the
+  master key and the database's `deployment_keys` row.
+- After restoring a database, run `zirv-flow admin replay-erasures --from <dir>` before it serves
+  traffic or any worker starts. It validates every file first (one corrupt or unknown-format file
+  stops it, naming the file, before anything changes), adds the entries the database lacks as
+  completed, upgrades a request the backup still holds as pending or failed to completed (the file
+  records a completed erasure and wins; a completed row is left alone), skips and counts files
+  whose workspace does not exist, and then runs the replay. The counts include `merged` (added
+  and upgraded) and `skipped_workspaces`. A file whose ledger id belongs to a request of another
+  workspace in the database stops the merge before any change, naming the file. A request merged
+  or upgraded from a file runs only the replay: it does not make the destination erase calls and
+  does not erase AI transcripts, which is the existing limit of replay.
+- A hung `privacy.ledger_dir` stalls the erase jobs, and the row locks they hold, until the
+  file system returns, so the directory must be reliable storage.
+- If a retry of an erasure finds its file already there with other content (the person gained an
+  identity since the first attempt, or a pending request came back from an older backup), the job
+  writes the union of the two to the file and to the ledger row; the file never shrinks. A file that
+  is unreadable or invalid fails the job, which the worker logs naming the file. Both steps are safe to run again.
+- With the directory set, the recovery point for erasures is none: the file exists before the
+  erasure is reported complete. With it unset, nothing is written and the restore guarantee rests
+  on backups of the database alone.
+- `zirv-flow admin export-ledger --out <dir>` writes the same files for every completed entry in
+  the database, a snapshot that also covers erasures made before the key was set. It prints counts
+  and writes no audit entry.
+- The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
+  person id nor a ledger hash is out of its reach (#373).
 
 **Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one

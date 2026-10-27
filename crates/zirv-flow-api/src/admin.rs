@@ -7,6 +7,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -74,6 +75,11 @@ pub enum AdminError {
     Conflict(&'static str),
     NotFound(&'static str),
     Store(StoreError),
+    /// A ledger file that cannot be merged; names the file, never a value.
+    Merge(String),
+    /// An erasure ledger file or directory that could not be read or written. Names a file or
+    /// directory, never a value.
+    Ledger(zirv_flow_store::LedgerFileError),
     /// A trait slot change that was refused; the problem carries its own code.
     Slot(zirv_flow_store::SlotError),
     /// A stored secret could not be re-wrapped. Names a key id, never key or plaintext bytes.
@@ -94,6 +100,8 @@ impl fmt::Display for AdminError {
             Self::Conflict(message) => formatter.write_str(message),
             Self::NotFound(what) => write!(formatter, "no such {what}"),
             Self::Store(error) => error.fmt(formatter),
+            Self::Ledger(error) => error.fmt(formatter),
+            Self::Merge(message) => formatter.write_str(message),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
             Self::Utm { detail, .. } => formatter.write_str(detail),
@@ -106,8 +114,13 @@ impl Error for AdminError {
         match self {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
+            Self::Ledger(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) | Self::Utm { .. } => None,
+            Self::Conflict(_)
+            | Self::NotFound(_)
+            | Self::Merge(_)
+            | Self::Slot(_)
+            | Self::Utm { .. } => None,
         }
     }
 }
@@ -121,6 +134,12 @@ impl From<ValidationError> for AdminError {
 impl From<SecretError> for AdminError {
     fn from(error: SecretError) -> Self {
         Self::Secret(error)
+    }
+}
+
+impl From<zirv_flow_store::LedgerFileError> for AdminError {
+    fn from(error: zirv_flow_store::LedgerFileError) -> Self {
+        Self::Ledger(error)
     }
 }
 
@@ -464,11 +483,18 @@ pub async fn workspace_by_slug(pool: &PgPool, slug: &str) -> Result<WorkspaceId,
 /// backup restore: re-adds the `erased` suppressions, erases every ledger person that exists
 /// again, and removes pending inbox rows that name an erased identifier. Returns counts only,
 /// and audits them as `privacy.erasures_replayed`.
+///
+/// With `from`, the ledger files of that directory are read first and all validated: one corrupt
+/// or unknown-format file fails the call, naming it, before anything changes. The entries the
+/// database lacks (of the workspace, when one is given) are then merged in as completed, files
+/// for a workspace that does not exist here are skipped and counted, and the replay runs over
+/// the merged ledger.
 pub async fn replay_erasures(
     pool: &PgPool,
     context: &Context,
     workspace: Option<&str>,
     root: &HmacRoot,
+    from: Option<&Path>,
 ) -> Result<ReplayReport, AdminError> {
     let workspace = match workspace {
         Some(slug) => {
@@ -482,9 +508,26 @@ pub async fn replay_erasures(
         }
         None => None,
     };
+    let mut entries = match from {
+        Some(dir) => zirv_flow_store::read_ledger_dir(dir)?,
+        None => Vec::new(),
+    };
+    if let Some(only) = workspace {
+        entries.retain(|entry| entry.workspace_id == only.as_uuid());
+    }
+    let merge = zirv_flow_store::merge_ledger_entries(pool, &entries)
+        .await
+        .map_err(|error| match error {
+            zirv_flow_store::MergeError::Store(error) => AdminError::Store(error),
+            other @ zirv_flow_store::MergeError::IdInOtherWorkspace { .. } => {
+                AdminError::Merge(other.to_string())
+            }
+        })?;
     let key = root.hmac_key(HmacPurpose::Identifier);
     let trace = TraceContext::root(Cause::api("admin.replay-erasures"));
-    let report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;
+    let mut report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;
+    report.merged = merge.merged;
+    report.skipped_workspaces = merge.skipped_workspaces;
     let mut tx = zirv_flow_store::begin(pool).await?;
     audit(
         &mut tx,
@@ -497,11 +540,28 @@ pub async fn replay_erasures(
             "suppressions": report.suppressions,
             "people": report.people,
             "inbox_rows": report.inbox_rows,
+            "merged": report.merged,
+            "skipped_workspaces": report.skipped_workspaces,
         }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
     Ok(report)
+}
+
+/// Writes a ledger file into `out` for every completed erasure of the database, a full snapshot
+/// that also covers entries made before `privacy.ledger_dir` was set. Returns counts. Like the
+/// other operations that only read the database it writes no audit entry.
+pub async fn export_ledger(
+    pool: &PgPool,
+    out: &Path,
+) -> Result<zirv_flow_store::ExportReport, AdminError> {
+    zirv_flow_store::export_ledger(pool, out)
+        .await
+        .map_err(|error| match error {
+            zirv_flow_store::ExportError::Store(error) => AdminError::Store(error),
+            zirv_flow_store::ExportError::File(error) => AdminError::Ledger(error),
+        })
 }
 
 /// What [`rotate_master_key`] re-wrapped.

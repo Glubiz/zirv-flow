@@ -436,9 +436,15 @@ mod tests {
             .expect("the retry is due");
         world.settle().await;
         assert_eq!(world.count("SELECT count(*) FROM people").await, 0);
-        admin::replay_erasures(&world.pool, &Context::system(), Some("acme"), &world.root)
-            .await
-            .expect("the replay");
+        admin::replay_erasures(
+            &world.pool,
+            &Context::system(),
+            Some("acme"),
+            &world.root,
+            None,
+        )
+        .await
+        .expect("the replay");
         assert_eq!(fake_ledger_erased(&ledger).len(), 2);
 
         let text = captured.text();

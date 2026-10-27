@@ -8,6 +8,7 @@ mod erasure;
 mod erasure_calls;
 mod export;
 mod handled_markers;
+mod ledger_files;
 
 #[cfg(test)]
 pub(crate) mod testing;
@@ -26,6 +27,13 @@ pub use export::{
     BuildOutcome, EXPORT_FORMAT, EXPORT_JOB_KIND, ExportCursor, ExportDownload, ExportStatus,
     PrivacyExport, build_export, download_export, expire_exports, find_privacy_export,
     list_privacy_exports, request_export,
+};
+
+pub use ledger_files::{
+    ExportError, ExportReport, LEDGER_FORMAT, LedgerEntry, LedgerFileError, LedgerWrite,
+    MergeError, MergeReport, check_ledger_dir, export_ledger, find_ledger_entry,
+    merge_ledger_entries, read_ledger_dir, reconcile_ledger_file, update_ledger_lists,
+    write_ledger_file,
 };
 
 pub(crate) use handled_markers::{delete_and_mark, event_columns, mark_partition};

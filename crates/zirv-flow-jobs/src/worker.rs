@@ -1,6 +1,7 @@
 //! The worker pool: claims jobs, runs them with a heartbeat, and completes each in the same
 //! transaction as the handler's own writes.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,8 @@ pub struct WorkerConfig {
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
     pub identifier_key: Option<Arc<HmacKey>>,
+    /// Where `privacy.erase` copies each completed ledger entry; none writes no file.
+    pub ledger_dir: Option<Arc<PathBuf>>,
     /// The master keys that open stored secrets; `sync.run` opens a source credential with them.
     pub keyring: Option<Arc<Keyring>>,
     /// Inbox rows `ingest.drain` applies per transaction.
@@ -93,6 +96,7 @@ impl WorkerConfig {
             message_retention: MessageRetention::default(),
             redaction_key: None,
             identifier_key: None,
+            ledger_dir: None,
             keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
@@ -408,6 +412,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_event_retention(shared.config.event_retention)
             .with_message_retention(shared.config.message_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
+            .with_ledger_dir(shared.config.ledger_dir.clone())
             .with_clock(shared.config.clock.clone())
             .with_rate_gates(Arc::clone(&shared.config.rate_gates))
             .with_render_pool(shared.config.render_pool.clone())
@@ -668,6 +673,7 @@ mod tests {
             message_retention: MessageRetention::default(),
             redaction_key: None,
             identifier_key: None,
+            ledger_dir: None,
             keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,

@@ -1,5 +1,6 @@
 //! What a running handler sees of its job.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -41,6 +42,7 @@ pub struct JobContext<'a> {
     message_retention: MessageRetention,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
+    ledger_dir: Option<Arc<PathBuf>>,
     keyring: Option<Arc<Keyring>>,
     egress: Arc<EgressPolicy>,
     rate_limits: Arc<RateLimits>,
@@ -61,6 +63,7 @@ impl<'a> JobContext<'a> {
             message_retention: MessageRetention::default(),
             ingest: None,
             identifier_key: None,
+            ledger_dir: None,
             keyring: None,
             egress: Arc::default(),
             rate_limits: Arc::default(),
@@ -160,6 +163,12 @@ impl<'a> JobContext<'a> {
         self
     }
 
+    /// Gives the handler the directory the erasure ledger is copied to (`privacy.ledger_dir`).
+    pub(crate) fn with_ledger_dir(mut self, dir: Option<Arc<PathBuf>>) -> Self {
+        self.ledger_dir = dir;
+        self
+    }
+
     /// Gives the handler the master keys that open stored secrets and the egress policy that
     /// outbound calls follow.
     pub(crate) fn with_outbound(
@@ -208,6 +217,11 @@ impl<'a> JobContext<'a> {
     /// The key that hashes identifiers; none when the worker has no master key.
     pub(crate) fn identifier_key(&self) -> Option<Arc<HmacKey>> {
         self.identifier_key.clone()
+    }
+
+    /// Where completed erasures are copied; none when `privacy.ledger_dir` is unset.
+    pub(crate) fn ledger_dir(&self) -> Option<Arc<PathBuf>> {
+        self.ledger_dir.clone()
     }
 
     /// The ingest drain's settings; none when the worker was given no pool for them.
