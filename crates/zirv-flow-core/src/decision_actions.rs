@@ -47,17 +47,6 @@ impl DecisionSpec {
             Reason::Detail(_) => detail,
         }
     }
-
-    /// Whether the row is the one for this triple.
-    pub fn is(&self, action: &str, outcome: &str, reason: Option<&str>) -> bool {
-        self.action == action
-            && self.outcome == outcome
-            && match self.reason {
-                Reason::None => reason.is_none(),
-                Reason::Fixed(code) => reason == Some(code),
-                Reason::Detail(_) => true,
-            }
-    }
 }
 
 /// Every cause kind.
@@ -337,14 +326,6 @@ mod tests {
         assert_eq!(FLOW_STEP_DONE.reason_text(Some("email")), Some("email"));
         assert_eq!(FLOW_STEP_DONE.reason_text(None), None);
         assert_eq!(FLOW_WAKE_TIMER.reason_text(Some("x")), None);
-    }
-
-    #[test]
-    fn is_matches_a_triple_and_a_detail_row_takes_any_reason() {
-        assert!(FLOW_WAIT_DURATION.is("flow.wait", "waiting", Some("duration")));
-        assert!(!FLOW_WAIT_DURATION.is("flow.wait", "waiting", Some("until_time")));
-        assert!(FLOW_STEP_DONE.is("flow.step", "done", Some("anything")));
-        assert!(!FLOW_WAKE_TIMER.is("flow.wake", "timer", Some("x")));
     }
 
     #[test]
