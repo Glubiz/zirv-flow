@@ -372,7 +372,12 @@ mod tests {
                 "('00000000-0000-0000-0000-0000000000b2', 'member@example.com', 'x'); ",
                 "INSERT INTO memberships (workspace_id, user_id, role) VALUES ",
                 "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b1', 'admin'), ",
-                "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b2', 'member')"
+                "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b2', 'member'); ",
+                "INSERT INTO api_keys (id, workspace_id, name, secret_hash, scopes) VALUES ",
+                "('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000a1', 'admin', decode('01', 'hex'), ARRAY['read','admin']), ",
+                "('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-0000000000a1', 'both', decode('02', 'hex'), ARRAY['publish','admin']), ",
+                "('00000000-0000-0000-0000-0000000000c3', '00000000-0000-0000-0000-0000000000a1', 'write', decode('03', 'hex'), ARRAY['write']), ",
+                "('00000000-0000-0000-0000-0000000000c4', '00000000-0000-0000-0000-0000000000a1', 'read', decode('04', 'hex'), ARRAY['read'])"
             ),
         )
         .execute(&pool)
@@ -395,6 +400,21 @@ mod tests {
             vec![
                 ("admin@example.com".to_owned(), "admin".to_owned()),
                 ("member@example.com".to_owned(), "editor".to_owned()),
+            ]
+        );
+        let keys: Vec<(String, Vec<String>)> =
+            sqlx::query_as("SELECT name, scopes FROM api_keys ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let scopes = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            vec![
+                ("admin".to_owned(), scopes(&["read", "admin", "publish"])),
+                ("both".to_owned(), scopes(&["publish", "admin"])),
+                ("read".to_owned(), scopes(&["read"])),
+                ("write".to_owned(), scopes(&["write"])),
             ]
         );
         for role in ["publisher", "viewer"] {

@@ -457,6 +457,10 @@ Passwords are 12 to 1024 characters.
   with a 409 (`last_admin`) unless the caller is the instance owner. Where a
   section below says "any member", read editor or above; "admin" on a publish
   route reads publisher or above.
+- **Upgrading to roles.** Migration 0073 gives every existing `admin` key the
+  `publish` scope, so deployed admin keys keep publishing. A `write` key that
+  runs imports (`POST .../imports/{id}/run`) needs `publish` added by hand.
+  Former members are now editors, who may also create assistant drafts.
 - **Sign-in throttling.** Five failures in a row lock the account for
   `min(2^(failures-5) seconds, 15 minutes)`. An unknown e-mail, a wrong password
   and a locked account give the same 401.

@@ -12,6 +12,17 @@ export function MembersPage() {
   return <WorkspaceMembers key={ws} ws={ws} />;
 }
 
+const ROLE_OPTIONS = [
+  { value: "admin", label: "Admin" },
+  { value: "publisher", label: "Publisher" },
+  { value: "editor", label: "Editor" },
+  { value: "viewer", label: "Viewer" },
+];
+
+function roleLabel(role: string): string {
+  return ROLE_OPTIONS.find((option) => option.value === role)?.label ?? role;
+}
+
 function WorkspaceMembers({ ws }: { ws: string }) {
   const user = useSignedInUser();
   const workspaces = useWorkspaces();
@@ -25,7 +36,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
   const canManage = access?.canManage ?? false;
 
-  async function changeRole(member: Member, role: MemberRole) {
+  async function changeRole(member: Member, role: string) {
     setBusyUser(member.user_id);
     setFailure(null);
     try {
@@ -101,13 +112,16 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                             aria-label={`Role for ${member.email}`}
                             value={member.role}
                             disabled={busyUser === member.user_id}
-                            onChange={(event) => void changeRole(member, event.target.value === "admin" ? "admin" : "editor")}
+                            onChange={(event) => void changeRole(member, event.target.value)}
                           >
-                            <option value="admin">Admin</option>
-                            <option value="editor">Member</option>
+                            {ROLE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
                           </select>
                         ) : (
-                          <Pill>{member.role === "admin" ? "Admin" : "Member"}</Pill>
+                          <Pill>{roleLabel(member.role)}</Pill>
                         )}
                       </td>
                       <td>{formatDate(member.added_at)}</td>
