@@ -1032,11 +1032,14 @@ export interface paths {
          * Watches the workspace's events as they are decided: one `item` frame per outcome
          *     (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no
          *     history beyond the last few seconds before it connected (so a batch that was still
-         *     committing is not missed). Each frame's `id` is a position that is safe to resume from: send it back as
-         *     `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
-         *     client already has (their `seq` identifies them). A position beyond the feed (the feed is
-         *     unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
-         *     frame whose `reset` is true. A viewer that cannot keep up gets an `event: gap` frame with
+         *     committing is not missed). Each frame's `id` is `<epoch>:<position>`, a position that is
+         *     safe to resume from: send it back as `Last-Event-ID` and the stream continues after it,
+         *     possibly repeating a few rows the client already has (their `seq` identifies them). A row
+         *     whose writer commits late is sent when it does, so frames may arrive out of order by `seq`;
+         *     a row that commits more than twice the 10 s patience after it was written can still be
+         *     missed. The epoch names the life of the feed, which is unlogged and starts over after a
+         *     crash: a position from another epoch, or an older bare number, is answered with a `gap`
+         *     frame whose `reset` is true, and the stream starts at the current position. A viewer that cannot keep up gets an `event: gap` frame with
          *     the number of rows skipped (an upper bound when filters apply). While the server's
          *     notifier is down, an `event: status` frame says `degraded` and the stream polls every few
          *     seconds instead of reacting at once; another says it recovered.
