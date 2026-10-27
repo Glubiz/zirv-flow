@@ -55,8 +55,10 @@ fn builder(keep: impl Fn(&str) -> bool + Send + Sync + 'static) -> Builder<'stat
     let mut builder = Builder::empty();
     builder
         .add_tags(TAGS)
+        .generic_attributes(Default::default())
+        .tag_attributes(Default::default())
         .add_tag_attributes("a", ["href"])
-        .add_url_schemes(SCHEMES)
+        .url_schemes(SCHEMES.into_iter().collect())
         .add_clean_content_tags(["script", "style"])
         .link_rel(None)
         .url_relative(UrlRelative::Custom(Box::new(Keep(keep))));
@@ -358,6 +360,8 @@ fn tidy(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn html(source: &str) -> String {
@@ -366,6 +370,11 @@ mod tests {
 
     #[test]
     fn the_sanitizer_table_removes_what_is_not_allowed_and_keeps_what_is() {
+        let nested = format!(
+            "{}<a href=\"javascript:x\">x</a>{}",
+            "<div>".repeat(256),
+            "</div>".repeat(256)
+        );
         let table = [
             // Scripts and what runs.
             ("<script>alert(1)</script><p>ok</p>", "<p>ok</p>"),
@@ -376,11 +385,63 @@ mod tests {
             ("<img src=\"https://a/b.png\" onerror=\"x()\">", ""),
             ("<iframe src=\"https://a\"></iframe>", ""),
             ("<svg><script>x</script></svg>ok", "ok"),
+            (
+                "<noscript><img src=x onerror=alert(1)></noscript>",
+                "&lt;img src=x onerror=alert(1)&gt;",
+            ),
+            (
+                "<math><mi><script>x</script></mi></math><p>ok</p>",
+                "<p>ok</p>",
+            ),
+            (
+                "<template><img src=x onerror=alert(1)></template><p>ok</p>",
+                "<p>ok</p>",
+            ),
+            ("<a><svg><script>x</script></svg>ok</a>", "<a>ok</a>"),
+            (
+                "<a href=\"https://a.example\">a<a href=\"javascript:x\">b</a></a>",
+                "<a href=\"https://a.example\">a</a><a>b</a>",
+            ),
+            ("<p><b onclick=x>unclosed", "<p><b>unclosed</b></p>"),
+            (
+                "<P ONCLICK=x><A HREF=\"JAVASCRIPT:x\">x</A></P>",
+                "<p><a>x</a></p>",
+            ),
+            ("<a href=\"java\0script:x\">x</a>", "<a>x</a>"),
+            (nested.as_str(), "<a>x</a>"),
+            ("<img src=\"data:image/svg+xml,<svg onload=alert(1)>\">", ""),
+            (
+                "<p srcdoc=\"<script>x</script>\" formaction=\"javascript:x\">ok</p>",
+                "<p>ok</p>",
+            ),
+            (
+                "<iframe srcdoc=\"<script>x</script>\"></iframe><button formaction=\"javascript:x\">ok</button>",
+                "ok",
+            ),
+            (
+                "<p style=\"background:url(javascript:alert(1))\">ok</p>",
+                "<p>ok</p>",
+            ),
+            (
+                "<p title=\"x\" lang=\"en\">ok</p><ol start=\"2\"><li>x</li></ol>",
+                "<p>ok</p><ol><li>x</li></ol>",
+            ),
             ("<p>a<!-- c -->b</p>", "<p>ab</p>"),
             // Links.
             ("<a href=\"javascript:alert(1)\">x</a>", "<a>x</a>"),
             ("<a href=\"JaVaScRiPt:alert(1)\">x</a>", "<a>x</a>"),
             ("<a href=\"java\tscript:alert(1)\">x</a>", "<a>x</a>"),
+            ("<a href=\" javascript:alert(1)\">x</a>", "<a>x</a>"),
+            (
+                "<a href=\"\u{1}\t\r\njavascript:alert(1)\">x</a>",
+                "<a>x</a>",
+            ),
+            ("<a href=\"javascript&colon;alert(1)\">x</a>", "<a>x</a>"),
+            ("<a href=\"java&Tab;script:alert(1)\">x</a>", "<a>x</a>"),
+            (
+                "<a href=\"ftp://a.example\" hreflang=\"en\">x</a>",
+                "<a>x</a>",
+            ),
             ("<a href=\"data:text/html;base64,AAAA\">x</a>", "<a>x</a>"),
             ("<a href=\"vbscript:x\">x</a>", "<a>x</a>"),
             ("<a href=\"/relative\">x</a>", "<a>x</a>"),
@@ -417,6 +478,87 @@ mod tests {
         ];
         for (input, expected) in table {
             assert_eq!(html(input), expected, "{input}");
+            assert_eq!(html(expected), expected, "idempotence: {input}");
+            assert!(violations(expected).is_empty(), "re-parse: {input}");
+            if !input.contains("{{") {
+                assert_eq!(clean_rendered(input), expected, "rendered: {input}");
+            }
+        }
+    }
+
+    fn hostile_html() -> impl Strategy<Value = String> {
+        let tag = prop::sample::select(vec![
+            "p", "b", "a", "br", "ul", "li", "div", "script", "style", "noscript", "math", "svg",
+            "template", "iframe", "img", "form", "button",
+        ]);
+        let attribute = prop::sample::select(vec![
+            "href",
+            "src",
+            "srcdoc",
+            "formaction",
+            "style",
+            "onclick",
+            "onerror",
+            "title",
+            "lang",
+            "hreflang",
+            "start",
+        ]);
+        let value = prop_oneof![
+            prop::sample::select(vec![
+                "https://safe.example/a",
+                "http://safe.example",
+                "mailto:a@b.example",
+                "ftp://evil.example",
+                "javascript:alert(1)",
+                " javascript:x",
+                "\t\njavascript:x",
+                "java&Tab;script:x",
+                "javascript&colon;x",
+                "data:text/html,x",
+                "/relative",
+                "//evil.example",
+                "background:url(javascript:x)",
+            ])
+            .prop_map(str::to_owned),
+            "[a-zA-Z0-9 &;:/<>='\"\\t\\n]{0,40}",
+        ];
+        let element =
+            (tag, attribute, value, any::<bool>()).prop_map(|(tag, attribute, value, close)| {
+                format!(
+                    "<{tag} {attribute}=\"{value}\">x{}",
+                    if close {
+                        format!("</{tag}>")
+                    } else {
+                        String::new()
+                    }
+                )
+            });
+        prop::collection::vec(prop_oneof![element, "[a-zA-Z0-9 &;<>/\0]{0,40}"], 0..16)
+            .prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            rng_seed: proptest::test_runner::RngSeed::Fixed(389),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn sanitizing_is_idempotent(source in hostile_html()) {
+            let once = sanitize_source(&source);
+            prop_assert_eq!(sanitize_source(&once.html), once);
+            let rendered = clean_rendered(&source);
+            prop_assert_eq!(clean_rendered(&rendered), rendered);
+        }
+
+        #[test]
+        fn sanitized_output_reparses_without_disallowed_tags_attributes_or_schemes(source in hostile_html()) {
+            for output in [html(&source), clean_rendered(&source)] {
+                prop_assert!(with_tokens(&output, |_| ()).is_some(), "cannot parse: {:?}", output);
+                prop_assert!(check(&output, |_| false).is_empty(), "disallowed output: {:?}", output);
+            }
         }
     }
 

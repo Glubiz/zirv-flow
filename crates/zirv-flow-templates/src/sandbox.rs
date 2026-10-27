@@ -186,6 +186,7 @@ pub(crate) fn render_raw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Category, EmailContent, FieldCatalog, TemplateDocument, validate};
 
     fn render(name: &'static str, source: &str, limit: usize) -> Result<String, RenderError> {
         let context = Value::from_serialize(serde_json::json!({
@@ -302,9 +303,151 @@ X-Evil: 1",
     }
 
     #[test]
-    fn no_filesystem_or_debug_dump() {
-        assert!(render("t.txt", "{% include 'x' %}", 100).is_err());
-        assert!(render("t.txt", "{{ debug() }}", 100).is_err());
+    fn sandbox_escape_table_is_typed_or_bounded_and_checked_by_the_editor() {
+        use RenderError::{
+            OutOfFuel, OutputTooLarge, RecursionLimit, SourceTooLarge, Syntax, Template, Undefined,
+        };
+
+        let identifier = "x".repeat(4096);
+        let long_identifier = format!("{{% set {identifier} = 1 %}}{{{{ {identifier} }}}}");
+        let oversized_identifier = format!("{{{{ {} }}}}", "x".repeat(MAX_SOURCE_BYTES));
+        let cases = [
+            (
+                "include",
+                "{% include '/etc/passwd' %}",
+                Err(Template { field: "html" }),
+            ),
+            (
+                "import",
+                "{% import '/etc/passwd' as file %}",
+                Err(Template { field: "html" }),
+            ),
+            (
+                "from import",
+                "{% from '/etc/passwd' import secret %}",
+                Err(Template { field: "html" }),
+            ),
+            (
+                "extends",
+                "{% extends '/etc/passwd' %}{% block body %}x{% endblock %}",
+                Err(Template { field: "html" }),
+            ),
+            ("block", "{% block body %}ok{% endblock %}", Ok("ok")),
+            (
+                "recursive block and self",
+                "{% block body %}{{ self.body() }}{% endblock %}",
+                Err(RecursionLimit { field: "html" }),
+            ),
+            (
+                "recursive macro",
+                "{% macro f(n) %}{{ f(n + 1) }}{% endmacro %}{{ f(0) }}",
+                Err(RecursionLimit { field: "html" }),
+            ),
+            (
+                "recursive call",
+                "{% macro f() %}{{ caller() }}{% call f() %}x{% endcall %}{% endmacro %}{% call f() %}x{% endcall %}",
+                Err(RecursionLimit { field: "html" }),
+            ),
+            (
+                "huge range",
+                "{% for i in range(10**9) %}x{% endfor %}",
+                Err(Template { field: "html" }),
+            ),
+            (
+                "nested ranges",
+                "{% for a in range(1000) %}{% for b in range(1000) %}{{ a }}{% endfor %}{% endfor %}",
+                Err(OutOfFuel { field: "html" }),
+            ),
+            (
+                "dict growth",
+                "{% set ns = namespace(d=dict()) %}{% for i in range(16) %}{% set ns.d = dict(ns.d, **{('k' ~ i): i}) %}{% endfor %}{{ ns.d | length }}",
+                Ok("16"),
+            ),
+            (
+                "namespace growth",
+                "{% set ns = namespace(s='') %}{% for i in range(32) %}{% set ns.s = ns.s ~ 'x' %}{% endfor %}{{ ns.s | length }}",
+                Ok("32"),
+            ),
+            // Keep intermediate allocation small here; unbounded doubling belongs in the OS-isolated API test.
+            (
+                "string doubling",
+                "{% set ns = namespace(s='x') %}{% for i in range(20) %}{% set ns.s = ns.s ~ ns.s %}{% endfor %}{{ ns.s }}",
+                Err(OutputTooLarge { field: "html" }),
+            ),
+            ("long identifier", long_identifier.as_str(), Ok("1")),
+            (
+                "oversized identifier",
+                oversized_identifier.as_str(),
+                Err(SourceTooLarge { field: "html" }),
+            ),
+            (
+                "BOM and Unicode text",
+                "\u{feff}{{ 'こんにちは 🌍' }}",
+                Ok("\u{feff}こんにちは 🌍"),
+            ),
+            (
+                "Unicode identifier",
+                "{{ café }}",
+                Err(Syntax { field: "html" }),
+            ),
+            ("lipsum", "{{ lipsum() }}", Err(Template { field: "html" })),
+            ("debug", "{{ debug() }}", Err(Template { field: "html" })),
+            (
+                "self lookup",
+                "{{ self.secret }}",
+                Err(Undefined { field: "html" }),
+            ),
+            (
+                "loop outside a loop",
+                "{{ loop.index }}",
+                Err(Undefined { field: "html" }),
+            ),
+            (
+                "recursive loop",
+                "{% for i in [1] recursive %}{{ loop([1]) }}{% endfor %}",
+                Err(RecursionLimit { field: "html" }),
+            ),
+            (
+                "loop method abuse",
+                "{% for i in [1] %}{{ loop.__class__() }}{% endfor %}",
+                Err(Template { field: "html" }),
+            ),
+            (
+                "unknown filter",
+                "{{ 'x' | filesystem }}",
+                Err(Template { field: "html" }),
+            ),
+            (
+                "unavailable random filter",
+                "{{ [1, 2] | random }}",
+                Err(Template { field: "html" }),
+            ),
+        ];
+        for (name, source, expected) in cases {
+            let result = render("t.html", source, MAX_HTML_BYTES);
+            assert_eq!(result.as_deref(), expected.as_ref().copied(), "{name}");
+            if let Ok(output) = &result {
+                assert!(output.len() <= MAX_HTML_BYTES, "{name}");
+            }
+            let doc = TemplateDocument::email_code(EmailContent {
+                subject: "Sandbox probe".into(),
+                sender: Some("00000000-0000-7000-8000-000000000001".into()),
+                lang: Some("en".into()),
+                category: Category::Transactional,
+                syntax: Default::default(),
+                html: source.into(),
+                text: "Sandbox probe".into(),
+            });
+            let issues = validate(&doc, &FieldCatalog::default());
+            if expected.is_err() {
+                assert!(
+                    issues.iter().any(|issue| issue.at == "/email/html"),
+                    "{name}: {issues:?}"
+                );
+            } else {
+                assert!(issues.is_empty(), "{name}: {issues:?}");
+            }
+        }
     }
 
     #[test]

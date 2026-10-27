@@ -110,6 +110,8 @@ describe("the Review and publish page", () => {
 
     await waitFor(() => expect(screen.getByTitle("Version 2 draft").getAttribute("srcdoc")).toContain(".zf-block-t1{outline:2px solid #2e9d5b"));
     expect(screen.getByTitle("Version 2 draft").getAttribute("srcdoc")).not.toContain("zf-block-h1");
+    const document = new DOMParser().parseFromString(screen.getByTitle("Version 2 draft").getAttribute("srcdoc") ?? "", "text/html");
+    expect(document.head.firstElementChild).toHaveAttribute("http-equiv", "Content-Security-Policy");
     expect(await screen.findByTitle("Version 1")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "v2 only" }));
     expect(screen.queryByTitle("Version 1")).not.toBeInTheDocument();
