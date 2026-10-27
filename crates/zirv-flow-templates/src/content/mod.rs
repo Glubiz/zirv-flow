@@ -23,12 +23,17 @@ fn with_tokenizer<'a, R>(
     read: impl FnOnce(htmlparser::Tokenizer<'a>) -> R,
 ) -> Option<R> {
     for prefix in ["<![if", "<!--[if", "<![endif"] {
+        let mut close = 0;
         for (at, _) in text.match_indices(prefix) {
-            let rest = &text[at + prefix.len()..];
+            let end = at + prefix.len();
+            let rest = &text[end..];
             if prefix == "<![endif" && !rest.starts_with(']') {
                 return None;
             }
-            let (_, suffix) = rest.split_once(']')?;
+            if close < end {
+                close = end + rest.find(']')?;
+            }
+            let suffix = &text[close + 1..];
             if !suffix.starts_with('>') && !suffix.starts_with("-->") {
                 return None;
             }
@@ -179,6 +184,14 @@ mod tests {
             .unwrap();
         // Without iteration, catch_unwind cannot mask a missing guard.
         assert_eq!(with_tokenizer(content, |_| ()), None);
+    }
+
+    #[test]
+    fn the_guard_handles_many_conditional_prefixes() {
+        let mut input = "<![if".repeat(50_000);
+        assert_eq!(with_tokenizer(&input, |_| ()), None);
+        input.push_str("]>");
+        assert_eq!(with_tokenizer(&input, |_| ()), Some(()));
     }
 
     /// A type of its own, to show that the type that owns a document is the one whose check runs.
