@@ -6,8 +6,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/semver-compare.sh"
 release_flags() {
   local version="$1" image="$2" prerelease=false alias=latest
   semver_valid "$version" || { echo 'invalid release SemVer' >&2; return 2; }
-  local precedence=${version%%+*}
-  if [[ "$precedence" == *-* ]]; then
+  if [[ "${version%%+*}" == *-* ]]; then
     prerelease=true
     alias=rc
     echo 'publish_flags=--draft=false --prerelease --latest=false'
