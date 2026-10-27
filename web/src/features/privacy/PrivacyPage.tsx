@@ -5,9 +5,11 @@ import { EmptyState, ErrorState, LoadingState, PageHeader } from "../../ui";
 import { useWorkspaceAccess } from "../members";
 import { ErasureSection } from "./ErasureSection";
 import { ExportSection } from "./ExportSection";
+import { Fold } from "./Fold";
 import { OrphanPolicySection } from "./OrphanPolicySection";
+import { RetentionSection } from "./RetentionSection";
 
-/** Erasure, export and the orphan policy. Only workspace admins and the owner see it. */
+/** Retention, erasure, export and the orphan policy. Only workspace admins and the owner see it. */
 export function PrivacyPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
@@ -27,9 +29,16 @@ export function PrivacyPage() {
       ) : null}
       {access.status === "ready" && access.data.canAdmin ? (
         <div className="stack" key={ws}>
-          <ErasureSection workspaceId={ws} />
-          <ExportSection workspaceId={ws} />
-          <OrphanPolicySection workspaceId={ws} />
+          <RetentionSection workspaceId={ws} canAdmin={access.data.canAdmin} />
+          <Fold title="Erase a person">
+            <ErasureSection workspaceId={ws} />
+          </Fold>
+          <Fold title="Export a person">
+            <ExportSection workspaceId={ws} />
+          </Fold>
+          <Fold title="People left with nothing">
+            <OrphanPolicySection workspaceId={ws} />
+          </Fold>
         </div>
       ) : null}
     </div>

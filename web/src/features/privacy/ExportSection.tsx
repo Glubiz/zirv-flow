@@ -74,7 +74,7 @@ export function ExportSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <Panel title="Export a person">
+      <Panel>
         <p className="muted">
           An export holds everything stored about a person: profile, identities, events, consent, lists and their history.
           It contains personal data, so only workspace admins can request or download one, every download is recorded, and
