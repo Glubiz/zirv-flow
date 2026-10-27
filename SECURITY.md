@@ -4,6 +4,8 @@
 
 Only the [latest release](https://github.com/Glubiz/zirv-flow/releases) is supported
 for security updates.
+The `/api/v1` HTTP API follows the [API contract policy](docs/api.md): from 1.0 it changes
+only additively, and the policy names the surface that stays unfrozen.
 
 ## Reporting a vulnerability
 
