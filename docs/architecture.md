@@ -2962,8 +2962,8 @@ the result per destination.
   destination that handled a person only before that would not be called. `erasure_handled_markers`
   (migration 0059) keeps the fact: one row per workspace, person and destination, with
   `first_handled_at`. Each retention purge that removes handling evidence writes the markers of the
-  rows it removes, in its own statement, with `ON CONFLICT DO NOTHING`: the event deletes (default
-  and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
+  rows it removes, in its own statement, keeping the earlier `first_handled_at` when a marker
+  exists: the event deletes (default and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
   safety net before a partition drop, and `purge_delivered` for delivered outbox rows. A row that
   names no destination writes none, and neither does a destination that no longer exists. Messages
   are purged by `messages.retention` (#376; below), which writes the marker of every row it removes,

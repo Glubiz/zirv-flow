@@ -321,6 +321,38 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purge_moves_an_existing_marker_back_to_an_older_message(pool: PgPool) {
+        let (ws, person, one) = world(&pool).await;
+        sqlx::query(
+            "INSERT INTO erasure_handled_markers \
+                (workspace_id, person_id, destination_id, first_handled_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(one)
+        .bind(NOW - Duration::days(100))
+        .execute(&pool)
+        .await
+        .unwrap();
+        message(&pool, (ws, person, one), 300, "sent", "m").await;
+
+        run(&pool).await;
+
+        let first: OffsetDateTime = sqlx::query_scalar(
+            "SELECT first_handled_at FROM erasure_handled_markers \
+             WHERE person_id = $1 AND destination_id = $2",
+        )
+        .bind(person)
+        .bind(one)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(first, NOW - Duration::days(300));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_second_run_deletes_and_marks_nothing(pool: PgPool) {
         let world = world(&pool).await;
         message(&pool, world, 300, "sent", "m").await;
