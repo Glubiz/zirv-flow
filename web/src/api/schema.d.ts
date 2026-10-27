@@ -3801,6 +3801,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/test-sends/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the caller may still send this hour: their own count and the workspace's, against the
+         *     limits `POST .../test-send` enforces, counted in the same window.
+         */
+        get: operations["test_send_quota"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/themes": {
         parameters: {
             query?: never;
@@ -8262,6 +8282,22 @@ export interface components {
              */
             start: string;
         };
+        QuotaBody: {
+            /** @description The caller's own sends; an API key has none. */
+            member: components["schemas"]["QuotaUsageBody"];
+            /**
+             * Format: date-time
+             * @description When the next test send is accepted again: the later release time of the limits that are
+             *     full now, as the refusal computes it. Null when the caller can send now.
+             */
+            resets_at?: string | null;
+            workspace: components["schemas"]["QuotaUsageBody"];
+        };
+        /** @description Test sends counted in the rolling hour against a limit. */
+        QuotaUsageBody: {
+            limit: number;
+            used: number;
+        };
         ReadBody: {
             /**
              * @description The read rule answer: among the states that cover the message the latest change wins;
@@ -9989,6 +10025,11 @@ export interface components {
             /** Format: uuid */
             destination_id: string;
             /**
+             * Format: int32
+             * @description The draft revision a draft test rendered; null for a version test.
+             */
+            draft_revision?: number | null;
+            /**
              * Format: uuid
              * @description Also the idempotency key at the destination.
              */
@@ -10007,6 +10048,11 @@ export interface components {
             /** @description A fixed code that says why a test did not go out. */
             reason?: string | null;
             /**
+             * @description A member's email, or the hint of the allowlist entry the test went to; `removed address`
+             *     once the entry is gone. Never an allowlisted address.
+             */
+            recipient_display: string;
+            /**
              * Format: uuid
              * @description The workspace member the test went to; null for an allowlisted address.
              */
@@ -10018,6 +10064,8 @@ export interface components {
             render_context: string;
             /** Format: uuid */
             sender_identity_id: string;
+            /** @description The email of the member who asked; null for an API key or a removed member. */
+            sent_by_email?: string | null;
             /** Format: uuid */
             template_id: string;
             /**
@@ -10026,13 +10074,18 @@ export interface components {
              */
             template_version?: number | null;
         };
-        /** @description Who a test goes to. Exactly one of the two fields is given. */
+        /** @description Who a test goes to. Exactly one of the three fields is given. */
         TestSendRecipient: {
             /**
              * @description An address on the workspace's test-send allowlist.
              * @example qa@example.com
              */
             address?: string | null;
+            /**
+             * Format: uuid
+             * @description An entry of the allowlist, by the id the allowlist options list. The address stays sealed.
+             */
+            allowlist_entry?: string | null;
             /**
              * Format: uuid
              * @description A member of this workspace; the test goes to the address on their account.
@@ -26460,6 +26513,8 @@ export interface operations {
             query?: {
                 /** @description Only the tests of this template */
                 template_id?: string;
+                /** @description Only the tests that rendered this draft revision */
+                draft_revision?: number;
                 /** @description Rows per page, 1 to 200; default 50 */
                 limit?: number;
                 /** @description The next_before of the previous page */
@@ -26483,13 +26538,63 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendsBody"];
                 };
             };
-            /** @description limit or template_id is out of range or malformed, or before is not a cursor */
+            /** @description limit, template_id or draft_revision is out of range or malformed, or before is not a cursor */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_send_quota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The hourly counts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaBody"];
                 };
             };
             /** @description Not authenticated */

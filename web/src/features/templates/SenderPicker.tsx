@@ -27,17 +27,19 @@ export function SenderSelect({
   value,
   onChange,
   disabled,
+  label = "Sender identity",
 }: {
   senders: SenderOptions;
   value: string;
   onChange: (id: string) => void;
   disabled: boolean;
+  label?: string;
 }) {
   if (senders.status === "loading") return <LoadingState label="Loading sender identities" />;
   if (senders.status === "error") {
     return (
       <div className="field">
-        <span className="field-label">Sender identity</span>
+        <span className="field-label">{label}</span>
         <p className="faint">{value === "" ? "No sender chosen." : <span className="mono">{value}</span>}</p>
         <ErrorState {...describeError(senders.error)} onRetry={senders.reload} />
       </div>
@@ -51,7 +53,7 @@ export function SenderSelect({
   if (chosen?.archived) hint = "Warning: the chosen sender is archived and cannot send. Choose another.";
   return (
     <SelectField
-      label="Sender identity"
+      label={label}
       value={value}
       onChange={(event) => onChange(event.target.value)}
       disabled={disabled}

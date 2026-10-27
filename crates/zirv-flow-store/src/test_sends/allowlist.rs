@@ -159,6 +159,30 @@ pub async fn find_allowlist_entry(
     .map_err(StoreError::query)
 }
 
+/// The hash and the hint of the entry with this id, when the workspace has one: what a test to
+/// that entry needs, with no address opened.
+pub async fn find_allowlist_target(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    id: Uuid,
+) -> Result<Option<([u8; 32], String)>, StoreError> {
+    let row: Option<(Vec<u8>, String)> = sqlx::query_as(
+        "SELECT address_hash, display_hint FROM test_send_allowlist \
+         WHERE workspace_id = $1 AND id = $2",
+    )
+    .bind(workspace.as_uuid())
+    .bind(id)
+    .fetch_optional(connection)
+    .await
+    .map_err(StoreError::query)?;
+    row.map(|(hash, hint)| {
+        <[u8; 32]>::try_from(hash.as_slice())
+            .map(|hash| (hash, hint))
+            .map_err(|_| StoreError::query(sqlx::Error::Decode("bad allowlist hash".into())))
+    })
+    .transpose()
+}
+
 /// Opens the sealed address of the entry with this hash. `Ok(None)` when the entry is gone; an
 /// entry the keyring cannot open is [`OpenError::Unopenable`].
 pub async fn open_allowlist_address(

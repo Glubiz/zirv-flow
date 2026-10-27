@@ -5,12 +5,13 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::UserId;
 use zirv_flow_core::people::{Identifier, identifier_hash};
-use zirv_flow_store::{NewTestSend, TestSendReservation};
+use zirv_flow_store::{ListedTestSend, NewTestSend, TestSendQuota, TestSendReservation};
 
 use super::TestSendBody;
 use crate::AppState;
@@ -22,7 +23,7 @@ use crate::problem::{ApiError, Problem};
 use crate::templates::authorize_render;
 use crate::trace;
 
-/// Who a test goes to. Exactly one of the two fields is given.
+/// Who a test goes to. Exactly one of the three fields is given.
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct TestSendRecipient {
     /// A member of this workspace; the test goes to the address on their account.
@@ -30,6 +31,8 @@ pub(crate) struct TestSendRecipient {
     /// An address on the workspace's test-send allowlist.
     #[schema(example = "qa@example.com")]
     address: Option<String>,
+    /// An entry of the allowlist, by the id the allowlist options list. The address stays sealed.
+    allowlist_entry: Option<Uuid>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -121,18 +124,20 @@ pub(crate) async fn test_send(
             "only an email template can be test-sent",
         ));
     }
-    match body.version {
+    let draft_revision = match body.version {
         Some(number) => {
             zirv_flow_store::find_template_version(&mut *tx, workspace.id, id, number)
                 .await?
                 .ok_or_else(ApiError::not_found)?;
+            None
         }
-        None => {
+        None => Some(
             zirv_flow_store::find_template_draft(&mut *tx, workspace.id, id)
                 .await?
-                .ok_or_else(ApiError::not_found)?;
-        }
-    }
+                .ok_or_else(ApiError::not_found)?
+                .revision,
+        ),
+    };
     let destination =
         zirv_flow_store::find_destination(&mut *tx, workspace.id, body.destination_id)
             .await?
@@ -152,10 +157,15 @@ pub(crate) async fn test_send(
             .ok_or_else(ApiError::not_found)?;
     }
 
-    // The recipient: a member's account address, or an allowlisted address. A refusal is the same
-    // problem whichever way it is reached, so it does not say which addresses are on the list.
-    let (address, member) = match (body.to.member, body.to.address.as_deref()) {
-        (Some(member), None) => {
+    // The recipient: a member's account address, or an allowlisted address named by its text or by
+    // its entry. A refusal is the same problem whichever way it is reached, so it does not say
+    // which addresses are on the list.
+    let (hash, member, recipient_display) = match (
+        body.to.member,
+        body.to.address.as_deref(),
+        body.to.allowlist_entry,
+    ) {
+        (Some(member), None, None) => {
             let user = UserId::from_uuid(member);
             zirv_flow_store::membership_role(&mut *tx, workspace.id, user)
                 .await?
@@ -163,24 +173,39 @@ pub(crate) async fn test_send(
             let account = zirv_flow_store::find_user(&mut *tx, user)
                 .await?
                 .ok_or_else(recipient_not_allowed)?;
-            (account.email, Some(member))
+            let identifier =
+                Identifier::parse("email", &account.email).map_err(|_| recipient_not_allowed())?;
+            (
+                identifier_hash(key, &identifier),
+                Some(member),
+                account.email,
+            )
         }
-        (None, Some(address)) => (address.to_owned(), None),
+        (None, Some(address), None) => {
+            let identifier =
+                Identifier::parse("email", address).map_err(|_| recipient_not_allowed())?;
+            let hash = identifier_hash(key, &identifier);
+            let entry = zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
+                .await?
+                .ok_or_else(recipient_not_allowed)?;
+            // The hint stored with the entry, not one derived from the text the caller typed.
+            let (_, hint) = zirv_flow_store::find_allowlist_target(&mut tx, workspace.id, entry)
+                .await?
+                .ok_or_else(recipient_not_allowed)?;
+            (hash, None, hint)
+        }
+        (None, None, Some(entry)) => {
+            let (hash, hint) = zirv_flow_store::find_allowlist_target(&mut tx, workspace.id, entry)
+                .await?
+                .ok_or_else(recipient_not_allowed)?;
+            (hash, None, hint)
+        }
         _ => {
             return Err(ApiError::unprocessable(
-                "`to` names exactly one of `member` and `address`",
+                "`to` names exactly one of `member`, `address` and `allowlist_entry`",
             ));
         }
     };
-    let identifier = Identifier::parse("email", &address).map_err(|_| recipient_not_allowed())?;
-    let hash = identifier_hash(key, &identifier);
-    if member.is_none()
-        && zirv_flow_store::find_allowlist_entry(&mut tx, workspace.id, &hash)
-            .await?
-            .is_none()
-    {
-        return Err(recipient_not_allowed());
-    }
 
     let now = state.clock.now(&mut tx).await?;
     let send_id = Uuid::now_v7();
@@ -191,6 +216,7 @@ pub(crate) async fn test_send(
             workspace: workspace.id,
             template: id,
             template_version: body.version,
+            draft_revision,
             member: principal.user_id().map(|user| user.as_uuid()),
             destination: destination.id,
             sender_identity: body.sender_identity_id,
@@ -228,8 +254,93 @@ pub(crate) async fn test_send(
         }),
     )
     .await?;
+    let sent_by_email = match principal.user_id() {
+        Some(user) => zirv_flow_store::find_user(&mut *tx, user)
+            .await?
+            .map(|account| account.email),
+        None => None,
+    };
     zirv_flow_store::commit(tx).await?;
-    Ok((StatusCode::ACCEPTED, Json((*row).into())))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(
+            ListedTestSend {
+                send: *row,
+                recipient_display,
+                sent_by_email,
+            }
+            .into(),
+        ),
+    ))
+}
+
+/// Test sends counted in the rolling hour against a limit.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct QuotaUsageBody {
+    used: usize,
+    limit: usize,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct QuotaBody {
+    /// The caller's own sends; an API key has none.
+    member: QuotaUsageBody,
+    workspace: QuotaUsageBody,
+    /// When the next test send is accepted again: the later release time of the limits that are
+    /// full now, as the refusal computes it. Null when the caller can send now.
+    #[serde(with = "time::serde::rfc3339::option")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    resets_at: Option<OffsetDateTime>,
+}
+
+impl From<TestSendQuota> for QuotaBody {
+    fn from(quota: TestSendQuota) -> Self {
+        Self {
+            member: QuotaUsageBody {
+                used: quota.member.used,
+                limit: quota.member.limit,
+            },
+            workspace: QuotaUsageBody {
+                used: quota.workspace.used,
+                limit: quota.workspace.limit,
+            },
+            resets_at: quota.resets_at,
+        }
+    }
+}
+
+/// What the caller may still send this hour: their own count and the workspace's, against the
+/// limits `POST .../test-send` enforces, counted in the same window.
+#[utoipa::path(
+    get,
+    operation_id = "test_send_quota",
+    path = "/api/v1/workspaces/{ws}/test-sends/quota",
+    tag = "templates",
+    params(("ws" = Uuid, Path, description = "Workspace id")),
+    responses(
+        (status = 200, description = "The hourly counts", body = QuotaBody),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn quota(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(ws): Path<String>,
+) -> Result<Json<QuotaBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let now = state.clock.now(&mut tx).await?;
+    let quota = zirv_flow_store::test_send_quota(
+        &mut tx,
+        workspace.id,
+        principal.user_id().map(|user| user.as_uuid()),
+        now,
+    )
+    .await?;
+    Ok(Json(quota.into()))
 }
 
 /// The workspace's test-send log, newest first, optionally of one template (`template_id`).
@@ -241,12 +352,13 @@ pub(crate) async fn test_send(
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("template_id" = Option<Uuid>, Query, description = "Only the tests of this template"),
+        ("draft_revision" = Option<i32>, Query, description = "Only the tests that rendered this draft revision"),
         ("limit" = Option<u32>, Query, description = "Rows per page, 1 to 200; default 50"),
         ("before" = Option<String>, Query, description = "The next_before of the previous page")
     ),
     responses(
         (status = 200, description = "A page of the log", body = TestSendsBody),
-        (status = 400, description = "limit or template_id is out of range or malformed, or before is not a cursor", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit, template_id or draft_revision is out of range or malformed, or before is not a cursor", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json")
@@ -263,6 +375,7 @@ pub(crate) async fn list(
     let query = query.unwrap_or_default();
     let (limit, before) = parse_page(&query)?;
     let mut template = None;
+    let mut draft_revision = None;
     for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
         if key == "template_id" {
             template = Some(
@@ -270,13 +383,25 @@ pub(crate) async fn list(
                     .parse::<Uuid>()
                     .map_err(|_| ApiError::bad_request("template_id is not a valid id"))?,
             );
+        } else if key == "draft_revision" {
+            draft_revision = Some(
+                value
+                    .parse::<i32>()
+                    .map_err(|_| ApiError::bad_request("draft_revision is not a number"))?,
+            );
         }
     }
-    let (rows, more) =
-        zirv_flow_store::list_test_sends(&state.pool, workspace.id, template, limit, before)
-            .await?;
+    let (rows, more) = zirv_flow_store::list_test_sends(
+        &state.pool,
+        workspace.id,
+        template,
+        draft_revision,
+        limit,
+        before,
+    )
+    .await?;
     let next_before = match rows.last() {
-        Some(last) if more => Some(encode_cursor((last.created_at, last.id))),
+        Some(last) if more => Some(encode_cursor((last.send.created_at, last.send.id))),
         _ => None,
     };
     Ok(Json(TestSendsBody {
