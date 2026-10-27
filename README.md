@@ -549,7 +549,8 @@ Passwords are 12 to 1024 characters.
   section below says "any member", read editor or above; "admin" on a publish
   route reads publisher or above.
 - **Personal values.** The instance owner, a workspace admin and an `admin` key see
-  identifiers, trait values, event properties and consent evidence unmasked. A  publisher, editor or viewer sees them masked unless the admin sets `view_pii` on
+  identifiers, trait values, event properties and consent evidence unmasked. A
+  publisher, editor or viewer sees them masked unless the admin sets `view_pii` on
   their membership (`PUT .../members/{user_id}` with `"view_pii": true`; leaving it
   out keeps the stored value; `GET .../members` shows it). A key sees them with the
   `pii` scope. The grant is also what an editor needs to preview, test-send or test a
