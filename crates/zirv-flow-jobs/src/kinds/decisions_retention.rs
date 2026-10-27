@@ -6,7 +6,9 @@
 use hashbrown::HashMap;
 use serde_json::Value;
 use tracing::info;
-use zirv_flow_store::{apply_decision_retention_for, decision_log_size};
+use zirv_flow_store::{
+    DecisionRetentionReport, apply_decision_retention_progress, decision_log_size,
+};
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
@@ -26,17 +28,23 @@ impl JobKind for DecisionsRetention {
         let now = clock.now(ctx.conn()).await?;
         // Workspaces with a shorter window of their own arrive here with the per-workspace
         // setting; none have one yet.
-        let report = apply_decision_retention_for(&pool, &settings, &HashMap::new(), now).await?;
+        // What committed before a failure still counts, so the counter is recorded either way.
+        let mut report = DecisionRetentionReport::default();
+        let outcome =
+            apply_decision_retention_progress(&pool, &settings, &HashMap::new(), now, &mut report)
+                .await;
         metrics::record_retention(
             "decision_records",
             report.records_deleted,
             now.unix_timestamp() as f64,
         );
+        outcome?;
         let size = decision_log_size(&pool).await?;
         metrics::record_decision_log_size(size.bytes, size.partitions);
         info!(
             records_deleted = report.records_deleted,
             partitions_dropped = report.partitions_dropped,
+            partitions_skipped = report.partitions_skipped,
             "decision retention ran"
         );
         Ok(())
@@ -142,6 +150,88 @@ mod tests {
                 "zirv_flow_decision_log_partitions {}",
                 size.partitions
             )),
+            "{output}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_after_a_committed_batch_still_counts_that_batch(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &zirv_flow_core::WorkspaceName::parse("ours").unwrap(),
+            &zirv_flow_core::Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let now = OffsetDateTime::now_utc();
+        // One full batch of old rows, then a last one that a trigger refuses to delete.
+        sqlx::query(
+            "INSERT INTO decision_records \
+             (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), $1, gen_random_uuid(), \
+                $2 - make_interval(days => 500) + make_interval(secs => n), \
+                CASE WHEN n = 5001 THEN 'last' ELSE 'old' END, 'done', 'api', 'x' \
+             FROM generate_series(1, 5001) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE FUNCTION refuse_last() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN IF OLD.action = 'last' THEN RAISE EXCEPTION 'refused'; END IF; \
+             RETURN OLD; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_last BEFORE DELETE ON decision_records_default \
+             FOR EACH ROW EXECUTE FUNCTION refuse_last()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
+        leader.tick_at(now + time::Duration::days(2)).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[DecisionsRetention::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_clock(Clock::Manual(ManualClock::new(now)))
+            .with_decision_retention(DecisionRetention::default());
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let guard = ::metrics::set_default_local_recorder(&recorder);
+        let result = DecisionsRetention
+            .run(&mut ctx, claimed.payload.clone())
+            .await;
+        drop(guard);
+        tx.rollback().await.unwrap();
+
+        assert!(result.is_err());
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_retention_deleted_total{table=\"decision_records\"} 5000"),
             "{output}"
         );
     }

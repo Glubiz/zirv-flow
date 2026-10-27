@@ -2110,7 +2110,7 @@ retention is set by `retention.decision_days`, default 13 months, bounded from
 (OQ-28, ruling ca12b4e5; 16.3). Measured at 200,000 records per shape, a record
 takes about 450 bytes (ingest), 730 (flow step) and 800 (send), about 260, 430
 and 500 without the three secondary indexes; at 1,000 events/s and one record
-per event that is 39 to 69 GB a day, 15 to 27 TB at the 13-month default. Erasure removes records scoped to the person
+per event that is 39 to 69 GB a day, 15 TB (ingest), 25 TB (flow) or 27 TB (send) at the 13-month default. Erasure removes records scoped to the person
 while preserving aggregate operational metrics.
 
 As built (M1 skeleton):

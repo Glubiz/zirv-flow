@@ -3,10 +3,20 @@
 //! partition) are deleted in batches, and a workspace with a shorter window loses its older rows
 //! the same way. A decision record is not a source of handled markers, so nothing is marked.
 //! Every drop and every batch commits on its own and a rerun continues from what is committed.
+//!
+//! A drop takes ACCESS EXCLUSIVE on `decision_records`, so it waits [`DROP_LOCK_TIMEOUT`] at most
+//! and is then skipped until the next run; otherwise one long transaction would queue every
+//! append behind the drop. The workspace delete walks `(recorded_at, id)`, the primary key order
+//! (no new index: each one adds bytes to every record), with a cursor carried between batches, so
+//! no batch rescans what an earlier one passed. The remaining cost is that it reads the rows of
+//! the other workspaces below the cutoff once.
 
 use hashbrown::HashMap;
 use sqlx::PgPool;
+use time::macros::datetime;
 use time::{Date, Duration, Month, OffsetDateTime, UtcOffset};
+use tracing::warn;
+use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
 use super::next_month;
@@ -14,6 +24,14 @@ use crate::StoreError;
 use crate::events::RETENTION_BATCH;
 
 const PARTITION_PREFIX: &str = "decision_records_y";
+
+/// How long a partition drop waits for the lock on `decision_records` before it is skipped. The
+/// drop needs ACCESS EXCLUSIVE on the parent, and while it waits every append queues behind it;
+/// `DETACH ... CONCURRENTLY` is not available with a DEFAULT partition.
+const DROP_LOCK_TIMEOUT: &str = "2s";
+
+/// SQLSTATE `lock_not_available`: the lock timeout of a drop expired.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 /// The operator's decision-log retention settings, in days.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +57,8 @@ impl Default for DecisionRetention {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DecisionRetentionReport {
     pub partitions_dropped: u64,
+    /// Partitions a drop gave up on because the table was locked; the next run retries them.
+    pub partitions_skipped: u64,
     pub records_deleted: u64,
 }
 
@@ -59,7 +79,21 @@ pub async fn apply_decision_retention_for(
     workspace_days: &HashMap<WorkspaceId, u32>,
     now: OffsetDateTime,
 ) -> Result<DecisionRetentionReport, StoreError> {
-    retain_in_batches(pool, settings, workspace_days, now, RETENTION_BATCH).await
+    let mut report = DecisionRetentionReport::default();
+    apply_decision_retention_progress(pool, settings, workspace_days, now, &mut report).await?;
+    Ok(report)
+}
+
+/// Like [`apply_decision_retention_for`], but adds what it removed to `report` as it goes, so a
+/// caller keeps the count of the drops and batches that committed before a later step failed.
+pub async fn apply_decision_retention_progress(
+    pool: &PgPool,
+    settings: &DecisionRetention,
+    workspace_days: &HashMap<WorkspaceId, u32>,
+    now: OffsetDateTime,
+    report: &mut DecisionRetentionReport,
+) -> Result<(), StoreError> {
+    retain_in_batches(pool, settings, workspace_days, now, RETENTION_BATCH, report).await
 }
 
 async fn retain_in_batches(
@@ -68,67 +102,90 @@ async fn retain_in_batches(
     workspace_days: &HashMap<WorkspaceId, u32>,
     now: OffsetDateTime,
     batch_size: i64,
-) -> Result<DecisionRetentionReport, StoreError> {
+    report: &mut DecisionRetentionReport,
+) -> Result<(), StoreError> {
     let cutoff = cutoff_of(now, settings.days);
-    let mut report = DecisionRetentionReport {
-        partitions_dropped: drop_old_partitions(pool, cutoff, now).await?,
-        records_deleted: 0,
-    };
-    report.records_deleted += delete_in_batches(
-        pool,
-        "WITH gone AS (DELETE FROM decision_records d USING ( \
-            SELECT recorded_at, id FROM decision_records WHERE recorded_at < $1 \
-            ORDER BY recorded_at, id LIMIT $2) old \
-         WHERE d.recorded_at = old.recorded_at AND d.id = old.id RETURNING 1) \
-         SELECT count(*) FROM gone",
-        |query| query.bind(cutoff).bind(batch_size),
-        batch_size,
-    )
-    .await?;
+    drop_old_partitions(pool, cutoff, now, report).await?;
+    delete_before_cutoff(pool, cutoff, batch_size, report).await?;
     for (workspace, days) in workspace_days {
-        report.records_deleted += delete_in_batches(
-            pool,
-            "WITH gone AS (DELETE FROM decision_records d USING ( \
-                SELECT recorded_at, id FROM decision_records \
-                WHERE workspace_id = $1 AND recorded_at < $2 LIMIT $3) old \
-             WHERE d.recorded_at = old.recorded_at AND d.id = old.id RETURNING 1) \
-             SELECT count(*) FROM gone",
-            |query| {
-                query
-                    .bind(workspace.as_uuid())
-                    .bind(cutoff_of(now, *days))
-                    .bind(batch_size)
-            },
-            batch_size,
-        )
-        .await?;
+        let cutoff = cutoff_of(now, *days);
+        delete_workspace_rows(pool, *workspace, cutoff, batch_size, report).await?;
     }
-    Ok(report)
+    Ok(())
 }
 
 fn cutoff_of(now: OffsetDateTime, days: u32) -> OffsetDateTime {
     now - Duration::days(i64::from(days))
 }
 
-/// Runs `statement`, which returns the number of rows it deleted as one `bigint`, until a batch
-/// comes back short. Each run commits on its own.
-async fn delete_in_batches<'q>(
+/// Deletes every row older than `cutoff`, `batch_size` at a time, each batch in its own commit.
+/// The rows found are the oldest, so each batch starts where the deleted ones were.
+async fn delete_before_cutoff(
     pool: &PgPool,
-    statement: &'static str,
-    bind: impl Fn(
-        sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
-    ) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
+    cutoff: OffsetDateTime,
     batch_size: i64,
-) -> Result<u64, StoreError> {
-    let mut total = 0;
+    report: &mut DecisionRetentionReport,
+) -> Result<(), StoreError> {
     loop {
-        let deleted: i64 = bind(sqlx::query_scalar(statement))
-            .fetch_one(pool)
-            .await
-            .map_err(StoreError::query)?;
-        total += u64::try_from(deleted).unwrap_or(0);
+        let deleted: i64 = sqlx::query_scalar(
+            "WITH gone AS (DELETE FROM decision_records d USING ( \
+                SELECT recorded_at, id FROM decision_records WHERE recorded_at < $1 \
+                ORDER BY recorded_at, id LIMIT $2) old \
+             WHERE d.recorded_at = old.recorded_at AND d.id = old.id RETURNING 1) \
+             SELECT count(*) FROM gone",
+        )
+        .bind(cutoff)
+        .bind(batch_size)
+        .fetch_one(pool)
+        .await
+        .map_err(StoreError::query)?;
+        report.records_deleted += u64::try_from(deleted).unwrap_or(0);
         if deleted < batch_size {
-            return Ok(total);
+            return Ok(());
+        }
+    }
+}
+
+/// Deletes the rows of `workspace` older than `cutoff`, `batch_size` at a time, each batch in its
+/// own commit, and returns how many batches ran. Each batch starts after the last key of the one
+/// before, so the rows of other workspaces below the cutoff are read once, not by every batch.
+async fn delete_workspace_rows(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    cutoff: OffsetDateTime,
+    batch_size: i64,
+    report: &mut DecisionRetentionReport,
+) -> Result<u64, StoreError> {
+    let mut last: (OffsetDateTime, Uuid) = (datetime!(0001-01-01 0:00 UTC), Uuid::nil());
+    let mut batches = 0;
+    loop {
+        let (deleted, at, id): (i64, Option<OffsetDateTime>, Option<Uuid>) = sqlx::query_as(
+            "WITH batch AS ( \
+                SELECT recorded_at, id FROM decision_records \
+                WHERE workspace_id = $1 AND recorded_at < $2 AND (recorded_at, id) > ($3, $4) \
+                ORDER BY recorded_at, id LIMIT $5), \
+             gone AS (DELETE FROM decision_records d USING batch \
+                WHERE d.recorded_at = batch.recorded_at AND d.id = batch.id RETURNING 1) \
+             SELECT (SELECT count(*) FROM gone), l.recorded_at, l.id \
+             FROM (SELECT 1) one LEFT JOIN LATERAL ( \
+                SELECT recorded_at, id FROM batch ORDER BY recorded_at DESC, id DESC LIMIT 1) l \
+                ON true",
+        )
+        .bind(workspace.as_uuid())
+        .bind(cutoff)
+        .bind(last.0)
+        .bind(last.1)
+        .bind(batch_size)
+        .fetch_one(pool)
+        .await
+        .map_err(StoreError::query)?;
+        batches += 1;
+        report.records_deleted += u64::try_from(deleted).unwrap_or(0);
+        if let (Some(at), Some(id)) = (at, id) {
+            last = (at, id);
+        }
+        if deleted < batch_size {
+            return Ok(batches);
         }
     }
 }
@@ -136,12 +193,14 @@ async fn delete_in_batches<'q>(
 /// Drops each monthly partition whose upper bound is at or before `cutoff`. Never the DEFAULT
 /// partition, never a partition that is not named for a month, and never the current or the next
 /// month, whatever the window. Each drop is its own transaction and `DROP TABLE IF EXISTS`, so a
-/// concurrent run that dropped it first is not an error.
+/// concurrent run that dropped it first is not an error. A drop that cannot get its lock within
+/// [`DROP_LOCK_TIMEOUT`] is counted as skipped and left for the next run.
 async fn drop_old_partitions(
     pool: &PgPool,
     cutoff: OffsetDateTime,
     now: OffsetDateTime,
-) -> Result<u64, StoreError> {
+    report: &mut DecisionRetentionReport,
+) -> Result<(), StoreError> {
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
          WHERE i.inhparent = 'decision_records'::regclass",
@@ -154,7 +213,6 @@ async fn drop_old_partitions(
         .date()
         .replace_day(1)
         .expect("day 1 exists in every month");
-    let mut dropped = 0;
     for name in names {
         let Some(first) = month_of(&name) else {
             continue;
@@ -169,14 +227,34 @@ async fn drop_old_partitions(
             u8::from(first.month())
         );
         let mut tx = crate::begin(pool).await?;
-        sqlx::query(sqlx::AssertSqlSafe(statement))
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(DROP_LOCK_TIMEOUT)
             .execute(&mut *tx)
             .await
             .map_err(StoreError::query)?;
-        crate::commit(tx).await?;
-        dropped += 1;
+        match sqlx::query(sqlx::AssertSqlSafe(statement))
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(_) => {
+                crate::commit(tx).await?;
+                report.partitions_dropped += 1;
+            }
+            Err(error) if is_lock_timeout(&error) => {
+                warn!(partition = %name, "decision partition drop skipped: the table is locked");
+                report.partitions_skipped += 1;
+            }
+            Err(error) => return Err(StoreError::query(error)),
+        }
     }
-    Ok(dropped)
+    Ok(())
+}
+
+fn is_lock_timeout(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|error| error.code())
+        .is_some_and(|code| code == LOCK_NOT_AVAILABLE)
 }
 
 /// The first day of the month a partition named `decision_records_yYYYYmMM` covers.
@@ -351,7 +429,8 @@ mod tests {
         insert_at(&pool, ws, datetime!(2026-02-21 12:00 UTC), "at-cutoff").await;
         insert_at(&pool, ws, datetime!(2026-02-27 00:00 UTC), "inside").await;
 
-        let report = retain_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2)
+        let mut report = DecisionRetentionReport::default();
+        retain_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2, &mut report)
             .await
             .unwrap();
 
@@ -426,5 +505,127 @@ mod tests {
             "only decision_records_y2025m02"
         );
         assert!(decision_log_size(&pool).await.unwrap().partitions >= 3);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_workspace_delete_walks_forward_and_reads_each_row_below_the_cutoff_once(
+        pool: PgPool,
+    ) {
+        let ours = workspace(&pool, "ours").await;
+        let theirs = workspace(&pool, "theirs").await;
+        partitions(&pool, date!(2026 - 04 - 10)).await;
+        let base = NOW - Duration::days(60);
+        for minute in 0..5 {
+            let at = base + Duration::minutes(minute);
+            insert_at(&pool, ours, at, &format!("ours{minute}")).await;
+            insert_at(&pool, theirs, at, &format!("theirs{minute}")).await;
+        }
+        let mut report = DecisionRetentionReport::default();
+
+        let batches = delete_workspace_rows(&pool, ours, NOW - Duration::days(30), 2, &mut report)
+            .await
+            .unwrap();
+
+        // 2 + 2 + 1 rows: three batches, the last one short, none of them a rescan.
+        assert_eq!((batches, report.records_deleted), (3, 5));
+        let left = actions(&pool).await;
+        assert_eq!(left.len(), 5);
+        assert!(left.iter().all(|action| action.starts_with("theirs")));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_locked_table_skips_the_drop_and_other_work_runs_and_a_rerun_drops_it(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        partitions(&pool, date!(2025 - 01 - 10)).await;
+        insert_at(&pool, ws, datetime!(2020-03-05 00:00 UTC), "ancient").await;
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE decision_records IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let report = apply_decision_retention(&pool, &settings(), NOW)
+            .await
+            .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(
+            (
+                report.partitions_dropped,
+                report.partitions_skipped,
+                report.records_deleted
+            ),
+            (0, 2, 1)
+        );
+        assert!(exists(&pool, "decision_records_y2025m01").await);
+        holder.rollback().await.unwrap();
+
+        let again = apply_decision_retention(&pool, &settings(), NOW)
+            .await
+            .unwrap();
+
+        assert_eq!((again.partitions_dropped, again.partitions_skipped), (2, 0));
+        assert!(!exists(&pool, "decision_records_y2025m01").await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_after_a_committed_batch_keeps_that_batch_in_the_report(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        for minute in 0..3 {
+            let at = datetime!(2020-03-05 00:00 UTC) + Duration::minutes(minute);
+            insert_at(&pool, ws, at, &format!("old{minute}")).await;
+        }
+        sqlx::query(
+            "CREATE FUNCTION refuse_last() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN IF OLD.action = 'old2' THEN RAISE EXCEPTION 'refused'; END IF; \
+             RETURN OLD; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_last BEFORE DELETE ON decision_records_default \
+             FOR EACH ROW EXECUTE FUNCTION refuse_last()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut report = DecisionRetentionReport::default();
+
+        let result =
+            retain_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2, &mut report).await;
+
+        assert!(result.is_err());
+        assert_eq!(report.records_deleted, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retention_pass_racing_the_partition_create_succeeds_and_both_months_exist(
+        pool: PgPool,
+    ) {
+        partitions(&pool, date!(2025 - 01 - 10)).await;
+        let today = OffsetDateTime::now_utc();
+        let settings = settings();
+
+        let (pass, created) = tokio::join!(
+            apply_decision_retention(&pool, &settings, today),
+            ensure_decision_partitions(&pool, today.date()),
+        );
+
+        assert!(pass.is_ok() && created.is_ok(), "{pass:?} {created:?}");
+        let this = today.date().replace_day(1).unwrap();
+        for month in [this, next_month(this)] {
+            let name = format!(
+                "decision_records_y{:04}m{:02}",
+                month.year(),
+                u8::from(month.month())
+            );
+            assert!(exists(&pool, &name).await, "{name}");
+        }
     }
 }

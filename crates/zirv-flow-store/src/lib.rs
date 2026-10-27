@@ -98,7 +98,7 @@ pub use contacts::{
 pub use decisions::{
     Decision, DecisionLogSize, DecisionRetention, DecisionRetentionReport, GraphPoint, NewDecision,
     append_decision, append_decisions, apply_decision_retention, apply_decision_retention_for,
-    decision_log_size, ensure_decision_partitions, list_trace,
+    apply_decision_retention_progress, decision_log_size, ensure_decision_partitions, list_trace,
 };
 pub use destinations::{
     Admission, AttemptOutcome, AttemptStats, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt,

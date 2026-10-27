@@ -739,14 +739,17 @@ The scheduler leader creates the partitions for this and next month.
 **Decision-log retention.** A daily job (03:53 UTC, `decisions.retention`) drops each monthly
 decision-log partition that ends before `retention.decision_days`, in a transaction of its own
 (never the default partition, this month or next), then deletes the older rows of the month
-that holds the cutoff in batches. It sets `zirv_flow_decision_log_bytes` and
+that holds the cutoff in batches. A drop waits at most 2 seconds for the table lock and is skipped
+(logged, retried by the next daily run) rather than stalling appends. A workspace with a shorter
+window is deleted in key order with a cursor, so the job reads the other workspaces' rows below
+the cutoff once and no batch rescans an earlier one; it adds no index. It sets `zirv_flow_decision_log_bytes` and
 `zirv_flow_decision_log_partitions` and counts deletes in
 `zirv_flow_retention_deleted_total{table="decision_records"}`. Measured on PostgreSQL
 (200,000 records per shape, with the primary key and the trace, person and enrollment
 indexes), a record takes about 450 bytes (ingest), 730 (flow step) and 800 (send), and about
 260, 430 and 500 without the three secondary indexes. At 1,000 events/s with one record per
 event that is about 39 GB (ingest), 63 GB (flow) or 69 GB (send) a day, so the 13-month
-default holds about 15 TB per record-per-event stream at that rate; scale it by the real
+default holds about 15 TB (ingest), 25 TB (flow) or 27 TB (send) per record-per-event stream at that rate; scale it by the real
 records per event and rate. Reproduce the table with
 `ZIRV_FLOW_BENCH_DECISION_SIZE=200000 cargo nextest run -p zirv-flow-store --run-ignored all --no-capture bytes_per_record`.
 ## Event debugger and explorer

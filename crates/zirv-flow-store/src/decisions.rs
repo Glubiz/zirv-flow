@@ -20,7 +20,7 @@ mod size;
 
 pub use retention::{
     DecisionRetention, DecisionRetentionReport, apply_decision_retention,
-    apply_decision_retention_for,
+    apply_decision_retention_for, apply_decision_retention_progress,
 };
 pub use size::{DecisionLogSize, decision_log_size};
 
