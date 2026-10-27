@@ -225,43 +225,9 @@ struct FeedRow {
     trace_id: Uuid,
 }
 
-/// The workspace's feed rows after `after`, oldest first, at most `limit`, that match
-/// `filter` and whose `seq` is not in `exclude`. A viewer excludes the rows it has sent above
-/// its low watermark.
-pub async fn read_debugger_feed<'e>(
-    executor: impl PgExecutor<'e>,
-    workspace: WorkspaceId,
-    after: i64,
-    exclude: &[i64],
-    filter: FeedFilter<'_>,
-    limit: i64,
-) -> Result<Vec<FeedItem>, StoreError> {
-    let rows: Vec<FeedRow> = sqlx::query_as(
-        "SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties, \
-                v.properties AS schema, f.event_id, f.reject_id, f.trace_id \
-         FROM debugger_feed f LEFT JOIN event_schema_versions v \
-            ON v.workspace_id = f.workspace_id AND v.name = f.name \
-           AND v.version = f.schema_version \
-         WHERE f.workspace_id = $1 AND f.seq > $2 \
-           AND ($3::text IS NULL OR f.source = $3) \
-           AND ($4::text IS NULL OR f.name = $4) \
-           AND ($5::text IS NULL OR f.outcome = $5) \
-           AND NOT (f.seq = ANY($7)) \
-         ORDER BY f.seq LIMIT $6",
-    )
-    .bind(workspace.as_uuid())
-    .bind(after)
-    .bind(filter.source)
-    .bind(filter.name)
-    .bind(filter.outcome)
-    .bind(limit)
-    .bind(exclude)
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| FeedItem {
+impl From<FeedRow> for FeedItem {
+    fn from(row: FeedRow) -> Self {
+        Self {
             seq: row.seq,
             at: row.at,
             source: row.source,
@@ -279,37 +245,71 @@ pub async fn read_debugger_feed<'e>(
             event_id: row.event_id,
             reject_id: row.reject_id,
             trace_id: row.trace_id,
-        })
-        .collect())
+        }
+    }
 }
 
-/// The `seq` of every feed row after `after`, of every workspace, oldest first, at most
-/// `limit`, with whether the row is the workspace's and matches `filter`.
-///
-/// `seq` is one identity shared by all workspaces, so a viewer can tell a number another
-/// workspace holds (settled, not its to send) from a hole (a writer still open, or rolled
-/// back). Only numbers and the match flag leave this query, never another workspace's row.
-pub async fn debugger_feed_seqs<'e>(
+/// The workspace's feed rows after `after`, oldest first, at most `limit`, that match
+/// `filter`. An index range scan on `seq`.
+pub async fn read_debugger_feed<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     after: i64,
     filter: FeedFilter<'_>,
     limit: i64,
-) -> Result<Vec<(i64, bool)>, StoreError> {
-    sqlx::query_as(
-        "SELECT f.seq, \
-                (f.workspace_id = $1 \
-                 AND ($3::text IS NULL OR f.source = $3) \
-                 AND ($4::text IS NULL OR f.name = $4) \
-                 AND ($5::text IS NULL OR f.outcome = $5)) AS matched \
-         FROM debugger_feed f WHERE f.seq > $2 \
-         ORDER BY f.seq LIMIT $6",
+) -> Result<Vec<FeedItem>, StoreError> {
+    let rows: Vec<FeedRow> = sqlx::query_as(
+        "SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties,                 v.properties AS schema, f.event_id, f.reject_id, f.trace_id          FROM debugger_feed f LEFT JOIN event_schema_versions v             ON v.workspace_id = f.workspace_id AND v.name = f.name            AND v.version = f.schema_version          WHERE f.workspace_id = $1 AND f.seq > $2            AND ($3::text IS NULL OR f.source = $3)            AND ($4::text IS NULL OR f.name = $4)            AND ($5::text IS NULL OR f.outcome = $5)          ORDER BY f.seq LIMIT $6",
     )
     .bind(workspace.as_uuid())
     .bind(after)
     .bind(filter.source)
     .bind(filter.name)
     .bind(filter.outcome)
+    .bind(limit)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows.into_iter().map(FeedItem::from).collect())
+}
+
+/// The workspace's feed rows whose `seq` is in `seqs`, oldest first, that match `filter`:
+/// point lookups through the `seq` index, for the numbers a viewer is still waiting for.
+pub async fn read_debugger_feed_at<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    seqs: &[i64],
+    filter: FeedFilter<'_>,
+) -> Result<Vec<FeedItem>, StoreError> {
+    let rows: Vec<FeedRow> = sqlx::query_as(
+        "SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties,                 v.properties AS schema, f.event_id, f.reject_id, f.trace_id          FROM debugger_feed f LEFT JOIN event_schema_versions v             ON v.workspace_id = f.workspace_id AND v.name = f.name            AND v.version = f.schema_version          WHERE f.seq = ANY($2) AND f.workspace_id = $1            AND ($3::text IS NULL OR f.source = $3)            AND ($4::text IS NULL OR f.name = $4)            AND ($5::text IS NULL OR f.outcome = $5)          ORDER BY f.seq",
+    )
+    .bind(workspace.as_uuid())
+    .bind(seqs)
+    .bind(filter.source)
+    .bind(filter.name)
+    .bind(filter.outcome)
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows.into_iter().map(FeedItem::from).collect())
+}
+
+/// The numbers in `(after, upto]` that no row of any workspace holds, oldest first, looking
+/// at most `limit` numbers down from `upto`. `seq` is one identity shared by all workspaces,
+/// so a number another workspace holds is settled; a number nobody holds is a hole (a writer
+/// still open, or rolled back). Only numbers leave this query. An index-only probe per number.
+pub async fn debugger_feed_missing<'e>(
+    executor: impl PgExecutor<'e>,
+    after: i64,
+    upto: i64,
+    limit: i64,
+) -> Result<Vec<i64>, StoreError> {
+    sqlx::query_scalar(
+        "SELECT n FROM generate_series(GREATEST($1 + 1, $2 - $3 + 1), $2) AS n          WHERE NOT EXISTS (SELECT 1 FROM debugger_feed f WHERE f.seq = n)          ORDER BY n",
+    )
+    .bind(after)
+    .bind(upto)
     .bind(limit)
     .fetch_all(executor)
     .await
@@ -351,15 +351,22 @@ pub async fn debugger_feed_start<'e>(
 /// the row when it is missing; concurrent callers agree on one value.
 pub async fn debugger_epoch<'e>(executor: impl PgExecutor<'e>) -> Result<String, StoreError> {
     sqlx::query_scalar(
-        "WITH made AS (\
-            INSERT INTO debugger_epoch (epoch) \
-            VALUES (left(replace(gen_random_uuid()::text, '-', ''), 12)) \
-            ON CONFLICT (singleton) DO NOTHING RETURNING epoch) \
-         SELECT epoch FROM made UNION ALL SELECT epoch FROM debugger_epoch LIMIT 1",
+        "INSERT INTO debugger_epoch (epoch)          VALUES (left(replace(gen_random_uuid()::text, '-', ''), 12))          ON CONFLICT (singleton) DO UPDATE SET epoch = debugger_epoch.epoch          RETURNING epoch",
     )
     .fetch_one(executor)
     .await
     .map_err(StoreError::query)
+}
+
+/// The current epoch without creating one: `None` when the table is empty, as after a crash.
+/// An open stream polls this; it writes nothing.
+pub async fn debugger_epoch_peek<'e>(
+    executor: impl PgExecutor<'e>,
+) -> Result<Option<String>, StoreError> {
+    sqlx::query_scalar("SELECT epoch FROM debugger_epoch")
+        .fetch_optional(executor)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// Deletes feed rows older than [`FEED_RETENTION_MINUTES`] and watch marks that expired more
@@ -493,34 +500,26 @@ mod tests {
         feed(&pool, ws, "b", "rejected").await;
         feed(&pool, ws, "a", "flagged").await;
 
-        let all = read_debugger_feed(&pool, ws, 0, &[], FeedFilter::default(), 10)
+        let all = read_debugger_feed(&pool, ws, 0, FeedFilter::default(), 10)
             .await
             .unwrap();
-        let after = read_debugger_feed(&pool, ws, all[0].seq, &[], FeedFilter::default(), 1)
+        let after = read_debugger_feed(&pool, ws, all[0].seq, FeedFilter::default(), 1)
             .await
             .unwrap();
         let named = FeedFilter {
             name: Some("a"),
             ..FeedFilter::default()
         };
-        let by_name = read_debugger_feed(&pool, ws, 0, &[], named, 10)
-            .await
-            .unwrap();
+        let by_name = read_debugger_feed(&pool, ws, 0, named, 10).await.unwrap();
         let head = debugger_feed_head(&pool, ws).await.unwrap();
-        let skipping = read_debugger_feed(
+        let skipping = read_debugger_feed_at(
             &pool,
             ws,
-            0,
-            &[all[0].seq, all[2].seq],
+            &[all[1].seq, all[2].seq + 40],
             FeedFilter::default(),
-            10,
         )
         .await
         .unwrap();
-        let seqs = debugger_feed_seqs(&pool, ws, all[0].seq, named, 10)
-            .await
-            .unwrap();
-
         assert_eq!(
             all.iter()
                 .map(|item| item.outcome.as_str())
@@ -535,16 +534,16 @@ mod tests {
             skipping.iter().map(|item| item.seq).collect::<Vec<_>>(),
             [all[1].seq]
         );
-        assert_eq!(seqs, [(all[1].seq, false), (all[2].seq, true)]);
-        // A number another workspace holds is listed too, as not the viewer's.
+        // A number another workspace holds is not the viewer's to read, and not a hole.
         let other = workspace(&pool, "two").await;
         feed(&pool, other, "theirs", "accepted").await;
-        let across = debugger_feed_seqs(&pool, ws, all[2].seq, FeedFilter::default(), 10)
+        let theirs = all[2].seq + 1;
+        let theirs_read = read_debugger_feed_at(&pool, ws, &[theirs], FeedFilter::default())
             .await
             .unwrap();
         let position = debugger_feed_position(&pool).await.unwrap();
-        assert_eq!(across, [(all[2].seq + 1, false)]);
-        assert_eq!(position, all[2].seq + 1);
+        assert!(theirs_read.is_empty());
+        assert_eq!(position, theirs);
     }
 
     #[sqlx::test]
@@ -595,6 +594,107 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn missing_numbers_are_those_no_workspace_holds_within_the_limit(pool: PgPool) {
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        feed(&pool, one, "a", "accepted").await;
+        feed(&pool, two, "b", "accepted").await;
+        feed(&pool, one, "c", "accepted").await;
+        sqlx::query("DELETE FROM debugger_feed WHERE seq = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // A rolled-back writer leaves a number nobody holds.
+        let mut writer = pool.begin().await.unwrap();
+        sqlx::query(
+            "INSERT INTO debugger_feed (workspace_id, source, outcome, trace_id)              VALUES ($1, 'web', 'accepted', gen_random_uuid())",
+        )
+        .bind(one.as_uuid())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+        writer.rollback().await.unwrap();
+        feed(&pool, two, "d", "accepted").await;
+
+        let all = debugger_feed_missing(&pool, 0, 5, 100).await.unwrap();
+        let limited = debugger_feed_missing(&pool, 0, 5, 2).await.unwrap();
+        let above = debugger_feed_missing(&pool, 2, 5, 100).await.unwrap();
+
+        assert_eq!(all, [2, 4]);
+        assert_eq!(limited, [4]);
+        assert_eq!(above, [4]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn both_parts_of_a_viewers_read_are_index_scans(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        feed(&pool, ws, "a", "accepted").await;
+        // The tables are tiny, so the planner would scan them; forbidding a sequential scan
+        // shows the indexes serve the reads.
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let range: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN SELECT f.seq FROM debugger_feed f              WHERE f.workspace_id = $1 AND f.seq > 10 ORDER BY f.seq LIMIT 200",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        let points: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN SELECT f.seq FROM debugger_feed f              WHERE f.seq = ANY($2) AND f.workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .bind(vec![1_i64, 2, 3])
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        let missing: Vec<String> = sqlx::query_scalar(
+            "EXPLAIN SELECT n FROM generate_series(1::bigint, 100::bigint) AS n              WHERE NOT EXISTS (SELECT 1 FROM debugger_feed f WHERE f.seq = n)",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+
+        for plan in [range, points, missing] {
+            let plan = plan.join(
+                "
+",
+            );
+            assert!(plan.contains("Index"), "{plan}");
+            assert!(!plan.contains("Seq Scan on debugger_feed"), "{plan}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_epoch_is_one_value_for_connections_that_start_it_together(pool: PgPool) {
+        let mut starters = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            starters.push(tokio::spawn(async move { debugger_epoch(&pool).await }));
+        }
+        let mut epochs = Vec::new();
+        for starter in starters {
+            epochs.push(starter.await.unwrap().unwrap());
+        }
+
+        assert!(epochs.iter().all(|epoch| *epoch == epochs[0]), "{epochs:?}");
+        assert_eq!(
+            debugger_epoch_peek(&pool).await.unwrap().as_deref(),
+            Some(epochs[0].as_str())
+        );
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(debugger_epoch_peek(&pool).await.unwrap(), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn pruning_deletes_old_rows_and_keeps_recent_ones(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         feed(&pool, ws, "old", "accepted").await;
@@ -609,7 +709,7 @@ mod tests {
         let deleted = prune_debugger_feed(&pool).await.unwrap();
 
         assert_eq!(deleted, 1);
-        let left = read_debugger_feed(&pool, ws, 0, &[], FeedFilter::default(), 10)
+        let left = read_debugger_feed(&pool, ws, 0, FeedFilter::default(), 10)
             .await
             .unwrap();
         assert_eq!(left.len(), 1);
