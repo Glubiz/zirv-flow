@@ -270,8 +270,7 @@ pub(crate) async fn create_source(
         Some(workspace),
         "source.created",
         Some(("source", source.id)),
-        json!({"kind": source.kind, "credential_id": source.credential_id,
-               "credential_fields": source.credential_fields}),
+        json!({"kind": source.kind, "credential_id": source.credential_id}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

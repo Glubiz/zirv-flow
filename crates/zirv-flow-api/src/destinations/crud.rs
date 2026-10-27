@@ -252,8 +252,7 @@ pub(crate) async fn create_destination(
         Some(workspace),
         "destination.created",
         Some(("destination", destination.id)),
-        json!({"kind": destination.kind, "rate": rate, "burst": burst, "credential_id": destination.credential_id,
-               "credential_fields": destination.credential_fields}),
+        json!({"kind": destination.kind, "rate": rate, "burst": burst, "credential_id": destination.credential_id}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
