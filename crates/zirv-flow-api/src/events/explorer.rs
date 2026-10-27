@@ -460,14 +460,15 @@ pub(crate) async fn list(
     }))
 }
 
-/// Records one explorer query: `zirv_flow_explorer_query_seconds{kind}` and, when it ran past its
-/// statement timeout, `zirv_flow_explorer_timeouts_total{kind}`. `kind` is `count`, `breakdown`,
-/// `list` or `export`; no workspace, filter or value is a label.
+/// Records one explorer query: `zirv_flow_explorer_query_seconds{kind}`, or, when it ran past its
+/// statement timeout, only `zirv_flow_explorer_timeouts_total{kind}` (the cap is not a duration).
+/// `kind` is `count`, `breakdown`, `list` or `export`; no workspace, filter or value is a label.
 fn observe_query<T>(kind: &'static str, started: Instant, result: &Result<T, ExploreError>) {
-    metrics::histogram!("zirv_flow_explorer_query_seconds", "kind" => kind)
-        .record(started.elapsed().as_secs_f64());
     if matches!(result, Err(ExploreError::Store(error)) if error.is_timeout()) {
         metrics::counter!("zirv_flow_explorer_timeouts_total", "kind" => kind).increment(1);
+    } else {
+        metrics::histogram!("zirv_flow_explorer_query_seconds", "kind" => kind)
+            .record(started.elapsed().as_secs_f64());
     }
 }
 

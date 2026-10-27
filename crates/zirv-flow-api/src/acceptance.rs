@@ -9289,12 +9289,8 @@ email,b@example.com,
             "{output}"
         );
         assert!(
-            crate::test_support::metric_sample(
-                &output,
-                "zirv_flow_explorer_query_seconds_count{kind=\"count\"}"
-            )
-            .is_some_and(|count| count >= 1.0),
-            "{output}"
+            !output.contains("zirv_flow_explorer_query_seconds_count{kind=\"count\"}"),
+            "a timed-out query adds no duration: {output}"
         );
     }
 
