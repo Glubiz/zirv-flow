@@ -1028,8 +1028,10 @@ identifier value. Operator duties:
 - After restoring a database, run `zirv-flow admin replay-erasures --from <dir>` before it serves
   traffic or any worker starts. It validates every file first (one corrupt or unknown-format file
   stops it, naming the file, before anything changes), adds the entries the database lacks as
-  completed, skips and counts files whose workspace does not exist, and then runs the replay. The
-  counts include `merged` and `skipped_workspaces`. Both steps are safe to run again.
+  completed, upgrades a request the backup still holds as pending or failed to completed (the file
+  records a completed erasure and wins; a completed row is left alone), skips and counts files
+  whose workspace does not exist, and then runs the replay. The counts include `merged` (added
+  and upgraded) and `skipped_workspaces`. Both steps are safe to run again.
 - With the directory set, the recovery point for erasures is none: the file exists before the
   erasure is reported complete. With it unset, nothing is written and the restore guarantee rests
   on backups of the database alone.

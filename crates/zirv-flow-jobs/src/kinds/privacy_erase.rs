@@ -370,6 +370,39 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_job_of_a_request_merged_from_its_file_succeeds_and_leaves_the_file_as_it_was(
+        pool: PgPool,
+    ) {
+        let key = identifier_key();
+        let (ws, _, request) = pending_request(&pool, &key).await;
+        let dir = TempDir::new();
+        let claimed = claim(&pool).await;
+        // The file exists, the transaction never committed: the row is pending, as in a backup.
+        run_once(&pool, &claimed, &key, Some(&dir.0), false)
+            .await
+            .unwrap();
+        let name = format!("{}-{}.json", ws.as_uuid(), request.id);
+        let before = std::fs::read(dir.0.join(&name)).unwrap();
+        let entries = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+        let merged = zirv_flow_store::merge_ledger_entries(&pool, &entries)
+            .await
+            .unwrap();
+        assert_eq!(merged.merged, 1);
+        assert_eq!(
+            status(&pool, ws, request.id).await,
+            ErasureStatus::Completed
+        );
+
+        run_once(&pool, &claimed, &key, Some(&dir.0), true)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(dir.0.join(&name)).unwrap(), before);
+        assert_eq!(dir.files(), [name]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_different_file_of_the_same_name_fails_the_job(pool: PgPool) {
         let key = identifier_key();
         let (ws, _, request) = pending_request(&pool, &key).await;

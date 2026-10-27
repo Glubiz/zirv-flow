@@ -413,15 +413,17 @@ pub async fn export_ledger(pool: &PgPool, dir: &Path) -> Result<ExportReport, Ex
 /// What [`merge_ledger_entries`] did, as counts.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MergeReport {
-    /// Entries inserted as completed.
+    /// Entries inserted as completed, and pending or failed rows upgraded to completed.
     pub merged: u64,
     /// Entries whose workspace does not exist here.
     pub skipped_workspaces: u64,
 }
 
-/// Inserts the entries the table lacks as `completed`, by ledger id, in one transaction. An entry
-/// already in the table is left as it is; one for a workspace that does not exist is skipped and
-/// counted. Idempotent.
+/// Inserts the entries the table lacks as `completed`, by ledger id, in one transaction. A row
+/// that is still `pending` or `failed` (a backup older than the completion) is upgraded to
+/// `completed` with the file's person ids, hashes and completion time, because the file records
+/// a completed erasure; both count as `merged`. A `completed` row is left as it is; an entry for a
+/// workspace that does not exist is skipped and counted. Idempotent.
 pub async fn merge_ledger_entries(
     pool: &PgPool,
     entries: &[LedgerEntry],
@@ -448,7 +450,7 @@ pub async fn merge_ledger_entries(
                 (id, workspace_id, person_id, identifier_hashes, identifier_kinds, person_ids, \
                  status, requested_by, requested_at, completed_at, trace_id) \
              VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10) \
-             ON CONFLICT (id) DO NOTHING",
+             ON CONFLICT (id) DO UPDATE SET                 status = 'completed', person_id = EXCLUDED.person_id,                 person_ids = EXCLUDED.person_ids,                 identifier_hashes = EXCLUDED.identifier_hashes,                 identifier_kinds = EXCLUDED.identifier_kinds,                 completed_at = EXCLUDED.completed_at              WHERE erasure_requests.status <> 'completed'                AND erasure_requests.workspace_id = EXCLUDED.workspace_id",
         )
         .bind(entry.id)
         .bind(entry.workspace_id)
@@ -770,6 +772,59 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored, present);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pending_or_failed_row_is_upgraded_to_completed_by_its_file_and_a_rerun_changes_nothing(
+        pool: PgPool,
+    ) {
+        crate::migrate(&pool).await.unwrap();
+        let ws = workspace(&pool, "ours").await;
+        let mut pending = entry();
+        pending.workspace_id = ws.as_uuid();
+        let mut failed = entry();
+        failed.workspace_id = ws.as_uuid();
+        for (file, status) in [(&pending, "pending"), (&failed, "failed")] {
+            sqlx::query(
+                "INSERT INTO erasure_requests                     (id, workspace_id, person_id, identifier_hashes, identifier_kinds, status,                      requested_by, requested_at, trace_id)                  VALUES ($1, $2, $3, '{}', '{}', $4, $5, $6, $7)",
+            )
+            .bind(file.id)
+            .bind(file.workspace_id)
+            .bind(file.person_id)
+            .bind(status)
+            .bind(file.requested_by)
+            .bind(file.requested_at)
+            .bind(file.trace_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let report = merge_ledger_entries(&pool, &[pending.clone(), failed.clone()])
+            .await
+            .unwrap();
+        let again = merge_ledger_entries(&pool, &[pending.clone(), failed.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report,
+            MergeReport {
+                merged: 2,
+                skipped_workspaces: 0
+            }
+        );
+        assert_eq!(again, MergeReport::default());
+        assert_eq!(rows(&pool).await, 2);
+        let mut conn = pool.acquire().await.unwrap();
+        for file in [pending, failed] {
+            let stored = find_ledger_entry(&mut conn, ws, file.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored, file);
+        }
     }
 
     #[sqlx::test]
