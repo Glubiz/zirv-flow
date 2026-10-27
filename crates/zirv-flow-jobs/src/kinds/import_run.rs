@@ -720,6 +720,29 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_import_whose_file_was_erased_for_a_person_fails_with_a_code(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let import = start(&pool, ws, &file(10, 0), 10, None).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let erased = zirv_flow_store::erase_import_values(
+            &mut connection,
+            ws,
+            &["user3@example.com".into()],
+        )
+        .await
+        .unwrap();
+        attempt(&pool, &import, None).await.unwrap();
+
+        assert_eq!(erased.chunks, 1);
+        let done = reread(&pool, &import).await;
+        assert_eq!(done.status, ImportStatus::Failed);
+        assert_eq!(done.error_code.as_deref(), Some("file_missing"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn ten_thousand_rows_run_to_the_end(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         plan_trait(&pool, ws).await;

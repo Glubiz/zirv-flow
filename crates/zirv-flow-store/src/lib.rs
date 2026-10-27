@@ -92,8 +92,9 @@ pub use consent::{
 pub use contacts::{
     Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,
     DefinitionError, DefinitionProblem, Idempotency, WriteError, Written, contact_registry,
-    delete_contact, expire_contact_idempotency, find_contact, find_contact_definition,
-    list_contacts, put_contact_definition, search_contacts, typed_definition, write_contact,
+    delete_contact, erase_contact_idempotency, expire_contact_idempotency, find_contact,
+    find_contact_definition, list_contacts, put_contact_definition, search_contacts,
+    typed_definition, write_contact,
 };
 pub use decisions::{
     Decision, GraphPoint, NewDecision, append_decision, append_decisions,
@@ -117,11 +118,11 @@ pub use events::{
     ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor, RowsPage,
     SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
     debugger_feed_head, debugger_feed_position, debugger_feed_seqs, debugger_feed_start,
-    enqueue_replay, ensure_event_partitions, explore_breakdown, explore_count, explore_rows,
-    explore_total, find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
-    list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
-    publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
-    set_event_policy, touch_debugger_watch, update_event_schema,
+    enqueue_replay, ensure_event_partitions, erase_unattributed_rejects, explore_breakdown,
+    explore_count, explore_rows, explore_total, find_event_schema, get_event_policy,
+    list_event_schemas, list_ingest_rejects, list_schema_versions, listen_for_debugger,
+    preview_replay, prune_debugger_feed, publish_schema_draft, read_debugger_feed, replay_rejects,
+    save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch, update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -167,13 +168,13 @@ pub use identities::{
 };
 pub use imports::{
     ABANDONED_AFTER_DAYS, BatchOutcome, BatchProgress, CHUNK_BYTES, CHUNK_RETENTION_DAYS,
-    DRY_RUN_JOB_KIND, DryRunBatch, Import, ImportBatch, ImportPhase, ImportReject, ImportRetention,
-    ImportStatus, ImportUpload, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS, RUN_JOB_KIND,
-    RejectReason, RejectedRow, RowDetail, StoredReason, TransitionError,
+    DRY_RUN_JOB_KIND, DryRunBatch, Import, ImportBatch, ImportErasure, ImportPhase, ImportReject,
+    ImportRetention, ImportStatus, ImportUpload, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS,
+    RUN_JOB_KIND, RejectReason, RejectedRow, RowDetail, StoredReason, TransitionError,
     UPLOAD_ABANDONED_AFTER_DAYS, UploadScan, UploadStart, cancel_import, commit_dry_run_batch,
-    commit_import_batch, delete_expired_import_data, enqueue_import_job, fail_import, find_import,
-    finish_import_dry_run, finish_import_run, list_import_rejects, list_imports, read_import_chunk,
-    set_import_mapping, start_import_dry_run, start_import_run,
+    commit_import_batch, delete_expired_import_data, enqueue_import_job, erase_import_values,
+    fail_import, find_import, finish_import_dry_run, finish_import_run, list_import_rejects,
+    list_imports, read_import_chunk, set_import_mapping, start_import_dry_run, start_import_run,
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,

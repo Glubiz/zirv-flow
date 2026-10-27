@@ -23,8 +23,9 @@ pub use rejects::{
     ImportPhase, ImportReject, RejectReason, RejectedRow, StoredReason, list_import_rejects,
 };
 pub use retention::{
-    ABANDONED_AFTER_DAYS, CHUNK_RETENTION_DAYS, ImportRetention, REJECT_RETENTION_DAYS,
-    UPLOAD_ABANDONED_AFTER_DAYS, delete_expired_import_data,
+    ABANDONED_AFTER_DAYS, CHUNK_RETENTION_DAYS, ImportErasure, ImportRetention,
+    REJECT_RETENTION_DAYS, UPLOAD_ABANDONED_AFTER_DAYS, delete_expired_import_data,
+    erase_import_values,
 };
 pub use upload::{CHUNK_BYTES, ImportUpload, UploadScan, UploadStart, read_import_chunk};
 
@@ -979,5 +980,111 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(sources, ["ui"]);
+    }
+
+    async fn stored_file(pool: &PgPool, ws: WorkspaceId, bytes: &[u8]) -> Import {
+        upload(pool, ws, bytes, 1).await
+    }
+
+    async fn reject_with(pool: &PgPool, ws: WorkspaceId, import: Uuid, row: i64, cell: &str) {
+        sqlx::query(
+            "INSERT INTO import_rejects (import_id, row_number, workspace_id, phase, errors, raw) \
+             VALUES ($1, $2, $3, 'run', '[]', $4)",
+        )
+        .bind(import)
+        .bind(row)
+        .bind(ws.as_uuid())
+        .bind(json!({"email": cell}))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_value_deletes_the_file_that_holds_it_and_keeps_the_others(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let hit = stored_file(&pool, ws, b"email\nZed.Quill@Example.com\n").await;
+        let kept = stored_file(&pool, ws, b"email\ngrace@example.org\n").await;
+        let elsewhere = stored_file(&pool, other, b"email\nzed.quill@example.com\n").await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let erased = erase_import_values(&mut connection, ws, &["zed.quill@example.com".into()])
+            .await
+            .unwrap();
+        let blank = erase_import_values(&mut connection, ws, &[String::new()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            erased,
+            ImportErasure {
+                chunks: 1,
+                rejects: 0
+            }
+        );
+        assert_eq!(blank, ImportErasure::default());
+        assert!(read_import_chunk(&pool, hit.id, 0).await.unwrap().is_none());
+        for id in [kept.id, elsewhere.id] {
+            assert!(read_import_chunk(&pool, id, 0).await.unwrap().is_some());
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_value_split_across_two_chunks_still_deletes_the_whole_file(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let import = stored_file(&pool, ws, b"email\nhead").await;
+        sqlx::query(
+            "INSERT INTO import_chunks (import_id, seq, workspace_id, data) VALUES ($1, 1, $2, $3)",
+        )
+        .bind(import.id)
+        .bind(ws.as_uuid())
+        .bind(b"er@example.com\n".as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let erased = erase_import_values(&mut connection, ws, &["header@example.com".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(erased.chunks, 2);
+        assert!(
+            read_import_chunk(&pool, import.id, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn erasing_a_value_deletes_the_rejected_rows_that_hold_it(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let other = workspace(&pool, "two").await;
+        let import = stored_file(&pool, ws, b"email\n").await;
+        let foreign = stored_file(&pool, other, b"email\n").await;
+        reject_with(&pool, ws, import.id, 2, "Zed.Quill@Example.com").await;
+        reject_with(&pool, ws, import.id, 3, "grace@example.org").await;
+        reject_with(&pool, other, foreign.id, 2, "zed.quill@example.com").await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let erased = erase_import_values(&mut connection, ws, &["zed.quill@example.com".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(erased.rejects, 1);
+        let mut left: Vec<(Uuid, i64)> =
+            sqlx::query_as("SELECT import_id, row_number FROM import_rejects")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        left.sort();
+        let mut expected = vec![(import.id, 3), (foreign.id, 2)];
+        expected.sort();
+        assert_eq!(left, expected);
     }
 }

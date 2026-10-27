@@ -20,8 +20,8 @@ pub use records::{
     search_contacts,
 };
 pub use write::{
-    ContactChange, Idempotency, WriteError, Written, delete_contact, expire_contact_idempotency,
-    write_contact,
+    ContactChange, Idempotency, WriteError, Written, delete_contact, erase_contact_idempotency,
+    expire_contact_idempotency, write_contact,
 };
 pub(crate) use write::{lock_contacts, replace_stored_fields};
 
@@ -1370,5 +1370,52 @@ mod tests {
             person_of_email(&pool, ws, "a@example.com").await,
             Some(person)
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_idempotency_key_naming_an_erased_value_is_deleted_and_others_stay(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        let other = defined(&pool, "two").await;
+        let hash = [1_u8; 32];
+        for (n, (workspace, key)) in [
+            (ws, "retry-Zed.Quill@Example.com-1"),
+            (ws, "retry-grace-9"),
+            (other, "retry-zed.quill@example.com-1"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let idem = Idempotency {
+                key,
+                request_hash: &hash,
+            };
+            write(
+                &pool,
+                workspace,
+                &format!("c-{n}"),
+                ContactChange::Create(object(json!({"email": format!("a{n}@example.com")}))),
+                Some(&idem),
+            )
+            .await
+            .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let deleted =
+            erase_contact_idempotency(&mut connection, ws, &["zed.quill@example.com".into()])
+                .await
+                .unwrap();
+        let blank = erase_contact_idempotency(&mut connection, ws, &[String::new()])
+            .await
+            .unwrap();
+
+        assert_eq!((deleted, blank), (1, 0));
+        let mut kept: Vec<String> = sqlx::query_scalar("SELECT key FROM contact_idempotency")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        kept.sort();
+        assert_eq!(kept, ["retry-grace-9", "retry-zed.quill@example.com-1"]);
     }
 }
