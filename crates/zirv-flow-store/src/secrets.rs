@@ -532,17 +532,7 @@ mod tests {
     async fn the_purpose_check_accepts_every_purpose_old_and_new_and_nothing_else(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         let keys = keyring();
-        for purpose in [
-            SecretPurpose::ConnectorCredential,
-            SecretPurpose::OAuthToken,
-            SecretPurpose::AiProviderKey,
-            SecretPurpose::WebhookSecret,
-            SecretPurpose::WebhookSigning,
-            SecretPurpose::DestinationCredential,
-            SecretPurpose::DkimKey,
-            SecretPurpose::WorkspaceCredential,
-            SecretPurpose::TestSendAddress,
-        ] {
+        for purpose in SecretPurpose::ALL {
             let id = SecretId::new();
             let sealed = seal(&keys, b"{}", &secret_aad(ws, id, purpose));
 

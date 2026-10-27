@@ -153,7 +153,8 @@ Each secret gets its own random data key (XChaCha20-Poly1305), and the master
 key wraps that data key; the database holds only ciphertext, the wrapped key and
 the id of the wrapping master key. A database dump without the master key
 reveals no credential, and the API never returns one. A lost master key means
-the stored credentials must be entered again.
+the stored secrets must be created again, and every hash and tracking token made
+before is dead; see [Secrets and the master key](docs/operations/secrets.md).
 
 #### Workspace credentials
 
