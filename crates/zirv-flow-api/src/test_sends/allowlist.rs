@@ -109,7 +109,7 @@ pub(crate) async fn allowlist_options(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<AllowlistOptionBody>>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let entries = zirv_flow_store::list_allowlist(&state.pool, workspace.id).await?;
     Ok(Json(
         entries

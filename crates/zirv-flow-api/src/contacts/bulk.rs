@@ -163,7 +163,7 @@ pub(crate) async fn bulk(
     Path(ws): Path<String>,
     request: Request,
 ) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let limits = state.ingest.limits();
     let max_items = limits.max_batch_items;
     let body = read_json(request, limits.max_request_bytes).await?;

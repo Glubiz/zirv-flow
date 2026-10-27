@@ -761,7 +761,7 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateTemplateRequest>,
 ) -> Result<(StatusCode, Json<TemplateDetailBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (template, draft) = create_template(
         &state.pool,
         &principal.context(),
@@ -838,7 +838,7 @@ pub(crate) async fn update(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdateTemplateRequest>,
 ) -> Result<Json<TemplateDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (template, draft) = update_template(
         &state.pool,
         &principal.context(),
@@ -917,7 +917,7 @@ pub(crate) async fn put_draft(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<SaveTemplateDraftRequest>,
 ) -> Result<Json<TemplateDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (template, draft) = save_draft(
         &state.pool,
         &principal.context(),
@@ -960,7 +960,7 @@ pub(crate) async fn convert_draft(
     Path((ws, id)): Path<(String, String)>,
     body: Option<ApiJson<ConvertTemplateDraftRequest>>,
 ) -> Result<Json<TemplateDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (template, draft) = convert_draft_to_mjml(
         &state.pool,
         &principal.context(),

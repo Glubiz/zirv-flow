@@ -244,7 +244,7 @@ mod tests {
         let router = router(state.clone());
         let admin_id = member_of(pool, ws, "admin@example.com", Role::Admin).await;
         member_of(pool, ws, "second@example.com", Role::Admin).await;
-        member_of(pool, ws, "member@example.com", Role::Member).await;
+        member_of(pool, ws, "member@example.com", Role::Viewer).await;
         member_of(pool, other_ws, "theirs@example.com", Role::Admin).await;
         let key = |ws: WorkspaceId| {
             let pool = pool.clone();
@@ -1403,7 +1403,7 @@ mod tests {
                         &Context::system(),
                         self.ws,
                         self.user,
-                        Role::Member,
+                        Role::Viewer,
                     )
                     .await
                     .unwrap();
@@ -2031,6 +2031,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "valid", "a refused accept changes nothing");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_editor_drafts_and_accepts_a_segment_but_not_a_mapping(pool: PgPool) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        fx.segment_traits().await;
+        let source = fx.pulled_source(json!({})).await;
+        member_of(&pool, fx.ws, "editor@example.com", Role::Editor).await;
+        let editor = login(&fx.router, "editor@example.com").await;
+        fx.fake.push(answer(
+            "draft_segment",
+            json!({"definition": {"v": 1, "trait": "plan", "op": "exists"}}),
+        ));
+
+        let drafted = fx
+            .path_as(&editor, "POST", "/ai/drafts", Some(segment_run(None)))
+            .await;
+        let sent = fx.fake.call_count();
+        let mapping = fx
+            .path_as(&editor, "POST", "/ai/drafts", Some(mapping_run(&source)))
+            .await;
+        let accepted = fx
+            .accept(&editor, drafted.body["id"].as_str().unwrap())
+            .await;
+
+        assert_eq!(drafted.status, StatusCode::CREATED, "{:?}", drafted.body);
+        assert_eq!(mapping.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            fx.fake.call_count(),
+            sent,
+            "nothing was sent for the mapping"
+        );
+        assert_eq!(accepted.status, StatusCode::OK, "{:?}", accepted.body);
     }
 
     #[sqlx::test]

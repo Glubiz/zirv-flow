@@ -20,8 +20,8 @@ use crate::problem::{ApiError, Problem};
 pub(crate) struct MemberBody {
     user_id: Uuid,
     email: String,
-    /// `admin` or `member`.
-    #[schema(value_type = String, example = "member")]
+    /// `admin`, `publisher`, `editor` or `viewer`.
+    #[schema(value_type = String, example = "editor")]
     role: Role,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
@@ -41,18 +41,18 @@ impl From<&Member> for MemberBody {
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct SetRoleRequest {
-    /// `admin` or `member`.
+    /// `admin`, `publisher`, `editor` or `viewer`.
     role: String,
 }
 
 #[derive(Serialize, ToSchema)]
 pub(crate) struct RoleBody {
     user_id: Uuid,
-    #[schema(value_type = String, example = "member")]
+    #[schema(value_type = String, example = "editor")]
     role: Role,
 }
 
-/// The members of a workspace. Any member can read this.
+/// The members of a workspace. Any member, whatever the role, can read this.
 #[utoipa::path(
     get,
     operation_id = "list_members",
@@ -93,6 +93,7 @@ pub(crate) async fn list(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or user, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The change would leave the workspace with no admin (`last_admin`); only the owner may do that", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "Invalid role", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -128,7 +129,8 @@ pub(crate) async fn set(
         (status = 204, description = "Removed"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
-        (status = 404, description = "No such workspace or member, or no access", body = Problem, content_type = "application/problem+json")
+        (status = 404, description = "No such workspace or member, or no access", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The change would leave the workspace with no admin (`last_admin`); only the owner may do that", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

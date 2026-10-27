@@ -58,6 +58,7 @@ mod tests {
         read: String,
         write: String,
         admin: String,
+        publish: String,
         other_admin: String,
         /// A workspace member: may read and write, not administer.
         member: Login,
@@ -256,9 +257,10 @@ mod tests {
         let read = key(ws, Scope::Read).await;
         let write = key(ws, Scope::Write).await;
         let admin_key = key(ws, Scope::Admin).await;
+        let publish = key(ws, Scope::Publish).await;
         let other_admin = key(other_ws, Scope::Admin).await;
         for (email, role) in [
-            ("member@example.com", Role::Member),
+            ("member@example.com", Role::Editor),
             ("lead@example.com", Role::Admin),
         ] {
             let user = admin::create_user(pool, &Context::system(), email, PASSWORD)
@@ -287,6 +289,7 @@ mod tests {
             read,
             write,
             admin: admin_key,
+            publish,
             other_admin,
             member,
             lead,
@@ -642,17 +645,18 @@ mod tests {
         let template = f.create("Welcome", email_doc("Hi", "x")).await;
         let person = f.person(json!({"plan": "pro"}), None).await;
         let id = |tail: &str| format!("/{template}{tail}");
-        let credentials: [(&str, Auth<'_>, u16); 7] = [
+        let credentials: [(&str, Auth<'_>, u16); 8] = [
             ("anonymous", Auth::Anonymous, 0),
             ("read key", Auth::Key(&f.read), 1),
             ("write key", Auth::Key(&f.write), 2),
             ("admin key", Auth::Key(&f.admin), 3),
+            ("publish key", Auth::Key(&f.publish), 4),
             ("member", Auth::Session(&f.member), 12),
-            ("workspace admin", Auth::Session(&f.lead), 123),
+            ("workspace admin", Auth::Session(&f.lead), 1234),
             ("other workspace's admin key", Auth::Key(&f.other_admin), 9),
         ];
-        // The levels each credential holds: 1 read, 2 write, 3 admin. A key holds one scope; a
-        // member reads and writes; a workspace admin does all three.
+        // The levels each credential holds: 1 read, 2 write, 3 admin, 4 publish. A key holds one
+        // scope; an editor reads and writes; a workspace admin holds all four.
         let held = |code: u16, need: u16| code.to_string().contains(&need.to_string());
         let requests: [(&str, &str, String, Option<Value>, u16); 14] = [
             ("list", "GET", String::new(), None, 1),
@@ -689,7 +693,7 @@ mod tests {
                 Some(json!({"person_id": person})),
                 3,
             ),
-            ("publish", "POST", id("/publish"), None, 3),
+            ("publish", "POST", id("/publish"), None, 4),
             ("archive", "DELETE", id(""), None, 3),
             ("get version", "GET", id("/versions/1"), None, 1),
             ("version stats", "GET", id("/versions/1/stats"), None, 1),

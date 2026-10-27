@@ -28,6 +28,7 @@ use crate::{credentials, passwords};
 pub struct Context {
     actor: Actor,
     request_id: Option<String>,
+    owner: bool,
 }
 
 impl Context {
@@ -36,6 +37,7 @@ impl Context {
         Self {
             actor: Actor::system(),
             request_id: None,
+            owner: false,
         }
     }
 
@@ -44,6 +46,7 @@ impl Context {
         Self {
             actor: Actor::anonymous(),
             request_id: None,
+            owner: false,
         }
     }
 
@@ -51,6 +54,7 @@ impl Context {
         Self {
             actor: Actor::user(id.as_uuid()),
             request_id: None,
+            owner: false,
         }
     }
 
@@ -58,7 +62,20 @@ impl Context {
         Self {
             actor: Actor::api_key(id.as_uuid()),
             request_id: None,
+            owner: false,
         }
+    }
+
+    /// Marks the actor as the instance owner, who may remove or demote a workspace's last admin.
+    pub fn with_owner(mut self, owner: bool) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    /// Whether the actor may take away a workspace's last admin: the instance owner, or the
+    /// operator on the command line.
+    fn may_remove_last_admin(&self) -> bool {
+        self.owner || self.actor.kind == zirv_flow_store::ActorKind::System
     }
 
     pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
@@ -67,12 +84,19 @@ impl Context {
     }
 }
 
+/// The refusal text of [`AdminError::LastAdmin`].
+pub(crate) const LAST_ADMIN: &str =
+    "the workspace would have no admin; only the owner can remove or demote its last admin";
+
 /// Why an operation did not happen. The messages are safe to show to callers.
 #[derive(Debug)]
 pub enum AdminError {
     Invalid(ValidationError),
     Conflict(&'static str),
     NotFound(&'static str),
+    /// The change would leave the workspace with no admin and the caller is not the owner; the
+    /// problem carries the code `last_admin`.
+    LastAdmin,
     Store(StoreError),
     /// A trait slot change that was refused; the problem carries its own code.
     Slot(zirv_flow_store::SlotError),
@@ -93,6 +117,7 @@ impl fmt::Display for AdminError {
             Self::Invalid(error) => error.fmt(formatter),
             Self::Conflict(message) => formatter.write_str(message),
             Self::NotFound(what) => write!(formatter, "no such {what}"),
+            Self::LastAdmin => formatter.write_str(LAST_ADMIN),
             Self::Store(error) => error.fmt(formatter),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
@@ -107,7 +132,11 @@ impl Error for AdminError {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) | Self::Utm { .. } => None,
+            Self::Conflict(_)
+            | Self::NotFound(_)
+            | Self::LastAdmin
+            | Self::Slot(_)
+            | Self::Utm { .. } => None,
         }
     }
 }
@@ -319,6 +348,32 @@ pub async fn create_workspace(
     Ok(workspace)
 }
 
+/// Refuses to take `user` out of the admin role when they are the workspace's only admin, unless
+/// the caller is the owner (or the operator). The memberships are locked until the transaction
+/// ends, so two concurrent demotions cannot each leave the other admin in place.
+async fn refuse_last_admin(
+    tx: &mut PgConnection,
+    context: &Context,
+    workspace: WorkspaceId,
+    user: UserId,
+) -> Result<(), AdminError> {
+    let members = zirv_flow_store::lock_memberships(tx, workspace).await?;
+    if context.may_remove_last_admin() {
+        return Ok(());
+    }
+    let is_admin = members
+        .iter()
+        .any(|(member, role)| *member == user && *role == Role::Admin);
+    let admins = members
+        .iter()
+        .filter(|(_, role)| *role == Role::Admin)
+        .count();
+    if is_admin && admins == 1 {
+        return Err(AdminError::LastAdmin);
+    }
+    Ok(())
+}
+
 /// Adds a user to a workspace or changes their role.
 pub async fn set_member(
     pool: &PgPool,
@@ -331,6 +386,9 @@ pub async fn set_member(
     zirv_flow_store::find_user(&mut *tx, user)
         .await?
         .ok_or(AdminError::NotFound("user"))?;
+    if role != Role::Admin {
+        refuse_last_admin(&mut tx, context, workspace, user).await?;
+    }
     let membership = zirv_flow_store::set_membership(&mut *tx, workspace, user, role).await?;
     audit(
         &mut tx,
@@ -353,6 +411,7 @@ pub async fn remove_member(
     user: UserId,
 ) -> Result<(), AdminError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
+    refuse_last_admin(&mut tx, context, workspace, user).await?;
     if !zirv_flow_store::remove_membership(&mut *tx, workspace, user).await? {
         return Err(AdminError::NotFound("member"));
     }
@@ -1169,7 +1228,7 @@ mod tests {
             .await
             .unwrap();
         let clash = create_workspace(&pool, &context, "Other", Some("acme-corp")).await;
-        set_member(&pool, &context, ws.id, user.id, Role::Member)
+        set_member(&pool, &context, ws.id, user.id, Role::Editor)
             .await
             .unwrap();
         let created = create_api_key(&pool, &context, ws.id, " ci ", &[Scope::Read, Scope::Read])
@@ -1205,6 +1264,56 @@ mod tests {
                 "membership.removed"
             ]
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_last_admin_stays_unless_the_caller_is_the_owner_or_the_operator(pool: PgPool) {
+        migrated(&pool).await;
+        let operator = Context::system();
+        let admin_user = create_user(&pool, &operator, "a@example.com", PASSWORD)
+            .await
+            .unwrap();
+        let other = create_user(&pool, &operator, "b@example.com", PASSWORD)
+            .await
+            .unwrap();
+        let ws = create_workspace(&pool, &operator, "Acme", None)
+            .await
+            .unwrap();
+        set_member(&pool, &operator, ws.id, admin_user.id, Role::Admin)
+            .await
+            .unwrap();
+        let as_admin = Context::user(admin_user.id);
+
+        let demoted = set_member(&pool, &as_admin, ws.id, admin_user.id, Role::Publisher).await;
+        let removed = remove_member(&pool, &as_admin, ws.id, admin_user.id).await;
+        // Adding a second member, or keeping the role, is not a demotion.
+        set_member(&pool, &as_admin, ws.id, other.id, Role::Viewer)
+            .await
+            .unwrap();
+        set_member(&pool, &as_admin, ws.id, admin_user.id, Role::Admin)
+            .await
+            .unwrap();
+        let by_owner = Context::user(admin_user.id).with_owner(true);
+        set_member(&pool, &by_owner, ws.id, admin_user.id, Role::Publisher)
+            .await
+            .unwrap();
+        assert_eq!(
+            zirv_flow_store::membership_role(&pool, ws.id, admin_user.id)
+                .await
+                .unwrap(),
+            Some(Role::Publisher)
+        );
+        for user in [admin_user.id, other.id] {
+            set_member(&pool, &operator, ws.id, user, Role::Admin)
+                .await
+                .unwrap();
+        }
+        let with_two = set_member(&pool, &as_admin, ws.id, other.id, Role::Viewer).await;
+
+        assert!(matches!(demoted, Err(AdminError::LastAdmin)));
+        assert!(matches!(removed, Err(AdminError::LastAdmin)));
+        assert!(with_two.is_ok());
     }
 
     #[sqlx::test]

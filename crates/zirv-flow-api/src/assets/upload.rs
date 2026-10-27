@@ -156,7 +156,7 @@ pub(crate) async fn upload(
     RawQuery(query): RawQuery,
     request: Request,
 ) -> Result<(StatusCode, Json<AssetBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let name = parse_name(&query.unwrap_or_default())?;
     let declared = declared_kind(request.headers())?;
     let limits = state.assets;

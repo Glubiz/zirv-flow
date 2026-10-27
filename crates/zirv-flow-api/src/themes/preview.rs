@@ -221,7 +221,7 @@ pub(crate) async fn preview(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<ThemePreviewRequest>,
 ) -> Result<Json<ThemePreviewBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id: Uuid = path_id(&id)?;
     let (name, tokens, source, resolved, catalog) = {
         let mut connection = state

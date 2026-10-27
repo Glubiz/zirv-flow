@@ -2778,6 +2778,19 @@ the operations it performs; `pii` alone grants no operation.
 unless the caller is the owner. **Invitations** are deferred past 1.0: the
 owner creates users, and workspace Admins add existing users as members.
 
+As built (issue 365): `core::Role` is `Admin`, `Publisher`, `Editor` and `Viewer`, with a
+capability lattice `Role::allows(Capability)` (`Read` < `Edit` < `Publish` < `Admin`), and
+`Scope::Publish` is the fifth key scope. Migration 0073 widens the `memberships.role` CHECK and
+maps `member` to `editor`. `api::auth::Need` is `Read`, `ReadMembers`, `Edit`, `Publish`, `Admin`
+and `Ingest`; the 403 text names the role the need takes. The `rbac.rs` route table records each
+route's need and is read by tests only. Placed at Publish: flow publish, pause, resume and
+archive, operator retry and skip, the bulk exit, the manual audience start, template, snippet and
+theme publish, and import run. A mapping or manifest assistant draft reads a source and stays
+Admin; the other assistant drafts and accepting a draft are Edit. A real-person preview, test
+send or flow test stays Admin until `view_pii` (#366). The last-admin check shares the write's
+transaction and locks the workspace's membership rows; the owner and the operator CLI are
+exempt, and the refusal is a 409 with code `last_admin`.
+
 The per-workspace webhook signing secret for `action.webhook` (9.1) is stored in `encrypted_secrets`, rotatable and shown once.
 
 M8 uses the owner flag and the four workspace roles above. **Audit access** is

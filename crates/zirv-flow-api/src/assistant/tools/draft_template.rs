@@ -19,6 +19,7 @@ use zirv_flow_templates::{Issue, TemplateDocument, migrate_to_current};
 
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
+use crate::auth::Need;
 use crate::problem::ApiError;
 use crate::templates::publish::{publish_inputs, publish_issues};
 use crate::templates::{check_matches, parse_document};
@@ -269,7 +270,7 @@ impl AiTool<ToolContext> for DraftTemplate {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Edit).await?;
             let DraftTarget::Template {
                 template,
                 task,

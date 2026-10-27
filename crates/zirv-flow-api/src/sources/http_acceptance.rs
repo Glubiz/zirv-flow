@@ -335,7 +335,7 @@ mod tests {
         for (email, role) in [
             ("admin@example.com", Role::Admin),
             ("other@example.com", Role::Admin),
-            ("member@example.com", Role::Member),
+            ("member@example.com", Role::Editor),
         ] {
             let user = admin::create_user(pool, &Context::system(), email, PASSWORD)
                 .await

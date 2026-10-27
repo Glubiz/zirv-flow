@@ -1,8 +1,10 @@
 //! The route permission table: what every endpoint demands of its caller, in one place.
 //!
 //! Each handler still calls `authorize` (or `require_owner`, `require_user`,
-//! `require_ingest_key`) itself; this table records the need that call makes today, so a test
-//! can walk every endpoint without a database. The rows carry today's needs unchanged.
+//! `require_ingest_key`) itself; this table records the need that call makes, so a test can walk
+//! every endpoint without a database. The needs follow the role matrix of architecture 16.2
+//! (ruling 92d5483d): Edit for drafts, Publish for publishing and the operator actions, and Admin
+//! for whatever the matrix does not place.
 //!
 //! One row per line, grouped by the feature module that owns the handler. A new endpoint fails
 //! `every_openapi_operation_has_a_row_and_every_row_an_operation` until it has a row, and a new
@@ -11,7 +13,8 @@
 //! `the_router_and_the_table_list_the_same_routes` also holds each row to a registered method.
 //! Where a handler's need depends on the request, the row holds the strictest need and says why.
 //!
-//! The table is read by tests only for now, so lib.rs compiles this module for tests only.
+//! The table is read by tests only: `authorize` takes its need from the call, and the 403 text
+//! from the need, so lib.rs compiles this module for tests only.
 
 use crate::auth::Need;
 
@@ -70,7 +73,8 @@ const OWNER: Class = Class::Owner;
 const INGEST: Class = Class::Ingest;
 const READ: Class = Class::Need(Need::Read);
 const READ_MEMBERS: Class = Class::Need(Need::ReadMembers);
-const WRITE: Class = Class::Need(Need::Write);
+const EDIT: Class = Class::Need(Need::Edit);
+const PUBLISH: Class = Class::Need(Need::Publish);
 const ADMIN: Class = Class::Need(Need::Admin);
 #[cfg(test)]
 const UNCHECKED: Class = Class::Unchecked;
@@ -151,8 +155,8 @@ pub(crate) const ROUTES: &[Route] = table! {
     Put    "/api/v1/workspaces/{ws}/ai/settings" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/ai/models" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/ai/usage" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/ai/drafts" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/ai/drafts" => ADMIN, "Admin for a mapping or manifest draft (it reads a source), else Edit";
+    Post   "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept" => EDIT;
     Post   "/api/v1/workspaces/{ws}/segments/{id}/ai/explain" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/flows/{id}/ai/explain" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain" => ADMIN;
@@ -171,23 +175,23 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/people/{id}/messages" => READ;
     // flows
     Get    "/api/v1/workspaces/{ws}/flows" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/flows" => EDIT;
     Get    "/api/v1/workspaces/{ws}/flows/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/flows/{id}" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/validate" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/publish" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/pause" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/resume" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/archive" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/flows/{id}" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/validate" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/publish" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/pause" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/resume" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/archive" => PUBLISH;
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => EDIT;
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip" => PUBLISH;
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/start" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => ADMIN, "Admin when the request names a real person (person_id), else Write";
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/start" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => ADMIN, "Admin when the request names a real person (person_id), until view_pii (#366); else Edit";
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/webhook-signing-secret" => ADMIN;
@@ -195,67 +199,67 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate" => ADMIN;
     // snippets
     Get    "/api/v1/workspaces/{ws}/snippets" => READ;
-    Post   "/api/v1/workspaces/{ws}/snippets" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/snippets" => EDIT;
     Get    "/api/v1/workspaces/{ws}/snippets/{id}" => READ;
-    Put    "/api/v1/workspaces/{ws}/snippets/{id}" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/snippets/{id}" => EDIT;
     Delete "/api/v1/workspaces/{ws}/snippets/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/snippets/{id}/draft" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/snippets/{id}/preview" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/snippets/{id}/publish" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/snippets/{id}/draft" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/snippets/{id}/preview" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/snippets/{id}/publish" => PUBLISH;
     Get    "/api/v1/workspaces/{ws}/snippets/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/snippets/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/snippets/{id}/where-used" => READ;
     // themes
     Get    "/api/v1/workspaces/{ws}/themes" => READ;
-    Post   "/api/v1/workspaces/{ws}/themes" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/themes" => EDIT;
     Put    "/api/v1/workspaces/{ws}/themes/default" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/themes/{id}" => READ;
-    Put    "/api/v1/workspaces/{ws}/themes/{id}" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/themes/{id}" => EDIT;
     Delete "/api/v1/workspaces/{ws}/themes/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/themes/{id}/draft" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/themes/{id}/preview" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/themes/{id}/publish" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/themes/{id}/draft" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/themes/{id}/preview" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/themes/{id}/publish" => PUBLISH;
     Get    "/api/v1/workspaces/{ws}/themes/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/themes/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/themes/{id}/where-used" => READ;
     // templates
     Get    "/api/v1/workspaces/{ws}/templates" => READ;
-    Post   "/api/v1/workspaces/{ws}/templates" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/templates" => EDIT;
     Get    "/api/v1/workspaces/{ws}/templates/{id}" => READ;
-    Put    "/api/v1/workspaces/{ws}/templates/{id}" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/templates/{id}" => EDIT;
     Delete "/api/v1/workspaces/{ws}/templates/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/templates/{id}/draft" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/publish" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/templates/{id}/draft" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/publish" => PUBLISH;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/where-used" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/send-volume" => READ;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/preview" => ADMIN, "Admin when the request names a real person (person_id), else Write";
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/preview" => ADMIN, "Admin when the request names a real person (person_id), until view_pii (#366); else Edit";
     Get    "/api/v1/workspaces/{ws}/templates/{id}/preview-people" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/templates/{id}/preview-people" => ADMIN;
     Delete "/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}" => ADMIN;
     // test_sends
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/test-send" => ADMIN, "Admin when the request names a real person (person_id), else Write";
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/test-send" => ADMIN, "Admin when the request names a real person (person_id), until view_pii (#366); else Edit";
     Get    "/api/v1/workspaces/{ws}/test-sends" => READ;
     Get    "/api/v1/workspaces/{ws}/test-sends/quota" => READ;
     Get    "/api/v1/workspaces/{ws}/test-send-allowlist" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/test-send-allowlist" => ADMIN;
-    Get    "/api/v1/workspaces/{ws}/test-send-allowlist/options" => WRITE;
+    Get    "/api/v1/workspaces/{ws}/test-send-allowlist/options" => EDIT;
     Delete "/api/v1/workspaces/{ws}/test-send-allowlist/{id}" => ADMIN;
     // segments
     Get    "/api/v1/workspaces/{ws}/segments" => READ;
-    Post   "/api/v1/workspaces/{ws}/segments" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/segments" => EDIT;
     Post   "/api/v1/workspaces/{ws}/segments/preview" => READ, "values masked unless Admin";
     Get    "/api/v1/workspaces/{ws}/segments/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/segments/{id}" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/segments/{id}/archive" => WRITE;
+    Patch  "/api/v1/workspaces/{ws}/segments/{id}" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/segments/{id}/archive" => EDIT;
     Get    "/api/v1/workspaces/{ws}/segments/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/segments/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/segments/{id}/members" => READ, "values masked unless Admin";
     Get    "/api/v1/workspaces/{ws}/segments/{id}/history" => READ, "values masked unless Admin";
-    Post   "/api/v1/workspaces/{ws}/segments/{id}/refresh" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/segments/{id}/refresh" => EDIT;
     Get    "/api/v1/workspaces/{ws}/people/{id}/explain" => READ, "values masked unless Admin";
     // events
     Get    "/api/v1/workspaces/{ws}/event-schemas" => READ;
@@ -283,14 +287,14 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values" => ADMIN;
     Patch  "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values/{value}" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/consent/policy/draft" => READ;
-    Put    "/api/v1/workspaces/{ws}/consent/policy/draft" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/consent/policy/draft" => EDIT;
     Post   "/api/v1/workspaces/{ws}/consent/policy/publish" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/consent/policy/versions" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/consent/policy/evaluate" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/consent/import" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/consent/export" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/people/{id}/consent" => READ;
-    Put    "/api/v1/workspaces/{ws}/people/{id}/consent" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/people/{id}/consent" => EDIT;
     Get    "/api/v1/workspaces/{ws}/people/{id}/consent/history" => READ, "values masked unless Admin";
     Get    "/api/v1/workspaces/{ws}/suppressions" => READ;
     Post   "/api/v1/workspaces/{ws}/suppressions" => ADMIN;
@@ -302,16 +306,16 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/contact-definition" => READ;
     Put    "/api/v1/workspaces/{ws}/contact-definition" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/contacts" => READ;
-    Post   "/api/v1/workspaces/{ws}/contacts" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/contacts/bulk" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/contacts" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/contacts/bulk" => EDIT;
     Get    "/api/v1/workspaces/{ws}/contacts/search" => READ;
     Post   "/api/v1/workspaces/{ws}/contacts/search" => READ;
     Get    "/api/v1/workspaces/{ws}/contacts/{key}" => READ;
-    Put    "/api/v1/workspaces/{ws}/contacts/{key}" => WRITE;
-    Patch  "/api/v1/workspaces/{ws}/contacts/{key}" => WRITE;
-    Delete "/api/v1/workspaces/{ws}/contacts/{key}" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT;
+    Patch  "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT;
+    Delete "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT;
     // destinations
-    Get    "/api/v1/workspaces/{ws}/destinations/options" => WRITE;
+    Get    "/api/v1/workspaces/{ws}/destinations/options" => EDIT;
     Get    "/api/v1/workspaces/{ws}/destinations" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/destinations" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/destinations/{id}" => ADMIN;
@@ -345,7 +349,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/sending-domains/{id}" => ADMIN;
     Delete "/api/v1/workspaces/{ws}/sending-domains/{id}" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/sending-domains/{id}/verify" => ADMIN;
-    Get    "/api/v1/workspaces/{ws}/sender-identities/options" => WRITE;
+    Get    "/api/v1/workspaces/{ws}/sender-identities/options" => EDIT;
     Get    "/api/v1/workspaces/{ws}/sender-identities" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/sender-identities" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/sender-identities/{id}" => ADMIN;
@@ -375,14 +379,14 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel" => ADMIN;
     // lists
     Get    "/api/v1/workspaces/{ws}/lists" => READ;
-    Post   "/api/v1/workspaces/{ws}/lists" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/lists" => EDIT;
     Get    "/api/v1/workspaces/{ws}/lists/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/lists/{id}" => WRITE;
-    Delete "/api/v1/workspaces/{ws}/lists/{id}" => WRITE;
+    Patch  "/api/v1/workspaces/{ws}/lists/{id}" => EDIT;
+    Delete "/api/v1/workspaces/{ws}/lists/{id}" => EDIT;
     Get    "/api/v1/workspaces/{ws}/lists/{id}/members" => READ, "values masked unless Admin";
-    Post   "/api/v1/workspaces/{ws}/lists/{id}/members" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/remove" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/import" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/lists/{id}/members" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/remove" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/import" => EDIT;
     Get    "/api/v1/workspaces/{ws}/people/{id}/lists" => READ;
     Get    "/api/v1/workspaces/{ws}/people/{id}/lists/history" => READ;
     // privacy
@@ -396,17 +400,17 @@ pub(crate) const ROUTES: &[Route] = table! {
     Put    "/api/v1/workspaces/{ws}/privacy/settings" => ADMIN;
     // assets
     Get    "/api/v1/workspaces/{ws}/assets" => READ;
-    Post   "/api/v1/workspaces/{ws}/assets" => WRITE;
+    Post   "/api/v1/workspaces/{ws}/assets" => EDIT;
     Get    "/api/v1/workspaces/{ws}/assets/{id}" => READ;
     Delete "/api/v1/workspaces/{ws}/assets/{id}" => ADMIN;
     // imports
     Get    "/api/v1/workspaces/{ws}/imports" => READ;
-    Post   "/api/v1/workspaces/{ws}/imports" => WRITE, "values masked unless Admin";
+    Post   "/api/v1/workspaces/{ws}/imports" => EDIT, "values masked unless Admin";
     Get    "/api/v1/workspaces/{ws}/imports/{id}" => READ, "values masked unless Admin";
-    Put    "/api/v1/workspaces/{ws}/imports/{id}/mapping" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/imports/{id}/dry-run" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/imports/{id}/run" => WRITE;
-    Post   "/api/v1/workspaces/{ws}/imports/{id}/cancel" => WRITE;
+    Put    "/api/v1/workspaces/{ws}/imports/{id}/mapping" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/imports/{id}/dry-run" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/imports/{id}/run" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/imports/{id}/cancel" => EDIT;
     Get    "/api/v1/workspaces/{ws}/imports/{id}/rejects" => READ;
     Get    "/api/v1/workspaces/{ws}/imports/{id}/rejects.csv" => READ, "values masked unless Admin";
     // traces
@@ -637,19 +641,93 @@ mod tests {
                 .find(|row| row.method == Method::Post && row.path == path)
                 .unwrap_or_else(|| panic!("no row for {path}"));
             assert_eq!(row.class, ADMIN, "{path}");
-            assert!(row.note.contains("Write"), "{path} has no note");
+            assert!(row.note.contains("Edit"), "{path} has no note");
         }
+        let drafts = ROUTES
+            .iter()
+            .find(|row| row.path == "/api/v1/workspaces/{ws}/ai/drafts")
+            .unwrap();
+        assert_eq!(drafts.class, ADMIN);
+        assert!(drafts.note.contains("Edit"));
+    }
+
+    /// The publish rows, as the matrix places them.
+    const PUBLISH_ROWS: [(&str, &str); 12] = [
+        ("post", "/api/v1/workspaces/{ws}/flows/{id}/publish"),
+        ("post", "/api/v1/workspaces/{ws}/flows/{id}/pause"),
+        ("post", "/api/v1/workspaces/{ws}/flows/{id}/resume"),
+        ("post", "/api/v1/workspaces/{ws}/flows/{id}/archive"),
+        (
+            "post",
+            "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry",
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip",
+        ),
+        (
+            "post",
+            "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments",
+        ),
+        ("post", "/api/v1/workspaces/{ws}/flows/{id}/start"),
+        ("post", "/api/v1/workspaces/{ws}/snippets/{id}/publish"),
+        ("post", "/api/v1/workspaces/{ws}/themes/{id}/publish"),
+        ("post", "/api/v1/workspaces/{ws}/templates/{id}/publish"),
+        ("post", "/api/v1/workspaces/{ws}/imports/{id}/run"),
+    ];
+
+    #[test]
+    fn exactly_the_ruled_routes_need_publish() {
+        let found: BTreeSet<String> = ROUTES
+            .iter()
+            .filter(|row| row.class == PUBLISH)
+            .map(row_key)
+            .collect();
+        let ruled: BTreeSet<String> = PUBLISH_ROWS
+            .iter()
+            .map(|(method, path)| key(method, path))
+            .collect();
+        assert_eq!(found, ruled);
+    }
+
+    #[test]
+    fn a_viewer_edits_nothing_an_editor_publishes_nothing_and_a_publisher_administers_nothing() {
+        use zirv_flow_core::Role;
+
+        use crate::auth::role_allows;
+
+        let refused = |role: Role| -> BTreeSet<String> {
+            ROUTES
+                .iter()
+                .filter_map(|row| match row.class {
+                    Class::Need(need) if !role_allows(role, need) => Some(format!("{need:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            refused(Role::Viewer),
+            BTreeSet::from(["Edit", "Publish", "Admin"].map(String::from))
+        );
+        assert_eq!(
+            refused(Role::Editor),
+            BTreeSet::from(["Publish", "Admin"].map(String::from))
+        );
+        assert_eq!(
+            refused(Role::Publisher),
+            BTreeSet::from(["Admin".to_owned()])
+        );
+        assert!(refused(Role::Admin).is_empty());
     }
 
     #[test]
     fn the_router_mounts_no_routes_the_inventory_cannot_see() {
-        let end = LIB
-            .find(
-                "#[cfg(test)]
-mod tests",
-            )
+        // A checkout may end its lines with CRLF.
+        let lib = LIB.replace("\r\n", "\n");
+        let end = lib
+            .find("#[cfg(test)]\nmod tests")
             .expect("the test module");
-        assert_eq!(unlisted_mounts(&LIB[..end]), Vec::<String>::new());
+        assert_eq!(unlisted_mounts(&lib[..end]), Vec::<String>::new());
         assert!(EXPLICIT_MOUNTS.iter().all(|(_, reason)| !reason.is_empty()));
     }
 

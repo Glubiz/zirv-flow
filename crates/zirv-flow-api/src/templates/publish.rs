@@ -1,5 +1,5 @@
 //! Publishing a template's draft into an immutable version, and reading the versions. Publishing
-//! needs the workspace admin role (ruling 43163028).
+//! needs the workspace publisher role (rulings 43163028 and 92d5483d).
 
 use axum::Json;
 use axum::body::Bytes;
@@ -374,7 +374,7 @@ pub(crate) async fn publish_template(
         (status = 201, description = "The template and its new version", body = TemplatePublishedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 400, description = "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)", body = Problem, content_type = "application/problem+json")
@@ -387,7 +387,7 @@ pub(crate) async fn publish(
     Path((ws, id)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let input = input_of(&body)?;
     let render = state
         .render_pool()
