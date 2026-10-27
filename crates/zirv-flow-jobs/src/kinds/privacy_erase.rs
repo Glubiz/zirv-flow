@@ -64,27 +64,49 @@ async fn write_ledger_file(
     let entry = zirv_flow_store::find_ledger_entry(ctx.conn(), workspace, request)
         .await?
         .ok_or(JobError::new("the completed erasure has no ledger entry"))?;
-    let written = tokio::task::spawn_blocking(move || {
-        zirv_flow_store::write_ledger_file(dir.as_path(), &entry)
-    })
-    .await
-    .map_err(|_| JobError::new("the erasure ledger file write was interrupted"))?;
-    match written {
-        Ok(_) => Ok(()),
+    let on_disk = entry.clone();
+    let write = tokio::task::spawn_blocking(move || {
+        zirv_flow_store::reconcile_ledger_file(dir.as_path(), &on_disk)
+    });
+    // The transaction holds row locks while the write runs, so it cannot wait for ever.
+    let written = tokio::time::timeout(LEDGER_WRITE_TIMEOUT, write)
+        .await
+        .map_err(|_| JobError::new("the erasure ledger file write timed out"))?
+        .map_err(|_| JobError::new("the erasure ledger file write was interrupted"))?;
+    let merged = match written {
+        Ok(merged) => merged,
         Err(error @ zirv_flow_store::LedgerFileError::Conflict { .. }) => {
             warn!(%error, "privacy.ledger_dir holds a different file for this erasure");
-            Err(JobError::new(
+            return Err(JobError::new(
                 "an erasure ledger file with other content exists",
-            ))
+            ));
+        }
+        Err(
+            error @ (zirv_flow_store::LedgerFileError::Corrupt { .. }
+            | zirv_flow_store::LedgerFileError::UnknownFormat { .. }),
+        ) => {
+            warn!(%error, "privacy.ledger_dir holds an invalid file for this erasure");
+            return Err(JobError::new(
+                "the erasure ledger file of this request is invalid",
+            ));
         }
         Err(error) => {
             warn!(%error, "could not write the erasure ledger file to privacy.ledger_dir");
-            Err(JobError::new(
+            return Err(JobError::new(
                 "the erasure ledger file could not be written",
-            ))
+            ));
         }
+    };
+    // The file holds the union of what it had and what this attempt knows; the row follows, in the
+    // same transaction, so a later read of both finds them equal.
+    if !merged.same_lists(&entry) {
+        zirv_flow_store::update_ledger_lists(ctx.conn(), workspace, &merged).await?;
     }
+    Ok(())
 }
+
+/// How long the ledger file write may take.
+const LEDGER_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Where a destination of this type and configuration takes its external key from, when it
 /// declares erase. A built-in type declares it through `Capabilities.erase` and keys on the person
@@ -420,9 +442,105 @@ mod tests {
 
         assert_eq!(
             error.message(),
-            "an erasure ledger file with other content exists"
+            "the erasure ledger file of this request is invalid"
         );
         assert_eq!(status(&pool, ws, request.id).await, ErasureStatus::Pending);
+    }
+
+    async fn add_second_email(pool: &PgPool, ws: WorkspaceId) {
+        apply_profile_batch(
+            pool,
+            ws,
+            &[ProfileRecord {
+                source: "crm".into(),
+                stream: "s".into(),
+                record_key: "1".into(),
+                identifiers: vec![
+                    ("email".into(), "ada@example.com".into()),
+                    ("email".into(), "ada.l@example.com".into()),
+                ],
+                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                observed_at: datetime!(2026-01-02 00:00 UTC),
+                trace: TraceContext::root(Cause::api("t")),
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn row_entry(pool: &PgPool, ws: WorkspaceId, id: Uuid) -> zirv_flow_store::LedgerEntry {
+        let mut conn = pool.acquire().await.unwrap();
+        zirv_flow_store::find_ledger_entry(&mut conn, ws, id)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retry_after_the_person_gained_an_identity_succeeds_and_file_and_row_hold_the_union(
+        pool: PgPool,
+    ) {
+        let key = identifier_key();
+        let (ws, _, request) = pending_request(&pool, &key).await;
+        let dir = TempDir::new();
+        let claimed = claim(&pool).await;
+        run_once(&pool, &claimed, &key, Some(&dir.0), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            zirv_flow_store::read_ledger_dir(&dir.0).unwrap()[0]
+                .identifier_hashes
+                .len(),
+            1
+        );
+        add_second_email(&pool, ws).await;
+
+        run_once(&pool, &claimed, &key, Some(&dir.0), true)
+            .await
+            .unwrap();
+
+        let files = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].identifier_hashes.len(), 2);
+        let row = row_entry(&pool, ws, request.id).await;
+        assert!(row.same_lists(&files[0]));
+        assert_eq!(row, files[0]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_restored_pending_row_whose_job_runs_before_any_replay_keeps_the_files_extra_hashes(
+        pool: PgPool,
+    ) {
+        let key = identifier_key();
+        let (ws, _, request) = pending_request(&pool, &key).await;
+        let dir = TempDir::new();
+        let claimed = claim(&pool).await;
+        run_once(&pool, &claimed, &key, Some(&dir.0), false)
+            .await
+            .unwrap();
+        // The authoritative file knows a hash and a person the restored row does not.
+        let mut file = zirv_flow_store::read_ledger_dir(&dir.0).unwrap().remove(0);
+        let extra_person = Uuid::now_v7();
+        file.identifier_hashes.push("07".repeat(32));
+        file.identifier_kinds.push("email".to_owned());
+        file.person_ids.push(extra_person);
+        std::fs::write(
+            dir.0.join(file.file_name()),
+            serde_json::to_vec_pretty(&file).unwrap(),
+        )
+        .unwrap();
+
+        run_once(&pool, &claimed, &key, Some(&dir.0), true)
+            .await
+            .unwrap();
+
+        let files = zirv_flow_store::read_ledger_dir(&dir.0).unwrap();
+        assert!(files[0].identifier_hashes.contains(&"07".repeat(32)));
+        assert!(files[0].person_ids.contains(&extra_person));
+        let row = row_entry(&pool, ws, request.id).await;
+        assert!(row.same_lists(&files[0]));
     }
 
     async fn run_claimed(pool: &PgPool, key: Option<Arc<HmacKey>>) -> Result<(), JobError> {

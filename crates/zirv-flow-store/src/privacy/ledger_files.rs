@@ -80,6 +80,38 @@ impl LedgerEntry {
     }
 }
 
+impl LedgerEntry {
+    /// Whether both hold the same person ids, hashes and kinds in the same order.
+    pub fn same_lists(&self, other: &Self) -> bool {
+        self.person_ids == other.person_ids
+            && self.identifier_hashes == other.identifier_hashes
+            && self.identifier_kinds == other.identifier_kinds
+    }
+
+    /// This entry with whatever `other` adds: its person ids, and its `(hash, kind)` pairs. The
+    /// order of this entry's lists is kept and new items are appended.
+    fn union(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+        for id in &other.person_ids {
+            if !merged.person_ids.contains(id) {
+                merged.person_ids.push(*id);
+            }
+        }
+        for (hash, kind) in other.identifier_hashes.iter().zip(&other.identifier_kinds) {
+            let known = merged
+                .identifier_hashes
+                .iter()
+                .zip(&merged.identifier_kinds)
+                .any(|(have, have_kind)| have == hash && have_kind == kind);
+            if !known {
+                merged.identifier_hashes.push(hash.clone());
+                merged.identifier_kinds.push(kind.clone());
+            }
+        }
+        merged
+    }
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     use fmt::Write as _;
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -182,6 +214,41 @@ pub fn write_ledger_file(dir: &Path, entry: &LedgerEntry) -> Result<LedgerWrite,
     Ok(LedgerWrite::Created)
 }
 
+/// Brings the file of `entry` in `dir` to hold everything both know, and returns what it holds.
+///
+/// With no file, it writes the entry. With a valid file of the same ledger id and workspace, the
+/// result is the union of the two (the file's order first, new items appended): a retry whose
+/// person gained an identity, or a pending row restored from an older backup, never shrinks the
+/// file. The file is rewritten, by the temp, fsync and rename path, only when the union adds
+/// something to it. The caller brings its database row to the returned lists. A file that is
+/// unreadable, corrupt, of another format, or named for another ledger id or workspace is an error
+/// naming it.
+pub fn reconcile_ledger_file(
+    dir: &Path,
+    entry: &LedgerEntry,
+) -> Result<LedgerEntry, LedgerFileError> {
+    let name = entry.file_name();
+    let path = dir.join(&name);
+    let existing = match fs::read(&path) {
+        Ok(bytes) => parse_ledger_bytes(&bytes, name.clone())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            write_ledger_file(dir, entry)?;
+            return Ok(entry.clone());
+        }
+        Err(error) => return Err(LedgerFileError::io(&path, "read", error)),
+    };
+    let mut merged = existing.union(entry);
+    if merged.same_lists(&existing) {
+        return Ok(merged);
+    }
+    merged.completed_at = entry.completed_at;
+    let bytes = merged
+        .to_bytes()
+        .map_err(|error| LedgerFileError::io(&path, "encode", io::Error::other(error)))?;
+    durable_write(dir, &name, &bytes)?;
+    Ok(merged)
+}
+
 /// Whether the bytes are this entry written by an earlier attempt: a retry after a crash between
 /// the rename and the commit completes the request again, at a later `completed_at`.
 fn same_but_for_completion(existing: &[u8], entry: &LedgerEntry) -> bool {
@@ -194,9 +261,12 @@ fn same_but_for_completion(existing: &[u8], entry: &LedgerEntry) -> bool {
 fn durable_write(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), LedgerFileError> {
     let temp = dir.join(format!(".{name}.{}.tmp", Uuid::now_v7()));
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Ledger files name people by keyed hash: owner only.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options
             .open(&temp)
             .map_err(|error| LedgerFileError::io(&temp, "create", error))?;
         file.write_all(bytes)
@@ -240,9 +310,13 @@ pub fn check_ledger_dir(dir: &Path) -> Result<(), LedgerFileError> {
         ));
     }
     let name = format!(".probe-{}", Uuid::now_v7());
-    durable_write(dir, &name, b"probe")?;
     let probe = dir.join(&name);
-    fs::remove_file(&probe).map_err(|error| LedgerFileError::io(&probe, "remove", error))
+    // The rename may succeed and a later step fail: the probe goes in every case, and the first
+    // error is the one reported.
+    let written = durable_write(dir, &name, b"probe");
+    let removed = fs::remove_file(&probe);
+    written?;
+    removed.map_err(|error| LedgerFileError::io(&probe, "remove", error))
 }
 
 /// Reads and validates every ledger file of `dir`, sorted by file name. Files whose name does not
@@ -260,9 +334,7 @@ pub fn read_ledger_dir(dir: &Path) -> Result<Vec<LedgerEntry>, LedgerFileError> 
         if name.starts_with('.') || !name.ends_with(".json") {
             continue;
         }
-        if item.file_type().is_ok_and(|kind| kind.is_file()) {
-            names.push(name);
-        }
+        names.push(name);
     }
     names.sort();
     names
@@ -271,11 +343,21 @@ pub fn read_ledger_dir(dir: &Path) -> Result<Vec<LedgerEntry>, LedgerFileError> 
         .collect()
 }
 
+/// Reads one `*.json` entry, following a symlink. Anything that is not a regular file after that
+/// (a directory, a dangling link) is corrupt.
 fn read_ledger_file(dir: &Path, name: String) -> Result<LedgerEntry, LedgerFileError> {
     let path = dir.join(&name);
+    if !fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err(LedgerFileError::Corrupt { file: name });
+    }
     let bytes = fs::read(&path).map_err(|error| LedgerFileError::io(&path, "read", error))?;
+    parse_ledger_bytes(&bytes, name)
+}
+
+/// Validates the bytes of the file called `name`.
+fn parse_ledger_bytes(bytes: &[u8], name: String) -> Result<LedgerEntry, LedgerFileError> {
     let corrupt = || LedgerFileError::Corrupt { file: name.clone() };
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| corrupt())?;
     match value.get("format").and_then(Value::as_str) {
         Some(LEDGER_FORMAT) => {}
         Some(_) => return Err(LedgerFileError::UnknownFormat { file: name }),
@@ -344,6 +426,32 @@ pub async fn find_ledger_entry(
     .await
     .map_err(StoreError::query)?;
     Ok(row.map(entry_of))
+}
+
+/// Brings the lists of a completed ledger row to those of `entry` (the person id stays), in the
+/// caller's transaction.
+pub async fn update_ledger_lists(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    entry: &LedgerEntry,
+) -> Result<(), StoreError> {
+    let hashes = entry.hash_bytes().ok_or_else(|| {
+        StoreError::query(sqlx::Error::Decode("a ledger hash is not 32 bytes".into()))
+    })?;
+    sqlx::query(
+        "UPDATE erasure_requests SET identifier_hashes = $3, identifier_kinds = $4, \
+            person_ids = $5 \
+         WHERE workspace_id = $1 AND id = $2 AND status = 'completed'",
+    )
+    .bind(workspace.as_uuid())
+    .bind(entry.id)
+    .bind(&hashes)
+    .bind(&entry.identifier_kinds)
+    .bind(&entry.person_ids)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(())
 }
 
 /// What [`export_ledger`] wrote, as counts.
@@ -419,6 +527,43 @@ pub struct MergeReport {
     pub skipped_workspaces: u64,
 }
 
+/// Why [`merge_ledger_entries`] changed nothing.
+#[derive(Debug)]
+pub enum MergeError {
+    Store(StoreError),
+    /// The file's ledger id belongs to a request of another workspace in this database.
+    IdInOtherWorkspace {
+        file: String,
+    },
+}
+
+impl From<StoreError> for MergeError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl fmt::Display for MergeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::IdInOtherWorkspace { file } => write!(
+                formatter,
+                "the ledger id of {file} belongs to another workspace in this database"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MergeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::IdInOtherWorkspace { .. } => None,
+        }
+    }
+}
+
 /// Inserts the entries the table lacks as `completed`, by ledger id, in one transaction. A row
 /// that is still `pending` or `failed` (a backup older than the completion) is upgraded to
 /// `completed` with the file's person ids, hashes and completion time, because the file records
@@ -427,7 +572,7 @@ pub struct MergeReport {
 pub async fn merge_ledger_entries(
     pool: &PgPool,
     entries: &[LedgerEntry],
-) -> Result<MergeReport, StoreError> {
+) -> Result<MergeReport, MergeError> {
     let mut report = MergeReport::default();
     let mut tx = begin(pool).await?;
     let wanted: Vec<Uuid> = entries.iter().map(|entry| entry.workspace_id).collect();
@@ -437,6 +582,25 @@ pub async fn merge_ledger_entries(
         .await
         .map_err(StoreError::query)?;
     let known: HashSet<Uuid> = known.into_iter().collect();
+    // Before any change: a ledger id that is taken by another workspace here would be dropped by
+    // the guarded upsert, so it stops the merge.
+    let ids: Vec<Uuid> = entries.iter().map(|entry| entry.id).collect();
+    let taken: Vec<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT id, workspace_id FROM erasure_requests WHERE id = ANY($1)")
+            .bind(&ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(StoreError::query)?;
+    for entry in entries {
+        let foreign = taken
+            .iter()
+            .any(|(id, workspace)| *id == entry.id && *workspace != entry.workspace_id);
+        if foreign && known.contains(&entry.workspace_id) {
+            return Err(MergeError::IdInOtherWorkspace {
+                file: entry.file_name(),
+            });
+        }
+    }
     for entry in entries {
         if !known.contains(&entry.workspace_id) {
             report.skipped_workspaces += 1;
@@ -450,7 +614,14 @@ pub async fn merge_ledger_entries(
                 (id, workspace_id, person_id, identifier_hashes, identifier_kinds, person_ids, \
                  status, requested_by, requested_at, completed_at, trace_id) \
              VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10) \
-             ON CONFLICT (id) DO UPDATE SET                 status = 'completed', person_id = EXCLUDED.person_id,                 person_ids = EXCLUDED.person_ids,                 identifier_hashes = EXCLUDED.identifier_hashes,                 identifier_kinds = EXCLUDED.identifier_kinds,                 completed_at = EXCLUDED.completed_at              WHERE erasure_requests.status <> 'completed'                AND erasure_requests.workspace_id = EXCLUDED.workspace_id",
+             ON CONFLICT (id) DO UPDATE SET \
+                status = 'completed', person_id = EXCLUDED.person_id, \
+                person_ids = EXCLUDED.person_ids, \
+                identifier_hashes = EXCLUDED.identifier_hashes, \
+                identifier_kinds = EXCLUDED.identifier_kinds, \
+                completed_at = EXCLUDED.completed_at \
+             WHERE erasure_requests.status <> 'completed' \
+               AND erasure_requests.workspace_id = EXCLUDED.workspace_id",
         )
         .bind(entry.id)
         .bind(entry.workspace_id)
@@ -595,6 +766,141 @@ mod tests {
 
         assert!(matches!(error, LedgerFileError::Conflict { .. }), "{error}");
         assert_eq!(fs::read(dir.0.join(entry.file_name())).unwrap(), before);
+    }
+
+    #[test]
+    fn reconciling_with_no_file_writes_the_entry() {
+        let dir = TempDir::new();
+        let entry = entry();
+
+        let held = reconcile_ledger_file(&dir.0, &entry).unwrap();
+
+        assert_eq!(held, entry);
+        assert_eq!(
+            read_ledger_dir(&dir.0).unwrap(),
+            std::slice::from_ref(&entry)
+        );
+    }
+
+    #[test]
+    fn reconciling_with_another_view_keeps_the_files_order_and_appends_what_is_new() {
+        let dir = TempDir::new();
+        let on_disk = entry();
+        write_ledger_file(&dir.0, &on_disk).unwrap();
+        let mut newer = on_disk.clone();
+        newer.identifier_hashes = vec![encode_hex(&[9; 32]), encode_hex(&[5; 32])];
+        newer.identifier_kinds = vec!["phone".to_owned(), "email".to_owned()];
+        let extra_person = Uuid::now_v7();
+        newer.person_ids = vec![extra_person];
+        newer.completed_at = datetime!(2026-03-02 10:00:00 UTC);
+
+        let held = reconcile_ledger_file(&dir.0, &newer).unwrap();
+
+        // The pair (9, phone) is known; (5, email) is new; (9, email) would be a different pair.
+        assert_eq!(
+            held.identifier_hashes,
+            [
+                encode_hex(&[7; 32]),
+                encode_hex(&[9; 32]),
+                encode_hex(&[5; 32])
+            ]
+        );
+        assert_eq!(held.identifier_kinds, ["email", "phone", "email"]);
+        assert_eq!(held.person_ids, [on_disk.person_ids[0], extra_person]);
+        assert_eq!(read_ledger_dir(&dir.0).unwrap(), [held]);
+    }
+
+    #[test]
+    fn reconciling_with_a_subset_leaves_the_file_as_it_is() {
+        let dir = TempDir::new();
+        let on_disk = entry();
+        write_ledger_file(&dir.0, &on_disk).unwrap();
+        let before = fs::read(dir.0.join(on_disk.file_name())).unwrap();
+        let mut older = on_disk.clone();
+        older.identifier_hashes.truncate(1);
+        older.identifier_kinds.truncate(1);
+        older.completed_at = datetime!(2026-04-01 00:00:00 UTC);
+
+        let held = reconcile_ledger_file(&dir.0, &older).unwrap();
+
+        assert_eq!(held, on_disk);
+        assert_eq!(fs::read(dir.0.join(on_disk.file_name())).unwrap(), before);
+    }
+
+    #[test]
+    fn reconciling_with_a_corrupt_or_foreign_file_is_an_error_naming_it() {
+        let dir = TempDir::new();
+        let entry = entry();
+        fs::write(dir.0.join(entry.file_name()), b"{ not json").unwrap();
+        assert!(matches!(
+            reconcile_ledger_file(&dir.0, &entry).unwrap_err(),
+            LedgerFileError::Corrupt { file } if file == entry.file_name()
+        ));
+
+        // A file under this name that says it belongs to another ledger id.
+        let mut foreign = entry.clone();
+        foreign.id = Uuid::now_v7();
+        fs::write(
+            dir.0.join(entry.file_name()),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            reconcile_ledger_file(&dir.0, &entry).unwrap_err(),
+            LedgerFileError::Corrupt { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ledger_files_and_the_probe_are_created_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new();
+        let entry = entry();
+
+        write_ledger_file(&dir.0, &entry).unwrap();
+
+        let mode = fs::metadata(dir.0.join(entry.file_name()))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_json_directory_is_corrupt_and_a_dangling_name_is_not_skipped() {
+        let dir = TempDir::new();
+        fs::create_dir(dir.0.join("folder.json")).unwrap();
+
+        let error = read_ledger_dir(&dir.0).unwrap_err();
+
+        assert!(
+            matches!(&error, LedgerFileError::Corrupt { file } if file == "folder.json"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_is_followed_and_a_dangling_link_is_corrupt() {
+        let dir = TempDir::new();
+        let elsewhere = TempDir::new();
+        let entry = entry();
+        write_ledger_file(&elsewhere.0, &entry).unwrap();
+        std::os::unix::fs::symlink(
+            elsewhere.0.join(entry.file_name()),
+            dir.0.join(entry.file_name()),
+        )
+        .unwrap();
+        assert_eq!(read_ledger_dir(&dir.0).unwrap(), [entry]);
+
+        std::os::unix::fs::symlink(elsewhere.0.join("nowhere.json"), dir.0.join("gone.json"))
+            .unwrap();
+        assert!(matches!(
+            read_ledger_dir(&dir.0).unwrap_err(),
+            LedgerFileError::Corrupt { file } if file == "gone.json"
+        ));
     }
 
     #[test]
@@ -825,6 +1131,34 @@ mod tests {
                 .unwrap();
             assert_eq!(stored, file);
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_ledger_id_held_by_another_workspace_stops_the_merge_before_any_change(pool: PgPool) {
+        crate::migrate(&pool).await.unwrap();
+        let ours = workspace(&pool, "ours").await;
+        let theirs = workspace(&pool, "theirs").await;
+        let mut held = entry();
+        held.workspace_id = theirs.as_uuid();
+        merge_ledger_entries(&pool, std::slice::from_ref(&held))
+            .await
+            .unwrap();
+        let mut fine = entry();
+        fine.workspace_id = ours.as_uuid();
+        let mut clash = entry();
+        clash.id = held.id;
+        clash.workspace_id = ours.as_uuid();
+
+        let error = merge_ledger_entries(&pool, &[fine, clash.clone()])
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, MergeError::IdInOtherWorkspace { file } if *file == clash.file_name()),
+            "{error}"
+        );
+        assert_eq!(rows(&pool).await, 1);
     }
 
     #[sqlx::test]

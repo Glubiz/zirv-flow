@@ -75,6 +75,8 @@ pub enum AdminError {
     Conflict(&'static str),
     NotFound(&'static str),
     Store(StoreError),
+    /// A ledger file that cannot be merged; names the file, never a value.
+    Merge(String),
     /// An erasure ledger file or directory that could not be read or written. Names a file or
     /// directory, never a value.
     Ledger(zirv_flow_store::LedgerFileError),
@@ -99,6 +101,7 @@ impl fmt::Display for AdminError {
             Self::NotFound(what) => write!(formatter, "no such {what}"),
             Self::Store(error) => error.fmt(formatter),
             Self::Ledger(error) => error.fmt(formatter),
+            Self::Merge(message) => formatter.write_str(message),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
             Self::Utm { detail, .. } => formatter.write_str(detail),
@@ -113,7 +116,11 @@ impl Error for AdminError {
             Self::Store(error) => Some(error),
             Self::Ledger(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) | Self::Utm { .. } => None,
+            Self::Conflict(_)
+            | Self::NotFound(_)
+            | Self::Merge(_)
+            | Self::Slot(_)
+            | Self::Utm { .. } => None,
         }
     }
 }
@@ -508,7 +515,14 @@ pub async fn replay_erasures(
     if let Some(only) = workspace {
         entries.retain(|entry| entry.workspace_id == only.as_uuid());
     }
-    let merge = zirv_flow_store::merge_ledger_entries(pool, &entries).await?;
+    let merge = zirv_flow_store::merge_ledger_entries(pool, &entries)
+        .await
+        .map_err(|error| match error {
+            zirv_flow_store::MergeError::Store(error) => AdminError::Store(error),
+            other @ zirv_flow_store::MergeError::IdInOtherWorkspace { .. } => {
+                AdminError::Merge(other.to_string())
+            }
+        })?;
     let key = root.hmac_key(HmacPurpose::Identifier);
     let trace = TraceContext::root(Cause::api("admin.replay-erasures"));
     let mut report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;

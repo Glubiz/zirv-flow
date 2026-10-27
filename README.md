@@ -1020,7 +1020,8 @@ complete without its file. A file holds ids, keyed hashes (hex), their kinds and
 identifier value. Operator duties:
 
 - Put the directory on storage shared by every worker that supports atomic rename and durable
-  writes. At start-up a worker writes, fsyncs, renames and removes a probe file there and refuses to
+  writes, owned by the user the workers run as and mode `0700`; the files are created `0600` on
+  unix. At start-up a worker writes, fsyncs, renames and removes a probe file there and refuses to
   start, naming `privacy.ledger_dir` and the path, if that fails.
 - Back the directory up apart from the database, so one restore cannot take both back in time.
   The hashes are keyed with the deployment HMAC root, so restoring from the files also needs the
@@ -1031,7 +1032,14 @@ identifier value. Operator duties:
   completed, upgrades a request the backup still holds as pending or failed to completed (the file
   records a completed erasure and wins; a completed row is left alone), skips and counts files
   whose workspace does not exist, and then runs the replay. The counts include `merged` (added
-  and upgraded) and `skipped_workspaces`. Both steps are safe to run again.
+  and upgraded) and `skipped_workspaces`. A file whose ledger id belongs to a request of another
+  workspace in the database stops the merge before any change, naming the file. A request merged
+  or upgraded from a file runs only the replay: it does not make the destination erase calls and
+  does not erase AI transcripts, which is the existing limit of replay.
+- If a retry of an erasure finds its file already there with other content (the person gained an
+  identity since the first attempt, or a pending request came back from an older backup), the job
+  writes the union of the two to the file and to the ledger row; the file never shrinks. A file that
+  is unreadable or invalid fails the job, which the worker logs naming the file. Both steps are safe to run again.
 - With the directory set, the recovery point for erasures is none: the file exists before the
   erasure is reported complete. With it unset, nothing is written and the restore guarantee rests
   on backups of the database alone.
