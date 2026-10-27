@@ -52,40 +52,99 @@ fn unquote(value: &str) -> String {
     value.to_owned()
 }
 
-/// Reads the rules of a file in the regular shape: a rule starts at `- alert: Name` and its
-/// `expr`, `for`, `severity`, `summary` and `runbook` keys follow, each on one line.
+/// The block of a rule that the reader is inside.
+#[derive(Clone, Copy, PartialEq)]
+enum Block {
+    Rule,
+    Labels,
+    Annotations,
+}
+
+/// Reads the rules of a file in the regular shape, and refuses anything else with the line
+/// number. The nesting is fixed by indentation:
+///
+/// - `groups:` at 0, `- name: X` at 2, `rules:` at 4 and `- alert: X` at 6;
+/// - at 8 the keys `expr`, `for`, `labels:` and `annotations:` of a rule;
+/// - at 10 `severity` under `labels:`, and `summary` and `runbook` under `annotations:`.
+///
+/// Each value is on one line, and a key is set at most once.
 fn parse_rules(text: &str) -> Result<Vec<Rule>, String> {
     let mut rules: Vec<Rule> = Vec::new();
-    for (number, line) in text.lines().enumerate() {
+    let mut groups = false;
+    let mut in_group = false;
+    let mut has_rules = false;
+    let mut block = Block::Rule;
+    for (index, line) in text.lines().enumerate() {
+        let fail = |what: &str| Err(format!("line {}: {what}: {}", index + 1, line.trim()));
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if let Some(name) = trimmed.strip_prefix("- alert:") {
-            rules.push(Rule {
-                alert: unquote(name),
-                ..Rule::default()
-            });
-            continue;
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if line[..indent].contains('\t') || line.trim_start_matches(' ').starts_with('\t') {
+            return fail("tabs are not allowed");
         }
-        let Some((key, value)) = trimmed.split_once(':') else {
-            return Err(format!("line {}: not a key: {trimmed}", number + 1));
-        };
-        let Some(rule) = rules.last_mut() else {
-            continue;
-        };
-        let field = match key {
-            "expr" => &mut rule.expr,
-            "for" => &mut rule.for_,
-            "severity" => &mut rule.severity,
-            "summary" => &mut rule.summary,
-            "runbook" => &mut rule.runbook,
-            _ => continue,
-        };
-        if !field.is_empty() {
-            return Err(format!("line {}: `{key}` is set twice", number + 1));
+        match indent {
+            0 if trimmed == "groups:" && !groups => groups = true,
+            2 if groups && trimmed.starts_with("- name:") => {
+                in_group = true;
+                has_rules = false;
+            }
+            4 if in_group && trimmed == "rules:" && !has_rules => has_rules = true,
+            6 if has_rules && trimmed.starts_with("- alert:") => {
+                let name = unquote(&trimmed["- alert:".len()..]);
+                if name.is_empty() {
+                    return fail("the alert has no name");
+                }
+                rules.push(Rule {
+                    alert: name,
+                    ..Rule::default()
+                });
+                block = Block::Rule;
+            }
+            8 | 10 if !rules.is_empty() && has_rules => {
+                let Some((key, value)) = trimmed.split_once(':') else {
+                    return fail("not a key");
+                };
+                let value = value.trim();
+                let Some(rule) = rules.last_mut() else {
+                    return fail("a key outside a rule");
+                };
+                let field = match (indent, block, key) {
+                    (8, _, "labels" | "annotations") => {
+                        if !value.is_empty() {
+                            return fail("a block key takes no value");
+                        }
+                        block = if key == "labels" {
+                            Block::Labels
+                        } else {
+                            Block::Annotations
+                        };
+                        continue;
+                    }
+                    (8, _, "expr") => {
+                        block = Block::Rule;
+                        &mut rule.expr
+                    }
+                    (8, _, "for") => {
+                        block = Block::Rule;
+                        &mut rule.for_
+                    }
+                    (10, Block::Labels, "severity") => &mut rule.severity,
+                    (10, Block::Annotations, "summary") => &mut rule.summary,
+                    (10, Block::Annotations, "runbook") => &mut rule.runbook,
+                    _ => return fail("unknown key or wrong place"),
+                };
+                if value.is_empty() {
+                    return fail("the key has no value");
+                }
+                if !field.is_empty() {
+                    return fail("the key is set twice");
+                }
+                *field = unquote(value);
+            }
+            _ => return fail("not in the expected structure"),
         }
-        *field = unquote(value);
     }
     Ok(rules)
 }
@@ -109,9 +168,203 @@ fn names_in(text: &str) -> BTreeSet<String> {
     found
 }
 
+/// Rust source with its comments and test-only items blanked, and the test-only modules it
+/// declares in other files.
+struct Production {
+    code: String,
+    test_mods: Vec<String>,
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Two copies of `source` of the same length in characters: the first with comments blanked, the
+/// second also with the insides of string and character literals blanked, so that a search in it
+/// sees code only.
+fn blank_comments(source: &str) -> (Vec<char>, Vec<char>) {
+    let chars: Vec<char> = source.chars().collect();
+    let mut clean = chars.clone();
+    let mut masked = chars.clone();
+    let blank = |text: &mut Vec<char>, from: usize, to: usize| {
+        for c in &mut text[from..to] {
+            if *c != '\n' {
+                *c = ' ';
+            }
+        }
+    };
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if c == '/' && next == Some('/') {
+            let end = chars[i..]
+                .iter()
+                .position(|c| *c == '\n')
+                .map_or(chars.len(), |p| i + p);
+            blank(&mut clean, i, end);
+            blank(&mut masked, i, end);
+            i = end;
+        } else if c == '/' && next == Some('*') {
+            let mut depth = 0_u32;
+            let mut end = i;
+            while end < chars.len() {
+                if chars[end] == '/' && chars.get(end + 1) == Some(&'*') {
+                    depth += 1;
+                    end += 2;
+                } else if chars[end] == '*' && chars.get(end + 1) == Some(&'/') {
+                    depth -= 1;
+                    end += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    end += 1;
+                }
+            }
+            blank(&mut clean, i, end);
+            blank(&mut masked, i, end);
+            i = end;
+        } else if c == 'r' && {
+            let before = if i > 0 { chars[i - 1] } else { ' ' };
+            let before_b = i > 1 && before == 'b' && !is_ident(chars[i - 2]);
+            let hashes = chars[i + 1..].iter().take_while(|c| **c == '#').count();
+            (!is_ident(before) || before_b) && chars.get(i + 1 + hashes) == Some(&'"')
+        } {
+            let hashes = chars[i + 1..].iter().take_while(|c| **c == '#').count();
+            let start = i + 2 + hashes;
+            let closing: Vec<char> = std::iter::once('"')
+                .chain(std::iter::repeat_n('#', hashes))
+                .collect();
+            let end = (start..chars.len())
+                .find(|at| chars[*at..].starts_with(&closing))
+                .unwrap_or(chars.len());
+            blank(&mut masked, start, end);
+            i = (end + closing.len()).min(chars.len());
+        } else if c == '"' {
+            let mut end = i + 1;
+            while end < chars.len() && chars[end] != '"' {
+                end += if chars[end] == '\\' { 2 } else { 1 };
+            }
+            let end = end.min(chars.len());
+            blank(&mut masked, i + 1, end);
+            i = (end + 1).min(chars.len());
+        } else if c == '\'' {
+            let literal_end = if next == Some('\\') {
+                (i + 3..chars.len().min(i + 12)).find(|at| chars[*at] == '\'')
+            } else if chars.get(i + 2) == Some(&'\'') {
+                Some(i + 2)
+            } else {
+                None
+            };
+            match literal_end {
+                Some(end) => {
+                    blank(&mut masked, i + 1, end);
+                    i = end + 1;
+                }
+                None => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    (clean, masked)
+}
+
+/// The index just past the bracket that closes the one at `open`, in `masked`.
+fn closing(masked: &[char], open: usize) -> usize {
+    let (up, down) = match masked[open] {
+        '{' => ('{', '}'),
+        '[' => ('[', ']'),
+        _ => ('(', ')'),
+    };
+    let mut depth = 0_u32;
+    for (at, c) in masked.iter().enumerate().skip(open) {
+        if *c == up {
+            depth += 1;
+        } else if *c == down {
+            depth -= 1;
+            if depth == 0 {
+                return at + 1;
+            }
+        }
+    }
+    masked.len()
+}
+
+/// `source` without comments and without items marked `#[cfg(test)]`: an inline module or
+/// function by its braces, a declaration such as `mod x;` or a `use` by its semicolon. The
+/// names of the `mod x;` declarations are returned, for the caller to skip those files.
+fn production_code(source: &str) -> Production {
+    let (mut clean, masked) = blank_comments(source);
+    let attribute: Vec<char> = "#[cfg(test)]".chars().collect();
+    let mut test_mods = Vec::new();
+    let mut from = 0;
+    while let Some(found) = (from..masked.len()).find(|at| masked[*at..].starts_with(&attribute)) {
+        let mut at = found + attribute.len();
+        loop {
+            while masked.get(at).is_some_and(|c| c.is_whitespace()) {
+                at += 1;
+            }
+            if masked.get(at) == Some(&'#') && masked.get(at + 1) == Some(&'[') {
+                at = closing(&masked, at + 1);
+            } else {
+                break;
+            }
+        }
+        let head: String = masked[at..].iter().take(40).collect();
+        let head = head
+            .trim_start_matches("pub(crate) ")
+            .trim_start_matches("pub ");
+        let end = if head.starts_with("use ") {
+            (at..masked.len())
+                .find(|i| masked[*i] == ';')
+                .map_or(masked.len(), |i| i + 1)
+        } else {
+            let mut depth = 0_u32;
+            let mut end = masked.len();
+            for i in at..masked.len() {
+                match masked[i] {
+                    '(' | '[' => depth += 1,
+                    ')' | ']' => depth = depth.saturating_sub(1),
+                    '{' if depth == 0 => {
+                        end = closing(&masked, i);
+                        break;
+                    }
+                    ';' if depth == 0 => {
+                        end = i + 1;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            end
+        };
+        if let Some(name) = head.strip_prefix("mod ") {
+            let name: String = name.chars().take_while(|c| is_ident(*c)).collect();
+            if masked[at..end].last() == Some(&';') {
+                test_mods.push(name);
+            }
+        }
+        for c in &mut clean[found..end] {
+            if *c != '\n' {
+                *c = ' ';
+            }
+        }
+        from = end.max(found + 1);
+    }
+    Production {
+        code: clean.into_iter().collect(),
+        test_mods,
+    }
+}
+
 /// Every series a `counter!`, `gauge!` or `histogram!` call in `source` names, with the label
 /// keys of that call.
+/// Test-only code and comments do not count.
 fn emitted_in(source: &str, into: &mut BTreeMap<String, BTreeSet<String>>) {
+    let source = production_code(source).code;
+    let source = source.as_str();
     for kind in ["counter", "gauge", "histogram"] {
         let opener = format!("{kind}!(");
         for (at, _) in source.match_indices(&opener) {
@@ -311,10 +564,38 @@ fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
 fn emitted_series() -> BTreeMap<String, BTreeSet<String>> {
     let mut files = Vec::new();
     rust_files(&root().join("crates"), &mut files);
+    let sources: Vec<(PathBuf, String)> = files
+        .into_iter()
+        .filter(|path| !path.components().any(|part| part.as_os_str() == "tests"))
+        .map(|path| {
+            let source = std::fs::read_to_string(&path).expect("a readable source file");
+            (path, source)
+        })
+        .collect();
+    let mut test_only: Vec<PathBuf> = Vec::new();
+    for (path, source) in &sources {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let home = if ["lib", "main", "mod"].contains(&stem) {
+            dir.to_path_buf()
+        } else {
+            dir.join(stem)
+        };
+        test_only.extend(
+            production_code(source)
+                .test_mods
+                .into_iter()
+                .flat_map(|name| [home.join(format!("{name}.rs")), home.join(name)]),
+        );
+    }
     let mut emitted = BTreeMap::new();
-    for path in files {
-        let source = std::fs::read_to_string(&path).expect("a readable source file");
-        emitted_in(&source, &mut emitted);
+    for (path, source) in &sources {
+        if !test_only.iter().any(|skipped| path.starts_with(skipped)) {
+            emitted_in(source, &mut emitted);
+        }
     }
     emitted
 }
@@ -366,11 +647,104 @@ groups:
         assert_eq!(rules[1].runbook, "");
     }
 
+    const SHAPE: &str = "groups:\n  - name: g\n    rules:\n      - alert: A\n";
+
+    fn with(extra: &str) -> String {
+        format!("{SHAPE}{extra}")
+    }
+
     #[test]
     fn the_reader_refuses_a_key_set_twice() {
-        let text = "- alert: A\n  for: 1m\n  for: 2m\n";
+        let text = with("        for: 1m\n        for: 2m\n");
 
-        assert!(parse_rules(text).unwrap_err().contains("set twice"));
+        let error = parse_rules(&text).unwrap_err();
+
+        assert!(
+            error.starts_with("line 6:") && error.contains("set twice"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_reader_refuses_a_misspelled_level_with_its_line_number() {
+        let text = "groups:\n  - name: g\n    ruless:\n";
+
+        let error = parse_rules(text).unwrap_err();
+
+        assert!(error.starts_with("line 3:"), "{error}");
+    }
+
+    #[test]
+    fn the_reader_refuses_an_unknown_key_in_a_rule() {
+        let text = with("        expr: up\n        fro: 5m\n");
+
+        let error = parse_rules(&text).unwrap_err();
+
+        assert!(
+            error.starts_with("line 6:") && error.contains("unknown key"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_reader_refuses_a_child_under_the_wrong_block() {
+        let text = with("        labels:\n          summary: x\n");
+
+        assert!(parse_rules(&text).unwrap_err().starts_with("line 6:"));
+    }
+
+    #[test]
+    fn the_reader_refuses_rules_outside_a_group_and_misplaced_indentation() {
+        assert!(parse_rules("rules:\n").unwrap_err().starts_with("line 1:"));
+        assert!(
+            parse_rules("groups:\n  - name: g\n    rules:\n     - alert: A\n")
+                .unwrap_err()
+                .starts_with("line 4:")
+        );
+        assert!(
+            parse_rules("groups:\n  - alert: A\n")
+                .unwrap_err()
+                .starts_with("line 2:")
+        );
+    }
+
+    #[test]
+    fn a_comment_or_a_test_only_call_is_not_an_emitted_series() {
+        let source = format!(
+            "// {}\"zirv_flow_in_comment\");\n/* {}\"zirv_flow_in_block\"); */\nlet s = \"// not a comment {}\\\"zirv_flow_in_string\\\")\";\n\
+             {}\"zirv_flow_real\");\n\
+             #[cfg(test)]\nmod tests {{\n    fn t() {{ {}\"zirv_flow_in_tests\"); }}\n}}\n\
+             #[cfg(test)]\nfn only_in_tests() {{ {}\"zirv_flow_in_test_fn\"); }}\n\
+             #[cfg(test)]\nmod elsewhere;\n\
+             {}\"zirv_flow_after\", \"label\" => 1);\n",
+            call("gauge", ""),
+            call("gauge", ""),
+            call("gauge", ""),
+            call("gauge", ""),
+            call("gauge", ""),
+            call("gauge", ""),
+            call("counter", ""),
+        );
+        let mut emitted = BTreeMap::new();
+
+        emitted_in(&source, &mut emitted);
+
+        assert_eq!(
+            emitted.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["zirv_flow_after", "zirv_flow_real"]
+        );
+        assert!(emitted["zirv_flow_after"].contains("label"));
+    }
+
+    #[test]
+    fn test_only_module_declarations_are_named_and_end_at_the_semicolon() {
+        let source = "#[cfg(test)]\nmod e2e;\n#[cfg(test)]\nuse a::{b, c};\nmod live { fn f() {} }\nfn kept() {}\n";
+
+        let production = production_code(source);
+
+        assert_eq!(production.test_mods, ["e2e"]);
+        assert!(production.code.contains("mod live") && production.code.contains("fn kept"));
+        assert!(!production.code.contains("e2e") && !production.code.contains("use a"));
     }
 
     #[test]
