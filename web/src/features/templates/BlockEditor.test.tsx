@@ -450,6 +450,25 @@ describe("converting to MJML", () => {
     expect(screen.getByText("MJML template")).toBeInTheDocument();
   });
 
+  it("sends the draft revision, and a draft saved by someone else closes the dialog with the newer-draft notice", async () => {
+    const calls = mockApi({
+      ...templateRoutes({ detail: detailOf(blocksDocument()) }),
+      [`POST ${BASE}/draft/convert-to-mjml`]: () => problem(409, "Conflict", "the draft was saved by someone else; read it again", undefined, "template_draft_revision_mismatch"),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("button", { name: "Template mode" }));
+    await user.click(screen.getByRole("menuitem", { name: "Convert to MJML…" }));
+    await user.click(within(await screen.findByRole("dialog", { name: "Convert to MJML code?" })).getByRole("button", { name: "Convert to MJML" }));
+
+    expect(await screen.findByText(/Another change was saved to this draft/, undefined, WAIT)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Load the newer draft" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Convert to MJML code?" })).toBeNull();
+    const convert = calls.find((call) => call.method === "POST" && call.path.endsWith("/draft/convert-to-mjml"));
+    expect((convert?.body as { revision: number }).revision).toBe(1);
+  });
+
   it("cancelling the confirmation converts nothing", async () => {
     const calls = mockApi(templateRoutes({ detail: detailOf(blocksDocument()) }));
     const user = userEvent.setup();
