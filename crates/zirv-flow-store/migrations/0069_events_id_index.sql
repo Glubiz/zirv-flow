@@ -1,0 +1,19 @@
+-- Reads of events by id (the trace of the event that starts an enrollment, the events a
+-- flow.enroll job filters) name the workspace and the ids, and the primary key leads with
+-- occurred_at. Without this index the plan walks the workspace's whole (workspace_id,
+-- occurred_at) range and filters on id, so the cost grows with the events already stored.
+--
+-- Created on the partitioned parent, so every partition, existing and future, gets its own.
+-- The id cannot be bounded by time instead: it is minted when an event is received, while
+-- occurred_at is the client's (late events, backfills, replayed rejects), so the two differ by
+-- an unbounded amount.
+--
+-- CREATE INDEX CONCURRENTLY is not allowed on a partitioned table, and sqlx runs a migration
+-- file as one statement batch, so this build takes a SHARE lock on each partition and blocks
+-- writes to it until the migration commits. A populated deployment avoids that by building
+-- the partition indexes first, with the same name and definition, before it upgrades:
+--     CREATE INDEX CONCURRENTLY events_y2026m10_workspace_id_id_idx
+--         ON events_y2026m10 (workspace_id, id);
+-- (one per partition, and events_default). PostgreSQL then attaches those indexes to the
+-- parent index instead of building new ones, and this statement only takes brief locks.
+CREATE INDEX events_workspace_id_id_idx ON events (workspace_id, id);

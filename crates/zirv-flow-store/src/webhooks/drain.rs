@@ -17,7 +17,9 @@ use zirv_flow_core::{HmacKey, WorkspaceId};
 use crate::events::{EventBatch, EventOutcome, EventRecord, apply_event_record};
 use crate::ingest::{InboxRow, strongest_identifier};
 use crate::lists::{ListSource, MembershipError, add_members};
-use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record, list_trait_definitions};
+use crate::people::{
+    ProfileOutcome, ProfileRecord, apply_profile_record_into, list_trait_definitions,
+};
 use crate::{PgConnection, StoreError};
 
 /// The only stream of a hook.
@@ -260,7 +262,8 @@ pub(crate) async fn apply_hook_record(
 ) -> Result<HookResult, StoreError> {
     let mut current = record.profile.clone();
     drop_superseded_traits(connection, workspace, &mut current).await?;
-    let profile = apply_profile_record(connection, workspace, &current).await?;
+    let profile =
+        apply_profile_record_into(connection, workspace, &current, &mut events.decisions).await?;
     let person = match &profile {
         ProfileOutcome::Applied { person_id, .. } | ProfileOutcome::Unchanged { person_id, .. } => {
             *person_id
