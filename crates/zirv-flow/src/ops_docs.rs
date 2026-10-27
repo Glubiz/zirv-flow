@@ -74,6 +74,7 @@ fn parse_rules(text: &str) -> Result<Vec<Rule>, String> {
     let mut in_group = false;
     let mut has_rules = false;
     let mut block = Block::Rule;
+    let mut seen = [false; 2];
     for (index, line) in text.lines().enumerate() {
         let fail = |what: &str| Err(format!("line {}: {what}: {}", index + 1, line.trim()));
         let trimmed = line.trim();
@@ -100,6 +101,7 @@ fn parse_rules(text: &str) -> Result<Vec<Rule>, String> {
                     alert: name,
                     ..Rule::default()
                 });
+                seen = [false; 2];
                 block = Block::Rule;
             }
             8 | 10 if !rules.is_empty() && has_rules => {
@@ -115,6 +117,11 @@ fn parse_rules(text: &str) -> Result<Vec<Rule>, String> {
                         if !value.is_empty() {
                             return fail("a block key takes no value");
                         }
+                        let slot = usize::from(key == "annotations");
+                        if seen[slot] {
+                            return fail("the block is set twice");
+                        }
+                        seen[slot] = true;
                         block = if key == "labels" {
                             Block::Labels
                         } else {
@@ -239,6 +246,7 @@ fn blank_comments(source: &str) -> (Vec<char>, Vec<char>) {
             let end = (start..chars.len())
                 .find(|at| chars[*at..].starts_with(&closing))
                 .unwrap_or(chars.len());
+            blank(&mut clean, start, end);
             blank(&mut masked, start, end);
             i = (end + closing.len()).min(chars.len());
         } else if c == '"' {
@@ -683,6 +691,43 @@ groups:
         assert!(
             error.starts_with("line 6:") && error.contains("unknown key"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn the_reader_refuses_a_second_labels_or_annotations_block() {
+        for block in ["labels", "annotations"] {
+            let text = with(&format!(
+                "        {block}:\n        for: 1m\n        {block}:\n"
+            ));
+
+            let error = parse_rules(&text).unwrap_err();
+
+            assert!(
+                error.starts_with("line 7:") && error.contains("set twice"),
+                "{error}"
+            );
+        }
+        let two_rules = with("        labels:\n      - alert: B\n        labels:\n");
+        assert!(parse_rules(&two_rules).is_ok());
+    }
+
+    #[test]
+    fn raw_and_byte_raw_string_contents_are_not_emitted_series() {
+        let gauge = call("gauge", "");
+        let source = format!(
+            "let a = r#\"{gauge}\"zirv_flow_raw_hash\")\"#;\n\
+             let b = br#\"{gauge}\"zirv_flow_byte_raw\")\"#;\n\
+             let c = r\"{gauge}\"zirv_flow_raw_plain\")\";\n\
+             {gauge}\"zirv_flow_real\");\n"
+        );
+        let mut emitted = BTreeMap::new();
+
+        emitted_in(&source, &mut emitted);
+
+        assert_eq!(
+            emitted.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["zirv_flow_real"]
         );
     }
 
