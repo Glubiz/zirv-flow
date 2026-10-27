@@ -14,9 +14,7 @@ const DROP_LOCK_TIMEOUT: &str = "2s";
 const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 /// Bounds the lock waits of the rest of the transaction to [`DROP_LOCK_TIMEOUT`].
-pub(crate) async fn set_drop_lock_timeout(
-    connection: &mut PgConnection,
-) -> Result<(), StoreError> {
+pub(crate) async fn set_drop_lock_timeout(connection: &mut PgConnection) -> Result<(), StoreError> {
     sqlx::query("SELECT set_config('lock_timeout', $1, true)")
         .bind(DROP_LOCK_TIMEOUT)
         .execute(connection)
@@ -41,9 +39,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_lock_wait_past_the_timeout_is_a_lock_timeout_and_other_errors_are_not(
-        pool: PgPool,
-    ) {
+    async fn a_lock_wait_past_the_timeout_is_a_lock_timeout_and_other_errors_are_not(pool: PgPool) {
         let mut holder = pool.begin().await.unwrap();
         sqlx::query("LOCK TABLE workspaces IN ACCESS SHARE MODE")
             .execute(&mut *holder)
