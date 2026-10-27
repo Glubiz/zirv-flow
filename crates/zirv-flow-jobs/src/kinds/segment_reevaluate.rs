@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 use zirv_flow_segments::{compile, parse_and_validate};
 use zirv_flow_store::{
@@ -28,8 +29,6 @@ use super::segment_refresh::{catalog_of, sql_query};
 use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct SegmentReevaluate;
-
-const ACTION: &str = "segment.reevaluate";
 
 /// The people one pass claims.
 const BATCH: i64 = 500;
@@ -140,9 +139,8 @@ impl Run {
                             graph: None,
                             workspace_id: self.workspace,
                             trace: self.trace.clone(),
-                            action: ACTION,
-                            outcome: "failed",
-                            reason: Some("definition_invalid"),
+                            spec: &decision_actions::SEGMENT_REEVALUATE_FAILED,
+                            detail: None,
                             subject_ids: vec![("segment", segment_id)],
                             job: Some(self.job),
                         },

@@ -8,6 +8,7 @@ use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use super::preview::{SqlQuery, bind_all_as};
@@ -380,7 +381,8 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
     });
     // The event and the decision of each change; `kind` is `entered` or `exited` and `from` the
     // CTE that lists the people.
-    let recorded = |kind: &str, from: &str| {
+    let recorded = |kind: &str, from: &str, spec: &DecisionSpec| {
+        let (action, outcome) = (spec.action(), spec.outcome());
         format!(
             "{kind}_events AS ( \
                  INSERT INTO events (id, workspace_id, person_id, name, occurred_at, \
@@ -393,14 +395,14 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
              {kind}_decisions AS ( \
                  INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
                      reason, cause_kind, cause_id, subject_ids, job_id, attempt) \
-                 SELECT gen_random_uuid(), $1, {trace}, 'segment.{kind}', '{kind}', {cause}, \
+                 SELECT gen_random_uuid(), $1, {trace}, '{action}', '{outcome}', {cause}, \
                      {cause_kind}, {cause_id}, \
                      jsonb_build_object('segment', {segment}::text, 'person', i.person_id::text), \
                      {job}, {attempt} FROM {from} i{join} RETURNING 1)"
         )
     };
-    let entered = recorded("entered", "inserted");
-    let exited = recorded("exited", "closed");
+    let entered = recorded("entered", "inserted", &decision_actions::SEGMENT_ENTERED);
+    let exited = recorded("exited", "closed", &decision_actions::SEGMENT_EXITED);
     // The trace a row is opened or closed under, reached through the batch in a batch diff.
     let (enter_join, leave_join) = match scope {
         Scope::Segment => ("", ""),

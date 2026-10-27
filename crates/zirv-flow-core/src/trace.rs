@@ -77,7 +77,6 @@ impl<'de> Deserialize<'de> for TraceId {
 #[serde(rename_all = "snake_case")]
 pub enum CauseKind {
     Event,
-    TraitChange,
     Schedule,
     Manual,
     Api,
@@ -89,7 +88,6 @@ impl CauseKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Event => "event",
-            Self::TraitChange => "trait_change",
             Self::Schedule => "schedule",
             Self::Manual => "manual",
             Self::Api => "api",
@@ -111,7 +109,6 @@ impl FromStr for CauseKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "event" => Ok(Self::Event),
-            "trait_change" => Ok(Self::TraitChange),
             "schedule" => Ok(Self::Schedule),
             "manual" => Ok(Self::Manual),
             "api" => Ok(Self::Api),
@@ -147,10 +144,6 @@ impl Cause {
 
     pub fn event(id: Uuid) -> Self {
         Self::of(CauseKind::Event, id)
-    }
-
-    pub fn trait_change(id: Uuid) -> Self {
-        Self::of(CauseKind::TraitChange, id)
     }
 
     pub fn sync_run(id: Uuid) -> Self {
@@ -230,7 +223,6 @@ mod tests {
         assert_eq!(Cause::manual(user).kind, CauseKind::Manual);
         assert_eq!(Cause::manual(user).id, user.to_string());
         assert_eq!(Cause::event(uuid).kind, CauseKind::Event);
-        assert_eq!(Cause::trait_change(uuid).kind, CauseKind::TraitChange);
         assert_eq!(Cause::sync_run(uuid).kind, CauseKind::SyncRun);
         assert_eq!(Cause::sync_run(uuid).id, uuid.to_string());
         assert_eq!(
@@ -243,7 +235,6 @@ mod tests {
     fn cause_kinds_round_trip_and_unknown_is_rejected() {
         for kind in [
             CauseKind::Event,
-            CauseKind::TraitChange,
             CauseKind::Schedule,
             CauseKind::Manual,
             CauseKind::Api,
@@ -253,6 +244,7 @@ mod tests {
             assert_eq!(kind.as_str().parse::<CauseKind>().unwrap(), kind);
         }
         assert!("other".parse::<CauseKind>().is_err());
+        assert!("trait_change".parse::<CauseKind>().is_err());
     }
 
     #[test]

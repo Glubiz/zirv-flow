@@ -3,6 +3,7 @@
 
 use sqlx::PgConnection;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -49,9 +50,8 @@ pub async fn recompute_trait_batch(
                 graph: None,
                 workspace_id: workspace,
                 trace: trace.clone(),
-                action: "trait.change",
-                outcome: "changed",
-                reason: Some("definition_changed"),
+                spec: &decision_actions::TRAIT_CHANGED_DEFINITION,
+                detail: None,
                 subject_ids: vec![("person", person)],
                 job,
             });

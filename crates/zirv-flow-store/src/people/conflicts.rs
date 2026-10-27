@@ -5,6 +5,7 @@
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::people::{BlockReason, Identifier, IdentifierKind, merge_allowed};
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
@@ -122,12 +123,18 @@ pub async fn resolve_conflict(
     if conflict.resolved_at.is_some() {
         return Err(ResolveError::AlreadyResolved);
     }
-    let outcome = match resolution {
-        ConflictResolution::KeepSeparate => "kept_separate",
+    let (outcome, spec) = match resolution {
+        ConflictResolution::KeepSeparate => (
+            "kept_separate",
+            &decision_actions::IDENTITY_CONFLICT_RESOLVED_KEPT_SEPARATE,
+        ),
         ConflictResolution::MoveIdentifier { to_person_id } => {
             move_identifier(connection, workspace, &conflict, to_person_id, trace).await?;
             request_reevaluation(connection, workspace).await?;
-            "identifier_moved"
+            (
+                "identifier_moved",
+                &decision_actions::IDENTITY_CONFLICT_RESOLVED_IDENTIFIER_MOVED,
+            )
         }
     };
     let closed: IdentityConflict = sqlx::query_as(concat!(
@@ -145,8 +152,7 @@ pub async fn resolve_conflict(
         connection,
         workspace,
         trace,
-        "identity.conflict.resolved",
-        outcome,
+        spec,
         None,
         vec![
             ("conflict", id),

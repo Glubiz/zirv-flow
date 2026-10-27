@@ -1315,9 +1315,16 @@ mod tests {
             graph: None,
             workspace_id: ws.parse().unwrap(),
             trace: trace.clone(),
-            action,
-            outcome: "done",
-            reason: None,
+            spec: Box::leak(Box::new(
+                zirv_flow_core::decision_actions::DecisionSpec::for_test(
+                    action,
+                    "done",
+                    zirv_flow_core::decision_actions::Reason::None,
+                    &[zirv_flow_core::CauseKind::Api],
+                    &[],
+                ),
+            )),
+            detail: None,
             subject_ids: Vec::new(),
             job: None,
         };

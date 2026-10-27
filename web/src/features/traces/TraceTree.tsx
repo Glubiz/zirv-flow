@@ -40,7 +40,6 @@ interface TraceTreeProps {
 
 const CAUSES: Record<string, string> = {
   event: "An event",
-  trait_change: "A change of a field or segment",
   schedule: "A schedule",
   manual: "An operator",
   api: "An API call",
