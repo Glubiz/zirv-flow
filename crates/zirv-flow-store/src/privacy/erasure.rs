@@ -398,6 +398,10 @@ pub struct ReplayReport {
     pub people: u64,
     /// Pending inbox rows removed; only when a key was given.
     pub inbox_rows: u64,
+    /// Ledger entries merged in from files before the replay; set by the caller, not here.
+    pub merged: u64,
+    /// Ledger files skipped because their workspace does not exist here; set by the caller.
+    pub skipped_workspaces: u64,
 }
 
 /// Re-applies the completed ledger entries of one workspace, or of all of them, after a
@@ -1381,7 +1385,8 @@ mod tests {
                 requests: 1,
                 suppressions: 1,
                 people: 1,
-                inbox_rows: 1
+                inbox_rows: 1,
+                ..ReplayReport::default()
             }
         );
         assert_eq!(rows_referencing_person(&pool, person).await, []);
