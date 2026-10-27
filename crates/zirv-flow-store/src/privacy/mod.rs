@@ -3,6 +3,8 @@
 //! [`delete_person`] owns the list of person-scoped tables. Erasure and export build on it and
 //! on the ledger tables of migration 0013.
 
+#[cfg(test)]
+mod content_scan;
 mod delete;
 mod erasure;
 mod erasure_calls;
