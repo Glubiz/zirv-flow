@@ -558,7 +558,11 @@ mod tests {
 
         let refused = MIGRATOR.run(&mut *connection).await;
 
-        assert!(refused.is_err());
+        let message = refused.expect_err("the migration is refused").to_string();
+        assert!(
+            message.contains("a row holds the cause kind trait_change, which has no producer"),
+            "{message}"
+        );
     }
 
     #[sqlx::test(migrations = false)]

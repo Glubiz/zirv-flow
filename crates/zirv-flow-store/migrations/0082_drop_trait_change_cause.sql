@@ -1,6 +1,11 @@
 -- Ruling 67953328: `trait_change` leaves the cause kinds. v1 has no producer for it, so no row can
 -- hold it; the migration asserts that before it narrows the four CHECKs (jobs, decision_records,
 -- person_changes, enrollments). It returns when computed traits produce a cause of their own.
+--
+-- Locking: the four ALTER TABLEs take ACCESS EXCLUSIVE on jobs, enrollments, person_changes and
+-- decision_records (every partition) and each ADD CONSTRAINT scans the whole table to validate
+-- the new CHECK, as 0022 did. sqlx runs the migration in one transaction, so the locks last until
+-- it commits. On a large install this runs during a stop of all roles.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM jobs WHERE cause_kind = 'trait_change')
