@@ -164,7 +164,7 @@ pub(crate) async fn create_snippet(
         Some(workspace),
         "snippet.created",
         Some(("snippet", snippet.id)),
-        json!({ "name": crate::admin::audit_text(&snippet.name) }),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -196,7 +196,7 @@ async fn rename_snippet(
         Some(workspace),
         "snippet.updated",
         Some(("snippet", id)),
-        json!({ "name": crate::admin::audit_text(&snippet.name) }),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -234,7 +234,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "snippet.draft_saved",
         Some(("snippet", id)),
-        json!({ "name": crate::admin::audit_text(&snippet.name), "revision": draft.revision }),
+        json!({ "revision": draft.revision }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -261,7 +261,7 @@ pub(crate) async fn archive_snippet(
         Some(workspace),
         "snippet.archived",
         Some(("snippet", id)),
-        json!({ "name": crate::admin::audit_text(&snippet.name), "version": snippet.current_version }),
+        json!({ "version": snippet.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

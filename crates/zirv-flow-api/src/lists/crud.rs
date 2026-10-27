@@ -120,7 +120,7 @@ pub(crate) async fn create_list(
         Some(workspace),
         "list.created",
         Some(("list", list.id)),
-        json!({ "name": crate::admin::audit_text(&list.name) }),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -165,7 +165,7 @@ pub(crate) async fn update_list(
         Some(workspace),
         "list.updated",
         Some(("list", list.id)),
-        json!({ "name": crate::admin::audit_text(&list.name), "fields": fields }),
+        json!({ "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -189,7 +189,7 @@ pub(crate) async fn delete_list(
         Some(workspace),
         "list.deleted",
         Some(("list", list.id)),
-        json!({ "name": crate::admin::audit_text(&list.name), "member_count": list.member_count }),
+        json!({ "member_count": list.member_count }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

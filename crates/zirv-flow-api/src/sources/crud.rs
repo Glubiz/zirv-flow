@@ -270,7 +270,7 @@ pub(crate) async fn create_source(
         Some(workspace),
         "source.created",
         Some(("source", source.id)),
-        json!({"kind": source.kind, "name": crate::admin::audit_text(&source.name), "credential_id": source.credential_id,
+        json!({"kind": source.kind, "credential_id": source.credential_id,
                "credential_fields": source.credential_fields}),
     )
     .await?;
@@ -422,7 +422,7 @@ pub(crate) async fn update_source(
         Some(workspace),
         "source.updated",
         Some(("source", source.id)),
-        json!({"name": crate::admin::audit_text(&source.name), "fields": fields}),
+        json!({"fields": fields}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -453,7 +453,7 @@ pub(crate) async fn delete_source(
         Some(workspace),
         "source.deleted",
         Some(("source", source.id)),
-        json!({"kind": source.kind, "name": crate::admin::audit_text(&source.name)}),
+        json!({"kind": source.kind, }),
     )
     .await?;
     if let Some(secret) = source.oauth_secret_id {

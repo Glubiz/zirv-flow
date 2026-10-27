@@ -2159,7 +2159,7 @@ mod tests {
             .iter()
             .find(|row| row.action == "trait.indexed")
             .unwrap();
-        assert_eq!(indexed.summary, json!({"key": "plan", "slot": "trait_s1"}));
+        assert_eq!(indexed.summary, json!({"slot": "trait_s1"}));
         assert!(audit.iter().any(|row| row.action == "trait.unindexed"));
         crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
@@ -2281,14 +2281,14 @@ mod tests {
             .iter()
             .find(|row| row.action == "trait.created")
             .unwrap();
-        assert_eq!(created_row.summary, json!({"key": "plan"}));
+        assert_eq!(created_row.summary, json!({}));
         let updated_row = audit
             .iter()
             .find(|row| row.action == "trait.updated")
             .unwrap();
         assert_eq!(
             updated_row.summary,
-            json!({"key": "plan", "fields": ["description", "archived"]})
+            json!({"fields": ["description", "archived"]})
         );
         let text = serde_json::to_string(&audit.iter().map(|row| &row.summary).collect::<Vec<_>>())
             .unwrap();
@@ -3219,10 +3219,46 @@ mod tests {
             .iter()
             .find(|row| row.action == "event_schema.published")
             .unwrap();
-        assert_eq!(published.summary["name"], "Order Completed");
+        assert_eq!(published.summary["version"], 2);
+        assert_eq!(published.summary.get("name"), None);
         let text = serde_json::to_string(&audit.iter().map(|row| &row.summary).collect::<Vec<_>>())
             .unwrap();
         assert!(!text.contains("secret words") && !text.contains("free"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_token_shaped_schema_and_property_name_is_created_and_audited(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let name = "subscription_renewal_reminder_sent_v2";
+
+        let created = call(
+            &router,
+            "POST",
+            &schemas_uri(&ws),
+            Some(json!({"name": name, "mode": "block",
+                        "properties": [{"name": name, "type": "string"}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let saved = call(
+            &router,
+            "PUT",
+            &format!("{}/{name}/draft", schemas_uri(&ws)),
+            Some(json!({"properties": [{"name": name, "type": "string"}]})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(created.status, StatusCode::CREATED, "{:?}", created.body);
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let audit = zirv_flow_store::list_audit(&pool, 50).await.unwrap();
+        for action in ["event_schema.created", "event_schema.draft_saved"] {
+            assert!(audit.iter().any(|row| row.action == action), "{action}");
+        }
+        assert!(!format!("{audit:?}").contains(name));
     }
 
     #[sqlx::test]
@@ -3325,8 +3361,8 @@ mod tests {
             .filter(|row| row.action == "event_schema.updated")
             .map(|row| row.summary.clone())
             .collect::<Vec<_>>();
-        assert!(updated.contains(&json!({"name": "order", "fields": ["retention_days"]})));
-        assert!(updated.contains(&json!({"name": "order", "fields": ["mode", "retention_days"]})));
+        assert!(updated.contains(&json!({"fields": ["retention_days"]})));
+        assert!(updated.contains(&json!({"fields": ["mode", "retention_days"]})));
     }
 
     #[sqlx::test]
@@ -3788,12 +3824,9 @@ mod tests {
                 "list.deleted"
             ]
         );
-        assert_eq!(audited[0].2, json!({"name": "Newsletter"}));
-        assert_eq!(
-            audited[2].2,
-            json!({"name": "Weekly", "fields": ["name", "description"]})
-        );
-        assert_eq!(audited[3].2, json!({"name": "Weekly", "member_count": 0}));
+        assert_eq!(audited[0].2, json!({}));
+        assert_eq!(audited[2].2, json!({"fields": ["name", "description"]}));
+        assert_eq!(audited[3].2, json!({"member_count": 0}));
         assert_eq!(audited[3].1.as_deref(), Some(id.as_str()));
     }
 
@@ -4586,7 +4619,7 @@ mod tests {
             .iter()
             .find(|row| row.action == "topic.created")
             .unwrap();
-        assert_eq!(created_row.summary, json!({"key": "news"}));
+        assert_eq!(created_row.summary, json!({}));
         assert_eq!(created_row.object_kind.as_deref(), Some("topic"));
         let updated_row = audit
             .iter()
@@ -4594,7 +4627,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             updated_row.summary,
-            json!({"key": "news", "fields": ["policy", "archived"]})
+            json!({"fields": ["policy", "archived"]})
         );
     }
 
@@ -4956,10 +4989,7 @@ mod tests {
             .iter()
             .find(|row| row.action == "consent_dimension.updated")
             .unwrap();
-        assert_eq!(
-            updated.summary,
-            json!({"key": "vertical", "fields": ["name"]})
-        );
+        assert_eq!(updated.summary, json!({"fields": ["name"]}));
         crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
@@ -14587,7 +14617,7 @@ email,b@example.com,
             &router,
             "POST",
             &format!("/api/v1/workspaces/{ws}/lists"),
-            Some(json!({"name": "Newsletter"})),
+            Some(json!({})),
             Auth::Session(&viewer),
         )
         .await;

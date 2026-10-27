@@ -53,7 +53,7 @@ pub(crate) async fn set_default(
         Some(workspace),
         "theme.default_set",
         Some(("theme", theme.id)),
-        json!({ "name": crate::admin::audit_text(&theme.name), "version": theme.current_version }),
+        json!({ "version": theme.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

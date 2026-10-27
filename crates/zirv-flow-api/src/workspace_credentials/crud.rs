@@ -402,8 +402,7 @@ pub(crate) async fn create_credential(
         Some(workspace),
         "credential.created",
         Some(("credential", credential.id)),
-        json!({"kind": credential.kind, "name": crate::admin::audit_text(&credential.name), "key": crate::admin::audit_text(&credential.key),
-               "fields": request.fields.keys().collect::<Vec<_>>(),
+        json!({"kind": credential.kind, "fields": request.fields.keys().collect::<Vec<_>>(),
                "secret_fields": names_of(&request.secret)}),
     )
     .await?;
@@ -474,7 +473,7 @@ pub(crate) async fn update_credential(
         Some(workspace),
         "credential.updated",
         Some(("credential", credential.id)),
-        json!({"name": crate::admin::audit_text(&credential.name), "fields": changed}),
+        json!({"fields": changed}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -543,8 +542,7 @@ pub(crate) async fn rotate_credential(
         Some(workspace),
         "credential.rotated",
         Some(("credential", id)),
-        json!({"kind": credential.kind, "name": crate::admin::audit_text(&credential.name),
-               "secret_fields": names_of(&request.secret)}),
+        json!({"kind": credential.kind, "secret_fields": names_of(&request.secret)}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -568,7 +566,7 @@ pub(crate) async fn archive_credential(
                 Some(workspace),
                 "credential.archived",
                 Some(("credential", credential.id)),
-                json!({"kind": credential.kind, "name": crate::admin::audit_text(&credential.name)}),
+                json!({"kind": credential.kind, }),
             )
             .await?;
             zirv_flow_store::commit(tx).await?;

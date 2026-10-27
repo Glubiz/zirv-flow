@@ -174,7 +174,7 @@ pub(crate) async fn create_theme(
         Some(workspace),
         "theme.created",
         Some(("theme", theme.id)),
-        json!({ "name": crate::admin::audit_text(&theme.name) }),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -205,7 +205,7 @@ async fn rename_theme(
         Some(workspace),
         "theme.updated",
         Some(("theme", id)),
-        json!({ "name": crate::admin::audit_text(&theme.name) }),
+        json!({}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -243,7 +243,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "theme.draft_saved",
         Some(("theme", id)),
-        json!({ "name": crate::admin::audit_text(&theme.name), "revision": draft.revision }),
+        json!({ "revision": draft.revision }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -270,7 +270,7 @@ pub(crate) async fn archive_theme(
         Some(workspace),
         "theme.archived",
         Some(("theme", id)),
-        json!({ "name": crate::admin::audit_text(&theme.name), "version": theme.current_version }),
+        json!({ "version": theme.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
