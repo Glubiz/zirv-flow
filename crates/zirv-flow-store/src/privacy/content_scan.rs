@@ -168,8 +168,13 @@ const VALUE_FREE: &[(&[&str], &str)] = &[
         "AI use: counters and mapping drafts; the free text is in ai_transcripts",
     ),
     (
-        &["debugger_watch", "_sqlx_migrations", "imports"],
-        "a watch timestamp, the migration ledger and an import's name, header and counters (cells are in import_rejects)",
+        &[
+            "debugger_watch",
+            "debugger_epoch",
+            "_sqlx_migrations",
+            "imports",
+        ],
+        "a watch timestamp, the debugger crash epoch, the migration ledger and an import's name, header and counters (cells are in import_rejects)",
     ),
 ];
 
