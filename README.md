@@ -56,8 +56,8 @@ host, change the published port and put TLS in front, or set
 database volume as well.
 
 The image is published to GHCR on each release as
-`ghcr.io/glubiz/zirv-flow:<version>` and `:latest` for linux/amd64 and
-linux/arm64. It is a static binary on a distroless base that runs as a non-root
+`ghcr.io/glubiz/zirv-flow:<version>` and `:latest` for linux/amd64 only.
+It is a static binary on a distroless base that runs as a non-root
 user, with `zirv-flow all` as its default command and `0.0.0.0:8080` as its bind
 address; supply `ZIRV_FLOW_DATABASE__URL` at run time.
 
@@ -2486,8 +2486,8 @@ For UI work, run the server (`cargo run -- all`), then in `web/` run `npm ci` on
 `npm run dev`. The Vite dev server proxies `/api`, `/healthz` and `/readyz` to
 `http://127.0.0.1:8080`. `npm run lint`, `typecheck`, `test` and `build` are the checks CI runs;
 `npm run gen:api` regenerates the API client from `crates/zirv-flow-api/openapi.json`
-and `npm run gen:api:check` fails when it is stale. The Docker image and the release
-build compile the app first, so released binaries always carry it.
+and `npm run gen:api:check` fails when it is stale. The Docker image build compiles
+the app first, so the published image always carries it.
 
 ### Browser tests
 
