@@ -146,9 +146,10 @@ describe("the template library", () => {
 
     expect(listCalls(calls)).toHaveLength(before);
     await waitFor(() => expect(router.state.location.search).toBe("?q=sale"));
-    expect(listCalls(calls).filter((query) => query.get("q") === "sale")).toHaveLength(1);
+    await waitFor(() => expect(screen.queryByRole("link", { name: "Welcome" })).not.toBeInTheDocument());
     expect(await screen.findByRole("link", { name: "Spring sale" })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Welcome" })).not.toBeInTheDocument();
+    expect(listCalls(calls).filter((query) => query.get("q") === "sale")).toHaveLength(1);
+    expect(listCalls(calls).filter((query) => query.get("q") === "sa")).toHaveLength(0);
   });
 
   it("filters by theme", async () => {
