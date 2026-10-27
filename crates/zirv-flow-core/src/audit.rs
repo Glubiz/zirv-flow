@@ -12,6 +12,7 @@ pub const ACTIONS: &[&str] = &[
     "asset.deleted",
     "asset.uploaded",
     "audit.exported",
+    "audit.purged",
     "consent.imported",
     "consent_dimension.created",
     "consent_dimension.updated",
