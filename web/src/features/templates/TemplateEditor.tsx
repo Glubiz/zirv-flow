@@ -8,6 +8,7 @@ import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
+import { assistable, TemplateAssistant } from "./TemplateAssistant";
 import { SenderOptionsProvider } from "./senderOptions";
 import { WhereUsedView } from "./WhereUsed";
 import {
@@ -21,6 +22,7 @@ import {
   type Template,
   type TemplateDetail,
   type TemplateIssue,
+  withSubject,
 } from "./model";
 
 /** How long an edit rests before the draft is saved and the preview is asked for again. */
@@ -56,9 +58,19 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  /** Once opened, the panel stays mounted while hidden, so a draft under review survives a look at the editor. */
+  const [assistantUsed, setAssistantUsed] = useState(false);
+  /** True from the moment an assistant draft is accepted until it lands: nothing is saved or typed meanwhile. */
+  const [holding, setHolding] = useState(false);
+  const holdingRef = useRef(false);
+  /** The revision of the server's draft as the editor last saw it, to tell a lost accept from none. */
+  const draftRevision = useRef(initial.draft.revision);
 
   const archived = template.archived_at !== null && template.archived_at !== undefined;
   const editable = canWrite && !archived;
+  /** Only an admin may draft with the assistant; when it is off the panel says so. */
+  const assistantEligible = editable && canAdmin && template.channel === "email" && assistable(doc);
   const docRef = useRef(doc);
   const personRef = useRef<string | null>(null);
   const dirty = useRef(false);
@@ -75,15 +87,17 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const saveDraft = useCallback(async (): Promise<boolean> => {
     if (!dirty.current) return true;
     if (convertedRef.current && docRef.current.kind === "blocks") return true;
+    if (holdingRef.current) return true;
     const sent = revision.current;
     setSave("saving");
     try {
-      await unwrap(
+      const saved = await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/templates/{id}/draft", {
           params: { path: { ws: workspaceId, id: template.id } },
           body: { document: asBody(writeDocument(docRef.current)) },
         }),
       );
+      draftRevision.current = saved.draft.revision;
       if (revision.current === sent) {
         dirty.current = false;
         if (live.current) setSave("saved");
@@ -158,6 +172,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   }, []);
 
   function change(next: Editable) {
+    if (holdingRef.current) return;
     if (convertedRef.current && next.kind === "blocks") return;
     docRef.current = next;
     dirty.current = true;
@@ -181,6 +196,58 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     setConverting(false);
     setPublished("Converted to MJML code. The draft is now written as code; published versions are unchanged.");
     schedule(0);
+  }
+
+  function setHold(on: boolean) {
+    holdingRef.current = on;
+    setHolding(on);
+  }
+
+  /** Stops the editor changing the draft while an accept runs: no edit is taken and any save that already runs finishes first. */
+  async function hold() {
+    window.clearTimeout(timer.current);
+    setHold(true);
+    await queue.current;
+  }
+
+  function release() {
+    setHold(false);
+    if (dirty.current) schedule(DEBOUNCE_MS);
+  }
+
+  /** The server's draft replaces the editor's copy; a subject line the person picked from the variants goes on top as an edit of theirs. */
+  function adopt(detail: TemplateDetail, subject: string | null) {
+    const next = readDocument(detail.draft.document);
+    window.clearTimeout(timer.current);
+    draftRevision.current = detail.draft.revision;
+    docRef.current = next;
+    dirty.current = false;
+    revision.current += 1;
+    setDoc(next);
+    setTemplate(detail);
+    setSave("saved");
+    setSaveFailure(null);
+    setHold(false);
+    if (subject !== null) change(withSubject(next, subject));
+    else schedule(0);
+  }
+
+  const readTemplate = () => unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}", { params: { path: { ws: workspaceId, id: template.id } } }));
+
+  async function reload() {
+    adopt(await readTemplate(), null);
+  }
+
+  /** After a lost reply: the draft the server holds is adopted when it is not the one the editor knows. */
+  async function reconcile(subject: string | null): Promise<boolean> {
+    try {
+      const detail = await readTemplate();
+      if (detail.draft.revision === draftRevision.current) return false;
+      adopt(detail, subject);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function saveNow() {
@@ -244,6 +311,14 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
             <span className="muted">Draft saved</span>
           )}
         </div>
+        {assistantEligible ? (
+          <Button aria-pressed={assistantOpen} onClick={() => {
+              setAssistantOpen((open) => !open);
+              setAssistantUsed(true);
+            }}>
+            Assistant
+          </Button>
+        ) : null}
         {editable ? (
           <Button onClick={saveNow} disabled={save === "saved" || save === "saving"}>
             Save draft
@@ -277,7 +352,26 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
+          {assistantUsed && assistantEligible ? (
+            <div hidden={!assistantOpen}>
+            <TemplateAssistant
+              workspaceId={workspaceId}
+              templateId={template.id}
+              doc={doc}
+              unsaved={save !== "saved"}
+              flush={flush}
+              hold={hold}
+              release={release}
+              onAccepted={adopt}
+              onReconcile={reconcile}
+              onReload={reload}
+              onClose={() => setAssistantOpen(false)}
+            />
+            </div>
+          ) : null}
+          {assistantOpen && assistantEligible ? null : (
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable || holding} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
+          )}
           {canWrite ? (
             <PreviewPane
               templateId={template.id}

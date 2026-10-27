@@ -3229,6 +3229,26 @@ main:focus {
   width: 375px;
 }
 
+.tp-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tp-compare-side {
+  min-width: 0;
+  margin: 0;
+}
+
+.tp-compare .tp-frame-mobile {
+  width: 60%;
+}
+
+.tp-assistant-title {
+  margin: 0;
+  margin-right: auto;
+}
+
 .tp-iframe {
   display: block;
   width: 100%;

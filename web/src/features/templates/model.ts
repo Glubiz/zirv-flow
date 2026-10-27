@@ -222,6 +222,13 @@ export function issueWhere(issue: TemplateIssue): string {
   return "Template";
 }
 
+/** The document with another subject line; a webhook or an unknown document has none. */
+export function withSubject(editable: Editable, subject: string): Editable {
+  if (editable.kind === "email") return { ...editable, email: { ...editable.email, subject } };
+  if (editable.kind === "blocks") return { ...editable, content: { ...editable.content, subject } };
+  return editable;
+}
+
 /** The status badge of a template: always words. */
 export function statusOf(template: Template): { label: string; tone: "neutral" | "attention" | "error" } {
   if (template.archived_at) return { label: "Archived", tone: "error" };

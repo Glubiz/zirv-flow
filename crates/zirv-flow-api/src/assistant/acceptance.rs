@@ -4044,6 +4044,8 @@ mod tests {
         let repaired = fx.draft(template_run(&id, "copy")).await;
         assert_eq!(repaired.body["status"], "valid", "{:?}", repaired.body);
         assert_eq!(repaired.body["attempts"], 2);
+        // The place the first attempt got wrong is reported as repaired.
+        assert_eq!(repaired.body["repaired"], json!(["/email/html"]));
         let requests = fx.requests_after(sent);
         let feedback = last_feedback(&requests[1]);
         assert!(
@@ -4060,12 +4062,15 @@ mod tests {
         assert_eq!(exhausted.body["attempts"], 3);
         assert!(exhausted.body["content"].is_null());
         assert!(exhausted.body["renders"].is_null());
+        assert!(exhausted.body.get("repaired").is_none());
         assert!(
             exhausted.body["issues"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|issue| issue["code"] == "unknown_merge_field" && issue["at"] == "/email/html"),
+                .any(|issue| issue["code"] == "unknown_merge_field"
+                    && issue["at"] == "/email/html"
+                    && issue["field"] == "person.nope"),
             "{:?}",
             exhausted.body["issues"]
         );
