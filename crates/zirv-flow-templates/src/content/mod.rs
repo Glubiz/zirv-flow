@@ -17,6 +17,29 @@ use crate::context::RenderExtras;
 use crate::document::{Channel, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
+/// Guard known conditional-comment panics before tokenizing and catch unknown tokenizer panics.
+fn with_tokenizer<'a, R>(
+    text: &'a str,
+    read: impl FnOnce(htmlparser::Tokenizer<'a>) -> R,
+) -> Option<R> {
+    for prefix in ["<![if", "<!--[if", "<![endif"] {
+        for (at, _) in text.match_indices(prefix) {
+            let rest = &text[at + prefix.len()..];
+            if prefix == "<![endif" && !rest.starts_with(']') {
+                return None;
+            }
+            let (_, suffix) = rest.split_once(']')?;
+            if !suffix.starts_with('>') && !suffix.starts_with("-->") {
+                return None;
+            }
+        }
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        read(htmlparser::Tokenizer::from(text))
+    }))
+    .ok()
+}
+
 /// Which render call a content type's documents go through. The render host serves one request
 /// kind for each (`RenderRequest`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,6 +167,19 @@ fn validate_in(
 mod tests {
     use super::*;
     use crate::document::{EmailContent, Mode, WebhookContent};
+
+    #[test]
+    fn the_guard_rejects_the_fuzz_crash_before_reading_tokens() {
+        let document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/fuzz/template_document-crash-861764cf.bin"
+        ))
+        .unwrap();
+        let content = document["blocks"]["sections"][0]["columns"][0][1]["content"]
+            .as_str()
+            .unwrap();
+        // Without iteration, catch_unwind cannot mask a missing guard.
+        assert_eq!(with_tokenizer(content, |_| ()), None);
+    }
 
     /// A type of its own, to show that the type that owns a document is the one whose check runs.
     struct Marker;

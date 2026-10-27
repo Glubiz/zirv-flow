@@ -14,7 +14,7 @@ use mrml::prelude::parser::noop_loader::NoopIncludeLoader;
 use mrml::prelude::parser::{Error as ParseError, ParserOptions};
 use mrml::prelude::render::RenderOptions;
 
-use super::{RenderKind, TemplateContent};
+use super::{RenderKind, TemplateContent, with_tokenizer};
 use crate::document::{Channel, Mode, Syntax, TemplateDocument};
 use crate::issue::{FieldCatalog, Issue};
 
@@ -144,32 +144,35 @@ fn is_void_element(tag: &str) -> bool {
 /// (never below 0), and a self-closing tag and every other token is 0. The tokenizer is
 /// iterative, so this is one linear pass with no recursion and no allocation per tag. At a
 /// tokenizer error it stops and returns the depth so far, because `mrml` fails at the same point.
-pub(crate) fn nesting_depth(text: &str) -> usize {
-    use htmlparser::{ElementEnd, Token, Tokenizer};
+/// A tokenizer panic returns `None`, so unreadable input never reaches `mrml`.
+pub(crate) fn nesting_depth(text: &str) -> Option<usize> {
+    use htmlparser::{ElementEnd, Token};
 
-    let (mut depth, mut deepest) = (0usize, 0usize);
-    let mut void = false;
-    for token in Tokenizer::from(text) {
-        match token {
-            Ok(Token::ElementStart { local, .. }) => void = is_void_element(local.as_str()),
-            Ok(Token::ElementEnd {
-                end: ElementEnd::Open,
-                ..
-            }) => {
-                if !void {
-                    depth += 1;
-                    deepest = deepest.max(depth);
+    with_tokenizer(text, |tokens| {
+        let (mut depth, mut deepest) = (0usize, 0usize);
+        let mut void = false;
+        for token in tokens {
+            match token {
+                Ok(Token::ElementStart { local, .. }) => void = is_void_element(local.as_str()),
+                Ok(Token::ElementEnd {
+                    end: ElementEnd::Open,
+                    ..
+                }) => {
+                    if !void {
+                        depth += 1;
+                        deepest = deepest.max(depth);
+                    }
                 }
+                Ok(Token::ElementEnd {
+                    end: ElementEnd::Close(..),
+                    ..
+                }) => depth = depth.saturating_sub(1),
+                Ok(_) => {}
+                Err(_) => break,
             }
-            Ok(Token::ElementEnd {
-                end: ElementEnd::Close(..),
-                ..
-            }) => depth = depth.saturating_sub(1),
-            Ok(_) => {}
-            Err(_) => break,
         }
-    }
-    deepest
+        deepest
+    })
 }
 
 /// The pinned `mrml` render options. Spelled out so a change of the crate's defaults cannot
@@ -187,7 +190,13 @@ pub(crate) fn compile(rendered: &str) -> Result<Compiled, MjmlError> {
     if has_include(rendered) {
         return Err(MjmlError::Include);
     }
-    if nesting_depth(rendered) > MAX_DEPTH {
+    let depth = nesting_depth(rendered).ok_or_else(|| MjmlError::Parse {
+        line: 1,
+        column: 1,
+        reason: "malformed markup",
+        excerpt: excerpt(rendered, 1, 1),
+    })?;
+    if depth > MAX_DEPTH {
         return Err(MjmlError::TooDeep);
     }
     #[cfg(test)]
@@ -345,13 +354,51 @@ mod tests {
     }
 
     #[test]
+    fn tokenizer_panics_are_parse_errors_before_mrml_runs() {
+        let document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../tests/fixtures/fuzz/template_document-crash-861764cf.bin"
+        ))
+        .unwrap();
+        let content = document["blocks"]["sections"][0]["columns"][0][1]["content"]
+            .as_str()
+            .unwrap();
+        for fragment in [
+            content,
+            "<![if",
+            "<![if mso]x",
+            "<![endif",
+            "<![endif x]>",
+            "<!--[if mso",
+        ] {
+            let source = format!("<mjml><mj-body><mj-raw>{fragment}</mj-raw></mj-body></mjml>");
+            assert_eq!(nesting_depth(&source), None, "{fragment}");
+            let before = parser_calls();
+            assert!(matches!(
+                compile(&source),
+                Err(MjmlError::Parse {
+                    reason: "malformed markup",
+                    ..
+                })
+            ));
+            assert_eq!(parser_calls(), before, "{fragment}: mrml must not see it");
+        }
+        for fragment in [
+            "<!--[if mso]><p>x</p><![endif]-->",
+            "<![if !IE]><p>x</p><![endif]>",
+        ] {
+            let source = format!("<mjml><mj-body><mj-raw>{fragment}</mj-raw></mj-body></mjml>");
+            assert_eq!(nesting_depth(&source), Some(4), "{fragment}");
+        }
+    }
+
+    #[test]
     fn nesting_too_deep_is_refused_before_mrml_runs() {
         // Deep enough that `mrml` would recurse far past a thread's stack if it were called.
         let deep = format!(
             "<mjml><mj-body><mj-raw>{}</mj-raw></mj-body></mjml>",
             "<a>".repeat(35_000)
         );
-        assert!(nesting_depth(&deep) > MAX_DEPTH);
+        assert!(nesting_depth(&deep).unwrap() > MAX_DEPTH);
         let before = parser_calls();
         assert_eq!(compile(&deep), Err(MjmlError::TooDeep));
         assert_eq!(parser_calls(), before, "mrml must not see it");
@@ -370,13 +417,13 @@ mod tests {
     #[test]
     fn real_nesting_passes_the_depth_guard() {
         for (name, _) in CORPUS {
-            assert!(nesting_depth(&source(name)) < 16, "{name}");
+            assert!(nesting_depth(&source(name)).unwrap() < 16, "{name}");
         }
         let table = "<table><tr><td>".repeat(40) + "x" + &"</td></tr></table>".repeat(40);
         let layout = format!(
             "<mjml lang=\"en\"><mj-body><mj-section><mj-column><mj-raw>{table}<br><img src=\"a\"></mj-raw></mj-column></mj-section></mj-body></mjml>"
         );
-        let depth = nesting_depth(&layout);
+        let depth = nesting_depth(&layout).unwrap();
         assert!(depth > 100, "{depth}");
         assert!(depth <= MAX_DEPTH, "{depth}");
         let before = parser_calls();
@@ -386,14 +433,14 @@ mod tests {
 
     #[test]
     fn the_depth_scan_counts_open_close_and_self_closing_tags() {
-        assert_eq!(nesting_depth("<a><b></b><c/><br></a>"), 2);
-        assert_eq!(nesting_depth("<r></a></b><a>"), 1);
+        assert_eq!(nesting_depth("<a><b></b><c/><br></a>"), Some(2));
+        assert_eq!(nesting_depth("<r></a></b><a>"), Some(1));
         assert_eq!(
             nesting_depth("<!-- <a><a><a> --><a x=\">\"><![CDATA[<b><b>]]></a>"),
-            1
+            Some(1)
         );
-        assert_eq!(nesting_depth("<a><b"), 1);
-        assert_eq!(nesting_depth(""), 0);
+        assert_eq!(nesting_depth("<a><b"), Some(1));
+        assert_eq!(nesting_depth(""), Some(0));
     }
 
     fn deep_inside(opening: &str, repeated: &str) -> String {
@@ -415,7 +462,7 @@ mod tests {
             "<!--[if mso]>x<![endif]-->",
         ] {
             let deep = deep_inside(opening, "<a>");
-            assert!(nesting_depth(&deep) > MAX_DEPTH, "{opening}");
+            assert!(nesting_depth(&deep).unwrap() > MAX_DEPTH, "{opening}");
             let before = parser_calls();
             assert_eq!(compile(&deep), Err(MjmlError::TooDeep), "{opening}");
             assert_eq!(parser_calls(), before, "{opening}: mrml must not see it");
@@ -427,14 +474,14 @@ mod tests {
         for tag in ["<BR>", "<IMG>", "<HR>", "<Br>"] {
             let deep = deep_inside("", tag);
             assert!(
-                nesting_depth(&deep) > MAX_DEPTH,
+                nesting_depth(&deep).unwrap() > MAX_DEPTH,
                 "{tag} is not void for mrml"
             );
             assert_eq!(compile(&deep), Err(MjmlError::TooDeep), "{tag}");
         }
         for tag in ["<br>", "<img src=\"a\">", "<hr/>", "<x:br>"] {
             let flat = deep_inside("", tag);
-            assert!(nesting_depth(&flat) <= 4, "{tag}");
+            assert!(nesting_depth(&flat).unwrap() <= 4, "{tag}");
         }
     }
 
@@ -445,7 +492,7 @@ mod tests {
             <div><p>Hi<br></p></div>\
             <!--[if mso | IE]></td></tr></table><![endif]-->\
             </mj-raw></mj-column></mj-section></mj-body></mjml>";
-        assert!(nesting_depth(source) < 16);
+        assert!(nesting_depth(source).unwrap() < 16);
         assert!(compile(source).is_ok());
     }
 

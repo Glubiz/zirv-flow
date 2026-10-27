@@ -95,6 +95,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn unterminated_conditional_comment_regression() {
+        check_template_document(include_bytes!(
+            "../tests/fixtures/fuzz/template_document-crash-861764cf.bin"
+        ));
+    }
+
     fn inputs() -> BoxedStrategy<Value> {
         let fixtures = [
             include_str!("../tests/fixtures/email_transactional.doc.json"),

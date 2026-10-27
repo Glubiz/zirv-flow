@@ -21,9 +21,12 @@ pub fn check_segment_ast(data: &[u8]) {
         let value = value.get("definition").unwrap_or(&value);
         match segment::parse(value) {
             Ok(definition) => {
-                let encoded = serde_json::to_vec(&definition).unwrap();
-                let decoded = serde_json::from_slice(&encoded).unwrap();
-                assert_eq!(segment::parse(&decoded), Ok(definition));
+                // Without float_roundtrip, serde_json itself can change float precision.
+                if json_round_trips(value) {
+                    let encoded = serde_json::to_vec(&definition).unwrap();
+                    let decoded = serde_json::from_slice(&encoded).unwrap();
+                    assert_eq!(segment::parse(&decoded), Ok(definition));
+                }
             }
             Err(issues) => assert!(!issues.is_empty() && issues.len() <= segment::MAX_ISSUES),
         }
@@ -53,6 +56,11 @@ pub fn check_segment_ast(data: &[u8]) {
         started.elapsed() < Duration::from_secs(5),
         "segment sample exceeded five seconds"
     );
+}
+
+fn json_round_trips(value: &Value) -> bool {
+    let encoded = serde_json::to_string(value).unwrap();
+    serde_json::from_str::<Value>(&encoded).unwrap() == *value
 }
 
 fn check_sql(query: &Query) {
@@ -101,6 +109,24 @@ mod tests {
     use zirv_flow_core::fuzz::{config, with_fixtures};
 
     use super::*;
+
+    #[test]
+    fn imprecise_json_float_regression() {
+        let data = include_bytes!("../tests/fixtures/fuzz/segment_ast-crash-0747684c.bin");
+        let value: Value = serde_json::from_slice(data).unwrap();
+        assert!(!json_round_trips(&value["definition"]));
+        assert!(segment::parse(&value["definition"]).is_ok());
+        check_segment_ast(data);
+    }
+
+    #[test]
+    fn normal_float_keeps_the_model_round_trip_check() {
+        let data = br#"{"v":1,"trait":"age","op":"eq","value":1.25}"#;
+        let value: Value = serde_json::from_slice(data).unwrap();
+        assert!(json_round_trips(&value));
+        assert!(segment::parse(&value).is_ok());
+        check_segment_ast(data);
+    }
 
     fn inputs() -> BoxedStrategy<Value> {
         let fixtures = [

@@ -20,9 +20,10 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ammonia::{Builder, UrlRelative, UrlRelativeEvaluate};
-use htmlparser::{ElementEnd, Token, Tokenizer};
+use htmlparser::{ElementEnd, Token};
 
 use super::tags::{Protected, starts_with_tag};
+use crate::content::with_tokenizer;
 use crate::links::unescape;
 
 /// The elements rich text may hold.
@@ -70,19 +71,27 @@ fn builder(keep: impl Fn(&str) -> bool + Send + Sync + 'static) -> Builder<'stat
 pub(crate) fn sanitize_source(source: &str) -> Cleaned {
     let protected = Arc::new(Protected::new(source));
     let probe = Arc::clone(&protected);
-    let html = builder(move |url| probe.starts_with_placeholder(url))
-        .clean(&protected.text)
-        .to_string();
+    let html = strip_controls(
+        builder(move |url| probe.starts_with_placeholder(url))
+            .clean(&protected.text)
+            .to_string(),
+    );
     let text = html_to_text(&html);
     Cleaned {
-        html: protected.restore(&html),
-        text: protected.restore(&text),
+        html: strip_controls(protected.restore(&html)),
+        text: strip_controls(protected.restore(&text)),
     }
 }
 
 /// Clean text that has no merge tags: relative URLs go.
 pub(crate) fn clean_rendered(html: &str) -> String {
-    builder(|_| false).clean(html).to_string()
+    strip_controls(builder(|_| false).clean(html).to_string())
+}
+
+/// Ammonia preserves C0 controls in text; only tab, LF and CR belong in email output.
+fn strip_controls(mut text: String) -> String {
+    text.retain(|c| c >= '\u{20}' || matches!(c, '\t' | '\n' | '\r'));
+    text
 }
 
 /// Exercise both sanitizer entry points on a bounded source, including merge tags.
@@ -146,9 +155,8 @@ fn url_allowed(url: &str, merge: &impl Fn(&str) -> bool) -> bool {
 fn with_tokens<R>(html: &str, read: impl FnOnce(&[Token<'_>]) -> R) -> Option<R> {
     const ROOT: &str = "zqroot";
     let wrapped = format!("<{ROOT}>{html}</{ROOT}>");
-    let tokens: Vec<Token<'_>> = Tokenizer::from(wrapped.as_str())
-        .collect::<Result<_, _>>()
-        .ok()?;
+    let tokens: Vec<Token<'_>> =
+        with_tokenizer(&wrapped, |tokens| tokens.collect::<Result<_, _>>())?.ok()?;
     match tokens.as_slice() {
         [
             Token::ElementStart { local: open, .. },
@@ -390,6 +398,44 @@ mod tests {
     }
 
     #[test]
+    fn rendered_control_characters_regression() {
+        check_sanitize_source(include_bytes!(
+            "../../../tests/fixtures/fuzz/sanitize_source-crash-49a04ec5.bin"
+        ));
+    }
+
+    #[test]
+    fn tokenizer_panics_count_as_unreadable_input() {
+        let document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/fuzz/template_document-crash-861764cf.bin"
+        ))
+        .unwrap();
+        let content = document["blocks"]["sections"][0]["columns"][0][1]["content"]
+            .as_str()
+            .unwrap();
+        for source in [
+            content,
+            "<![if",
+            "<![if mso]x",
+            "<![endif",
+            "<![endif x]>",
+            "<!--[if mso",
+        ] {
+            assert_eq!(violations(source), ["<"], "{source}");
+            assert_eq!(html_to_text(source), "", "{source}");
+            assert_eq!(enforce(source), clean_rendered(source), "{source}");
+        }
+        for source in [
+            "<!--[if mso]><p>x</p><![endif]-->",
+            "<![if !IE]><p>x</p><![endif]>",
+        ] {
+            assert_eq!(violations(source), ["<!", "<!"], "{source}");
+            assert_eq!(html_to_text(source), "x", "{source}");
+            assert_eq!(enforce(source), clean_rendered(source), "{source}");
+        }
+    }
+
+    #[test]
     fn the_sanitizer_table_removes_what_is_not_allowed_and_keeps_what_is() {
         let nested = format!(
             "{}<a href=\"javascript:x\">x</a>{}",
@@ -448,6 +494,11 @@ mod tests {
                 "<p>ok</p><ol><li>x</li></ol>",
             ),
             ("<p>a<!-- c -->b</p>", "<p>ab</p>"),
+            // C0 controls are removed even when an entity decodes to one.
+            ("<p>a\u{7}\u{7}b</p>", "<p>ab</p>"),
+            ("<p>a\u{1}\u{8}\u{b}\u{c}\u{e}\u{1f}é</p>", "<p>aé</p>"),
+            ("<p>a&#7;&#x1f;b</p>", "<p>ab</p>"),
+            ("<p>a\t\nb</p>", "<p>a\t\nb</p>"),
             // Links.
             ("<a href=\"javascript:alert(1)\">x</a>", "<a>x</a>"),
             ("<a href=\"JaVaScRiPt:alert(1)\">x</a>", "<a>x</a>"),
@@ -636,6 +687,17 @@ mod tests {
         assert_eq!(html(source), source);
         let list = "<ul>{% for t in event.tags %}<li>{{ t }}</li>{% endfor %}</ul>";
         assert_eq!(html(list), list);
+    }
+
+    #[test]
+    fn controls_are_removed_before_plain_text_and_after_restoring_merge_tags() {
+        let cleaned = sanitize_source("<p>a\u{7}b {{ '\u{1}' }}</p>");
+        assert_eq!(cleaned.html, "<p>ab {{ '' }}</p>");
+        assert_eq!(cleaned.text, "ab {{ '' }}");
+        let source = "<p>a&#9;&#10;&#13;b</p>";
+        let expected = "<p>a\t\n\rb</p>";
+        assert_eq!(html(source), expected);
+        assert_eq!(clean_rendered(source), expected);
     }
 
     #[test]
