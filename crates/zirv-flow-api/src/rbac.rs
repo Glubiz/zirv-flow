@@ -187,7 +187,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts" => READ;
     Post   "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/flows/{id}/start" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => WRITE, "values masked unless Admin";
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => ADMIN, "Admin when the request names a real person (person_id), else Write";
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/webhook-signing-secret" => ADMIN;
@@ -363,7 +363,7 @@ pub(crate) const ROUTES: &[Route] = table! {
     Post   "/api/v1/workspaces/{ws}/sources/{id}/test" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/sources/{id}/discover" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/sources/{id}/oauth/start" => ADMIN;
-    Get    "/api/v1/oauth/callback" => INSTANCE, "no principal; the OAuth state authorises";
+    Get    "/api/v1/oauth/callback" => ADMIN, "outside /workspaces/{ws}: needs the signed-in session of the user who started the consent, Admin on the consent's workspace, and the state token";
     Post   "/api/v1/workspaces/{ws}/source-manifests/validate" => ADMIN;
     Post   "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/sources/{id}/streams" => READ, "values masked unless Admin";
@@ -420,6 +420,17 @@ mod tests {
     use super::*;
 
     const LIB: &str = include_str!("lib.rs");
+    /// Router mounts that add routes without a textual `.route(`: none today. An entry is
+    /// `(source text, reason)` and the reason must say why its routes need no row.
+    const EXPLICIT_MOUNTS: &[(&str, &str)] = &[];
+    const MOUNTS: [&str; 6] = [
+        ".nest(",
+        ".nest_service(",
+        ".route_service(",
+        ".merge(",
+        ".fallback_service(",
+        ".route_layer_service(",
+    ];
     const METHODS: [&str; 5] = ["get", "post", "put", "patch", "delete"];
 
     fn key(method: &str, path: &str) -> String {
@@ -468,6 +479,19 @@ mod tests {
             }
         }
         keys
+    }
+
+    /// The lines of `source` that mount routes other than through `.route(` and are not listed
+    /// in `EXPLICIT_MOUNTS`.
+    fn unlisted_mounts(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .filter(|line| MOUNTS.iter().any(|mount| line.contains(mount)))
+            .filter(|line| !EXPLICIT_MOUNTS.iter().any(|(text, _)| line.contains(text)))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// The operations that lack a row, and the non-public rows no operation backs. A public row
@@ -606,6 +630,7 @@ mod tests {
         for path in [
             "/api/v1/workspaces/{ws}/templates/{id}/preview",
             "/api/v1/workspaces/{ws}/templates/{id}/test-send",
+            "/api/v1/workspaces/{ws}/flows/{id}/test",
         ] {
             let row = ROUTES
                 .iter()
@@ -614,5 +639,30 @@ mod tests {
             assert_eq!(row.class, ADMIN, "{path}");
             assert!(row.note.contains("Write"), "{path} has no note");
         }
+    }
+
+    #[test]
+    fn the_router_mounts_no_routes_the_inventory_cannot_see() {
+        let end = LIB
+            .find(
+                "#[cfg(test)]
+mod tests",
+            )
+            .expect("the test module");
+        assert_eq!(unlisted_mounts(&LIB[..end]), Vec::<String>::new());
+        assert!(EXPLICIT_MOUNTS.iter().all(|(_, reason)| !reason.is_empty()));
+    }
+
+    #[test]
+    fn a_nested_or_merged_mount_is_caught() {
+        for source in [
+            "Router::new().nest(\"/x\", other())",
+            "    .nest_service(\"/x\", files)",
+            "    .route_service(\"/x\", svc)",
+            "    .merge(other_routes())",
+        ] {
+            assert_eq!(unlisted_mounts(source), vec![source.trim().to_owned()]);
+        }
+        assert!(unlisted_mounts("    // .merge(other_routes())").is_empty());
     }
 }
