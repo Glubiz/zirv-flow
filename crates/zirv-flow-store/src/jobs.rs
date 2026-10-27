@@ -2187,8 +2187,7 @@ mod tests {
         }
         let done = commits.load(Ordering::Relaxed);
         big.close().await;
-        counter.abort();
-        let notifications = counter.await.map_or(-1, |heard| heard);
+        let notifications = counter.await.unwrap_or(-1);
         let stress = Stress {
             commits_per_second: done as f64 / elapsed,
             sample_share: waited as f64 / samples.max(1) as f64,
@@ -2275,7 +2274,10 @@ mod tests {
         enqueue(&pool, &job("a.kind")).await.unwrap();
         assert!(heard(&mut listener).await, "the first job wakes");
         enqueue(&pool, &job("a.kind")).await.unwrap();
-        assert!(!heard(&mut listener).await, "a backlog of the kind is already awake");
+        assert!(
+            !heard(&mut listener).await,
+            "a backlog of the kind is already awake"
+        );
         enqueue(&pool, &job("b.kind")).await.unwrap();
         assert!(heard(&mut listener).await, "another kind wakes");
 
@@ -2291,7 +2293,10 @@ mod tests {
         rolled_back.rollback().await.unwrap();
         assert!(!heard(&mut listener).await, "a rollback wakes nobody");
         enqueue(&pool, &job("d.kind")).await.unwrap();
-        assert!(heard(&mut listener).await, "the retry after a rollback wakes");
+        assert!(
+            heard(&mut listener).await,
+            "the retry after a rollback wakes"
+        );
     }
 
     #[sqlx::test]
