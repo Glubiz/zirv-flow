@@ -2089,7 +2089,7 @@ and skip paths. The `trait_change` cause is removed from the code, the API and t
 traits produce it (ruling 67953328). Every decision is a row of the registry in
 `zirv-flow-core` (`decision_actions`): the action, the outcome, a fixed reason or a detail the
 deciding code picks, the cause kinds and the subject names. The decision log is written
-only from a registry row, so a triple outside it does not compile; a source scan fails on
+only from a registry row; the row has private fields and only `zirv-flow-core` builds one (other crates' tests use a `test-support` constructor), so a triple outside it does not compile; a source scan fails on
 an action string or row that the code does not use, a fixture table maps each row to the
 test that produces it, and the web trace labels must name every action. A decision never
 stores identifier, trait or event-property values.
