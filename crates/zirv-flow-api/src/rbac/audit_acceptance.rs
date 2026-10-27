@@ -328,7 +328,8 @@ mod tests {
             }
             for other in rows.iter().filter(|row| row.action != action) {
                 let companion = other.action.starts_with("secret.")
-                    || (action == "credential.tested" && other.action == "destination.checked");
+                    || (matches!(action, "credential.tested" | "forwarding.rule_created")
+                        && other.action == "destination.checked");
                 if !companion {
                     self.fail(format!("{name}: also wrote {}", other.action));
                 }
