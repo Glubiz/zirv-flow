@@ -2632,7 +2632,8 @@ export interface paths {
          *     and its links, forwarding rows and handled markers, ingest rejects, decision records and saved
          *     template previews, with the data of merged people under the survivor. A document past the
          *     size cap fails with the code `export_too_large`. A background job
-         *     builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
+         *     builds it; it can be downloaded for the configured window
+         *     (`retention.export_hours`, default 24 hours) once it is ready. The request is given as a
          *     `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
          *     Audited as `privacy.export_requested`.
          */
@@ -2678,6 +2679,35 @@ export interface paths {
          *     `workspace.privacy_settings_updated`.
          */
         put: operations["put_privacy_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/retention": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every retention window in force for the workspace, with its source, bounds, whether it can be
+         *     changed here, and the last run of the job that enforces it. Admins, the owner and `admin` keys
+         *     only.
+         */
+        get: operations["get_retention"];
+        /**
+         * Changes the workspace's own message and decision-log windows. A value must be at least the
+         *     deployment minimum and at most the deployment window; a missing field keeps the stored value
+         *     and null returns the window to the deployment value, so an empty body changes nothing and is
+         *     not audited. Audit, ingest rejects, import files, job history and events are
+         *     the deployment's alone, and assistant transcripts stay under the AI settings: any other field
+         *     is a 422. Audited as `retention.updated`, with window names and day counts only.
+         */
+        put: operations["put_retention"];
         post?: never;
         delete?: never;
         options?: never;
@@ -6756,7 +6786,8 @@ export interface components {
         ExportBody: {
             /**
              * Format: date-time
-             * @description 24 hours after `ready_at`; the download answers 410 from then on.
+             * @description The configured window (`retention.export_hours`, default 24 hours) after `ready_at`; the
+             *     download answers 410 from then on.
              */
             expires_at?: string | null;
             /**
@@ -7745,6 +7776,16 @@ export interface components {
              */
             total: number;
         };
+        /** @description The last time a window's job finished. */
+        LastRunBody: {
+            /**
+             * Format: int64
+             * @description Rows the run removed.
+             */
+            deleted: number;
+            /** Format: date-time */
+            ran_at: string;
+        };
         ListBody: {
             /** Format: date-time */
             created_at: string;
@@ -8510,6 +8551,24 @@ export interface components {
             /** @description At most 100 fields, each registry key once, each identifier kind once. */
             fields: components["schemas"]["ContactFieldBody"][];
         };
+        /**
+         * @description The windows a workspace admin may set. A field left out keeps the stored value; an explicit
+         *     `null` returns that window to the deployment value.
+         */
+        PutRetentionRequest: {
+            /**
+             * Format: int64
+             * @description Days decision records are kept, within the same rule and with the same treatment of a
+             *     missing field and `null`.
+             */
+            decision_days?: number | null;
+            /**
+             * Format: int64
+             * @description Days messages are kept; at least the deployment minimum and at most the deployment window.
+             *     Left out keeps the stored value; `null` returns to the deployment value.
+             */
+            messages_days?: number | null;
+        };
         QueueStatusBody: {
             /**
              * Format: int64
@@ -8736,6 +8795,10 @@ export interface components {
             outcome: "move_identifier";
             /** Format: uuid */
             to_person_id: string;
+        };
+        RetentionBody: {
+            /** @description The eight windows, in a fixed order. */
+            windows: components["schemas"]["WindowBody"][];
         };
         RoleBody: {
             /** @example editor */
@@ -11101,6 +11164,36 @@ export interface components {
             timestamp_header?: string | null;
             /** Format: int32 */
             tolerance_seconds: number;
+        };
+        /** @description One retention window. */
+        WindowBody: {
+            /** @description Whether this API changes the window for a workspace admin. */
+            editable: boolean;
+            /**
+             * @description `events`, `messages`, `decision_log`, `audit`, `ingest_rejects`, `import_files`,
+             *     `job_history` or `assistant_transcripts`.
+             */
+            key: string;
+            last_run?: null | components["schemas"]["LastRunBody"];
+            /**
+             * Format: int64
+             * @description The longest window allowed; null when there is no upper bound.
+             */
+            max?: number | null;
+            /**
+             * Format: int64
+             * @description The shortest window allowed; null when there is no lower bound.
+             */
+            min?: number | null;
+            /** @description `workspace` when this workspace's own setting applies, else `deployment`. */
+            source: string;
+            /** @description `days`. */
+            unit: string;
+            /**
+             * Format: int64
+             * @description The effective window; null when the assistant stores no transcripts.
+             */
+            value?: number | null;
         };
         WorkspaceBody: {
             /** Format: date-time */
@@ -21952,6 +22045,119 @@ export interface operations {
                 };
             };
             /** @description The policy is not keep or delete */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_retention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The eight windows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_retention: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutRetentionRequest"];
+            };
+        };
+        responses: {
+            /** @description The windows after the change */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not a workspace admin, or a missing CSRF token */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description An unknown field, or a window outside the deployment bounds or longer than the deployment window (code retention_out_of_bounds, with the bounds in the detail) */
             422: {
                 headers: {
                     [name: string]: unknown;

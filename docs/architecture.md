@@ -1776,8 +1776,8 @@ As built (#303): the renderer and the validator resolve nothing; the caller pass
   token with no message but a `test_sends` row is answered by every `/u` route (GET, the form POST, the
   one-click POST, the preference center) with the page "This was a test send. Nothing was changed.",
   and nothing is changed or written.
-- **Retention and erasure.** `events.retention` also deletes `test_sends` rows older than 13 months
-  (the proposed message retention, 16.3) and reports the count. The log names no person (the rendered
+- **Retention and erasure.** `events.retention` also deletes `test_sends` rows older than the configured
+  window (`retention.test_send_months`, default 13 months, the message retention of 16.3) and reports the count. The log names no person (the rendered
   person's id is not stored), so erasing a person deletes the rows whose `recipient_hash` is one of the
   person's erased identifier hashes, folded from the ledger, and the allowlist entries with such an
   `address_hash` together with their sealed addresses, because an entry now holds the address. The

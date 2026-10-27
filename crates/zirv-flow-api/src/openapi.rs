@@ -31,6 +31,7 @@ use crate::problem::{
     FlowIssueProblem, ItemProblem, Problem, SegmentIssueProblem, SegmentRefProblem,
     TemplateIssueProblem,
 };
+use crate::retention;
 use crate::segments::preview::{
     PreviewBody as SegmentPreviewBody, PreviewRequest as SegmentPreviewRequest,
     SampleBody as SegmentSampleBody,
@@ -348,6 +349,8 @@ use crate::workspaces::{
         exports::download_handler,
         privacy::settings::get,
         privacy::settings::put,
+        retention::get,
+        retention::put,
     ),
     components(schemas(
         Problem,
@@ -793,6 +796,10 @@ use crate::workspaces::{
         exports::ExportBody,
         exports::ExportsBody,
         privacy::settings::PrivacySettingsBody,
+        retention::RetentionBody,
+        retention::WindowBody,
+        retention::LastRunBody,
+        retention::PutRetentionRequest,
     )),
     modifiers(&SecuritySchemes, &SegmentSchemas, &FlowSchemas)
 )]

@@ -1,5 +1,5 @@
 //! The rows an import refused. A reject carries codes; the row's cells (`raw`) are personal
-//! data, only selected when the caller asks for them, kept 30 days.
+//! data, only selected when the caller asks for them, kept for the configured window (`retention.import_reject_days`, default 30).
 
 use serde::Deserialize;
 use serde_json::{Value, json};
