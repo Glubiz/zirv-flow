@@ -1063,7 +1063,17 @@ identifier value. Operator duties:
   the database, a snapshot that also covers erasures made before the key was set. It prints counts
   and writes no audit entry.
 - The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
-  person id nor a ledger hash is out of its reach (#373).
+  person id nor a ledger hash is out of its reach: transcripts, rejects that never named a
+  person, imported files and refused rows, and idempotency keys are found by value, so the live
+  erase is the control and their retention windows (30 days, 7 days, 24 hours) bound the rest.
+- **What the live erase finds by value, and its limits.** The person's ids and identifier values
+  are searched as substrings, ignoring case, in assistant transcripts, the redacted payload and
+  sample of rejects with no person, the stored CSV chunks (a value split across two chunks is
+  found, and the whole file is deleted; a running import then ends `failed` with `file_missing`),
+  the refused rows' cells, and contact idempotency keys. A value spelled differently in free text
+  is missed, and a short value (such as an external id of one character) can delete a record
+  that merely contains it. Each delete is bounded by the workspace. The erasure ledger file
+  (`privacy.ledger_dir`) is outside the database, so the content scan does not cover it.
 
 **Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one
