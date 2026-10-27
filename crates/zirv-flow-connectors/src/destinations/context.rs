@@ -8,7 +8,9 @@ use std::time::Duration;
 use zirv_flow_core::egress::EgressPolicy;
 
 use super::error::DestinationError;
-use crate::http::{GuardedClient, HttpError, HttpLimits, Lookup, SystemLookup, check_all};
+use crate::http::{
+    GuardedClient, HttpError, HttpLimits, Lookup, SystemLookup, check_all, parse_host,
+};
 
 /// The most addresses [`DestinationContext::resolve_checked`] hands to a driver.
 pub(crate) const MAX_RESOLVED: usize = 8;
@@ -70,12 +72,17 @@ impl DestinationContext {
     ///
     /// [`Disposition::Terminal`]: super::Disposition::Terminal
     pub async fn resolve_checked(&self, host: &str) -> Result<Vec<IpAddr>, DestinationError> {
-        let mut ips = match host.parse::<IpAddr>() {
-            Ok(ip) => vec![ip],
-            Err(_) => match tokio::time::timeout(RESOLVE_TIMEOUT, self.lookup.lookup(host)).await {
-                Ok(Ok(ips)) => ips,
-                Ok(Err(_)) | Err(_) => return Err(DestinationError::Unreachable),
-            },
+        let parsed = parse_host(host).map_err(|denied| DestinationError::Egress(denied.into()))?;
+        let host = parsed.to_string();
+        let mut ips = match parsed {
+            url::Host::Ipv4(ip) => vec![IpAddr::V4(ip)],
+            url::Host::Ipv6(ip) => vec![IpAddr::V6(ip)],
+            url::Host::Domain(name) => {
+                match tokio::time::timeout(RESOLVE_TIMEOUT, self.lookup.lookup(&name)).await {
+                    Ok(Ok(ips)) => ips,
+                    Ok(Err(_)) | Err(_) => return Err(DestinationError::Unreachable),
+                }
+            }
         };
         let mut seen = Vec::with_capacity(ips.len());
         ips.retain(|ip| {
@@ -86,7 +93,7 @@ impl DestinationContext {
         if ips.is_empty() {
             return Err(DestinationError::Unreachable);
         }
-        check_all(&self.policy, host, &ips)
+        check_all(&self.policy, &host, &ips)
             .map_err(|denied| DestinationError::Egress(denied.into()))?;
         if ips.len() > MAX_RESOLVED {
             return Err(DestinationError::Config {
@@ -148,6 +155,108 @@ mod tests {
         .with_lookup(Arc::new(Fixed(
             answer.iter().map(|ip| ip.parse().unwrap()).collect(),
         )))
+    }
+
+    #[tokio::test]
+    async fn real_destinations_refuse_exotic_private_targets_at_check_and_delivery() {
+        use crate::destinations::{Outbound, Registry};
+        use crate::http::testing::{HOSTS, PrivateNames};
+        use crate::sources::Credential;
+        use serde_json::{Value, json};
+        use zirv_flow_core::SecretString;
+
+        let signer = crate::destinations::dkim::tests::signer("example.com");
+        for kind in ["webhook", "smtp", "provider"] {
+            let mut ctx = context(&[], &[]);
+            ctx.lookup = Arc::new(PrivateNames);
+            ctx.http = GuardedClient::with_lookup(
+                Arc::default(),
+                HttpLimits::default(),
+                ctx.lookup.clone(),
+            )
+            .unwrap();
+            let driver = Registry::built_in().get(kind).unwrap();
+            for &(host, _) in HOSTS {
+                let authority = if host == "fe80::1%eth0" {
+                    "[fe80::1%eth0]"
+                } else {
+                    host
+                };
+                let mut credential = Credential::new();
+                for (key, value) in [
+                    ("host", host),
+                    ("port", "25"),
+                    ("tls", "starttls"),
+                    ("username", "user"),
+                    ("password", "secret"),
+                    ("signing_secret", "secret"),
+                    ("token", "secret"),
+                    ("feedback_secret", "secret"),
+                ] {
+                    credential.insert(key, SecretString::new(value.to_owned()));
+                }
+                let mut manifest: Value = serde_json::from_str(include_str!(
+                    "../../tests/fixtures/providers/bearer_timestamped.json"
+                ))
+                .unwrap();
+                manifest["base_url"] = json!(format!("http://{authority}/"));
+                let config = match kind {
+                    "webhook" => {
+                        json!({"url": format!("http://{authority}/private-path?token=private-query")})
+                    }
+                    "provider" => json!({"manifest": manifest}),
+                    _ => json!({}),
+                };
+                let payload = json!({"body": "{}", "timestamp": 1,
+                    "from": {"name": "News", "address": "news@example.com"},
+                    "reply_to": null, "subject": "Hello", "html": "<p>Hi</p>", "text": "Hi", "headers": {}});
+                let message = Outbound {
+                    idempotency_key: "egress-test",
+                    channel: if kind == "webhook" {
+                        "webhook"
+                    } else {
+                        "email"
+                    },
+                    to: "ada@example.com",
+                    payload: &payload,
+                    dkim: Some(&signer),
+                };
+                let check = driver.check(&ctx, &config, &credential).await;
+                let deliver = driver
+                    .deliver(&ctx, &config, &credential, &message)
+                    .await
+                    .map(|_| ());
+                for result in [check, deliver] {
+                    let error = result.unwrap_err();
+                    // Invalid URL/SMTP syntax is rejected by the feature before resolution.
+                    let invalid_syntax = (kind == "provider"
+                        && (host.contains('@') || host.contains('%')))
+                        || (kind == "smtp"
+                            && (host.contains('@')
+                                || host.contains('%')
+                                || host.starts_with('[')
+                                || !host.is_ascii()));
+                    if invalid_syntax {
+                        assert!(
+                            matches!(error, DestinationError::Config { .. }),
+                            "{kind} {host}: {error:?}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(
+                                error,
+                                DestinationError::Egress(HttpError::EgressDenied { .. })
+                            ),
+                            "{kind} {host}: {error:?}"
+                        );
+                    }
+                    assert_eq!(error.disposition(), Disposition::Terminal);
+                    for secret in ["http://", "allowed@", "private-path", "private-query"] {
+                        assert!(!error.to_string().contains(secret), "{error:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

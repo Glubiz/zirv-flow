@@ -108,13 +108,14 @@ impl Destination for Webhook {
             .get("signing_secret")
             .ok_or_else(|| missing("signing_secret"))?;
         // Nothing is sent: the host must resolve to addresses the egress policy allows.
-        if let Some(host) = url::Url::parse(url)
-            .ok()
-            .as_ref()
-            .and_then(url::Url::host_str)
-        {
-            ctx.resolve_checked(host.trim_matches(['[', ']'])).await?;
+        let parsed = crate::http::parse_url(url)?;
+        if !matches!(parsed.scheme(), "http" | "https") || !parsed.has_host() {
+            return Err(DestinationError::Config {
+                field: "url".to_owned(),
+                reason: "must be an http or https URL".to_owned(),
+            });
         }
+        ctx.resolve_checked(parsed.host_str().unwrap()).await?;
         Ok(())
     }
 
@@ -556,6 +557,23 @@ mod tests {
                 .await,
             Err(DestinationError::Config { ref field, .. }) if field == "signing_secret"
         ));
+    }
+
+    #[tokio::test]
+    async fn check_does_not_accept_an_unparseable_or_hostless_url() {
+        for url in [
+            "not a URL",
+            "file:///etc/passwd",
+            "http://[fe80::1%25eth0]/",
+        ] {
+            assert!(
+                Webhook
+                    .check(&ctx(), &json!({"url": url}), &credential("s", None))
+                    .await
+                    .is_err(),
+                "{url}"
+            );
+        }
     }
 
     #[tokio::test]

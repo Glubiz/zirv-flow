@@ -251,6 +251,53 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rule_cannot_be_created_for_a_private_webhook(pool: PgPool) {
+        use zirv_flow_core::{Keyring, MasterKey};
+
+        let mut fx = fixture(&pool).await;
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        fx.router = router(AppState::new(pool.clone(), Arc::new(String::new)).with_keyring(keys));
+        let credential = fx.as_admin("POST", "/credentials", Some(json!({
+            "kind": "custom", "name": "Signing", "schema": {"fields": [
+                {"key": "signing_secret", "label": "Signing secret", "type": "string", "required": true, "secret": true}
+            ]}, "secret": {"signing_secret": "secret"}
+        }))).await;
+        assert_eq!(
+            credential.status,
+            StatusCode::CREATED,
+            "{}",
+            credential.body
+        );
+        let destination = fx.as_admin("POST", "/destinations", Some(json!({
+            "kind": "webhook", "name": "Private", "config": {"url": "http://169.254.169.254/secret-path?token=secret-query"},
+            "credential_id": credential.body["id"],
+        }))).await;
+        assert_eq!(
+            destination.status,
+            StatusCode::CREATED,
+            "{}",
+            destination.body
+        );
+        let mut rule = fx.rule("Private");
+        rule["destination_id"] = destination.body["id"].clone();
+        let refused = fx.as_admin("POST", "/forwarding/rules", Some(rule)).await;
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            refused.body
+        );
+        assert_eq!(
+            refused.headers[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        assert_eq!(refused.body["code"], "egress_denied");
+        assert!(!refused.body.to_string().contains("169.254.169.254"));
+        assert!(fx.audit_actions().await.is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_forwarding_endpoint_is_admin_only_and_no_access_is_404(pool: PgPool) {
         let fx = fixture(&pool).await;
         let rule = fx.create_rule("Orders").await;

@@ -8,7 +8,9 @@ use zirv_flow_core::SecretString;
 use zirv_flow_core::egress::EgressPolicy;
 
 use super::error::SourceError;
-use crate::http::{GuardedClient, HttpError, HttpLimits, Lookup, SystemLookup, check_all};
+use crate::http::{
+    GuardedClient, HttpError, HttpLimits, Lookup, SystemLookup, check_all, parse_host,
+};
 use crate::runtime::{
     AccessToken, Auth, RateLimit, RateLimits, RequestSpec, RetryPolicy, RuntimeError,
     RuntimeResponse, TokenSlot, TokenStore, send,
@@ -138,12 +140,17 @@ impl SourceContext {
     /// [`MAX_RESOLVED`] distinct addresses is refused only after all of them were checked, so the
     /// cut can never hide a denied one.
     pub async fn resolve_checked(&self, host: &str) -> Result<Vec<IpAddr>, SourceError> {
-        let mut ips = match host.parse::<IpAddr>() {
-            Ok(ip) => vec![ip],
-            Err(_) => match tokio::time::timeout(RESOLVE_TIMEOUT, self.lookup.lookup(host)).await {
-                Ok(Ok(ips)) => ips,
-                Ok(Err(_)) | Err(_) => return Err(SourceError::Unreachable),
-            },
+        let parsed = parse_host(host).map_err(|denied| SourceError::Egress(denied.into()))?;
+        let host = parsed.to_string();
+        let mut ips = match parsed {
+            url::Host::Ipv4(ip) => vec![IpAddr::V4(ip)],
+            url::Host::Ipv6(ip) => vec![IpAddr::V6(ip)],
+            url::Host::Domain(name) => {
+                match tokio::time::timeout(RESOLVE_TIMEOUT, self.lookup.lookup(&name)).await {
+                    Ok(Ok(ips)) => ips,
+                    Ok(Err(_)) | Err(_) => return Err(SourceError::Unreachable),
+                }
+            }
         };
         let mut seen = Vec::with_capacity(ips.len());
         ips.retain(|ip| {
@@ -154,7 +161,8 @@ impl SourceContext {
         if ips.is_empty() {
             return Err(SourceError::Unreachable);
         }
-        check_all(&self.policy, host, &ips).map_err(|denied| SourceError::Egress(denied.into()))?;
+        check_all(&self.policy, &host, &ips)
+            .map_err(|denied| SourceError::Egress(denied.into()))?;
         if ips.len() > MAX_RESOLVED {
             return Err(SourceError::Config {
                 field: "host".to_owned(),
@@ -289,6 +297,61 @@ mod tests {
     use std::pin::Pin;
 
     struct Never;
+
+    #[tokio::test]
+    async fn exotic_hosts_are_refused_and_counted_without_echoing_input() {
+        use crate::http::testing::{HOSTS, PrivateNames};
+
+        for &(host, class) in HOSTS {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let ctx = context("postgres", &[], Arc::new(PrivateNames));
+            let error = ctx.resolve_checked(host).await.unwrap_err();
+            assert!(
+                matches!(error, SourceError::Egress(HttpError::EgressDenied { class: actual, .. }) if actual == class),
+                "{host}: {error:?}"
+            );
+            assert!(!error.to_string().contains("allowed@"));
+            assert!(
+                handle.render().contains(&format!(
+                    "zirv_flow_egress_denied_total{{class=\"{class}\"}} 1"
+                )),
+                "{host}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_then_private_dns_is_rechecked_and_an_exact_allowlist_does_not_expand() {
+        use crate::http::testing::Rebinding;
+
+        for later in ["10.0.0.5", "169.254.169.254"] {
+            let lookup = Arc::new(Rebinding::new("8.8.8.8", later));
+            let ctx = context("postgres", &[], lookup.clone());
+            assert_eq!(
+                ctx.resolve_checked("db.test").await.unwrap(),
+                vec!["8.8.8.8".parse::<IpAddr>().unwrap()]
+            );
+            assert!(matches!(
+                ctx.resolve_checked("db.test").await,
+                Err(SourceError::Egress(_))
+            ));
+            assert_eq!(lookup.calls(), 2);
+        }
+        for (answer, allowed) in [
+            ("10.0.0.5", true),
+            ("10.0.0.6", false),
+            ("169.254.169.254", false),
+        ] {
+            let ctx = context("postgres", &["10.0.0.5/32"], fixed(&[answer]));
+            assert_eq!(
+                ctx.resolve_checked("db.test").await.is_ok(),
+                allowed,
+                "{answer}"
+            );
+        }
+    }
 
     impl Lookup for Never {
         fn lookup<'a>(
