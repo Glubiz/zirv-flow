@@ -103,6 +103,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `retention.messages_days` | u32 | 395 | at least 1; how long ended messages are kept (about 13 months); within the two bounds below; the purge writes the erasure handled markers |
 | `retention.messages_min_days` | u32 | 30 | at least 1; the shortest per-workspace message window |
 | `retention.messages_max_days` | u32 | 1095 | at least 1; the longest per-workspace message window; not below the minimum |
+| `retention.decision_days` | u32 | 395 | at least 1; how long decision-log records are kept (about 13 months); within the two bounds below |
+| `retention.decision_min_days` | u32 | 30 | at least 1; the shortest per-workspace decision-log window |
+| `retention.decision_max_days` | u32 | 760 | at least 1; the longest per-workspace decision-log window (25 months); not below the minimum |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
@@ -643,6 +646,20 @@ batches, drops whole monthly partitions older than the longest limit and removes
 records of events that no longer exist. Each batch and each partition drop commits separately,
 with its handled markers, so a failed run keeps completed work and the next run continues.
 The scheduler leader creates the partitions for this and next month.
+
+**Decision-log retention.** A daily job (03:53 UTC, `decisions.retention`) drops each monthly
+decision-log partition that ends before `retention.decision_days`, in a transaction of its own
+(never the default partition, this month or next), then deletes the older rows of the month
+that holds the cutoff in batches. It sets `zirv_flow_decision_log_bytes` and
+`zirv_flow_decision_log_partitions` and counts deletes in
+`zirv_flow_retention_deleted_total{table="decision_records"}`. Measured on PostgreSQL
+(200,000 records per shape, with the primary key and the trace, person and enrollment
+indexes), a record takes about 450 bytes (ingest), 730 (flow step) and 800 (send), and about
+260, 430 and 500 without the three secondary indexes. At 1,000 events/s with one record per
+event that is about 39 GB (ingest), 63 GB (flow) or 69 GB (send) a day, so the 13-month
+default holds about 15 TB per record-per-event stream at that rate; scale it by the real
+records per event and rate. Reproduce the table with
+`ZIRV_FLOW_BENCH_DECISION_SIZE=200000 cargo nextest run -p zirv-flow-store --run-ignored all --no-capture bytes_per_record`.
 ## Event debugger and explorer
 
 Under **Events** in the web UI, **Debugger**, **Explorer** and **Rejects** show what the event
