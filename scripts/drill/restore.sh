@@ -44,8 +44,29 @@ if [[ "$SOURCE_DB" == "$TARGET_DB" ]]; then
   exit 2
 fi
 
+# A base names a server, never a database: scheme://authority and nothing after it. Anything
+# else (a path, a query string, a fragment) could point the tools at another database than the
+# one the script means, so it is refused. Prints the scheme and the authority, one per line.
+split_base() {
+  if [[ "$1" =~ ^(postgres|postgresql)://([^/?#]+)$ ]]; then
+    printf '%s\n%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  else
+    echo "refusing server URL: it must be scheme://user:password@host:port with no database, path or query string" >&2
+    exit 2
+  fi
+}
+
+# The URL of one database, built from the parts of its base.
+url_of() {
+  local parts
+  mapfile -t parts < <(split_base "$1")
+  printf '%s://%s/%s' "${parts[0]}" "${parts[1]}" "$2"
+}
+
 APP_BASE="${ZF_DRILL_APP_BASE:-postgres://postgres:postgres@127.0.0.1:5432}"
 TOOL_BASE="${ZF_DRILL_TOOL_BASE:-$APP_BASE}"
+split_base "$APP_BASE" >/dev/null
+split_base "$TOOL_BASE" >/dev/null
 PORT="${ZF_DRILL_PORT:-18398}"
 read -r -a PG_PREFIX <<<"${ZF_DRILL_PG_PREFIX:-}"
 if [[ -n "${ZF_DRILL_BIN:-}" ]]; then
@@ -62,7 +83,7 @@ done
 [[ -x "$BIN" ]] || { echo "build the binary first (cargo build); not found: $BIN" >&2; exit 2; }
 
 pg() { "${PG_PREFIX[@]}" "$@"; }
-sql() { pg psql -X -q -At "$TOOL_BASE/$1" -c "$2"; }
+sql() { pg psql -X -q -At "$(url_of "$TOOL_BASE" "$1")" -c "$2"; }
 
 native() {
   if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s' "$1"; fi
@@ -76,24 +97,58 @@ CREATED=()
 SERVER_PID=""
 CSRF=""
 
+SERVER_STARTED=0
+
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
+
+wait_port_free() {
+  local i
+  for i in $(seq 1 40); do
+    if ! port_in_use; then return 0; fi
+    sleep 0.5
+  done
+  echo "port $PORT is still in use after the server was stopped" >&2
+  return 1
+}
+
+# Stops the server this script started and no other process, then checks that its port is free.
+# Under MSYS and Cygwin the background job is an MSYS process whose native image has another
+# (Windows) PID, read from /proc/<pid>/winpid; it is stopped with its own children only when the
+# image name is the drill binary's.
 stop_server() {
   if [[ -n "$SERVER_PID" ]]; then
-    kill "$SERVER_PID" 2>/dev/null || true
+    if [[ -r "/proc/$SERVER_PID/winpid" ]]; then
+      local winpid image
+      winpid="$(<"/proc/$SERVER_PID/winpid")"
+      image="$(basename "$BIN")"
+      if tasklist //FI "PID eq $winpid" //FO CSV //NH 2>/dev/null | grep -qiF "\"$image\""; then
+        taskkill //PID "$winpid" //T //F >/dev/null 2>&1 || true
+      fi
+    else
+      kill "$SERVER_PID" 2>/dev/null || true
+    fi
     wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
   fi
+  if [[ "$SERVER_STARTED" -eq 1 ]]; then wait_port_free; fi
 }
 
+# Runs on every exit path: stops the server, verifies the port, drops the scratch databases.
 cleanup() {
-  stop_server
+  local code=$?
+  trap - EXIT
+  stop_server || code=1
   local name
   for name in "${CREATED[@]}"; do
     require_scratch "$name"
     sql postgres "DROP DATABASE IF EXISTS \"$name\" WITH (FORCE)" >/dev/null 2>&1 || true
   done
   rm -rf "$WORK"
+  exit "$code"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 create_db() {
   require_scratch "$1"
@@ -101,27 +156,35 @@ create_db() {
   CREATED+=("$1")
 }
 
-# The binary's environment for one database.
-with_env() {
-  local db="$1"
-  shift
-  ZIRV_FLOW_DATABASE__URL="$APP_BASE/$db" \
-    ZIRV_FLOW_SECRETS__MASTER_KEY_FILE="$(native "$WORK/master.key")" \
-    ZIRV_FLOW_PRIVACY__LEDGER_DIR="$(native "$LEDGER")" \
-    ZIRV_FLOW_SERVER__BIND="127.0.0.1:$PORT" \
-    ZIRV_FLOW_SERVER__COOKIE_SECURE=false \
-    "$@"
+# The binary's environment for one database, in ENV_ARGS.
+ENV_ARGS=()
+set_env() {
+  ENV_ARGS=(
+    "ZIRV_FLOW_DATABASE__URL=$(url_of "$APP_BASE" "$1")"
+    "ZIRV_FLOW_SECRETS__MASTER_KEY_FILE=$(native "$WORK/master.key")"
+    "ZIRV_FLOW_PRIVACY__LEDGER_DIR=$(native "$LEDGER")"
+    "ZIRV_FLOW_SERVER__BIND=127.0.0.1:$PORT"
+    "ZIRV_FLOW_SERVER__COOKIE_SECURE=false"
+  )
 }
 
 run_bin() {
   local db="$1"
   shift
-  with_env "$db" "$BIN" "$@"
+  set_env "$db"
+  env "${ENV_ARGS[@]}" "$BIN" "$@"
 }
 
 start_server() {
-  with_env "$1" "$BIN" all >"$WORK/server.log" 2>&1 &
+  if port_in_use; then
+    echo "refusing to start: port $PORT is already in use; set ZF_DRILL_PORT to a free port" >&2
+    exit 2
+  fi
+  set_env "$1"
+  # A plain background command, so that $! is the server itself and not a subshell around it.
+  env "${ENV_ARGS[@]}" "$BIN" all >"$WORK/server.log" 2>&1 &
   SERVER_PID=$!
+  SERVER_STARTED=1
   local i
   for i in $(seq 1 120); do
     if curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then return 0; fi
@@ -201,7 +264,7 @@ took
 
 step "2. Back up with pg_dump"
 stop_server
-pg pg_dump -Fc "$TOOL_BASE/$SOURCE_DB" >"$WORK/backup.dump"
+pg pg_dump -Fc "$(url_of "$TOOL_BASE" "$SOURCE_DB")" >"$WORK/backup.dump"
 check "the dump is not empty" yes "$([[ -s "$WORK/backup.dump" ]] && echo yes || echo no)"
 took
 
@@ -218,7 +281,7 @@ took
 
 step "4. Restore with pg_restore into a fresh database"
 create_db "$TARGET_DB"
-pg pg_restore --no-owner --exit-on-error -d "$TOOL_BASE/$TARGET_DB" <"$WORK/backup.dump"
+pg pg_restore --no-owner --exit-on-error -d "$(url_of "$TOOL_BASE" "$TARGET_DB")" <"$WORK/backup.dump"
 check "people in the restored database" 3 "$(sql "$TARGET_DB" 'SELECT count(*) FROM people')"
 check "the erasure is missing from the restored ledger" 0 "$(sql "$TARGET_DB" 'SELECT count(*) FROM erasure_requests')"
 took
