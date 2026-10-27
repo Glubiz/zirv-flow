@@ -184,6 +184,27 @@ mod tests {
         text
     }
 
+    /// Whether `text` holds `word` other than inside a run of hex digits, so a uuid, hash or hex
+    /// bytea that happens to spell it does not count.
+    fn names(text: &str, word: &str) -> bool {
+        text.match_indices(word).any(|(at, _)| {
+            let before = text[..at].chars().next_back();
+            let after = text[at + word.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_hexdigit())
+                && !after.is_some_and(|c| c.is_ascii_hexdigit())
+        })
+    }
+
+    #[test]
+    fn a_name_inside_hex_is_not_a_name() {
+        assert!(names("to ada@example.com", "ada"));
+        assert!(names("ada%40example.com", "ada"));
+        assert!(names("ada", "ada"));
+        assert!(!names("4f1c-ada7-9e2b", "ada"));
+        assert!(!names("\\x0ada", "ada"));
+        assert!(!names("3fadab", "ada"));
+    }
+
     /// Criterion 1 (track call to an unsubscribed second send) and criterion 9 (the trace and its
     /// API tree), end to end.
     #[sqlx::test]
@@ -467,7 +488,7 @@ mod tests {
             Some(&["messages", "message_links", "test_sends"]),
         )
         .await;
-        assert!(!leaked.contains("ada"), "the erased person is still named");
+        assert!(!names(&leaked, "ada"), "the erased person is still named");
         let everything = dump_text(&world.pool, None).await;
         for marker in [ADDRESS, TEST_ADDRESS] {
             assert!(
