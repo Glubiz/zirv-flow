@@ -1,5 +1,5 @@
 //! Publishing a theme's draft into an immutable version, and reading the versions. Publishing
-//! needs the workspace admin role.
+//! needs the workspace publisher role.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -237,7 +237,7 @@ pub(crate) async fn publish_theme(
     responses(
         (status = 201, description = "The theme, its new version and what uses it", body = ThemePublishedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or theme, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The theme is archived (`theme_archived`), or its draft was saved while it was being validated (`theme_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has blocking issues (`theme_invalid`, with `template_issues`), or would stop live templates from sending (`theme_breaks_templates`, with `templates` and `total`)", body = Problem, content_type = "application/problem+json"),
@@ -250,7 +250,7 @@ pub(crate) async fn publish(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<ThemePublishedBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;

@@ -96,8 +96,9 @@ pub use contacts::{
     list_contacts, put_contact_definition, search_contacts, typed_definition, write_contact,
 };
 pub use decisions::{
-    Decision, GraphPoint, NewDecision, append_decision, append_decisions,
-    ensure_decision_partitions, list_trace,
+    Decision, DecisionLogSize, DecisionRetention, DecisionRetentionReport, GraphPoint, NewDecision,
+    append_decision, append_decisions, apply_decision_retention, apply_decision_retention_for,
+    apply_decision_retention_progress, decision_log_size, ensure_decision_partitions, list_trace,
 };
 pub use destinations::{
     Admission, AttemptOutcome, AttemptStats, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt,
@@ -112,16 +113,18 @@ pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
     EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
     ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES,
-    FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS, MAX_REPLAY,
-    NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor, RejectFilter,
-    ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor, RowsPage,
-    SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
-    debugger_feed_head, debugger_feed_position, debugger_feed_seqs, debugger_feed_start,
-    enqueue_replay, ensure_event_partitions, explore_breakdown, explore_count, explore_rows,
-    explore_total, find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
+    FeedBatch, FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS,
+    MAX_REPLAY, NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor,
+    RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor,
+    RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
+    create_event_schema, debugger_epoch, debugger_epoch_peek, debugger_feed_head,
+    debugger_feed_missing, debugger_feed_position, debugger_feed_start, enqueue_replay,
+    ensure_event_partitions, explore_breakdown, explore_count, explore_rows, explore_total,
+    find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
     list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
-    publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
-    set_event_policy, touch_debugger_watch, update_event_schema,
+    publish_schema_draft, read_debugger_batch, read_debugger_feed, read_debugger_feed_at,
+    replay_rejects, save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch,
+    update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -130,16 +133,16 @@ pub use flows::{
     AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError, EndedOrphan,
     EnrollEntries, EnrollEntry, EnrollError, EnrollJobPayload, EnrollOutcome, EnrollRequest,
     EnrollWork, Enrolled, Enrollment, EnrollmentCursor, EnrollmentFilter, EnrollmentPage,
-    EnrollmentPath, EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate, ExitBatch, Flow,
-    FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion, HARD_BOUNCE,
-    INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
-    LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow, NewStepExecution,
-    NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND,
-    SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome,
-    SettleItem, SettlePayload, Signal, SigningKey, SigningKeys, StepJobInput, StepJobPayload,
-    StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind, TriggeredFlow,
-    UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
-    apply_flow_list, apply_flow_trait, archive_flow, audience_page, clear_waits,
+    EnrollmentPath, EnrollmentSample, EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate,
+    ExitBatch, Flow, FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion,
+    HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction,
+    LifecycleBatch, LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow,
+    NewStepExecution, NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation,
+    SEND_JOB_KIND, SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND,
+    SendOutcome, SettleItem, SettlePayload, Signal, SigningKey, SigningKeys, StepJobInput,
+    StepJobPayload, StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind,
+    TriggeredFlow, UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult,
+    WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow, audience_page, clear_waits,
     count_in_flight_enrollments, create_flow, create_signing_key, end_orphaned_messages,
     enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch, find_enrollment,
     find_event_of_person, find_events, find_flow, find_flow_version, flow_source,
@@ -149,9 +152,9 @@ pub use flows::{
     publish_flow, read_webhook_subject, reconcile_flow_schedules, record_send_outcome,
     record_steps, record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
     reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
-    rotate_signing_key, save_enrollment, segment_is_watched, segment_trigger_flows,
-    settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft, version_node_counts,
-    wait_filters,
+    rotate_signing_key, sample_enrollments, save_enrollment, segment_is_watched,
+    segment_trigger_flows, settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft,
+    version_node_counts, wait_filters,
 };
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
@@ -369,9 +372,9 @@ pub use workspace_credentials::{
 };
 pub use workspaces::{
     Member, Membership, UtmSettings, Workspace, create_workspace, find_workspace,
-    find_workspace_by_slug, list_members, list_workspaces_for_user, membership_role, orphan_policy,
-    remove_membership, set_membership, set_orphan_policy, set_workspace_timezone,
-    set_workspace_utm,
+    find_workspace_by_slug, list_members, list_workspaces_for_user, lock_memberships,
+    membership_role, orphan_policy, remove_membership, set_membership, set_orphan_policy,
+    set_workspace_timezone, set_workspace_utm,
 };
 /// The operator master key, its derived keys and the sealing of secrets, and the workspace and role
 /// types the test server seeds with, re-exported so the
@@ -616,7 +619,7 @@ mod tests {
 
     /// Tables that hold instance-level data and so carry no `workspace_id`. Every other
     /// table is workspace-scoped and must have the column.
-    const INSTANCE_LEVEL_TABLES: [&str; 8] = [
+    const INSTANCE_LEVEL_TABLES: [&str; 9] = [
         "users",
         "user_identities",
         "oidc_logins",
@@ -624,6 +627,7 @@ mod tests {
         "sessions",
         "audit_log",
         "deployment_keys",
+        "debugger_epoch",
         "_sqlx_migrations",
     ];
 

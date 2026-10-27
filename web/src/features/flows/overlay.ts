@@ -19,6 +19,32 @@ export interface NodeTally {
   skipped?: readonly { reason: string; count: number }[];
 }
 
+/** The badge grid of a card, in pixels. The stylesheet reads these through custom properties, so the card height below is exact. */
+export const COUNT_ROW = 22;
+export const COUNT_GAP = 4;
+/** The grid has two columns: a short badge takes one cell, a skip reason both. */
+const COUNT_COLUMNS = 2;
+
+/** The height the count badges of one step add to its card: their grid rows plus the gap above them. */
+export function countsHeight(counts: NodeTally): number {
+  const short = 1 + (counts.waiting > 0 ? 1 : 0) + (counts.failed > 0 ? 1 : 0) + (counts.sent ? 1 : 0) + (counts.send_failed ? 1 : 0);
+  const lines = Math.ceil(short / COUNT_COLUMNS) + (counts.skipped?.length ?? 0);
+  return lines * COUNT_ROW + (lines - 1) * COUNT_GAP + COUNT_GAP;
+}
+
+/** The mark line a selected enrollment adds to a card, in pixels: its row and the gap above it. */
+export const MARK_ROW = 18;
+export const MARK_GAP = 2;
+
+/**
+ * The height a counted card needs on top of its usual one: its badge grid, and the mark line when an
+ * enrollment marks the step. A step without counts keeps its usual height, mark or not.
+ */
+export function overlayExtra(counts: NodeTally | undefined, marked: boolean): number {
+  if (!counts) return 0;
+  return countsHeight(counts) + (marked ? MARK_ROW + MARK_GAP : 0);
+}
+
 /** What is drawn over the canvas: a path with its numbers, counts per step, marks. */
 export interface Overlay {
   /** The numbers a step has on the path (a step can be reached twice), by step id. */

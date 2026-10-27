@@ -7,7 +7,7 @@ import { renderRoute } from "../../test/renderFeature";
 import { NewSourcePage } from "./NewSourcePage";
 import { aCredentialHolding, aSource, aStream, FAKE_KIND, HTTP_KIND, POSTGRES_KIND } from "./testData";
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -338,7 +338,7 @@ describe("the source wizard", () => {
   it("tells someone who is not an admin that they cannot add sources", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       "GET /api/v1/source-kinds": () => json([FAKE_KIND]),
     });
     mount();

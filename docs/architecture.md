@@ -2032,12 +2032,28 @@ As built (debugger, explorer):
 - **Stream.** `GET /debugger/stream` (`read`) uses one shared `PgListener` per `serve`
   process; a separate timer renews the watch, so a failing listener cannot let it expire, and
   while the listener is down the viewers poll every 5 s and send `event: status` with
-  `degraded`. A notification wakes the viewers of that workspace. Each viewer keeps a low
-  watermark (every `seq` up to it is settled) and the rows it sent above it, reads what it has
-  not sent, and waits 10 s for a missing `seq` before giving up on it (its writer rolled
-  back), so a late commit is never lost. A frame's `id` is the watermark after it, so
-  `Last-Event-ID` resumes without skipping and may repeat rows (the `seq` in the data tells);
-  a position beyond the feed is clamped to its end with a `gap` frame whose `reset` is true.
+  `degraded`. A notification wakes the viewers of that workspace. Each viewer keeps a watermark
+  (the highest `seq` it has read) and the holes below it: numbers no row of any workspace held
+  when the watermark passed them, each with the time it was noticed. A read takes the rows
+  above the watermark in batches of 200 (`seq > watermark`, an index range scan) and looks up
+  the holes by point lookup (`seq = ANY(holes)`, the `seq` index), in one repeatable-read
+  snapshot with the probe that lists the missing numbers, so a row that commits in between is
+  never mistaken for a hole. A hole is dropped when its row is delivered, after twice the 10 s
+  patience from when it was noticed, or when it lies more than 5000 numbers below the
+  watermark; it is pruned after every batch, so the set never exceeds 5000 numbers. A writer
+  that commits after its number was passed is therefore delivered once, out of order, and a
+  row committing after its hole was dropped can still be missed. A connection without a
+  position starts at the newest row older than the patience and takes the missing numbers in
+  the window below it as holes. A frame's `id` is `<epoch>:<position>`, the position being just
+  below the oldest hole (else the watermark), so `Last-Event-ID` resumes without skipping a
+  row still awaited and may repeat rows (the `seq` in the data tells). A resumed stream starts
+  with no holes: a late row below its resume point whose writer committed while the client was
+  away is not delivered, as before; the lookback covers live streams only. The epoch is the
+  value of the one-row UNLOGGED `debugger_epoch` (migration `0074`), emptied by a crash like
+  the feed, so a position of another epoch or in the old bare-number form is answered with a
+  `gap` frame whose `reset` is true and the stream restarts at the current position. An open
+  stream re-reads the epoch and the feed head on its 5 s poll; a changed epoch, or a head
+  below its watermark, sends the same reset `gap`, adopts the new epoch and re-seeds.
   At most 20 streams per workspace per process (`429` with `Retry-After`), and every stream
   ends when the server shuts down. Rows are masked per viewer with `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
   sample rule), and sends `item` frames through a bounded channel. A full channel makes the
@@ -2107,7 +2123,10 @@ flowchart LR
 Decision records are append-only and time-partitioned by record time. Their
 retention is set by `retention.decision_days`, default 13 months, bounded from
 30 days to 25 months, with whole-partition drops and no hard volume cap
-(OQ-28, ruling ca12b4e5; 16.3). Erasure removes records scoped to the person
+(OQ-28, ruling ca12b4e5; 16.3). Measured at 200,000 records per shape, a record
+takes about 450 bytes (ingest), 730 (flow step) and 800 (send), about 260, 430
+and 500 without the three secondary indexes; at 1,000 events/s and one record
+per event that is 39 to 69 GB a day, 15 TB (ingest), 25 TB (flow) or 27 TB (send) at the 13-month default. Erasure removes records scoped to the person
 while preserving aggregate operational metrics.
 
 As built (M1 skeleton):
@@ -2782,6 +2801,19 @@ the operations it performs; `pii` alone grants no operation.
 unless the caller is the owner. **Invitations** are deferred past 1.0: the
 owner creates users, and workspace Admins add existing users as members.
 
+As built (issue 365): `core::Role` is `Admin`, `Publisher`, `Editor` and `Viewer`, with a
+capability lattice `Role::allows(Capability)` (`Read` < `Edit` < `Publish` < `Admin`), and
+`Scope::Publish` is the fifth key scope. Migration 0073 widens the `memberships.role` CHECK and
+maps `member` to `editor`. `api::auth::Need` is `Read`, `ReadMembers`, `Edit`, `Publish`, `Admin`
+and `Ingest`; the 403 text names the role the need takes. The `rbac.rs` route table records each
+route's need and is read by tests only. Placed at Publish: flow publish, pause, resume and
+archive, operator retry and skip, the bulk exit, the manual audience start, template, snippet and
+theme publish, and import run. A mapping or manifest assistant draft reads a source and stays
+Admin; the other assistant drafts and accepting a draft are Edit. A real-person preview, test
+send or flow test stays Admin until `view_pii` (#366). The last-admin check shares the write's
+transaction and locks the workspace's membership rows; the owner and the operator CLI are
+exempt, and the refusal is a 409 with code `last_admin`.
+
 The per-workspace webhook signing secret for `action.webhook` (9.1) is stored in `encrypted_secrets`, rotatable and shown once.
 
 M8 uses the owner flag and the four workspace roles above. **Audit access** is
@@ -3010,7 +3042,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | Area | Design |
 |------|--------|
 | Logs and traces | Structured JSON through `tracing` on standard error for the long-running commands (`serve`, `worker`, `scheduler`, `all`); one-shot commands print plain text. An `http.request` span carries `request_id`, `trace_id`, `method` and the matched `route`; a `job` span carries `job_id`, `kind`, `workspace_id`, `attempt`, `trace_id`, `cause_kind` and `cause_id`. JSON lines include the current span's fields. The response header `x-trace-id` and the `trace_id` of problem bodies name the trace; with `log.otlp.endpoint` set, spans are exported over OTLP/HTTP (protobuf, batched, dropped on a full queue or a collector error, flushed at shutdown) with the zirv trace id as the OTel trace id and no invented parent span, so `x-trace-id`, the logged `trace_id`, the decision log and the exported trace agree; a valid `traceparent` request header becomes a span link on `http.request` and never a parent or the trace id, `log.filter` applies to exported spans too, and export is off (no provider, layer or task) without the setting. Operational spans link to, but never replace, the customer-event, audit or decision stores in section 12. |
-| Metrics | Prometheus, `zirv_flow_` prefix: HTTP latency/status (`zirv_flow_http_requests_total`, `zirv_flow_http_request_duration_seconds`); queue depth `zirv_flow_jobs{kind,state}` for `ready`, `running` and `dead`, claim lag `zirv_flow_job_claim_lag_seconds{kind}` (`now - run_at`), handler duration `zirv_flow_job_duration_seconds{kind}`, attempts `zirv_flow_jobs_total{kind,outcome}`; ingestion rate, inbox age, validation outcomes, duplicates and late events; debugger delivery latency and clients; explorer duration/timeouts/exports; decision-log append duration; sync duration, records, stream freshness; segment refresh duration/size, dirty backlog; active/waiting enrollments, timer lateness; sends by outcome and skip reason, rate-limit waits; forwarding lag/retries/dead letters; template render duration and failures; assistant calls/tokens/estimated cost/latency/outcomes/budget denials; DB pool `zirv_flow_db_pool_connections{pool,state}` and `zirv_flow_db_pool_max_connections{pool}`, jobs-table dead tuples. `/metrics` is served only by processes that run `serve` (so not by a worker-only or scheduler-only process, #21); the leader exports the queue gauges, so they appear where `serve` and the leader run together |
+| Metrics | Prometheus, `zirv_flow_` prefix; the README metric table lists every series and a test fails when one in `crates/` is missing from it. HTTP: `zirv_flow_http_requests_total`, `zirv_flow_http_request_duration_seconds`. Queue: depth `zirv_flow_jobs{kind,state}` for `ready`, `running` and `dead`, claim lag `zirv_flow_job_claim_lag_seconds{kind}` (`now - run_at`), handler duration `zirv_flow_job_duration_seconds{kind}`, attempts `zirv_flow_jobs_total{kind,outcome}`. Ingestion: `zirv_flow_ingest_requests_total`, `zirv_flow_ingest_items_total`, `zirv_flow_ingest_applied_total{kind,outcome}`, `zirv_flow_ingest_late_total`, `zirv_flow_ingest_inbox_age_seconds`. Debugger: `zirv_flow_debugger_clients` and `zirv_flow_debugger_delivery_seconds` (the server-side part, from the feed row to the frame write). Explorer: `zirv_flow_explorer_query_seconds{kind}`, `zirv_flow_explorer_timeouts_total{kind}`, `zirv_flow_explorer_exports_total`. Decision log: `zirv_flow_decision_append_seconds` (nothing in a `bench-no-decisions` build) and the size gauge `zirv_flow_decision_log_bytes` (emitted with the partition work, #378). Sync: `zirv_flow_sync_runs_total`, `zirv_flow_sync_run_duration_seconds`, `zirv_flow_sync_records_total`, `zirv_flow_sync_events_total`, stream freshness `zirv_flow_stream_freshness_seconds`, `zirv_flow_stream_state` and `zirv_flow_streams`. Segments: `zirv_flow_segment_refresh_seconds`, `zirv_flow_segment_refresh_people`, `zirv_flow_segment_dirty_backlog`, `zirv_flow_segment_dirty_age_seconds`. Flows: `zirv_flow_enrollments{state}` (`active`, `waiting`), `zirv_flow_enrollments_last_sample_timestamp_seconds` (when the sampler last succeeded), `zirv_flow_timer_lateness_seconds` (the oldest overdue timer) and `zirv_flow_timer_wake_lateness_seconds` (the p99 section 19 states). Destinations: queue depth and age, attempts and outcomes, forwarding depth and lag, `zirv_flow_destination_forwarding_dead_total`. Rendering: `zirv_flow_render_duration_seconds{channel}`, `zirv_flow_render_failures_total`. Assistant: `zirv_flow_ai_calls_total{feature,outcome}`, `zirv_flow_ai_tokens_total{feature,direction}`, `zirv_flow_ai_estimated_cost_micros_total{feature}`, `zirv_flow_ai_latency_seconds{feature}`, `zirv_flow_ai_refusals_total{reason}` (budget denials are `reason="budget_exceeded"`). DB pool `zirv_flow_db_pool_connections{pool,state}` and `zirv_flow_db_pool_max_connections{pool}`. `/metrics` is served only by processes that run `serve` (so not by a worker-only or scheduler-only process, #21); the leader exports the queue, enrollment, freshness and destination gauges, so they appear where `serve` and the leader run together |
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
 | Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `ops` (`bind`, off by default: metrics and health listener for worker-only and scheduler-only processes), `log` (`filter`, an EnvFilter directive, default `info`; `format`, `json` or `text`, default `json`), `secrets` (`master_key_file`, `master_key`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |

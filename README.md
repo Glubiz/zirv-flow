@@ -106,6 +106,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `retention.messages_days` | u32 | 395 | at least 1; how long ended messages are kept (about 13 months); within the two bounds below; the purge writes the erasure handled markers |
 | `retention.messages_min_days` | u32 | 30 | at least 1; the shortest per-workspace message window |
 | `retention.messages_max_days` | u32 | 1095 | at least 1; the longest per-workspace message window; not below the minimum |
+| `retention.decision_days` | u32 | 395 | at least 1; how long decision-log records are kept (about 13 months); within the two bounds below |
+| `retention.decision_min_days` | u32 | 30 | at least 1; the shortest per-workspace decision-log window |
+| `retention.decision_max_days` | u32 | 760 | at least 1; the longest per-workspace decision-log window (25 months); not below the minimum |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
@@ -303,6 +306,92 @@ process flushes what is queued (up to 5 seconds) when it shuts down. The log
 output is the same with or without export. `log.filter` also decides which
 spans are exported, so a filter such as `warn` exports none.
 
+## Metrics
+
+`GET /metrics` serves Prometheus text with the `zirv_flow_` prefix. Label values come from
+closed sets (a route template, a kind, an outcome, a feature) or are ids; no email, phone, name,
+property value, key, prompt or model output is ever a label. The queue, enrollment, freshness,
+destination and dirty-set gauges are sampled by the scheduler leader, so they appear where the
+leader runs. The enrollment gauges read the live rows through `enrollments_live_idx` under a 5 second
+statement timeout; at 11 million live rows the count takes about half a second and the overdue-timer
+lookup well under a millisecond. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
+table.
+
+| Series | Type | Labels | What it measures |
+|--------|------|--------|------------------|
+| `zirv_flow_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests by matched route template |
+| `zirv_flow_http_request_duration_seconds` | histogram | `method`, `route` | HTTP request latency |
+| `zirv_flow_db_pool_connections` | gauge | `pool`, `state` | Pool connections by state |
+| `zirv_flow_db_pool_max_connections` | gauge | `pool` | Pool size limit |
+| `zirv_flow_jobs` | gauge | `kind`, `state` | Queue depth for `ready`, `running` and `dead` |
+| `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
+| `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
+| `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
+| `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages` or `decision_records` |
+| `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
+| `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
+| `zirv_flow_ingest_requests_total` | counter | `endpoint`, `status` | Ingestion requests |
+| `zirv_flow_ingest_items_total` | counter | `kind` | Items accepted into the inbox |
+| `zirv_flow_ingest_applied_total` | counter | `kind`, `outcome` | Inbox items applied, by validation outcome |
+| `zirv_flow_ingest_late_total` | counter | none | Events that arrived late |
+| `zirv_flow_ingest_inbox_age_seconds` | gauge | none | Age of the oldest unprocessed inbox row |
+| `zirv_flow_webhook_requests_total` | counter | `outcome` | Inbound webhook requests |
+| `zirv_flow_debugger_clients` | gauge | none | Open debugger streams on this process |
+| `zirv_flow_debugger_delivery_seconds` | histogram | none | Server side of debugger latency: from the feed row's `at` to the frame write. The end-to-end figure counts from the inbox append and is measured from `events.received_at` |
+| `zirv_flow_explorer_query_seconds` | histogram | `kind` | Explorer query duration; `kind` is `count`, `breakdown`, `list` or `export` |
+| `zirv_flow_explorer_timeouts_total` | counter | `kind` | Explorer queries that ran past their statement timeout (503 `query_timeout`) |
+| `zirv_flow_explorer_exports_total` | counter | none | Explorer exports started |
+| `zirv_flow_decision_append_seconds` | histogram | none | Time of one decision-log append call (a batch is one observation); records nothing in a `bench-no-decisions` build |
+| `zirv_flow_decision_log_bytes` | gauge | none | Total size of the decision-log partitions, refreshed by the `decisions.retention` job |
+| `zirv_flow_decision_log_partitions` | gauge | none | Decision-log partitions, the default one included |
+| `zirv_flow_sync_runs_total` | counter | `outcome` | Ended sync runs |
+| `zirv_flow_sync_run_duration_seconds` | histogram | none | Sync run duration |
+| `zirv_flow_sync_records_total` | counter | `outcome` | Records of committed sync batches |
+| `zirv_flow_sync_events_total` | counter | `outcome` | Events of committed sync batches |
+| `zirv_flow_stream_freshness_seconds` | gauge | `workspace`, `stream` | Age of a stream's data |
+| `zirv_flow_stream_state` | gauge | `workspace`, `stream` | 0 fresh, 1 stale, 2 failing |
+| `zirv_flow_streams` | gauge | `workspace`, `state` | Enabled streams in each state |
+| `zirv_flow_stream_lag_messages` | gauge | `workspace`, `stream` | Messages behind, for consumer streams |
+| `zirv_flow_source_requests_total` | counter | `source_type`, `outcome` | Source HTTP requests |
+| `zirv_flow_source_retries_total` | counter | `source_type`, `reason` | Source request retries |
+| `zirv_flow_source_oauth_total` | counter | `outcome` | Source token fetches |
+| `zirv_flow_source_rate_limit_wait_seconds_total` | gauge | `source_type` | Seconds spent waiting on a source's rate limit |
+| `zirv_flow_source_db_batches_total` | counter | `source_type` | Database source batches |
+| `zirv_flow_source_db_errors_total` | counter | `source_type`, `reason` | Database source errors |
+| `zirv_flow_kafka_fetches_total` | counter | `outcome` | Kafka fetches |
+| `zirv_flow_kafka_offset_resets_total` | counter | none | Kafka offset resets |
+| `zirv_flow_segment_refresh_seconds` | histogram | none | Duration of one `segment.refresh` |
+| `zirv_flow_segment_refresh_people` | histogram | none | People who entered or left the segment in one refresh |
+| `zirv_flow_segment_dirty_backlog` | gauge | none | People marked dirty, over all workspaces |
+| `zirv_flow_segment_dirty_age_seconds` | gauge | none | Age of the oldest dirty mark |
+| `zirv_flow_flow_enrollments_total` | counter | `trigger`, `outcome` | People a `flow.enroll` enrolled or found enrolled |
+| `zirv_flow_flow_enroll_skips_total` | counter | `trigger`, `reason` | Enrollments refused, by reason |
+| `zirv_flow_enrollments` | gauge | `state` | Enrollments that are `active` or `waiting` |
+| `zirv_flow_enrollments_last_sample_timestamp_seconds` | gauge | none | Unix time of the last successful enrollment sample; alert on it going stale, since a failed sample leaves the gauges at their last values |
+| `zirv_flow_timer_lateness_seconds` | gauge | none | Age of the oldest `waiting` enrollment whose `wake_at` has passed; 0 with none |
+| `zirv_flow_timer_wake_lateness_seconds` | histogram | none | Time between a timer's `wake_at` and its `flow.step` running |
+| `zirv_flow_destination_queue_depth` | gauge | `workspace`, `destination` | Items waiting for delivery |
+| `zirv_flow_destination_queue_oldest_seconds` | gauge | `workspace`, `destination` | Age of the oldest waiting item |
+| `zirv_flow_destination_attempts_total` | counter | `workspace`, `destination` | Delivery attempts |
+| `zirv_flow_destination_outcomes_total` | counter | `workspace`, `destination`, `outcome` | Delivery attempts by outcome |
+| `zirv_flow_delivery_attempt_record_failures_total` | counter | `workspace` | Attempts whose record could not be written |
+| `zirv_flow_destination_forwarding_depth` | gauge | `workspace`, `destination` | Forwarding outbox rows waiting |
+| `zirv_flow_destination_forwarding_lag_seconds` | gauge | `workspace`, `destination` | How long the oldest outbox row has been past due |
+| `zirv_flow_destination_forwarding_dead_total` | counter | none | Outbox rows settled as dead letters |
+| `zirv_flow_provider_feedback_total` | counter | `outcome` | Provider feedback received |
+| `zirv_flow_render_duration_seconds` | histogram | `channel` | Template render duration |
+| `zirv_flow_render_wait_seconds` | histogram | none | Wait for a render host |
+| `zirv_flow_render_failures_total` | counter | `reason` | Failed renders |
+| `zirv_flow_render_restarts_total` | counter | none | Render host restarts |
+| `zirv_flow_ai_calls_total` | counter | `feature`, `outcome` | Assistant calls by feature and outcome |
+| `zirv_flow_ai_refusals_total` | counter | `reason` | Calls refused before the provider, including `budget_exceeded` |
+| `zirv_flow_ai_tokens_total` | counter | `feature`, `direction` | Tokens used; `direction` is `input` or `output` |
+| `zirv_flow_ai_estimated_cost_micros_total` | counter | `feature` | Estimated cost of finished calls, in micros |
+| `zirv_flow_ai_latency_seconds` | histogram | `feature` | Provider call latency |
+| `zirv_flow_ai_provider_faults_total` | counter | `feature`, `reason` | Provider replies outside the reserved bounds |
+| `zirv_flow_ai_draft_runs_total` | counter | `kind`, `outcome` | Draft runs |
+| `zirv_flow_ai_drafts_accepted_total` | counter | `kind` | Drafts a person accepted |
+
 ## Requirements and database migrations
 
 Zirv Flow requires PostgreSQL 16 or newer. Apply pending migrations before
@@ -445,17 +534,37 @@ Passwords are 12 to 1024 characters.
   DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
   needs none.
 - **API keys.** A workspace admin creates a key with scopes (`ingest`, `read`,
-  `write`, `admin`); the response shows the `zfk_...` key once, and only a hash
-  is stored. Send it as `Authorization: Bearer <key>`. A key works only in its
-  own workspace and never on instance-level endpoints (`/users`, creating
-  workspaces, `/session`). `read` allows GETs, `admin` allows members and keys;
-  scopes do not imply one another.
+  `write`, `publish`, `admin`); the response shows the `zfk_...` key once, and
+  only a hash is stored. Send it as `Authorization: Bearer <key>`. A key works
+  only in its own workspace and never on instance-level endpoints (`/users`,
+  creating workspaces, `/session`). `read` allows GETs, `write` the editor-level
+  drafts, `publish` the publisher actions and `admin` members, keys and the
+  rest of the admin routes; scopes do not imply one another, so a `write` key
+  cannot publish and a `publish` key cannot edit.
+- **Roles.** A workspace membership is `admin`, `publisher`, `editor` or
+  `viewer`; the instance owner is a flag on the user, not a role. A viewer
+  reads. An editor also changes drafts (segments, flows, templates, snippets,
+  themes, lists, contacts), previews, test mode and test sends. A publisher
+  also publishes, pauses, resumes and archives flows, retries, skips and exits
+  enrollments, starts a flow for an audience, publishes templates, snippets and
+  themes, and runs imports. An admin also manages sources, destinations,
+  credentials, keys, members, retention, privacy, consent policy, event
+  schemas, suppressions, forwarding, sending domains and webhooks. A refused
+  request is a 403 that names the role the route needs. Older `member` rows
+  became `editor`. Removing or demoting a workspace's last admin is refused
+  with a 409 (`last_admin`) unless the caller is the instance owner. Where a
+  section below says "any member", read editor or above; "admin" on a publish
+  route reads publisher or above.
+- **Upgrading to roles.** Migration 0073 gives every existing `admin` key the
+  `publish` scope, so deployed admin keys keep publishing. A `write` key that
+  runs imports (`POST .../imports/{id}/run`) needs `publish` added by hand.
+  Former members are now editors, who may also create assistant drafts.
 - **Sign-in throttling.** Five failures in a row lock the account for
   `min(2^(failures-5) seconds, 15 minutes)`. An unknown e-mail, a wrong password
   and a locked account give the same 401.
 - **Isolation.** A caller with no access to a workspace gets 404 for it, never
-  403. Workspace members can read the workspace and its member list; admins and
-  the owner also manage members and keys.
+  403. Workspace members of any role can read the workspace and its member list;
+  admins and the owner also manage members and keys.
 - **Audit log.** Sign-ins (including failures), sign-outs, user, workspace,
   membership and key events and password resets are appended to `audit_log`.
   Rows hold ids, the request id and a small summary, never e-mails, passwords,
@@ -649,6 +758,23 @@ batches, drops whole monthly partitions older than the longest limit and removes
 records of events that no longer exist. Each batch and each partition drop commits separately,
 with its handled markers, so a failed run keeps completed work and the next run continues.
 The scheduler leader creates the partitions for this and next month.
+
+**Decision-log retention.** A daily job (03:53 UTC, `decisions.retention`) drops each monthly
+decision-log partition that ends before `retention.decision_days`, in a transaction of its own
+(never the default partition, this month or next), then deletes the older rows of the month
+that holds the cutoff in batches. A drop waits at most 2 seconds for the table lock and is skipped
+(logged, retried by the next daily run) rather than stalling appends. A workspace with a shorter
+window is deleted in key order with a cursor, so the job reads the other workspaces' rows below
+the cutoff once and no batch rescans an earlier one; it adds no index. It sets `zirv_flow_decision_log_bytes` and
+`zirv_flow_decision_log_partitions` and counts deletes in
+`zirv_flow_retention_deleted_total{table="decision_records"}`. Measured on PostgreSQL
+(200,000 records per shape, with the primary key and the trace, person and enrollment
+indexes), a record takes about 450 bytes (ingest), 730 (flow step) and 800 (send), and about
+260, 430 and 500 without the three secondary indexes. At 1,000 events/s with one record per
+event that is about 39 GB (ingest), 63 GB (flow) or 69 GB (send) a day, so the 13-month
+default holds about 15 TB (ingest), 25 TB (flow) or 27 TB (send) per record-per-event stream at that rate; scale it by the real
+records per event and rate. Reproduce the table with
+`ZIRV_FLOW_BENCH_DECISION_SIZE=200000 cargo nextest run -p zirv-flow-store --run-ignored all --no-capture bytes_per_record`.
 ## Event debugger and explorer
 
 Under **Events** in the web UI, **Debugger**, **Explorer** and **Rejects** show what the event
@@ -664,7 +790,14 @@ workspace has at most 20 streams per server process (more get 429), and the page
 the server's notifier is down and updates are delayed.
 Ingestion writes the feed only while someone watches the workspace (a viewer renews a 30 s
 watch every 10 s); with nobody watching it pays nothing extra, and feed rows older than 15
-minutes are deleted. The feed is unlogged and holds redacted values only.
+minutes are deleted. The feed is unlogged and holds redacted values only. Frames can arrive out of order: a row whose writer commits late is sent when it does, and the
+page shows it once whatever its `seq`. Each frame id is `<epoch>:<position>`; after a database
+crash the unlogged feed starts over, and a stream resumed from before it is told with a
+`gap` frame whose `reset` is true (the page clears its list and says so). The remaining limit:
+a row whose writer commits more than about 20 seconds after the row was written is past the
+lookback window and can still be missed. A stream resumed from `Last-Event-ID` does not deliver
+a late row below its resume point whose writer committed while the client was away; the
+lookback covers live streams only. An open stream also notices a crash and sends the reset.
 
 **Masking and reveal.** Values are masked per viewer as in the person timeline: only
 properties the published schema declares non-PII are shown, and every other value is null and

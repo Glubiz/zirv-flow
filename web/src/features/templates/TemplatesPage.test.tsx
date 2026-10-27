@@ -18,7 +18,7 @@ const GONE = listItem({ id: "t-gone", name: "Old promo", current_version: 1, arc
 const ALL = [LIVE, CHANGED, FRESH, HOOK, GONE];
 
 interface Options {
-  role?: "admin" | "member" | "reader";
+  role?: "admin" | "editor" | "reader";
   items?: Record<string, unknown>[];
   extra?: Record<string, Handler>;
   themes?: unknown[];
@@ -220,7 +220,7 @@ describe("the template library", () => {
   });
 
   it("offers a member who is not an admin Duplicate but not Archive", async () => {
-    mockApi(libraryRoutes({ role: "member" }));
+    mockApi(libraryRoutes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
 

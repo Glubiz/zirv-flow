@@ -98,7 +98,7 @@ function pathBody(overrides: Record<string, unknown> = {}) {
 }
 
 interface Options {
-  role?: "writer" | "member" | "reader";
+  role?: "writer" | "editor" | "reader";
   routes?: Record<string, Handler>;
   state?: string;
 }
@@ -401,7 +401,7 @@ describe("the enrollment inspector", () => {
   });
 
   it("offers Retry and Skip to admins only, and gives others the reason", async () => {
-    mockApi(routes({ role: "member" }));
+    mockApi(routes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
     const sheet = await openFailed(user);
@@ -465,7 +465,7 @@ describe("the enrollment inspector", () => {
   });
 
   it("does not offer the bulk exit to a member, and explains", async () => {
-    mockApi(routes({ role: "member" }));
+    mockApi(routes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
     await openInspector(user);

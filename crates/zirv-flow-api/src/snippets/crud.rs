@@ -322,7 +322,7 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateSnippetRequest>,
 ) -> Result<(StatusCode, Json<SnippetDetailBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (snippet, draft) = create_snippet(
         &state.pool,
         &principal.context(),
@@ -398,7 +398,7 @@ pub(crate) async fn update(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdateSnippetRequest>,
 ) -> Result<Json<SnippetDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (snippet, draft) = rename_snippet(&state.pool, workspace.id, path_id(&id)?, body).await?;
     Ok(Json(SnippetDetailBody::new(&snippet, &draft)))
 }
@@ -469,7 +469,7 @@ pub(crate) async fn put_draft(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<SaveSnippetDraftRequest>,
 ) -> Result<Json<SnippetDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (snippet, draft) = save_draft(
         &state.pool,
         &principal.context(),

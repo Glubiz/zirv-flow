@@ -140,7 +140,7 @@ mod tests {
         let user = admin::create_user(pool, &Context::system(), "member@example.com", PASSWORD)
             .await
             .unwrap();
-        admin::set_member(pool, &Context::system(), ws, user.id, Role::Member)
+        admin::set_member(pool, &Context::system(), ws, user.id, Role::Editor)
             .await
             .unwrap();
         let reply = call(

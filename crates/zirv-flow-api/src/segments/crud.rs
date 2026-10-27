@@ -437,7 +437,7 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateSegmentRequest>,
 ) -> Result<(StatusCode, Json<SegmentDetailBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (segment, version) = create_segment(
         &state.pool,
         &principal.context(),
@@ -519,7 +519,7 @@ pub(crate) async fn update(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdateSegmentRequest>,
 ) -> Result<Json<SegmentDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (segment, version) = update_segment(
         &state.pool,
         &principal.context(),
@@ -557,7 +557,7 @@ pub(crate) async fn archive(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<SegmentDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (segment, version) = archive_segment(
         &state.pool,
         &principal.context(),

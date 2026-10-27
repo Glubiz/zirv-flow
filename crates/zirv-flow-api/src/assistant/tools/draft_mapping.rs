@@ -15,6 +15,7 @@ use zirv_flow_core::mapping::Header;
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::prompt::sample_fields;
 use crate::assistant::schema::tool_parameters;
+use crate::auth::Need;
 use crate::imports::MappingBody;
 use crate::problem::ApiError;
 use crate::sources::{MappingCheck, load_mapping_check};
@@ -73,7 +74,7 @@ impl AiTool<ToolContext> for DraftMapping {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Admin).await?;
             let DraftTarget::Mapping { source_id, stream } = &context.target else {
                 return Err(ToolError::Failed(ApiError::internal()));
             };

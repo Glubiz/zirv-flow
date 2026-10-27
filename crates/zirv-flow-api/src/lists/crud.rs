@@ -245,7 +245,7 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateListRequest>,
 ) -> Result<(StatusCode, Json<ListBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let list = create_list(
         &state.pool,
         &principal.context(),
@@ -314,7 +314,7 @@ pub(crate) async fn update(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdateListRequest>,
 ) -> Result<Json<ListBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let list = update_list(
         &state.pool,
         &principal.context(),
@@ -349,7 +349,7 @@ pub(crate) async fn remove(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     delete_list(
         &state.pool,
         &principal.context(),

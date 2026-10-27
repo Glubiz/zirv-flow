@@ -9,7 +9,7 @@ import { SendingSettingsPage } from "./SendingSettingsPage";
 const WS = "/api/v1/workspaces/ws1";
 const ENTRY = { id: "e1", display_hint: "q***@example.com", created_at: "2026-10-11T09:00:00Z" };
 
-function routes(role: "admin" | "member" | null, extra: Record<string, Handler> = {}): Record<string, Handler> {
+function routes(role: "admin" | "editor" | null, extra: Record<string, Handler> = {}): Record<string, Handler> {
   const who = role === "admin" ? OWNER : MEMBER;
   return {
     "GET /api/v1/session": () => json(session(who)),
@@ -148,7 +148,7 @@ describe("the test inboxes section", () => {
   });
 
   it("gives a writer the list read-only, from the options read", async () => {
-    const calls = mockApi(routes("member"));
+    const calls = mockApi(routes("editor"));
     mount();
 
     const inboxes = await section();

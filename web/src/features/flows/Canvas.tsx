@@ -16,14 +16,14 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 
 import { MenuButton, reasonLabel } from "../../ui";
 import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
-import { TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
+import { COUNT_GAP, COUNT_ROW, MARK_ROW, overlayExtra, TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
 import {
   connectionWire,
   entryOf,
@@ -59,6 +59,28 @@ type StepNode = Node<StepData, "step">;
 
 function issuesLabel(count: number): string {
   return `${count} issue${count === 1 ? "" : "s"}`;
+}
+
+interface CountBadge {
+  key: string;
+  className: string;
+  text: string;
+}
+
+/** The badges of a step's counts: the short ones first, one grid cell each, then a full-width one per skip reason. */
+function countBadges(counts: NodeTally): CountBadge[] {
+  const n = (value: number) => value.toLocaleString("en");
+  const short: CountBadge[] = [{ key: "entered", className: "fl-count", text: `${n(counts.entered)} entered` }];
+  if (counts.waiting > 0) short.push({ key: "waiting", className: "fl-count fl-count-lite", text: `${n(counts.waiting)} waiting` });
+  if (counts.failed > 0) short.push({ key: "failed", className: "fl-count fl-count-bad", text: `${n(counts.failed)} failed` });
+  if (counts.sent) short.push({ key: "sent", className: "fl-count", text: `${n(counts.sent)} sent` });
+  if (counts.send_failed) short.push({ key: "send_failed", className: "fl-count fl-count-bad", text: `${n(counts.send_failed)} send failed` });
+  const skips = (counts.skipped ?? []).map((skip) => ({
+    key: `skip-${skip.reason}`,
+    className: "fl-count fl-count-lite fl-count-wide",
+    text: `${n(skip.count)} skipped: ${reasonLabel(skip.reason)}`,
+  }));
+  return [...short, ...skips];
 }
 
 const Step = memo(function Step({ data }: NodeProps<StepNode>) {
@@ -98,19 +120,18 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
           {data.stepNumbers.join(", ")}
         </span>
       ) : null}
-      {data.mark ? <span className={`fl-mark fl-mark-${data.mark.tone}`}>{data.mark.text}</span> : null}
+      {data.mark ? (
+        <span className={`fl-mark fl-mark-${data.mark.tone}`} title={data.mark.text} style={{ "--mark-row": `${MARK_ROW}px` } as CSSProperties}>
+          {data.mark.text}
+        </span>
+      ) : null}
       {data.counts ? (
-        <div className="fl-counts">
-          <span className="fl-count">{data.counts.entered.toLocaleString("en")} entered</span>
-          {data.counts.waiting > 0 ? <span className="fl-count fl-count-lite">{data.counts.waiting.toLocaleString("en")} waiting</span> : null}
-          {data.counts.failed > 0 ? <span className="fl-count fl-count-bad">{data.counts.failed.toLocaleString("en")} failed</span> : null}
-          {data.counts.sent ? <span className="fl-count">{data.counts.sent.toLocaleString("en")} sent</span> : null}
-          {(data.counts.skipped ?? []).map((skip) => (
-            <span key={skip.reason} className="fl-count fl-count-lite">
-              {skip.count.toLocaleString("en")} skipped: {reasonLabel(skip.reason)}
+        <div className="fl-counts" style={{ "--count-row": `${COUNT_ROW}px`, "--count-gap": `${COUNT_GAP}px` } as CSSProperties}>
+          {countBadges(data.counts).map((badge) => (
+            <span key={badge.key} className={badge.className} title={badge.text}>
+              {badge.text}
             </span>
           ))}
-          {data.counts.send_failed ? <span className="fl-count fl-count-bad">{data.counts.send_failed.toLocaleString("en")} send failed</span> : null}
         </div>
       ) : null}
       {many ? (
@@ -383,7 +404,13 @@ function Surface(props: CanvasProps) {
   const [flash, setFlash] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(flashTimer.current), []);
-  const plan = useMemo(() => layout(graph), [graph]);
+  const counts = overlay?.counts;
+  const marks = overlay?.marks;
+  const plan = useMemo(() => {
+    const extra = new Map<string, number>();
+    for (const [id, tally] of counts ?? []) extra.set(id, overlayExtra(tally, marks?.has(id) === true));
+    return layout(graph, extra);
+  }, [graph, counts, marks]);
 
   const nodes = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));

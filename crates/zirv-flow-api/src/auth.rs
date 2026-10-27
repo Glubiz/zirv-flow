@@ -18,7 +18,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use zirv_flow_core::token::{hash_matches, sha256};
-use zirv_flow_core::{Role, Scope, UserId, WorkspaceId};
+use zirv_flow_core::{Capability, Role, Scope, UserId, WorkspaceId};
 use zirv_flow_store::{ApiKey, User, Workspace};
 
 use crate::problem::ApiError;
@@ -59,14 +59,30 @@ pub(crate) enum Need {
     Read,
     /// Read the member list: as `Read`, and also an `admin` key.
     ReadMembers,
-    /// Change the workspace's data, such as its lists: any member, a workspace admin, the
-    /// owner, or a `write` key.
-    Write,
-    /// Manage members and keys: a workspace admin, the owner, or an `admin` key.
+    /// Change drafts and working data, such as lists and previews: an editor, a publisher, a
+    /// workspace admin, the owner, or a `write` key.
+    Edit,
+    /// Publish, pause or archive, and the operator actions on running work: a publisher, a
+    /// workspace admin, the owner, or a `publish` key.
+    Publish,
+    /// Manage members, keys, sources and governance: a workspace admin, the owner, or an
+    /// `admin` key.
     Admin,
     /// Send events and profile updates: an API key with the `ingest` scope, and nobody
     /// else.
     Ingest,
+}
+
+impl Need {
+    /// The role the 403 names, for a need a role can fail.
+    const fn role_name(self) -> &'static str {
+        match self {
+            Self::Publish => "publisher",
+            Self::Edit => "editor",
+            Self::Admin => "admin",
+            Self::Read | Self::ReadMembers | Self::Ingest => "member",
+        }
+    }
 }
 
 impl Principal {
@@ -80,7 +96,9 @@ impl Principal {
 
     pub(crate) fn context(&self) -> admin::Context {
         let context = match self {
-            Self::Session(session) => admin::Context::user(session.user.id),
+            Self::Session(session) => {
+                admin::Context::user(session.user.id).with_owner(session.user.is_owner)
+            }
             Self::Key(key) => admin::Context::api_key(key.key.id),
         };
         context.with_request_id(request_id::current())
@@ -216,7 +234,8 @@ pub(crate) fn scopes_allow(scopes: &[Scope], need: Need) -> bool {
     match need {
         Need::Read => scopes.contains(&Scope::Read),
         Need::ReadMembers => scopes.contains(&Scope::Read) || scopes.contains(&Scope::Admin),
-        Need::Write => scopes.contains(&Scope::Write),
+        Need::Edit => scopes.contains(&Scope::Write),
+        Need::Publish => scopes.contains(&Scope::Publish),
         Need::Admin => scopes.contains(&Scope::Admin),
         Need::Ingest => scopes.contains(&Scope::Ingest),
     }
@@ -225,9 +244,11 @@ pub(crate) fn scopes_allow(scopes: &[Scope], need: Need) -> bool {
 /// Whether a workspace role (or the owner flag) allows the request.
 pub(crate) fn role_allows(role: Role, need: Need) -> bool {
     match need {
-        Need::Read | Need::ReadMembers | Need::Write => true,
+        Need::Read | Need::ReadMembers => true,
+        Need::Edit => role.allows(Capability::Edit),
+        Need::Publish => role.allows(Capability::Publish),
+        Need::Admin => role.allows(Capability::Admin),
         Need::Ingest => false,
-        Need::Admin => role == Role::Admin,
     }
 }
 
@@ -256,9 +277,10 @@ pub(crate) async fn authorize(
                 .await?
                 .ok_or_else(ApiError::not_found)?;
             if !role_allows(role, need) {
-                return Err(ApiError::forbidden(
-                    "this needs the admin role in the workspace",
-                ));
+                return Err(ApiError::forbidden(format!(
+                    "this needs the {} role in the workspace",
+                    need.role_name()
+                )));
             }
         }
     }
@@ -363,26 +385,38 @@ mod tests {
         assert!(scopes_allow(&[Scope::Admin], Need::ReadMembers));
         assert!(scopes_allow(&[Scope::Read], Need::ReadMembers));
         assert!(!scopes_allow(&[Scope::Write], Need::ReadMembers));
-        assert!(scopes_allow(&[Scope::Write], Need::Write));
-        assert!(!scopes_allow(&[Scope::Read, Scope::Admin], Need::Write));
+        assert!(scopes_allow(&[Scope::Write], Need::Edit));
+        assert!(!scopes_allow(&[Scope::Read, Scope::Admin], Need::Edit));
         assert!(scopes_allow(&[Scope::Admin], Need::Admin));
         assert!(!scopes_allow(&[Scope::Read, Scope::Write], Need::Admin));
         assert!(!scopes_allow(&[], Need::Read));
-        assert!(scopes_allow(&[Scope::Write], Need::Write));
+        assert!(scopes_allow(&[Scope::Write], Need::Edit));
         assert!(!scopes_allow(
             &[Scope::Read, Scope::Admin, Scope::Ingest],
-            Need::Write
+            Need::Edit
         ));
         assert!(scopes_allow(&[Scope::Ingest], Need::Ingest));
-        for other in [Scope::Read, Scope::Write, Scope::Admin] {
+        for other in [Scope::Read, Scope::Write, Scope::Publish, Scope::Admin] {
             assert!(!scopes_allow(&[other], Need::Ingest));
         }
     }
 
     #[test]
-    fn any_member_may_write_and_a_key_belongs_to_no_user() {
-        assert!(role_allows(Role::Member, Need::Write));
-        assert!(role_allows(Role::Admin, Need::Write));
+    fn a_write_key_cannot_publish_and_a_publish_key_cannot_edit() {
+        assert!(scopes_allow(&[Scope::Publish], Need::Publish));
+        assert!(!scopes_allow(&[Scope::Write], Need::Publish));
+        assert!(!scopes_allow(&[Scope::Read, Scope::Admin], Need::Publish));
+        assert!(!scopes_allow(&[Scope::Publish], Need::Edit));
+        assert!(!scopes_allow(&[Scope::Publish], Need::Read));
+        assert!(!scopes_allow(&[Scope::Publish], Need::Admin));
+        assert!(scopes_allow(&[Scope::Write, Scope::Publish], Need::Edit));
+        assert!(scopes_allow(&[Scope::Write, Scope::Publish], Need::Publish));
+    }
+
+    #[test]
+    fn an_editor_may_edit_and_a_key_belongs_to_no_user() {
+        assert!(role_allows(Role::Editor, Need::Edit));
+        assert!(role_allows(Role::Admin, Need::Edit));
         let member = session(false);
         let id = member.user.id;
         assert_eq!(Principal::Session(member).user_id(), Some(id));
@@ -402,13 +436,33 @@ mod tests {
     }
 
     #[test]
-    fn members_read_but_only_admins_manage() {
-        assert!(role_allows(Role::Member, Need::Read));
-        assert!(role_allows(Role::Member, Need::ReadMembers));
-        assert!(role_allows(Role::Member, Need::Write));
-        assert!(!role_allows(Role::Member, Need::Admin));
-        assert!(role_allows(Role::Admin, Need::Admin));
-        assert!(!role_allows(Role::Admin, Need::Ingest));
+    fn each_role_holds_its_own_needs_and_those_below() {
+        let table = [
+            (Role::Viewer, [true, true, false, false, false]),
+            (Role::Editor, [true, true, true, false, false]),
+            (Role::Publisher, [true, true, true, true, false]),
+            (Role::Admin, [true, true, true, true, true]),
+        ];
+        for (role, expected) in table {
+            let needs = [
+                Need::Read,
+                Need::ReadMembers,
+                Need::Edit,
+                Need::Publish,
+                Need::Admin,
+            ];
+            for (need, allowed) in needs.into_iter().zip(expected) {
+                assert_eq!(role_allows(role, need), allowed, "{role} {need:?}");
+            }
+            assert!(!role_allows(role, Need::Ingest), "{role}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_the_role_the_need_takes() {
+        assert_eq!(Need::Edit.role_name(), "editor");
+        assert_eq!(Need::Publish.role_name(), "publisher");
+        assert_eq!(Need::Admin.role_name(), "admin");
     }
 
     #[test]

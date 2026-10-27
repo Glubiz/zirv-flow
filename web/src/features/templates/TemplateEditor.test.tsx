@@ -191,7 +191,7 @@ describe("editing a code template", () => {
     expect(((drafts(calls)[0] as Doc)["webhook"] as Doc)["headers"]).toEqual({ "X-Key": "{{ person.city }}" });
   });
   it("lets a writer who is not an admin pick the sender by name on the Settings tab", async () => {
-    mockApi(templateRoutes({ role: "member" }));
+    mockApi(templateRoutes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
 

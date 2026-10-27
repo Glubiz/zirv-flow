@@ -13,7 +13,7 @@ const BASE = "/api/v1/workspaces/ws1/sources/src-1";
 
 type Handlers = Record<string, () => Response | Promise<Response>>;
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -27,7 +27,7 @@ function mount() {
   );
 }
 
-function routes(role: "admin" | "member" = "admin", extra: Handlers = {}): Handlers {
+function routes(role: "admin" | "editor" = "admin", extra: Handlers = {}): Handlers {
   return {
     "GET /api/v1/session": () => json(session(role === "admin" ? OWNER : MEMBER, "csrf-runs")),
     "GET /api/v1/workspaces/ws1/members": () => json(members(role, role === "admin" ? OWNER.id : MEMBER.id)),
@@ -175,7 +175,7 @@ describe("the runs of a source", () => {
 
   it("gives a member the history and the details but no way to start or cancel", async () => {
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${BASE}/runs`]: () => json({ runs: [aRun({ state: "running", finished_at: null })], next_cursor: null }),
       }),
     );
@@ -190,7 +190,7 @@ describe("the runs of a source", () => {
 
   it("shows a run with its failure in plain words, the masked rejects and a link to the trace", async () => {
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${BASE}/runs/run-1`]: () =>
           json(aRunDetail({ state: "failed", error_code: "reject_threshold", attempt: 2 })),
       }),
@@ -216,7 +216,7 @@ describe("the runs of a source", () => {
   it("says a clean run refused nothing, and reports a failure to load it", async () => {
     let attempts = 0;
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${BASE}/runs/run-1`]: () => {
           attempts += 1;
           return attempts === 1
@@ -267,7 +267,7 @@ describe("the runs of a source", () => {
 
   it("shows the kind of each run and the removed records of a run in its details", async () => {
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${BASE}/runs`]: () =>
           json({
             runs: [aRun(), aRun({ id: "run-2", kind: "reconcile", records_deleted: 3 })],
@@ -293,7 +293,7 @@ describe("the runs of a source", () => {
 
   it("explains a run that was stopped by the sweep limit", async () => {
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${BASE}/runs/run-1`]: () =>
           json(aRunDetail({ state: "failed", error_code: "sweep_limit", rejects: [] })),
       }),
@@ -341,7 +341,7 @@ describe("the runs of a source", () => {
 
   it("offers a member no reconciliation", async () => {
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${BASE}/streams`]: () =>
           json([aStream({ enabled: true, sync_mode: "incremental", mapping: { columns: [] } })]),
       }),

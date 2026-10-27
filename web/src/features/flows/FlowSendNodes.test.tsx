@@ -27,7 +27,7 @@ beforeEach(() => {
 const SAVE = { timeout: 3000 };
 const FLOW = `${WS}/flows/${FLOW_ID}`;
 
-function routes(extra: Record<string, Handler> = {}, role: "writer" | "member" | "reader" = "writer"): Record<string, Handler> {
+function routes(extra: Record<string, Handler> = {}, role: "writer" | "editor" | "reader" = "writer"): Record<string, Handler> {
   return { ...flowRoutes({ role, flow: { graph: sendGraph() } }), ...deliveryRoutes(), ...extra };
 }
 
@@ -141,7 +141,7 @@ describe("the send and sync steps in the editor", () => {
   });
 
   it("shows the chosen destination's id to a reader who cannot read the options", async () => {
-    mockApi(routes({ [`GET ${WS}/destinations/options`]: () => problem(403, "Forbidden", "Needs the write role.") }, "member"));
+    mockApi(routes({ [`GET ${WS}/destinations/options`]: () => problem(403, "Forbidden", "Needs the write role.") }, "editor"));
     const user = userEvent.setup();
     mount();
 
@@ -321,6 +321,27 @@ describe("delivery counts on the canvas", () => {
     expect(within(send).getByText("2 skipped: The address is suppressed")).toBeInTheDocument();
     expect(within(send).getByText("3 send failed")).toHaveClass("fl-count-bad");
     expect(send).toHaveAccessibleName(/20 sent, 5 skipped, There is no consent to send this message/);
+  });
+
+  it("makes the card tall enough for its badge grid, so the badges sit below the text", async () => {
+    mockApi(countsRoutes());
+    const user = userEvent.setup();
+    mount();
+    await openCounts(user);
+
+    // A wait card is 92 px; "30 entered" is one grid line: 22 px plus the 4 px gap above it.
+    const wait = await screen.findByRole("group", { name: /^Wait: 1 day.*30 entered/ });
+    expect((wait.closest(".react-flow__node") as HTMLElement).style.height).toBe("118px");
+    const row = wait.querySelector(".fl-counts") as HTMLElement;
+    expect(row).toHaveStyle({ "--count-row": "22px", "--count-gap": "4px" });
+
+    // The send card is 92 px: sent, send failed and entered make two lines, two skips two more, each 22 px with 4 px gaps.
+    const send = await screen.findByRole("group", { name: /^Send an email.*30 entered/ });
+    expect((send.closest(".react-flow__node") as HTMLElement).style.height).toBe(`${92 + 4 * 22 + 3 * 4 + 4}px`);
+    const long = within(send).getByText("5 skipped: There is no consent to send this message");
+    expect(long).toHaveClass("fl-count-wide");
+    expect(long).toHaveAttribute("title", "5 skipped: There is no consent to send this message");
+    expect(within(send).getByText("20 sent")).not.toHaveClass("fl-count-wide");
   });
 
   it("shows no delivery counts on a step that sends nothing", async () => {

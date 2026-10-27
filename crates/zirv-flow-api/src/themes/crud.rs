@@ -334,7 +334,7 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateThemeRequest>,
 ) -> Result<(StatusCode, Json<ThemeDetailBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (theme, draft) = create_theme(
         &state.pool,
         &principal.context(),
@@ -410,7 +410,7 @@ pub(crate) async fn update(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdateThemeRequest>,
 ) -> Result<Json<ThemeDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (theme, draft) = rename_theme(&state.pool, workspace.id, path_id(&id)?, body).await?;
     Ok(Json(ThemeDetailBody::new(&theme, &draft)))
 }
@@ -480,7 +480,7 @@ pub(crate) async fn put_draft(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<SaveThemeDraftRequest>,
 ) -> Result<Json<ThemeDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (theme, draft) = save_draft(
         &state.pool,
         &principal.context(),
