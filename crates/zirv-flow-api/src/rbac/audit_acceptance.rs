@@ -26,6 +26,29 @@ mod tests {
     use crate::rbac::{Audit, ROUTES};
 
     /// What one call left behind.
+    /// The `secret.*` rows a route that seals or drops a secret writes beside its own row. Any
+    /// other route writing one is a defect.
+    fn secret_companion(route_action: &str, written: &str) -> bool {
+        let allowed: &[&str] = match route_action {
+            "credential.created"
+            | "webhook.created"
+            | "sending_domain.created"
+            | "webhook_signing.created" => &["secret.created"],
+            "credential.rotated" | "webhook.secret_rotated" | "webhook_signing.rotated" => {
+                &["secret.created", "secret.deleted"]
+            }
+            "webhook.deleted"
+            | "sending_domain.deleted"
+            | "source.deleted"
+            | "source.oauth_disconnected" => &["secret.deleted"],
+            "source.oauth_connected" | "ai.settings.updated" => {
+                &["secret.created", "secret.replaced"]
+            }
+            _ => &[],
+        };
+        allowed.contains(&written)
+    }
+
     struct Reply {
         status: u16,
         body: Value,
@@ -292,7 +315,7 @@ mod tests {
                 self.fail(format!("{name}: object {:?} not {object}", row.object_id));
             }
             for other in rows.iter().filter(|row| row.action != action) {
-                let companion = other.action.starts_with("secret.")
+                let companion = secret_companion(action, &other.action)
                     || (matches!(action, "credential.tested" | "forwarding.rule_created")
                         && other.action == "destination.checked");
                 if !companion {
