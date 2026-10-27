@@ -318,6 +318,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebinding_dials_the_checked_broker_and_refuses_the_next_answer() {
+        use crate::http::testing::Rebinding;
+
+        for later in ["10.0.0.5", "169.254.169.254"] {
+            let (port, count) = target().await;
+            let lookup = Arc::new(Rebinding::new("127.0.0.1", later));
+            let relay = relay(&["127.0.0.1/32"], lookup.clone()).await;
+            timeout(Duration::from_secs(3), async {
+                let (code, mut stream) = connect(&relay, "broker.test", port).await;
+                assert_eq!(code, REPLY_OK);
+                stream.write_all(b"ping").await.unwrap();
+                let mut echoed = [0u8; 4];
+                stream.read_exact(&mut echoed).await.unwrap();
+                assert_eq!(&echoed, b"ping");
+                assert_eq!(lookup.calls(), 1);
+                let (code, _) = connect(&relay, "broker.test", port).await;
+                assert_eq!(code, REPLY_RULESET);
+            })
+            .await
+            .expect("the relay must connect only to the checked listener");
+            assert_eq!(lookup.calls(), 2);
+            assert_eq!(count.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                relay.denial(),
+                Some(zirv_flow_core::egress::classify(later.parse().unwrap()))
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn an_allowed_name_is_connected_by_its_checked_address_and_bytes_flow() {
         let (port, count) = target().await;
         let relay = relay(&["127.0.0.0/8"], table(&[("broker.test", &["127.0.0.1"])])).await;

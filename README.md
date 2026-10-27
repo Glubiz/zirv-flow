@@ -56,7 +56,10 @@ host, change the published port and put TLS in front, or set
 database volume as well.
 
 The image is published to GHCR on each release as
-`ghcr.io/glubiz/zirv-flow:<version>` and `:latest` for linux/amd64 only.
+`ghcr.io/glubiz/zirv-flow:<version>` and `:latest` for stable releases, or
+`:<version>` and `:rc` for prereleases, for linux/amd64 only. Prereleases leave
+GitHub Latest and `:latest` on the last stable release. See the
+[API gate and release candidate process](CONTRIBUTING.md#api-compatibility-gate).
 It is a static binary on a distroless base that runs as a non-root
 user, with `zirv-flow all` as its default command and `0.0.0.0:8080` as its bind
 address; supply `ZIRV_FLOW_DATABASE__URL` at run time.

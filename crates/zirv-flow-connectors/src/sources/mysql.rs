@@ -1002,6 +1002,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebinding_dials_only_the_checked_address_and_rechecks_on_reconnect() {
+        use crate::http::testing::Rebinding;
+
+        for later in ["10.0.0.5", "169.254.169.254"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let accepted = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                // The local endpoint is the destination; the peer is the client's address.
+                assert_eq!(stream.local_addr().unwrap(), address);
+            };
+            let lookup = std::sync::Arc::new(Rebinding::new("127.0.0.1", later));
+            let ctx = context(TYPE, &["127.0.0.1/32"], lookup.clone());
+            let config = source_config(address.port(), serde_json::json!({}));
+            let login = credential("u", "p");
+            let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::join!(Mysql.check(&ctx, &config, &login), accepted)
+            })
+            .await
+            .expect("the driver must dial the checked listener");
+            assert!(
+                result.is_err(),
+                "the listener closes without a database handshake"
+            );
+            assert_eq!(lookup.calls(), 1);
+            assert!(matches!(
+                Mysql.check(&ctx, &config, &login).await,
+                Err(SourceError::Egress(_))
+            ));
+            assert_eq!(lookup.calls(), 2);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_refusal_is_counted_in_the_egress_denied_metric() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();

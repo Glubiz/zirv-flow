@@ -30,6 +30,7 @@ jobs:
       contents: write
     outputs:
       version: ${{ steps.get_version.outputs.version }}
+      prerelease: ${{ steps.get_version.outputs.prerelease }}
       published: ${{ steps.release.outputs.published }}
 
     steps:
@@ -45,7 +46,8 @@ jobs:
           VER=$(grep '^version' Cargo.toml \
             | head -n1 \
             | sed -E 's/version *= *"([^"]+)".*/\1/')
-          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          bash scripts/release-flags.sh "$VER" "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zirv-flow" >> "$GITHUB_OUTPUT"
 
       # A light script (not release-please -- that stages its own release PR and
       # drops the per-PR version bump this repo's linear rebase-merge model
@@ -76,13 +78,10 @@ jobs:
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
 
-          # No --from: the script's own nearest-tag lookup excludes HEAD
-          # itself (looks at HEAD^), which matters on a re-run after a
-          # previous attempt already created $TAG on HEAD -- resolving the
-          # previous tag here manually would otherwise find $TAG itself and
-          # produce an empty range.
+          # The target version selects the previous SemVer tag even before
+          # tagging or on a rerun. Stable releases fold all rc changes.
           DATE=$(date -u +%Y-%m-%d)
-          bash scripts/generate-changelog.sh --section --to HEAD \
+          bash scripts/generate-changelog.sh --section --to HEAD --version "${{ steps.get_version.outputs.version }}" \
             --header "## ${TAG} (${DATE})" > changelog-section.md
 
           if git rev-parse "$TAG" >/dev/null 2>&1; then
@@ -123,6 +122,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_FLAGS: ${{ steps.get_version.outputs.publish_flags }}
         run: |
           set -euo pipefail
           TAG="v${{ steps.get_version.outputs.version }}"
@@ -138,7 +138,8 @@ jobs:
             gh release create "$TAG" --draft --title "Release $TAG" --notes-file changelog-section.md
           fi
 
-          gh release edit "$TAG" --draft=false --latest
+          read -r -a flags <<< "$PUBLISH_FLAGS"
+          gh release edit "$TAG" "${flags[@]}"
           echo "published=true" >> "$GITHUB_OUTPUT"
 
   image:
@@ -157,9 +158,11 @@ jobs:
         with:
           ref: v${{ needs.release.outputs.version }}
 
-      - name: Set image name
+      - name: Set image tags
         id: image
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zirv-flow" >> "$GITHUB_OUTPUT"
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: bash scripts/release-flags.sh "$VERSION" "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/zirv-flow" >> "$GITHUB_OUTPUT"
 
       - name: Set Up Docker Buildx
         uses: docker/setup-buildx-action@v3.11.1
@@ -177,9 +180,7 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ needs.release.outputs.version }}
-            ${{ steps.image.outputs.name }}:latest
+          tags: ${{ steps.image.outputs.image_tags }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ needs.release.outputs.version }}
