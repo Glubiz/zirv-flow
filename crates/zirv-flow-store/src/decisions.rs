@@ -172,7 +172,7 @@ pub async fn append_decision<'e>(
         return Ok(());
     }
     let started = Instant::now();
-    sqlx::query(
+    let written = sqlx::query(
         "INSERT INTO decision_records \
             (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
              subject_ids, job_id, attempt) \
@@ -191,13 +191,15 @@ pub async fn append_decision<'e>(
     .bind(decision.job.map(|(_, attempt)| attempt))
     .execute(executor)
     .await
-    .map_err(StoreError::query)?;
+    .map(|_| ())
+    .map_err(StoreError::query);
     record_append(started);
-    Ok(())
+    written
 }
 
-/// The `zirv_flow_decision_append_seconds` histogram: one observation per append call. A build
-/// with `bench-no-decisions` returns before the timer starts, so it records nothing.
+/// The `zirv_flow_decision_append_seconds` histogram: one observation per non-empty append call,
+/// whether it succeeds or fails. A build with `bench-no-decisions` and an empty batch return
+/// before the timer starts, so they record nothing.
 fn record_append(started: Instant) {
     metrics::histogram!("zirv_flow_decision_append_seconds")
         .record(started.elapsed().as_secs_f64());
@@ -221,10 +223,19 @@ async fn insert_identified(
     connection: &mut PgConnection,
     decisions: &[(Uuid, &NewDecision)],
 ) -> Result<(), StoreError> {
-    if BENCH_NO_DECISIONS {
+    if BENCH_NO_DECISIONS || decisions.is_empty() {
         return Ok(());
     }
     let started = Instant::now();
+    let written = write_chunks(connection, decisions).await;
+    record_append(started);
+    written
+}
+
+async fn write_chunks(
+    connection: &mut PgConnection,
+    decisions: &[(Uuid, &NewDecision)],
+) -> Result<(), StoreError> {
     for chunk in decisions.chunks(MAX_BATCH) {
         let mut query = QueryBuilder::<Postgres>::new(
             "INSERT INTO decision_records \
@@ -250,7 +261,6 @@ async fn insert_identified(
             .await
             .map_err(StoreError::query)?;
     }
-    record_append(started);
     Ok(())
 }
 
@@ -601,6 +611,34 @@ mod tests {
         assert_eq!(counted, Some("2"), "{output}");
         #[cfg(feature = "bench-no-decisions")]
         assert_eq!(counted, None, "{output}");
+    }
+
+    #[cfg(not(feature = "bench-no-decisions"))]
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failed_append_is_timed_and_an_empty_one_is_not(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let trace = TraceContext::root(Cause::api("req"));
+        let missing = WorkspaceId::from_uuid(Uuid::now_v7());
+        let counted = || {
+            handle.render().lines().find_map(|line| {
+                line.strip_prefix("zirv_flow_decision_append_seconds_count ")
+                    .map(str::to_owned)
+            })
+        };
+        let mut connection = pool.acquire().await.unwrap();
+
+        append_decisions(&mut connection, &[]).await.unwrap();
+        assert_eq!(counted(), None);
+
+        let one = append_decision(&pool, &decision(missing, &trace, "one")).await;
+        assert!(one.is_err(), "a workspace that does not exist is refused");
+        assert_eq!(counted().as_deref(), Some("1"));
+        let many = append_decisions(&mut connection, &[decision(missing, &trace, "two")]).await;
+        assert!(many.is_err());
+        assert_eq!(counted().as_deref(), Some("2"));
     }
 
     /// Times 500 decisions appended one by one against one batched call, inside a transaction
