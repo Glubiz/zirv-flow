@@ -18550,7 +18550,7 @@
         "tags": [
           "snippets"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; a snippet with no block\nis refused as `missing_content`. A theme logo image is accepted: the template or theme that\nholds the snippet checks it. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; a snippet with no block\nis refused as `missing_content`. A theme logo image is accepted: the template or theme that\nholds the snippet checks it. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The live templates whose current\nversion renders with the snippet (a snippet block, or a theme footer) are validated with the\ndraft in place of the published version, at most 200 in template id order; past 200 the publish\ngoes ahead on the result for the first 200. A blocking issue in one of them, such as a footer\nwithout an unsubscribe link in a marketing template, is a 422 `snippet_breaks_templates` that\nlists up to 20 of them with their issue codes and the total, and writes nothing. Warnings do\nnot refuse. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
         "operationId": "publish_snippet",
         "parameters": [
           {
@@ -18626,7 +18626,7 @@
             }
           },
           "422": {
-            "description": "The draft has blocking issues (`snippet_invalid`, with `template_issues`)",
+            "description": "The draft has blocking issues (`snippet_invalid`, with `template_issues`), or would stop live templates from sending (`snippet_breaks_templates`, with `templates` and `total`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -24275,7 +24275,7 @@
         "tags": [
           "themes"
         ],
-        "summary": "Publishes the draft as the next immutable version. The tokens are checked by the renderer's\ntheme rules (colours, width, font, URL and ids; contrast below WCAG AA is a warning and never\nblocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the\nfooter a snippet of the workspace that is not archived and has a published version\n(`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue\nand writes nothing. The logo's asset reference is written with the version. The response lists\nthe templates and active flows that use the theme. Audited as `theme.published`.",
+        "summary": "Publishes the draft as the next immutable version. The tokens are checked by the renderer's\ntheme rules (colours, width, font, URL and ids; contrast below WCAG AA is a warning and never\nblocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the\nfooter a snippet of the workspace that is not archived and has a published version\n(`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue\nand writes nothing. The live templates that name the theme, or follow it while it is the\ndefault, are validated with the draft in place of the published version, at most 200 in\ntemplate id order; past 200 the publish goes ahead on the result for the first 200. A blocking\nissue in one of them, such as a removed footer in a marketing template, is a 422\n`theme_breaks_templates` that lists up to 20 of them with their issue codes and the total, and\nwrites nothing. Warnings do not refuse. The logo's asset reference is written with the version. The response lists\nthe templates and active flows that use the theme. Audited as `theme.published`.",
         "operationId": "publish_theme",
         "parameters": [
           {
@@ -24351,7 +24351,7 @@
             }
           },
           "422": {
-            "description": "The draft has blocking issues (`theme_invalid`, with `template_issues`)",
+            "description": "The draft has blocking issues (`theme_invalid`, with `template_issues`), or would stop live templates from sending (`theme_breaks_templates`, with `templates` and `total`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -27585,6 +27585,31 @@
               "$ref": "#/components/schemas/BatchItemRequest"
             },
             "description": "At least one item, at most `ingest.max_batch_items`. All are validated before any is\nappended."
+          }
+        }
+      },
+      "BrokenTemplateProblem": {
+        "type": "object",
+        "description": "A live template that a new snippet or theme version would stop from sending.",
+        "required": [
+          "id",
+          "name",
+          "codes"
+        ],
+        "properties": {
+          "codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The codes of its blocking issues with the new version."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -35875,8 +35900,27 @@
             },
             "description": "What is wrong with a template document (`template_invalid`): a fixed code, how bad it is\nand where, never a value from the document."
           },
+          "templates": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BrokenTemplateProblem"
+            },
+            "description": "The live templates a snippet or theme version would stop from sending\n(`snippet_breaks_templates`, `theme_breaks_templates`), at most 20."
+          },
           "title": {
             "type": "string"
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many templates `templates` is the first of.",
+            "minimum": 0
           },
           "trace_id": {
             "type": [

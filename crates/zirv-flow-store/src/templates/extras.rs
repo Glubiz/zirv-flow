@@ -57,6 +57,24 @@ pub struct LoadedInputs {
     pub assets: BTreeMap<String, String>,
 }
 
+/// A template that renders with a snippet or theme in its current published version.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveTemplate {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// A version that is not published yet, loaded in place of the published one: the check of what a
+/// snippet or theme publish would do to the templates that use it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Candidate {
+    /// The content of a snippet.
+    Snippet { id: Uuid, content: Value },
+    /// The tokens of a theme. A theme with no published version resolves to nothing, so it has no
+    /// effect then.
+    Theme { id: Uuid, tokens: Value },
+}
+
 /// Loads what `request` names. `public_url` is what asset URLs are built on (`server.public_url`
 /// without a trailing slash); with none they are the relative `/a/...` path.
 pub async fn load_render_inputs(
@@ -65,12 +83,30 @@ pub async fn load_render_inputs(
     request: &ExtrasRequest,
     public_url: Option<&str>,
 ) -> Result<LoadedInputs, StoreError> {
+    load_render_inputs_with(connection, workspace, request, public_url, None).await
+}
+
+/// [`load_render_inputs`] with `candidate` in place of the published version of its snippet or
+/// theme, wherever the request reaches it: a snippet block, the theme footer, or the theme itself.
+pub async fn load_render_inputs_with(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    request: &ExtrasRequest,
+    public_url: Option<&str>,
+    candidate: Option<&Candidate>,
+) -> Result<LoadedInputs, StoreError> {
     let choice = match &request.theme {
         ThemeRequest::None => ThemeChoice::None,
         ThemeRequest::Default => ThemeChoice::Default,
         ThemeRequest::Id(id) => ThemeChoice::Named(id.parse().unwrap_or(Uuid::nil())),
     };
-    let theme = effective_theme(connection, workspace, choice).await?;
+    let mut theme = effective_theme(connection, workspace, choice).await?;
+    if let (Some(theme), Some(Candidate::Theme { id, tokens })) = (&mut theme, candidate)
+        && theme.theme_id == *id
+    {
+        theme.version += 1;
+        theme.tokens = tokens.clone();
+    }
 
     let mut wanted = request.snippets.clone();
     let mut assets = request.assets.clone();
@@ -83,7 +119,19 @@ pub async fn load_render_inputs(
         }
         assets.extend(text_at(&theme.tokens, "logo").map(str::to_owned));
     }
-    let snippets = current_snippets(connection, workspace, &wanted).await?;
+    let mut snippets = current_snippets(connection, workspace, &wanted).await?;
+    if let Some(Candidate::Snippet { id, content }) = candidate {
+        for spelled in wanted.iter().filter(|spelled| spelled.parse() == Ok(*id)) {
+            let version = snippets.get(spelled).map_or(1, |loaded| loaded.version + 1);
+            snippets.insert(
+                spelled.clone(),
+                LoadedSnippet {
+                    version,
+                    content: content.clone(),
+                },
+            );
+        }
+    }
     for snippet in snippets.values() {
         assets.extend(image_assets(&snippet.content));
     }
@@ -386,5 +434,60 @@ mod tests {
         )
         .await;
         assert!(relative.assets[&logo.id.to_string()].starts_with("/a/"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_candidate_takes_the_place_of_its_own_snippet_or_theme_only(pool: PgPool) {
+        use crate::snippets::tests_support::create;
+        use crate::themes::tests_support::{create as create_theme, publish};
+        let ws = workspace(&pool, "one").await;
+        let snippet = create(&pool, ws, "Offer").await;
+        let other = create(&pool, ws, "Other").await;
+        publish_snippet_with(&pool, ws, snippet.id).await;
+        publish_snippet_with(&pool, ws, other.id).await;
+        let theme = create_theme(&pool, ws, "Brand").await;
+        publish(&pool, ws, theme.id).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let asked = request(
+            ThemeRequest::Id(theme.id.to_string()),
+            &[snippet.id, other.id],
+            &[],
+        );
+        let content = json!({"blocks": []});
+        let tokens = json!({"primary": "#010203"});
+        let published = load_render_inputs(&mut connection, ws, &asked, None)
+            .await
+            .unwrap();
+
+        let swapped_snippet = Candidate::Snippet {
+            id: snippet.id,
+            content: content.clone(),
+        };
+        let with_snippet =
+            load_render_inputs_with(&mut connection, ws, &asked, None, Some(&swapped_snippet))
+                .await
+                .unwrap();
+        let swapped_theme = Candidate::Theme {
+            id: theme.id,
+            tokens: tokens.clone(),
+        };
+        let with_theme =
+            load_render_inputs_with(&mut connection, ws, &asked, None, Some(&swapped_theme))
+                .await
+                .unwrap();
+
+        let snippet_key = snippet.id.to_string();
+        let other_key = other.id.to_string();
+        assert_eq!(with_snippet.snippets[&snippet_key].content, content);
+        assert_eq!(with_snippet.snippets[&snippet_key].version, 2);
+        assert_eq!(
+            with_snippet.snippets[&other_key],
+            published.snippets[&other_key]
+        );
+        assert_eq!(with_snippet.theme, published.theme);
+        assert_eq!(with_theme.snippets, published.snippets);
+        let themed = with_theme.theme.unwrap();
+        assert_eq!((themed.tokens, themed.version), (tokens, 2));
     }
 }

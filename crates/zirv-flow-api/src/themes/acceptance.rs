@@ -284,6 +284,49 @@ mod tests {
             reply.body["id"].as_str().unwrap().to_owned()
         }
 
+        /// A block template with a published current version, written to the store directly so the
+        /// sender check of the template publish does not apply; returns its id.
+        async fn live_template(
+            &self,
+            name: &str,
+            category: &str,
+            theme: Value,
+            sections: Value,
+        ) -> String {
+            let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+                "subject": "Hi", "sender": "0192b1a4-7c3e-7000-8000-00000000a001", "lang": "en",
+                "category": category, "theme": theme, "sections": sections}});
+            let reply = self
+                .admin(
+                    "POST",
+                    "/templates",
+                    Some(
+                        json!({"name": name, "channel": "email", "category": category,
+                        "document": document}),
+                    ),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+            let id = reply.body["id"].as_str().unwrap().to_owned();
+            let template: Uuid = id.parse().unwrap();
+            sqlx::query(
+                "INSERT INTO template_versions (workspace_id, template_id, version, document, \
+                    validation, trace_id) \
+                 SELECT workspace_id, template_id, 1, document, '[]'::jsonb, gen_random_uuid() \
+                 FROM template_drafts WHERE template_id = $1",
+            )
+            .bind(template)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+                .bind(template)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            id
+        }
+
         /// A published flow whose graph names `template`; returns its id.
         async fn flow_naming(&self, name: &str, template: &str) -> Uuid {
             let flow = Uuid::now_v7();
@@ -322,6 +365,16 @@ mod tests {
             zirv_flow_store::commit(tx).await.unwrap();
             flow
         }
+    }
+
+    /// Snippet content with the unsubscribe link, which a footer needs.
+    fn unsubscribe_content() -> Value {
+        json!({"blocks": [{"type": "text", "id": "legal", "content":
+            r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#}]})
+    }
+
+    fn section_of(block: Value) -> Value {
+        json!([{"id": "s", "columns": [[block]]}])
     }
 
     fn issue_codes(reply: &Reply) -> Vec<String> {
@@ -1002,5 +1055,94 @@ mod tests {
         );
         assert_eq!(refused.body["code"], "snippet_in_use", "{:?}", refused.body);
         assert_eq!(ids(&refused.body["snippet_themes"]), [theme.as_str()]);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_theme_version_that_drops_its_footer_is_refused_while_a_live_marketing_template_follows_it(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = f
+            .admin(
+                "POST",
+                "/snippets",
+                Some(json!({"name": "Footer", "content": unsubscribe_content()})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/snippets/{footer}/publish"), None)
+            .await;
+        let theme = f
+            .published("Brand", json!({"footer_snippet": footer}))
+            .await;
+        f.set_default(&theme).await;
+        let heading =
+            || section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"}));
+        let marketing = f
+            .live_template("News", "marketing", json!("default"), heading())
+            .await;
+        f.live_template("Receipt", "transactional", json!("default"), heading())
+            .await;
+        f.put_draft(&theme, tokens("#112233"), None).await;
+
+        let refused = f.publish(&theme).await;
+        let versions_after_refusal = f.count("SELECT count(*) FROM theme_versions").await;
+        let archived = f
+            .admin("DELETE", &format!("/templates/{marketing}"), None)
+            .await;
+        let accepted = f.publish(&theme).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "theme_breaks_templates");
+        assert_eq!(refused.body["total"], 1);
+        assert_eq!(ids(&refused.body["templates"]), [marketing.as_str()]);
+        assert_eq!(
+            refused.body["templates"][0]["codes"],
+            json!(["missing_unsubscribe"])
+        );
+        assert_eq!(versions_after_refusal, 1);
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert_eq!(accepted.status, StatusCode::CREATED, "{:?}", accepted.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_named_theme_version_that_breaks_the_template_naming_it_is_refused(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let footer = f
+            .admin(
+                "POST",
+                "/snippets",
+                Some(json!({"name": "Footer", "content": unsubscribe_content()})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/snippets/{footer}/publish"), None)
+            .await;
+        let theme = f
+            .published("Brand", json!({"footer_snippet": footer}))
+            .await;
+        let named = f
+            .live_template(
+                "Named",
+                "marketing",
+                json!({"id": theme}),
+                section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"})),
+            )
+            .await;
+        f.put_draft(&theme, tokens("#112233"), None).await;
+
+        let refused = f.publish(&theme).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "theme_breaks_templates");
+        assert_eq!(ids(&refused.body["templates"]), [named]);
     }
 }

@@ -24,7 +24,10 @@ pub use crud::{
     create_template, document_sender, find_template, find_template_draft, lock_templates_shared,
     save_template_draft, update_template,
 };
-pub use extras::{ExtrasRequest, LoadedInputs, LoadedSnippet, ThemeRequest, load_render_inputs};
+pub use extras::{
+    Candidate, ExtrasRequest, LiveTemplate, LoadedInputs, LoadedSnippet, ThemeRequest,
+    load_render_inputs, load_render_inputs_with,
+};
 pub use library::{
     TemplateListQuery, TemplateSort, TemplateStatus, TemplateSummary, TemplateTheme,
     TemplateThemeFilter, list_templates, set_template_draft_checks, template_active_flow_counts,

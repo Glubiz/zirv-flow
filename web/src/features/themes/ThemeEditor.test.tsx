@@ -224,6 +224,32 @@ describe("publishing a theme", () => {
 
     expect(await within(dialog).findByText("Blocks publishing")).toBeInTheDocument();
   });
+
+  it("lists the live templates the version would break, with links, and stays open", async () => {
+    mockApi({
+      ...themeRoutes(),
+      [`POST ${BASE}/publish`]: () =>
+        refusal(422, {
+          code: "theme_breaks_templates",
+          detail: "This theme version would stop 25 live templates from sending; fix them or the version first.",
+          total: 25,
+          templates: [{ id: "t9", name: "Weekly news", codes: ["missing_unsubscribe"] }],
+        }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await publishButton());
+    const dialog = await screen.findByRole("dialog");
+    await user.click(await within(dialog).findByRole("button", { name: "Publish" }));
+
+    const link = await within(dialog).findByRole("link", { name: "Weekly news" });
+    expect(link.getAttribute("href")).toMatch(/\/templates\/t9$/);
+    expect(within(dialog).getByText("missing_unsubscribe")).toBeInTheDocument();
+    expect(within(dialog).getByText(/would stop 25 live templates from sending/)).toBeInTheDocument();
+    expect(within(dialog).getByText("and 24 more")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
 });
 
 describe("versions and where used", () => {

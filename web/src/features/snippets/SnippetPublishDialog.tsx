@@ -1,8 +1,8 @@
 import { useState } from "react";
 
-import { ApiError, client, describeError, unwrap, type ErrorSummary, type ProblemTemplateIssue, type Resource } from "../../api";
+import { ApiError, client, describeError, unwrap, type BrokenTemplate, type ErrorSummary, type ProblemTemplateIssue, type Resource } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState } from "../../ui";
-import { IssueList } from "../templates";
+import { BrokenTemplates, IssueList } from "../templates";
 import { nextVersion, usersOf, type Snippet, type SnippetUsedBy, type SnippetVersion } from "./model";
 import { SnippetUserList } from "./SnippetUsers";
 
@@ -26,11 +26,13 @@ export function SnippetPublishDialog({ workspaceId, snippet, usedBy, flush, onCl
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [issues, setIssues] = useState<ProblemTemplateIssue[]>([]);
   const [more, setMore] = useState(false);
+  const [broken, setBroken] = useState<{ detail: string; templates: BrokenTemplate[]; total: number } | null>(null);
 
   async function publish() {
     setBusy(true);
     setFailure(null);
     setIssues([]);
+    setBroken(null);
     try {
       if (!(await flush())) {
         setFailure({ title: "The draft could not be saved", detail: "Fix that, then publish again.", traceId: null });
@@ -43,6 +45,8 @@ export function SnippetPublishDialog({ workspaceId, snippet, usedBy, flush, onCl
       onPublished(published.snippet, published.version);
     } catch (error) {
       if (error instanceof ApiError && error.code === "snippet_invalid") setIssues(error.templateIssues);
+      else if (error instanceof ApiError && error.code === "snippet_breaks_templates")
+        setBroken({ detail: error.detail, templates: error.templates, total: error.total });
       else setFailure(describeError(error));
       setBusy(false);
     }
@@ -75,6 +79,7 @@ export function SnippetPublishDialog({ workspaceId, snippet, usedBy, flush, onCl
           </section>
         ) : null}
         {issues.length > 0 ? <IssueList issues={issues} checked /> : null}
+        {broken ? <BrokenTemplates workspaceId={workspaceId} {...broken} /> : null}
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
           <Button onClick={onClose}>Cancel</Button>
