@@ -122,10 +122,11 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](#render-host) |
 | `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
+| `privacy.export_max_bytes` | u64 | 268435456 | 1048576 to 4294967296; the most uncompressed JSON one person export may hold; past it the export fails with `export_too_large` |
+| `privacy.ledger_dir` | path | unset | a directory on storage shared by every worker where each completed erasure is also written as a file; see [After a restore](#privacy-ledger-dir) |
 | `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `tracking.prefetch_user_agents` | list of strings | `[]` | extra user-agent fragments (case-insensitive) that mark an open as automated, added to the generic markers; see [Tracking and unsubscribe links](#tracking-and-unsubscribe-links) |
-| `privacy.ledger_dir` | path | unset | a directory on storage shared by every worker where each completed erasure is also written as a file; see [After a restore](#privacy-ledger-dir) |
 | `log.filter` | string | `info` | a `tracing` filter directive, such as `warn,zirv_flow_jobs=debug` |
 | `log.format` | string | `json` | `json` (one object per line) or `text` (for local development) |
 | `log.otlp.endpoint` | URL | none (export off) | `http` or `https` OTLP/HTTP base URL, such as `http://collector:4318` |
@@ -1068,8 +1069,19 @@ identifier value. Operator duties:
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one
 gzip-compressed JSON document, `zirv-flow.person-export/v1`: `person` holds `profile` (traits
 with their sources), `identities`, `source_records`, `events` (every partition, oldest first),
-`consent`, `consent_history`, `lists`, `list_history`, `merges` and `identity_conflicts`, with the
-data of merged people under the survivor. It is the one place values leave the system, so only
+`consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges` and
+`identity_conflicts`, then the flow and send side: `enrollments`, `step_executions`,
+`enrollment_waits`, `flow_entries`, `messages` and `message_links` (never the recipient hash or a
+rendered body), `forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
+payload; rows with no person are not reachable), `decision_records` and
+`template_preview_people`, with the data of merged people under the survivor. Left out on
+purpose, each checked by a test against every table with a person column: the change feed
+(`person_changes`), the export itself (`privacy_exports`), `event_dedupe`, the debugger buffer,
+`jobs` (copies of data already exported), the assistant's stored transcripts (free text found by
+needle on erase only, so an export cannot find it) and the suppression and erasure ledgers. The
+document may hold at most `privacy.export_max_bytes` of JSON before compression (default 256 MiB);
+a person over the cap ends as `failed` with the code `export_too_large` and nothing is stored.
+It is the one place values leave the system, so only
 workspace admins can list exports or download one, and every download is audited as
 `privacy.export_downloaded`. `GET .../privacy/exports/{id}/download` returns the file for 24 hours
 after the export is ready and then answers 410; the scheduler leader drops expired content

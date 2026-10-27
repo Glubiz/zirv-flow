@@ -39,6 +39,7 @@ pub struct JobContext<'a> {
     connection: &'a mut PgConnection,
     job: &'a ClaimedJob,
     event_retention: EventRetention,
+    export_max_bytes: u64,
     message_retention: MessageRetention,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
@@ -60,6 +61,7 @@ impl<'a> JobContext<'a> {
             connection,
             job,
             event_retention: EventRetention::default(),
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             ingest: None,
             identifier_key: None,
@@ -138,6 +140,17 @@ impl<'a> JobContext<'a> {
     /// The operator's event retention settings.
     pub fn event_retention(&self) -> &EventRetention {
         &self.event_retention
+    }
+
+    /// Gives the handler the operator's person export size cap.
+    pub(crate) fn with_export_max_bytes(mut self, bytes: u64) -> Self {
+        self.export_max_bytes = bytes;
+        self
+    }
+
+    /// The most uncompressed bytes a person export may hold.
+    pub fn export_max_bytes(&self) -> u64 {
+        self.export_max_bytes
     }
 
     /// Gives the handler the operator's message retention settings.

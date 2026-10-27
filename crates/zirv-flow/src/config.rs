@@ -34,7 +34,7 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 56] = [
+const CONFIG_KEYS: [&str; 57] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -82,9 +82,10 @@ const CONFIG_KEYS: [&str; 56] = [
     "render.deadline_ms",
     "render.memory_limit_mib",
     "sending.recheck_hours",
+    "privacy.export_max_bytes",
+    "privacy.ledger_dir",
     "egress.allow",
     "tracking.prefetch_user_agents",
-    "privacy.ledger_dir",
     "ai.providers",
     "ai.rate_limit_per_user_per_minute",
     "ai.max_repair_attempts",
@@ -118,11 +119,11 @@ pub(crate) struct Config {
     render: RenderConfig,
     sending: SendingConfig,
     #[serde(default)]
+    privacy: PrivacyConfig,
+    #[serde(default)]
     egress: EgressConfig,
     #[serde(default)]
     tracking: TrackingConfig,
-    #[serde(default)]
-    privacy: PrivacyConfig,
     /// The model allowlist of the AI assistant; empty means the assistant is unavailable.
     #[serde(default)]
     ai: zirv_flow_api::AiConfig,
@@ -141,13 +142,24 @@ struct EgressConfig {
 }
 
 /// Privacy settings (architecture 16.3).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PrivacyConfig {
+    /// The most uncompressed bytes of JSON one person export may hold.
+    export_max_bytes: u64,
     /// A directory on storage shared by every worker where each completed erasure is also
     /// written as a file, so it survives a restore of an older backup. Unset writes no file.
     #[serde(default)]
     ledger_dir: Option<PathBuf>,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+            ledger_dir: None,
+        }
+    }
 }
 
 /// Open and click tracking (architecture 10.2).
@@ -622,6 +634,10 @@ impl Config {
             .merge(Serialized::default("render.deadline_ms", 5_000_u64))
             .merge(Serialized::default("render.memory_limit_mib", 512_u64))
             .merge(Serialized::default("sending.recheck_hours", 6_u32))
+            .merge(Serialized::default(
+                "privacy.export_max_bytes",
+                zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+            ))
             .merge(Serialized::default("log.filter", "info"))
             .merge(Serialized::default("log.format", "json"));
         if let Some(path) = path {
@@ -763,6 +779,7 @@ impl Config {
         config.validate_render(path, &env_sources)?;
         config.validate_sending(path, &env_sources)?;
         config.validate_events(path, &env_sources)?;
+        config.validate_privacy(path, &env_sources)?;
         config.validate_retention(path, &env_sources)?;
         config.validate_ingest(path, &env_sources)?;
         if config.imports.max_file_bytes == 0 {
@@ -896,6 +913,23 @@ impl Config {
             return Err(fail(
                 "events.retention_days",
                 "must lie between events.min_retention_days and events.max_retention_days",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The export size cap must lie within the supported bounds.
+    fn validate_privacy(
+        &self,
+        path: Option<&Path>,
+        env_sources: &HashMap<String, String>,
+    ) -> Result<(), ConfigError> {
+        let bounds = zirv_flow_store::EXPORT_MAX_BYTES_MIN..=zirv_flow_store::EXPORT_MAX_BYTES_MAX;
+        if !bounds.contains(&self.privacy.export_max_bytes) {
+            return Err(ConfigError::new(
+                "privacy.export_max_bytes",
+                "must be between 1048576 and 4294967296",
+                source_for("privacy.export_max_bytes", path, env_sources),
             ));
         }
         Ok(())
@@ -1159,6 +1193,11 @@ impl Config {
             rate_per_hook: self.ingest.rate_per_hook,
             burst_per_hook: self.ingest.burst_per_hook,
         }
+    }
+
+    /// The most uncompressed bytes a person export may hold.
+    pub(crate) fn export_max_bytes(&self) -> u64 {
+        self.privacy.export_max_bytes
     }
 
     /// What a CSV upload may be.
@@ -2750,6 +2789,35 @@ output_price_per_mtok = 15000000
 
             assert!(
                 error.contains("sending.recheck_hours: must be between 1 and 720"),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_export_size_cap_defaults_to_256_mib_and_is_bounded_from_1_mib_to_4_gib() {
+        let mut env = database_env("postgres://localhost/database");
+        assert_eq!(
+            Config::load(None, env.clone()).unwrap().export_max_bytes(),
+            256 * 1024 * 1024
+        );
+
+        env.push((
+            "ZIRV_FLOW_PRIVACY__EXPORT_MAX_BYTES".into(),
+            "1048576".into(),
+        ));
+        assert_eq!(
+            Config::load(None, env).unwrap().export_max_bytes(),
+            1024 * 1024
+        );
+        for value in ["1048575", "4294967297", "0"] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push(("ZIRV_FLOW_PRIVACY__EXPORT_MAX_BYTES".into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(
+                error.contains("privacy.export_max_bytes: must be between 1048576 and 4294967296"),
                 "{value}: {error}"
             );
         }

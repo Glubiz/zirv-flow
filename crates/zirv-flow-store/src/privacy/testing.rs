@@ -105,6 +105,8 @@ fn event(name: &str, message_id: &str, at: Option<OffsetDateTime>) -> EventRecor
 /// - two events in two monthly partitions, their dedupe rows and one ingest reject;
 /// - consent with history, two lists with a bystander in one of them, and an identity
 ///   conflict with the bystander;
+/// - flow enrollments with their steps, waits, entries and messages, saved preview people,
+///   forwarding rows and a handled marker;
 /// - a pending export;
 /// - pending inbox rows for the person and for the bystander.
 pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
@@ -491,6 +493,79 @@ pub(crate) async fn seed_everything(pool: &PgPool) -> Seeded {
         person,
         merged,
         bystander,
+    }
+}
+
+/// What the export reads besides [`seed_everything`]'s rows: a tracked link and a recipient hash
+/// on the survivor's message, a bystander message, and decision records and rejects of each person.
+pub(crate) async fn seed_export_extras(pool: &PgPool, seeded: &Seeded) {
+    let Seeded {
+        ws,
+        person,
+        merged,
+        bystander,
+    } = *seeded;
+    sqlx::query(
+        "INSERT INTO message_links (workspace_id, message_id, link_index, url) \
+         SELECT workspace_id, id, 0, 'https://example.com/seeded-link' FROM messages \
+         WHERE workspace_id = $1 AND person_id = $2",
+    )
+    .bind(ws.as_uuid())
+    .bind(person)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE messages SET address_hash = decode(repeat('ab', 32), 'hex') \
+         WHERE workspace_id = $1 AND person_id = $2",
+    )
+    .bind(ws.as_uuid())
+    .bind(person)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, template_id, \
+            destination_id, status, reason, completed_at) \
+         VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), 'bystander-node', \
+                 gen_random_uuid(), gen_random_uuid(), 'skipped', 'no_consent', now())",
+    )
+    .bind(ws.as_uuid())
+    .bind(bystander)
+    .execute(pool)
+    .await
+    .unwrap();
+    for (holder, marker) in [
+        (person, "survivor-decision"),
+        (merged, "merged-decision"),
+        (bystander, "bystander-decision"),
+    ] {
+        sqlx::query(
+            "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
+                cause_kind, cause_id, subject_ids) \
+             VALUES (gen_random_uuid(), $1, gen_random_uuid(), $3, 'done', 'api', 't', \
+                     jsonb_build_object('person', $2::text))",
+        )
+        .bind(ws.as_uuid())
+        .bind(holder)
+        .bind(marker)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    for (holder, marker) in [(person, "survivor-reject"), (bystander, "bystander-reject")] {
+        sqlx::query(
+            "INSERT INTO ingest_rejects (id, workspace_id, received_at, source, kind, reason, \
+                payload, person_id, trace_id) \
+             VALUES (gen_random_uuid(), $1, now(), 'web', 'event', 'schema', \
+                     jsonb_build_object('marker', $3::text), $2, gen_random_uuid())",
+        )
+        .bind(ws.as_uuid())
+        .bind(holder)
+        .bind(marker)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 }
 

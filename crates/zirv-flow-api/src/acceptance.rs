@@ -7188,9 +7188,14 @@ email,b@example.com,
         assert_eq!(jobs, 1);
 
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        zirv_flow_store::build_export(&mut tx, ws.parse().unwrap(), export.parse().unwrap())
-            .await
-            .unwrap();
+        zirv_flow_store::build_export(
+            &mut tx,
+            ws.parse().unwrap(),
+            export.parse().unwrap(),
+            zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+        )
+        .await
+        .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
 
         let listed = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;

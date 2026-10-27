@@ -223,16 +223,17 @@ pub use people::{
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use privacy::{
     BuildOutcome, DeleteReason, ERASE_CALL_ATTEMPTS, ERASE_CALL_JOB_KIND, ERASE_JOB_KIND,
-    EXPORT_FORMAT, EXPORT_JOB_KIND, EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseOutcome,
-    EraseTarget, ErasureCall, ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor,
-    ExportDownload, ExportError, ExportReport, ExportStatus, ExternalKey, LEDGER_FORMAT,
-    LedgerEntry, LedgerFileError, LedgerWrite, MISSING_KEY, MergeError, MergeReport, PrivacyExport,
-    ReplayReport, build_export, check_ledger_dir, delete_person, download_export, erase_person,
-    expire_exports, export_ledger, find_erasure_request, find_ledger_entry, find_privacy_export,
-    finish_erasure_call, idempotency_key, list_erasure_calls, list_erasure_requests,
-    list_privacy_exports, lock_person_call_shared, merge_ledger_entries, read_ledger_dir,
-    reconcile_ledger_file, replay_erasures, request_erasure, request_export, update_ledger_lists,
-    write_ledger_file,
+    EXPORT_EXCLUDED, EXPORT_FORMAT, EXPORT_JOB_KIND, EXPORT_MAX_BYTES_DEFAULT,
+    EXPORT_MAX_BYTES_MAX, EXPORT_MAX_BYTES_MIN, EXPORT_SECTIONS, EXPORT_TOO_LARGE,
+    EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseOutcome, EraseTarget, ErasureCall, ErasureCursor,
+    ErasureRequest, ErasureStatus, ExportCursor, ExportDownload, ExportError, ExportReport,
+    ExportStatus, ExternalKey, LEDGER_FORMAT, LedgerEntry, LedgerFileError, LedgerWrite,
+    MISSING_KEY, MergeError, MergeReport, PrivacyExport, ReplayReport, build_export,
+    check_ledger_dir, delete_person, download_export, erase_person, expire_exports, export_ledger,
+    find_erasure_request, find_ledger_entry, find_privacy_export, finish_erasure_call,
+    idempotency_key, list_erasure_calls, list_erasure_requests, list_privacy_exports,
+    lock_person_call_shared, merge_ledger_entries, read_ledger_dir, reconcile_ledger_file,
+    replay_erasures, request_erasure, request_export, update_ledger_lists, write_ledger_file,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;

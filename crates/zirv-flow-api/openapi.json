@@ -15106,7 +15106,7 @@
         "tags": [
           "privacy"
         ],
-        "summary": "Asks for an export of everything held about a person: profile, identities, ledger\ncontributions, events, consent and its history, lists and their history, merges and\nidentity conflicts, with the data of merged people under the survivor. A background job\nbuilds it; it can be downloaded for 24 hours once it is ready. The request is given as a\n`person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.\nAudited as `privacy.export_requested`.",
+        "summary": "Asks for an export of everything held about a person: profile, identities, ledger\ncontributions, events, consent and its history, lists and segments and their history, merges\nand identity conflicts, flow enrollments with their steps, waits and entries, the message log\nand its links, forwarding rows and handled markers, ingest rejects, decision records and saved\ntemplate previews, with the data of merged people under the survivor. A document past the\nsize cap fails with the code `export_too_large`. A background job\nbuilds it; it can be downloaded for 24 hours once it is ready. The request is given as a\n`person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.\nAudited as `privacy.export_requested`.",
         "operationId": "request_export",
         "parameters": [
           {
@@ -31965,6 +31965,13 @@
             "format": "date-time",
             "description": "24 hours after `ready_at`; the download answers 410 from then on."
           },
+          "failure_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the export failed, when known: `export_too_large` when the document passed\n`privacy.export_max_bytes`. Null otherwise."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -32002,7 +32009,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`pending`, `ready`, `failed` once the job ran out of attempts, or `expired`.",
+            "description": "`pending`, `ready`, `failed` once the job ran out of attempts or the document passed\nthe size cap, or `expired`.",
             "example": "ready"
           },
           "trace_id": {
