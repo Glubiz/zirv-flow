@@ -103,6 +103,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `events.min_retention_days` | u32 | 30 | at least 1; the shortest per-name override a workspace may set |
 | `events.max_retention_days` | u32 | 1095 | at least 1; the longest per-name override; not below the minimum |
 | `events.reject_retention_days` | u32 | 30 | at least 1; how long ingest rejects are kept |
+| `retention.messages_days` | u32 | 395 | at least 1; how long ended messages are kept (about 13 months); within the two bounds below; the purge writes the erasure handled markers |
+| `retention.messages_min_days` | u32 | 30 | at least 1; the shortest per-workspace message window |
+| `retention.messages_max_days` | u32 | 1095 | at least 1; the longest per-workspace message window; not below the minimum |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
@@ -122,6 +125,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `render.pool_size` | u32 | 2 | 1 to 32; render-host child processes, and so renders at once, in each `serve` and `worker` process; see [Render host](#render-host) |
 | `render.deadline_ms` | u64 | 5000 | 1 to 600000; how long one render may take before its child is killed and replaced |
 | `render.memory_limit_mib` | u64 | 512 | 64 to 1048576; address space a child may use (`RLIMIT_AS`); applied on Linux only |
+| `privacy.export_max_bytes` | u64 | 268435456 | 1048576 to 4294967296; the most uncompressed JSON one person export may hold; past it the export fails with `export_too_large` |
+| `privacy.ledger_dir` | path | unset | a directory on storage shared by every worker where each completed erasure is also written as a file; see [After a restore](#privacy-ledger-dir) |
 | `sending.recheck_hours` | u32 | 6 | 1 to 720; hours a sending domain may go without a DNS check of its DKIM, SPF and DMARC records before the scheduler queues another; see [Sending domains](#sending-domains) |
 | `egress.allow` | list of CIDR ranges | `[]` | each entry a CIDR such as `10.0.5.7/32`, with no host bits set; see [Egress](#egress) |
 | `tracking.prefetch_user_agents` | list of strings | `[]` | extra user-agent fragments (case-insensitive) that mark an open as automated, added to the generic markers; see [Tracking and unsubscribe links](#tracking-and-unsubscribe-links) |
@@ -156,7 +161,8 @@ Each secret gets its own random data key (XChaCha20-Poly1305), and the master
 key wraps that data key; the database holds only ciphertext, the wrapped key and
 the id of the wrapping master key. A database dump without the master key
 reveals no credential, and the API never returns one. A lost master key means
-the stored credentials must be entered again.
+the stored secrets must be created again, and every hash and tracking token made
+before is dead; see [Secrets and the master key](docs/operations/secrets.md).
 
 #### Workspace credentials
 
@@ -991,6 +997,15 @@ destination, with an idempotency key that is stable across retries; a failing de
 and then shown as `failed`, and never blocks the erasure. The ledger is the one place that keeps the
 person id of an erased person, by design.
 
+The logs hold no identifier values: no email, phone, external id, name or trait value, in the
+message or in a span field, and no keyed hash of one. The end-to-end test
+`default_level_logs_hold_no_identifier_value_through_the_whole_privacy_scenario`
+(`crates/zirv-flow/src/e2e/privacy.rs`) captures the real JSON log layer at the default `info`
+level through ingest (including a refused batch and a rejected event), a profile read, 4xx and 5xx
+answers, an export and its download, a failing send, an erasure whose destination fails its erase
+call, and a replay. It then scans every line for each seeded value raw, lowercase, percent-encoded
+and as a prefix of its identifier hash. A control line proves the scan can fail.
+
 Erasure removes what was held or pending when it ran. Data that arrives while it runs, or after it,
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
 
@@ -1003,21 +1018,73 @@ request; see [CSV import](#csv-import).
 **After a restore.** Backups keep erased data until they age out, so after restoring a backup run
 
 ```sh
-zirv-flow admin replay-erasures [--workspace <slug>]
+zirv-flow admin replay-erasures [--workspace <slug>] [--from <ledger_dir>]
 ```
 
 before starting the workers. It needs the master key and no password, and prints counts only. For
 each completed ledger entry it re-adds the `erased` suppressions, erases every person id the erased group had (the survivor and the people merged
 into them) that the restore brought back, including a backup from before a merge, and removes pending inbox rows that name an erased identifier. It is safe to
-run again. Keeping a copy of the ledger outside the database is an open question in the
-architecture.
+run again.
+
+<a id="privacy-ledger-dir"></a>**The ledger outside the database.** A backup taken before an
+erasure holds neither the deletion nor the ledger row, so the replay above has nothing to replay.
+Set `privacy.ledger_dir` (or `ZIRV_FLOW_PRIVACY__LEDGER_DIR`) and the `privacy.erase` job also
+writes one JSON file per completed ledger entry, `<workspace_id>-<ledger_id>.json`
+(`zirv-flow.erasure-ledger/v1`), before the job returns: it writes a temporary file in the same
+directory, fsyncs it, renames it into place and fsyncs the directory. If the write fails the job
+fails, the erasure rolls back and the request stays pending for the retry, so an erasure is never
+complete without its file. A file holds ids, keyed hashes (hex), their kinds and times, never an
+identifier value. Operator duties:
+
+- Put the directory on storage shared by every worker that supports atomic rename and durable
+  writes, owned by the user the workers run as and mode `0700`; the files are created `0600` on
+  unix. At start-up a worker writes, fsyncs, renames and removes a probe file there and refuses to
+  start, naming `privacy.ledger_dir` and the path, if that fails.
+- Back the directory up apart from the database, so one restore cannot take both back in time.
+  The hashes are keyed with the deployment HMAC root, so restoring from the files also needs the
+  master key and the database's `deployment_keys` row.
+- After restoring a database, run `zirv-flow admin replay-erasures --from <dir>` before it serves
+  traffic or any worker starts. It validates every file first (one corrupt or unknown-format file
+  stops it, naming the file, before anything changes), adds the entries the database lacks as
+  completed, upgrades a request the backup still holds as pending or failed to completed (the file
+  records a completed erasure and wins; a completed row is left alone), skips and counts files
+  whose workspace does not exist, and then runs the replay. The counts include `merged` (added
+  and upgraded) and `skipped_workspaces`. A file whose ledger id belongs to a request of another
+  workspace in the database stops the merge before any change, naming the file. A request merged
+  or upgraded from a file runs only the replay: it does not make the destination erase calls and
+  does not erase AI transcripts, which is the existing limit of replay.
+- A hung `privacy.ledger_dir` stalls the erase jobs, and the row locks they hold, until the
+  file system returns, so the directory must be reliable storage.
+- If a retry of an erasure finds its file already there with other content (the person gained an
+  identity since the first attempt, or a pending request came back from an older backup), the job
+  writes the union of the two to the file and to the ledger row; the file never shrinks. A file that
+  is unreadable or invalid fails the job, which the worker logs naming the file. Both steps are safe to run again.
+- With the directory set, the recovery point for erasures is none: the file exists before the
+  erasure is reported complete. With it unset, nothing is written and the restore guarantee rests
+  on backups of the database alone.
+- `zirv-flow admin export-ledger --out <dir>` writes the same files for every completed entry in
+  the database, a snapshot that also covers erasures made before the key was set. It prints counts
+  and writes no audit entry.
+- The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
+  person id nor a ledger hash is out of its reach (#373).
 
 **Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one
 gzip-compressed JSON document, `zirv-flow.person-export/v1`: `person` holds `profile` (traits
 with their sources), `identities`, `source_records`, `events` (every partition, oldest first),
-`consent`, `consent_history`, `lists`, `list_history`, `merges` and `identity_conflicts`, with the
-data of merged people under the survivor. It is the one place values leave the system, so only
+`consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges` and
+`identity_conflicts`, then the flow and send side: `enrollments`, `step_executions`,
+`enrollment_waits`, `flow_entries`, `messages` and `message_links` (never the recipient hash or a
+rendered body), `forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
+payload; rows with no person are not reachable), `decision_records` and
+`template_preview_people`, with the data of merged people under the survivor. Left out on
+purpose, each checked by a test against every table with a person column: the change feed
+(`person_changes`), the export itself (`privacy_exports`), `event_dedupe`, the debugger buffer,
+`jobs` (copies of data already exported), the assistant's stored transcripts (free text found by
+needle on erase only, so an export cannot find it) and the suppression and erasure ledgers. The
+document may hold at most `privacy.export_max_bytes` of JSON before compression (default 256 MiB);
+a person over the cap ends as `failed` with the code `export_too_large` and nothing is stored.
+It is the one place values leave the system, so only
 workspace admins can list exports or download one, and every download is audited as
 `privacy.export_downloaded`. `GET .../privacy/exports/{id}/download` returns the file for 24 hours
 after the export is ready and then answers 410; the scheduler leader drops expired content

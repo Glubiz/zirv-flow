@@ -2700,7 +2700,7 @@ data key per secret (XChaCha20-Poly1305), wrapped by an operator-held master
 key (`secrets.master_key_file` or env, identified by key id).
 `zirv-flow admin rotate-master-key` re-wraps data keys in one transaction
 without decrypting payloads. The API never returns plaintext. A lost master key means
-credentials must be re-entered (documented).
+credentials must be re-entered (documented in [`docs/operations/secrets.md`](operations/secrets.md)).
 
 **Workspace credentials (M6, ruling 20303fa3).** A source or destination does not seal a
 credential of its own: it references a named workspace credential by `credential_id`. A
@@ -2816,8 +2816,23 @@ reachable under a public-looking name stays the operator's to split-horizon.
 ### 16.3 Export, erasure and retention
 
 **Export** (`privacy.export`) produces JSON of everything held on a person
-(profile, identities, traits with sources, events, consent history, membership
-history, enrollments, messages) behind an expiring link. **Erasure**
+behind an expiring link: `profile`, `identities`, `source_records`, `events`,
+`consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges`,
+`identity_conflicts`, `enrollments`, `step_executions`, `enrollment_waits`,
+`flow_entries`, `messages` (without the recipient hash), `message_links`,
+`forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
+payload and reason; rows with no person are out of reach), `decision_records`
+(ids and codes) and `template_preview_people`, with merged people folded under the
+survivor. Deliberately left out, in a constant list that a catalog test checks
+against every table with a person column: `person_changes` (internal change feed),
+`privacy_exports` (the export itself), `event_dedupe` (message ids only),
+`debugger_feed` (a 15-minute buffer of event ids), `jobs` (payload copies of data
+already exported, purged on erase), `ai_transcripts` (free text found by needle
+on erase only, so an export cannot find it), and `suppressions` and
+`erasure_requests` (the ledger, kept on purpose). The uncompressed document is
+capped by `privacy.export_max_bytes` (default 256 MiB): rows are counted as they
+are read, and a person over the cap fails with `export_too_large`, with no
+content stored. **Erasure**
 (`privacy.erase`): (1) record the request in the erasure ledger (person id,
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
@@ -2867,6 +2882,19 @@ holds the lock through the drop, serialising with override changes. No row locks
 batches. A failed run keeps completed batches; the next run continues, counting only what that
 run removes. The delivered outbox purge uses the pool too, releasing its locks before delivery
 calls.
+
+`messages.retention` (#376, migration 0071) is the same for the message log: a daily instance-level
+schedule (03:41 UTC) runs `apply_message_retention` with `retention.messages_days` (default 395,
+bounded by `retention.messages_min_days` 30 and `retention.messages_max_days` 1095). It deletes
+messages in a terminal status (`sent`, `skipped`, `failed`) older than the window, oldest first by
+`(created_at, id)` on the index `messages_created_idx`, in batches of `RETENTION_BATCH`; `pending`
+and `sending` rows belong to a live job and stay, and `message_links` follow by cascade. Each batch
+is one committed statement built with `privacy::delete_and_mark`, so it writes the handled marker
+of every purged row (earliest `created_at` per person and destination) and a failure rolls the
+batch back whole while earlier batches stay. The purge takes an optional map of workspace to days
+(empty until the per-workspace window exists). The run adds the count to
+`zirv_flow_retention_deleted_total{table="messages"}`, sets
+`zirv_flow_retention_last_run_timestamp_seconds{table="messages"}` and logs the count only.
 
 As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs with their kinds,
 status, requester, trace); the M8 erasure scan applies the ledger and audit exceptions above.
@@ -2953,12 +2981,12 @@ the result per destination.
   destination that handled a person only before that would not be called. `erasure_handled_markers`
   (migration 0059) keeps the fact: one row per workspace, person and destination, with
   `first_handled_at`. Each retention purge that removes handling evidence writes the markers of the
-  rows it removes, in its own statement, with `ON CONFLICT DO NOTHING`: the event deletes (default
-  and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
+  rows it removes, in its own statement, keeping the earlier `first_handled_at` when a marker
+  exists: the event deletes (default and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
   safety net before a partition drop, and `purge_delivered` for delivered outbox rows. A row that
   names no destination writes none, and neither does a destination that no longer exists. Messages
-  are not purged by retention (the 13-month message retention is not built), so they write none;
-  when it is built it writes markers too. Nothing on a hot path (message insert, outbox insert, sync
+  are purged by `messages.retention` (#376; below), which writes the marker of every row it removes,
+  whatever its status. Nothing on a hot path (message insert, outbox insert, sync
   outcome) writes a marker. The marker insert joins `people`, so a purge writes nothing for a person
   already gone, and the table's `person_id` key (`ON DELETE CASCADE`) means a
   marker never outlives its person: a purge that raced an erasure fails as a whole statement and

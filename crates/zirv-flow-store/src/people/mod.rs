@@ -17,6 +17,8 @@ mod timeline;
 #[cfg(test)]
 pub(crate) mod erasure;
 #[cfg(test)]
+pub(crate) use erasure::person_reference_places;
+#[cfg(test)]
 mod isolation;
 
 pub use apply::{

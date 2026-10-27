@@ -2,7 +2,8 @@
 //!
 //! The payload is `{workspace_id, export_id}`. The document is built and stored in the job's
 //! own transaction; an export whose person was erased in the meantime is gone, and the job
-//! finishes without doing anything.
+//! finishes without doing anything. A document past `privacy.export_max_bytes` is stored as
+//! failed, and the job finishes: a retry would grow it to the same size.
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -22,7 +23,8 @@ impl JobKind for PrivacyExport {
                 "the payload names another workspace than the job",
             ));
         }
-        zirv_flow_store::build_export(ctx.conn(), workspace, export).await?;
+        let max_bytes = ctx.export_max_bytes();
+        zirv_flow_store::build_export(ctx.conn(), workspace, export, max_bytes).await?;
         Ok(())
     }
 }
@@ -130,6 +132,74 @@ mod tests {
                 .unwrap(),
             ExportDownload::Content(_)
         ));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_document_past_the_cap_finishes_the_job_and_leaves_a_failed_export(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let name = WorkspaceName::parse("ours").unwrap();
+        let ws = zirv_flow_store::create_workspace(&pool, &name, &Slug::parse("ours").unwrap())
+            .await
+            .unwrap()
+            .id;
+        let trace = TraceContext::root(Cause::api("t"));
+        let outcomes = zirv_flow_store::apply_profile_batch(
+            &pool,
+            ws,
+            &[ProfileRecord {
+                source: "crm".into(),
+                stream: "s".into(),
+                record_key: "1".into(),
+                identifiers: vec![("email".into(), "ada@example.com".into())],
+                traits: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                observed_at: datetime!(2026-01-01 00:00 UTC),
+                trace: trace.clone(),
+            }],
+        )
+        .await
+        .unwrap();
+        let ProfileOutcome::Applied { person_id, .. } = outcomes[0] else {
+            panic!("not applied");
+        };
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let export = zirv_flow_store::request_export(&mut tx, ws, person_id, None, &trace)
+            .await
+            .unwrap()
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[PrivacyExport::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .expect("the request enqueued the job");
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed).with_export_max_bytes(10);
+
+        let result = PrivacyExport.run(&mut ctx, claimed.payload.clone()).await;
+
+        assert!(result.is_ok());
+        zirv_flow_store::commit(tx).await.unwrap();
+        let stored = zirv_flow_store::find_privacy_export(&pool, ws, export.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ExportStatus::Failed);
+        assert_eq!(
+            stored.failure_code.as_deref(),
+            Some(zirv_flow_store::EXPORT_TOO_LARGE)
+        );
+        assert_eq!(
+            zirv_flow_store::download_export(&pool, ws, export.id)
+                .await
+                .unwrap(),
+            ExportDownload::NotReady
+        );
     }
 
     #[sqlx::test]

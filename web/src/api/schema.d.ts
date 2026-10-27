@@ -2519,8 +2519,11 @@ export interface paths {
         put?: never;
         /**
          * Asks for an export of everything held about a person: profile, identities, ledger
-         *     contributions, events, consent and its history, lists and their history, merges and
-         *     identity conflicts, with the data of merged people under the survivor. A background job
+         *     contributions, events, consent and its history, lists and segments and their history, merges
+         *     and identity conflicts, flow enrollments with their steps, waits and entries, the message log
+         *     and its links, forwarding rows and handled markers, ingest rejects, decision records and saved
+         *     template previews, with the data of merged people under the survivor. A document past the
+         *     size cap fails with the code `export_too_large`. A background job
          *     builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
          *     `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
          *     Audited as `privacy.export_requested`.
@@ -6594,6 +6597,11 @@ export interface components {
              * @description 24 hours after `ready_at`; the download answers 410 from then on.
              */
             expires_at?: string | null;
+            /**
+             * @description Why the export failed, when known: `export_too_large` when the document passed
+             *     `privacy.export_max_bytes`. Null otherwise.
+             */
+            failure_code?: string | null;
             /** Format: uuid */
             id: string;
             /** Format: uuid */
@@ -6613,7 +6621,8 @@ export interface components {
              */
             size_bytes?: number | null;
             /**
-             * @description `pending`, `ready`, `failed` once the job ran out of attempts, or `expired`.
+             * @description `pending`, `ready`, `failed` once the job ran out of attempts or the document passed
+             *     the size cap, or `expired`.
              * @example ready
              */
             status: string;
