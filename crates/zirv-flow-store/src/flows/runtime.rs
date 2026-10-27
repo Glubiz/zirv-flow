@@ -8,7 +8,7 @@
 
 use serde_json::{Value, json};
 use sqlx::prelude::FromRow;
-use sqlx::{Connection, PgConnection};
+use sqlx::{Connection, PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
@@ -290,6 +290,50 @@ pub async fn count_in_flight_enrollments(
     .fetch_one(connection)
     .await
     .map_err(StoreError::query)
+}
+
+/// The longest the live-enrollment sampler's queries may run.
+const SAMPLE_TIMEOUT: &str = "5s";
+
+/// What the leader samples of the live enrollments, over all workspaces.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EnrollmentSample {
+    pub active: i64,
+    pub waiting: i64,
+    /// How long the oldest `waiting` enrollment has been past its `wake_at`, in seconds; 0 when
+    /// no timer is overdue.
+    pub oldest_late_seconds: i64,
+}
+
+/// Counts the `active` and `waiting` enrollments and finds the oldest overdue timer, from
+/// `enrollments_live_idx`, under a statement timeout so a table of millions of waiting rows
+/// cannot hold the leader's tick.
+pub async fn sample_enrollments(pool: &PgPool) -> Result<EnrollmentSample, StoreError> {
+    let mut tx = pool.begin().await.map_err(StoreError::query)?;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SET LOCAL statement_timeout = '{SAMPLE_TIMEOUT}'"
+    )))
+    .execute(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let (active, waiting): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE state = 'active'),                 count(*) FILTER (WHERE state = 'waiting')          FROM enrollments WHERE state IN ('active', 'waiting')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    let late: Option<i64> = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM now() - min(wake_at))::bigint FROM enrollments          WHERE state = 'waiting' AND wake_at <= now()",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(StoreError::query)?;
+    tx.commit().await.map_err(StoreError::query)?;
+    Ok(EnrollmentSample {
+        active,
+        waiting,
+        oldest_late_seconds: late.unwrap_or(0).max(0),
+    })
 }
 
 /// The time zones a step reads: the workspace's, and the person's `timezone` trait as written
@@ -724,6 +768,75 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    /// An enrollment of a new person in `state`, with its timer `wake_in_seconds` from now.
+    async fn timed_enrollment(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        flow: Uuid,
+        state: &str,
+        wake_in_seconds: Option<i32>,
+    ) {
+        let person = person(pool, ws).await;
+        sqlx::query(
+            "INSERT INTO enrollments                 (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id,                  trace_id, cause_kind, cause_id, wake_at, ended_at)              VALUES ($1, $2, $3, 1, $4, $5, 'draft', $6, $7, 'api', 't',                      now() + make_interval(secs => $8),                      CASE WHEN $5 IN ('completed', 'exited') THEN now() END)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(flow)
+        .bind(person)
+        .bind(state)
+        .bind(Uuid::now_v7())
+        .bind(trace().trace_id.as_uuid())
+        .bind(wake_in_seconds.map(f64::from))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sample_counts_live_enrollments_and_finds_the_oldest_overdue_timer(pool: PgPool) {
+        let ws = workspace(&pool, "sample").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+
+        let none = sample_enrollments(&pool).await.unwrap();
+
+        timed_enrollment(&pool, ws, flow.id, "active", None).await;
+        timed_enrollment(&pool, ws, flow.id, "waiting", Some(3600)).await;
+        timed_enrollment(&pool, ws, flow.id, "waiting", Some(-30)).await;
+        timed_enrollment(&pool, ws, flow.id, "waiting", Some(-90)).await;
+        timed_enrollment(&pool, ws, flow.id, "completed", Some(-500)).await;
+        let seeded = sample_enrollments(&pool).await.unwrap();
+
+        assert_eq!(none, EnrollmentSample::default());
+        assert_eq!((seeded.active, seeded.waiting), (1, 3));
+        assert!(
+            (90..100).contains(&seeded.oldest_late_seconds),
+            "{seeded:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_sample_reports_no_lateness_while_every_timer_is_in_the_future(pool: PgPool) {
+        let ws = workspace(&pool, "sample-future").await;
+        let flow = create(&pool, ws, "Flow").await;
+        publish(&pool, ws, flow.id).await.unwrap();
+        timed_enrollment(&pool, ws, flow.id, "waiting", Some(120)).await;
+
+        let sample = sample_enrollments(&pool).await.unwrap();
+
+        assert_eq!(
+            sample,
+            EnrollmentSample {
+                active: 0,
+                waiting: 1,
+                oldest_late_seconds: 0
+            }
+        );
     }
 
     async fn person(pool: &PgPool, ws: WorkspaceId) -> Uuid {

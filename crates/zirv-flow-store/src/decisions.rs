@@ -4,6 +4,8 @@
 //! The write API takes static strings and durable ids only, so personal data cannot reach
 //! a record by accident.
 
+use std::time::Instant;
+
 use serde_json::{Map, Value};
 use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, QueryBuilder};
@@ -169,6 +171,7 @@ pub async fn append_decision<'e>(
     if BENCH_NO_DECISIONS {
         return Ok(());
     }
+    let started = Instant::now();
     sqlx::query(
         "INSERT INTO decision_records \
             (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
@@ -189,7 +192,15 @@ pub async fn append_decision<'e>(
     .execute(executor)
     .await
     .map_err(StoreError::query)?;
+    record_append(started);
     Ok(())
+}
+
+/// The `zirv_flow_decision_append_seconds` histogram: one observation per append call. A build
+/// with `bench-no-decisions` returns before the timer starts, so it records nothing.
+fn record_append(started: Instant) {
+    metrics::histogram!("zirv_flow_decision_append_seconds")
+        .record(started.elapsed().as_secs_f64());
 }
 
 /// Appends many records in one statement, at most [`MAX_BATCH`] at a time; the same rules as
@@ -201,6 +212,7 @@ pub async fn append_decisions(
     if BENCH_NO_DECISIONS {
         return Ok(());
     }
+    let started = Instant::now();
     for chunk in decisions.chunks(MAX_BATCH) {
         let mut query = QueryBuilder::<Postgres>::new(
             "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
@@ -224,6 +236,7 @@ pub async fn append_decisions(
             .await
             .map_err(StoreError::query)?;
     }
+    record_append(started);
     Ok(())
 }
 
@@ -505,6 +518,36 @@ mod tests {
             "{}",
             serde_json::json!({ "benchmark": "decision_append", "drain_batch_size": size, "shapes": report })
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_append_call_is_timed_and_the_benchmark_build_times_nothing(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req"));
+
+        append_decision(&pool, &decision(ws, &trace, "one"))
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        append_decisions(
+            &mut connection,
+            &[decision(ws, &trace, "two"), decision(ws, &trace, "three")],
+        )
+        .await
+        .unwrap();
+
+        let output = handle.render();
+        let counted = output
+            .lines()
+            .find_map(|line| line.strip_prefix("zirv_flow_decision_append_seconds_count "));
+        #[cfg(not(feature = "bench-no-decisions"))]
+        assert_eq!(counted, Some("2"), "{output}");
+        #[cfg(feature = "bench-no-decisions")]
+        assert_eq!(counted, None, "{output}");
     }
 
     #[test]
