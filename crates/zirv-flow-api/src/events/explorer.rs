@@ -8,7 +8,7 @@
 //! or audits a name, an identifier or a value.
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::body::{Body, Bytes};
@@ -208,6 +208,7 @@ pub(crate) async fn count(
         .map_err(|()| ApiError::unprocessable("bucket: must be hour, day or week"))?;
     let filters = request.scope.filters()?;
     let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let started = Instant::now();
     let result = zirv_flow_store::explore_count(
         &state.pool,
         workspace.id,
@@ -216,7 +217,9 @@ pub(crate) async fn count(
         state.explorer.interactive(),
         reveal,
     )
-    .await?;
+    .await;
+    observe_query("count", started, &result);
+    let result = result?;
     let total = result.buckets.iter().map(|(_, count)| count).sum();
     Ok(Json(ExploreCountBody {
         buckets: result
@@ -287,6 +290,7 @@ pub(crate) async fn breakdown(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let filters = request.scope.filters()?;
     let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let started = Instant::now();
     let result = zirv_flow_store::explore_breakdown(
         &state.pool,
         workspace.id,
@@ -295,7 +299,9 @@ pub(crate) async fn breakdown(
         state.explorer.interactive(),
         reveal,
     )
-    .await?;
+    .await;
+    observe_query("breakdown", started, &result);
+    let result = result?;
     Ok(Json(ExploreBreakdownBody {
         property: request.property,
         values: result
@@ -431,6 +437,7 @@ pub(crate) async fn list(
     };
     let filters = request.scope.filters()?;
     let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let started = Instant::now();
     let page = zirv_flow_store::explore_rows(
         &state.pool,
         workspace.id,
@@ -440,7 +447,9 @@ pub(crate) async fn list(
         state.explorer.interactive(),
         reveal,
     )
-    .await?;
+    .await;
+    observe_query("list", started, &page);
+    let page = page?;
     Ok(Json(ExploreListBody {
         events: page
             .rows
@@ -449,6 +458,17 @@ pub(crate) async fn list(
             .collect(),
         next_after: page.next.map(encode_cursor),
     }))
+}
+
+/// Records one explorer query: `zirv_flow_explorer_query_seconds{kind}` and, when it ran past its
+/// statement timeout, `zirv_flow_explorer_timeouts_total{kind}`. `kind` is `count`, `breakdown`,
+/// `list` or `export`; no workspace, filter or value is a label.
+fn observe_query<T>(kind: &'static str, started: Instant, result: &Result<T, ExploreError>) {
+    metrics::histogram!("zirv_flow_explorer_query_seconds", "kind" => kind)
+        .record(started.elapsed().as_secs_f64());
+    if matches!(result, Err(ExploreError::Store(error)) if error.is_timeout()) {
+        metrics::counter!("zirv_flow_explorer_timeouts_total", "kind" => kind).increment(1);
+    }
 }
 
 const EXPORT_HEADER: &str =
@@ -542,6 +562,7 @@ pub(crate) async fn export(
 
     // Count first: a bad filter or a timeout is an error response, not a broken stream, and
     // the audit entry exists whether or not the client reads to the end.
+    let started = Instant::now();
     let matched = zirv_flow_store::explore_total(
         &state.pool,
         workspace.id,
@@ -549,8 +570,9 @@ pub(crate) async fn export(
         limits,
         reveal,
     )
-    .await
-    .map_err(ApiError::from)?;
+    .await;
+    observe_query("export", started, &matched);
+    let matched = matched.map_err(ApiError::from)?;
     let rows = u64::try_from(matched)
         .unwrap_or(0)
         .min(u64::from(limits.row_limit));
@@ -568,6 +590,7 @@ pub(crate) async fn export(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
+    metrics::counter!("zirv_flow_explorer_exports_total").increment(1);
 
     let source = ExportSource {
         pool: state.pool.clone(),
@@ -596,6 +619,7 @@ pub(crate) async fn export(
                     return Some((Ok(source.tail()), (source, Export::Done)));
                 }
                 let size = u32::try_from(remaining.min(u64::from(EXPORT_PAGE))).unwrap_or(1);
+                let started = Instant::now();
                 let page = zirv_flow_store::explore_rows(
                     &source.pool,
                     source.workspace,
@@ -606,6 +630,7 @@ pub(crate) async fn export(
                     source.reveal,
                 )
                 .await;
+                observe_query("export", started, &page);
                 match page {
                     Ok(page) => {
                         let count = u64::try_from(page.rows.len()).unwrap_or(0);
