@@ -458,6 +458,7 @@ async fn run_roles_reporting(
         worker_config.lease = Duration::from_secs(u64::from(config.worker_lease_seconds()));
         worker_config.max_running_per_workspace = config.worker_max_running_per_workspace();
         worker_config.event_retention = config.events_retention();
+        worker_config.message_retention = config.messages_retention();
         worker_config.redaction_key = hmac_root
             .as_deref()
             .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Redaction)));
