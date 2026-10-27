@@ -112,16 +112,18 @@ pub use events::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, DEBUGGER_CHANNEL, DebuggerListener,
     EventOutcome, EventPolicy, EventRecord, EventRetention, EventSchema, EventSchemaUpdate,
     ExploreError, ExploreFilter, ExploreLimits, ExploreRow, ExploreScope, FEED_RETENTION_MINUTES,
-    FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS, MAX_REPLAY,
-    NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor, RejectFilter,
-    ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor, RowsPage,
-    SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention, create_event_schema,
-    debugger_feed_head, debugger_feed_position, debugger_feed_seqs, debugger_feed_start,
-    enqueue_replay, ensure_event_partitions, explore_breakdown, explore_count, explore_rows,
-    explore_total, find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
+    FeedBatch, FeedFilter, FeedItem, FilterOp, IngestReject, MAX_FILTERS, MAX_RANGE_DAYS,
+    MAX_REPLAY, NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor,
+    RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor,
+    RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
+    create_event_schema, debugger_epoch, debugger_epoch_peek, debugger_feed_head,
+    debugger_feed_missing, debugger_feed_position, debugger_feed_start, enqueue_replay,
+    ensure_event_partitions, explore_breakdown, explore_count, explore_rows, explore_total,
+    find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
     list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
-    publish_schema_draft, read_debugger_feed, replay_rejects, save_schema_draft, select_rejects,
-    set_event_policy, touch_debugger_watch, update_event_schema,
+    publish_schema_draft, read_debugger_batch, read_debugger_feed, read_debugger_feed_at,
+    replay_rejects, save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch,
+    update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -616,7 +618,7 @@ mod tests {
 
     /// Tables that hold instance-level data and so carry no `workspace_id`. Every other
     /// table is workspace-scoped and must have the column.
-    const INSTANCE_LEVEL_TABLES: [&str; 8] = [
+    const INSTANCE_LEVEL_TABLES: [&str; 9] = [
         "users",
         "user_identities",
         "oidc_logins",
@@ -624,6 +626,7 @@ mod tests {
         "sessions",
         "audit_log",
         "deployment_keys",
+        "debugger_epoch",
         "_sqlx_migrations",
     ];
 

@@ -8744,7 +8744,17 @@ email,b@example.com,
         assert!(owner_frames.iter().all(|frame| frame.event == "item"));
         let seqs: Vec<i64> = owner_frames
             .iter()
-            .map(|frame| frame.id.as_ref().unwrap().parse().unwrap())
+            .map(|frame| {
+                frame
+                    .id
+                    .as_ref()
+                    .unwrap()
+                    .split_once(':')
+                    .unwrap()
+                    .1
+                    .parse()
+                    .unwrap()
+            })
             .collect();
         assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(owner_frames[1].data["reasons"][0]["reason"], "wrong_type");
@@ -9682,16 +9692,311 @@ email,b@example.com,
         notify_feed(&pool, &ws).await;
         let second = viewer.take(1).await;
 
-        assert_eq!(first[0].data["name"], "from_b");
         assert_eq!(second[0].data["name"], "from_a");
         // The first frame could not claim a position past the open writer; the second can.
-        assert_eq!(first[0].id.as_deref(), Some("0"));
-        assert_eq!(second[0].id.as_deref(), Some("2"));
+        assert_eq!(first[0].data["name"], "from_b");
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(first[0].id, Some(format!("{epoch}:0")));
+        assert_eq!(second[0].id, Some(format!("{epoch}:2")));
         assert!(
             viewer
                 .next(std::time::Duration::from_millis(600))
                 .await
                 .is_none()
+        );
+    }
+
+    /// The app with the debugger patience cut to `patience`, so its lookback (twice it) is short.
+    async fn quick_state(pool: &PgPool, patience: std::time::Duration) -> (Router, AppState) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let (router, state) = app_with_state(pool).await;
+        state.debugger.set_patience_for_test(patience);
+        (router, state)
+    }
+
+    fn names(frames: &[Frame]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| frame.data["name"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_from_before_a_crash_is_answered_with_a_reset_not_a_skip(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut before =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..3)
+                .map(|_| inv_record("a@example.com", "before", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        let last = before.take(3).await[2].id.clone().unwrap();
+        drop(before);
+        // A crash empties the unlogged feed and its epoch, and the sequence starts over; the
+        // restarted server writes more rows than the client had seen.
+        sqlx::query("TRUNCATE debugger_feed RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        inv_store(
+            &pool,
+            &ws,
+            (0..5)
+                .map(|_| inv_record("a@example.com", "after", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+
+        let mut again = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some(&last),
+        )
+        .await;
+        let frames = again.take(6).await;
+
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].data["reset"], true);
+        assert_eq!(names(&frames[1..]), ["after"; 5]);
+        assert_ne!(
+            frames[1]
+                .id
+                .as_deref()
+                .and_then(|id| id.split_once(':'))
+                .map(|(epoch, _)| epoch),
+            last.split_once(':').map(|(epoch, _)| epoch),
+            "the new life of the feed has a new epoch"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_writer_open_below_a_fresh_viewers_start_is_delivered_once_it_commits(pool: PgPool) {
+        let patience = std::time::Duration::from_millis(2000);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        // Writer A takes seq 1 and stays open; writer B takes seq 2 and commits. Both are older
+        // than the patience when the viewer connects, so it starts at seq 2.
+        let mut writer_a = pool.begin().await.unwrap();
+        feed_row(&mut *writer_a, &ws, "from_a").await;
+        feed_row(&pool, &ws, "from_b").await;
+        tokio::time::sleep(patience + std::time::Duration::from_millis(300)).await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+
+        writer_a.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let late = viewer.take(1).await;
+
+        assert_eq!(names(&late), ["from_a"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(600))
+                .await
+                .is_none(),
+            "the row B committed before the connection is history, and nothing is sent twice"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_the_watermark_passed_is_filled_when_its_writer_commits_in_the_window(
+        pool: PgPool,
+    ) {
+        let patience = std::time::Duration::from_millis(2000);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        // Writers 1 and 2 stay open; writer 3 commits.
+        let mut writer_1 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_1, &ws, "from_1").await;
+        let mut writer_2 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_2, &ws, "from_2").await;
+        feed_row(&pool, &ws, "from_3").await;
+        notify_feed(&pool, &ws).await;
+        let first = viewer.take(1).await;
+        // Past the patience the watermark gives up on seq 1 and 2.
+        tokio::time::sleep(patience + std::time::Duration::from_millis(300)).await;
+        notify_feed(&pool, &ws).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        writer_2.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let second = viewer.take(1).await;
+        writer_1.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let third = viewer.take(1).await;
+
+        assert_eq!(names(&first), ["from_3"]);
+        assert_eq!(names(&second), ["from_2"]);
+        assert_eq!(names(&third), ["from_1"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(600))
+                .await
+                .is_none(),
+            "no row is sent twice"
+        );
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_that_commits_after_the_window_is_not_delivered(pool: PgPool) {
+        let patience = std::time::Duration::from_millis(500);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        // Writer 1 stays open; writer 2 commits, so seq 1 becomes a hole.
+        let mut writer_1 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_1, &ws, "from_1").await;
+        feed_row(&pool, &ws, "from_2").await;
+        notify_feed(&pool, &ws).await;
+        let first = viewer.take(1).await;
+        // The window is twice the patience; a wake after it drops the hole.
+        tokio::time::sleep(patience * 2 + std::time::Duration::from_millis(400)).await;
+        notify_feed(&pool, &ws).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        writer_1.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+
+        assert_eq!(names(&first), ["from_2"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(800))
+                .await
+                .is_none(),
+            "a row that commits after its hole expired is the documented limit"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_open_stream_notices_a_crash_on_its_poll_and_resets(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..3)
+                .map(|_| inv_record("a@example.com", "before", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        let before = viewer.take(3).await;
+        let old_epoch = before[2].id.clone().unwrap();
+        // A crash empties the feed and its epoch and restarts the sequence below the stream's
+        // watermark; the restarted server then writes two rows.
+        sqlx::query("TRUNCATE debugger_feed RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        feed_row(&pool, &ws, "after").await;
+        feed_row(&pool, &ws, "after").await;
+
+        let frames = viewer.take(3).await;
+
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].data["reset"], true);
+        assert_eq!(names(&frames[1..]), ["after", "after"]);
+        let epoch_of = |id: &str| id.split_once(':').map(|(epoch, _)| epoch.to_owned());
+        let new_epoch = epoch_of(frames[1].id.as_deref().unwrap());
+        assert_ne!(new_epoch, epoch_of(&old_epoch));
+        assert_eq!(new_epoch, epoch_of(frames[2].id.as_deref().unwrap()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_after_rows_below_it_were_purged_has_no_holes(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        for _ in 0..5 {
+            feed_row(&pool, &ws, "old").await;
+        }
+        sqlx::query("DELETE FROM debugger_feed")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        let resume = format!("{epoch}:5");
+
+        let mut viewer = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some(&resume),
+        )
+        .await;
+        feed_row(&pool, &ws, "new").await;
+        notify_feed(&pool, &ws).await;
+        let frames = viewer.take(1).await;
+
+        assert_eq!(names(&frames), ["new"]);
+        assert_eq!(
+            frames[0].id,
+            Some(format!("{epoch}:6")),
+            "numbers 1 to 5 are not holes: the id is not pulled below the resume point"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_another_workspace_fills_settles_the_position_without_a_frame(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Mine").await;
+        let theirs = workspace(&router, &owner, "Theirs").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&mine, ""), Auth::Session(&owner), None).await;
+        // Another workspace's writer takes seq 1 and stays open; mine commits seq 2.
+        let mut writer = pool.begin().await.unwrap();
+        feed_row(&mut *writer, &theirs, "theirs").await;
+        feed_row(&pool, &mine, "first").await;
+        notify_feed(&pool, &mine).await;
+        let first = viewer.take(1).await;
+        writer.commit().await.unwrap();
+        feed_row(&pool, &mine, "second").await;
+        notify_feed(&pool, &mine).await;
+        let second = viewer.take(1).await;
+
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(first[0].id, Some(format!("{epoch}:0")), "seq 1 is a hole");
+        assert_eq!(names(&second), ["second"]);
+        assert_eq!(
+            second[0].id,
+            Some(format!("{epoch}:3")),
+            "the other workspace's row settled the hole"
+        );
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(500))
+                .await
+                .is_none(),
+            "the other workspace's row is not delivered"
         );
     }
 
@@ -9889,7 +10194,8 @@ email,b@example.com,
         assert_eq!(frames[0].data["name"], "yours");
         assert!(!frames[0].raw.contains("not_yours"));
         // No wait for the numbers of the other workspace: the position is already past them.
-        assert_eq!(frames[0].id.as_deref(), Some("3"));
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(frames[0].id, Some(format!("{epoch}:3")));
         assert!(
             viewer
                 .next(std::time::Duration::from_millis(300))

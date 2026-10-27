@@ -2032,12 +2032,28 @@ As built (debugger, explorer):
 - **Stream.** `GET /debugger/stream` (`read`) uses one shared `PgListener` per `serve`
   process; a separate timer renews the watch, so a failing listener cannot let it expire, and
   while the listener is down the viewers poll every 5 s and send `event: status` with
-  `degraded`. A notification wakes the viewers of that workspace. Each viewer keeps a low
-  watermark (every `seq` up to it is settled) and the rows it sent above it, reads what it has
-  not sent, and waits 10 s for a missing `seq` before giving up on it (its writer rolled
-  back), so a late commit is never lost. A frame's `id` is the watermark after it, so
-  `Last-Event-ID` resumes without skipping and may repeat rows (the `seq` in the data tells);
-  a position beyond the feed is clamped to its end with a `gap` frame whose `reset` is true.
+  `degraded`. A notification wakes the viewers of that workspace. Each viewer keeps a watermark
+  (the highest `seq` it has read) and the holes below it: numbers no row of any workspace held
+  when the watermark passed them, each with the time it was noticed. A read takes the rows
+  above the watermark in batches of 200 (`seq > watermark`, an index range scan) and looks up
+  the holes by point lookup (`seq = ANY(holes)`, the `seq` index), in one repeatable-read
+  snapshot with the probe that lists the missing numbers, so a row that commits in between is
+  never mistaken for a hole. A hole is dropped when its row is delivered, after twice the 10 s
+  patience from when it was noticed, or when it lies more than 5000 numbers below the
+  watermark; it is pruned after every batch, so the set never exceeds 5000 numbers. A writer
+  that commits after its number was passed is therefore delivered once, out of order, and a
+  row committing after its hole was dropped can still be missed. A connection without a
+  position starts at the newest row older than the patience and takes the missing numbers in
+  the window below it as holes. A frame's `id` is `<epoch>:<position>`, the position being just
+  below the oldest hole (else the watermark), so `Last-Event-ID` resumes without skipping a
+  row still awaited and may repeat rows (the `seq` in the data tells). A resumed stream starts
+  with no holes: a late row below its resume point whose writer committed while the client was
+  away is not delivered, as before; the lookback covers live streams only. The epoch is the
+  value of the one-row UNLOGGED `debugger_epoch` (migration `0074`), emptied by a crash like
+  the feed, so a position of another epoch or in the old bare-number form is answered with a
+  `gap` frame whose `reset` is true and the stream restarts at the current position. An open
+  stream re-reads the epoch and the feed head on its 5 s poll; a changed epoch, or a head
+  below its watermark, sends the same reset `gap`, adopts the new epoch and re-seeds.
   At most 20 streams per workspace per process (`429` with `Retry-After`), and every stream
   ends when the server shuts down. Rows are masked per viewer with `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
   sample rule), and sends `item` frames through a bounded channel. A full channel makes the
