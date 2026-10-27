@@ -779,13 +779,14 @@ pub(crate) async fn create(
 ) -> Result<(StatusCode, Json<DraftBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, draft_need(&principal)).await?;
     let user = session_user(&principal)?;
-    check_request(&request)?;
     let kind = request.kind.store();
     // A mapping or manifest draft reads a source and sends a sample of it, which is the
-    // admin's to see; the other kinds draft the editor's own work.
+    // admin's to see; the other kinds draft the editor's own work. The request is judged only
+    // once the caller is.
     if matches!(kind, DraftKind::Mapping | DraftKind::Manifest) {
         authorize(&state, &principal, workspace.id, Need::Admin).await?;
     }
+    check_request(&request)?;
     // The assistant being off is the first answer, before anything is read.
     let dispatcher = Dispatcher::open(&state, Some(user), workspace.id, kind.as_str())
         .await
