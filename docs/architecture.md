@@ -2036,8 +2036,15 @@ As built (debugger, explorer):
   watermark (every `seq` up to it is settled) and the rows it sent above it, reads what it has
   not sent, and waits 10 s for a missing `seq` before giving up on it (its writer rolled
   back), so a late commit is never lost. A frame's `id` is the watermark after it, so
-  `Last-Event-ID` resumes without skipping and may repeat rows (the `seq` in the data tells);
-  a position beyond the feed is clamped to its end with a `gap` frame whose `reset` is true.
+  `Last-Event-ID` resumes without skipping and may repeat rows (the `seq` in the data tells).
+  The id is `<epoch>:<watermark>`; the epoch is the value of the one-row UNLOGGED
+  `debugger_epoch` (migration `0074`), emptied by a crash like the feed, so a position of
+  another epoch or in the old bare-number form is answered with a `gap` frame whose `reset` is
+  true and the stream restarts at the current position. Each read also looks back below the
+  watermark over twice the patience of row age (at most 5000 numbers) and sends rows not yet
+  sent, so a writer that commits after its number was passed is delivered out of order; the
+  viewer remembers what it sent in that window (no row twice), and a connection seeds it with
+  the rows already committed. A row committing after it left the window can still be missed.
   At most 20 streams per workspace per process (`429` with `Retry-After`), and every stream
   ends when the server shuts down. Rows are masked per viewer with `mask_event` (the person timeline's rule, now in core; rejected events use the stricter
   sample rule), and sends `item` frames through a bounded channel. A full channel makes the

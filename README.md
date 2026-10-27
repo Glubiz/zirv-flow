@@ -655,7 +655,12 @@ workspace has at most 20 streams per server process (more get 429), and the page
 the server's notifier is down and updates are delayed.
 Ingestion writes the feed only while someone watches the workspace (a viewer renews a 30 s
 watch every 10 s); with nobody watching it pays nothing extra, and feed rows older than 15
-minutes are deleted. The feed is unlogged and holds redacted values only.
+minutes are deleted. The feed is unlogged and holds redacted values only. Frames can arrive out of order: a row whose writer commits late is sent when it does, and the
+page shows it once whatever its `seq`. Each frame id is `<epoch>:<position>`; after a database
+crash the unlogged feed starts over, and a stream resumed from before it is told with a
+`gap` frame whose `reset` is true (the page clears its list and says so). The remaining limit:
+a row whose writer commits more than about 20 seconds after the row was written is past the
+lookback window and can still be missed.
 
 **Masking and reveal.** Values are masked per viewer as in the person timeline: only
 properties the published schema declares non-PII are shown, and every other value is null and
