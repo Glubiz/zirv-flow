@@ -384,7 +384,7 @@ pub(crate) async fn create_template(
         Some(workspace),
         "template.created",
         Some(("template", template.id)),
-        json!({ "name": template.name, "channel": template.channel, "category": template.category }),
+        json!({ "channel": template.channel, "category": template.category }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -432,7 +432,7 @@ pub(crate) async fn update_template(
         Some(workspace),
         "template.updated",
         Some(("template", template.id)),
-        json!({ "name": template.name, "utm": template.utm, "fields": fields }),
+        json!({ "utm": template.utm, "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -471,7 +471,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "template.draft_saved",
         Some(("template", id)),
-        json!({ "name": template.name, "revision": draft.revision }),
+        json!({ "revision": draft.revision }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -541,7 +541,7 @@ pub(crate) async fn convert_draft_to_mjml(
         Some(workspace),
         "template.draft_converted",
         Some(("template", id)),
-        json!({ "name": template.name, "revision": draft.revision, "to": "mjml" }),
+        json!({ "revision": draft.revision, "to": "mjml" }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -634,7 +634,7 @@ pub(crate) async fn archive_template(
         Some(workspace),
         "template.archived",
         Some(("template", id)),
-        json!({ "name": template.name, "version": template.current_version }),
+        json!({ "version": template.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

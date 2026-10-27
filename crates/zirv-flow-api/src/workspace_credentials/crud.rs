@@ -332,10 +332,6 @@ fn fingerprint_of(state: &AppState, sealed: &SecretBytes) -> Option<String> {
         .map(|key| fingerprint(key, sealed.expose()))
 }
 
-fn names_of(values: &BTreeMap<String, SecretString>) -> Vec<&str> {
-    values.keys().map(String::as_str).collect()
-}
-
 /// Creates a credential, seals its secret fields as one object and audits `credential.created`
 /// (and `secret.created` for the secret), all in one transaction.
 pub(crate) async fn create_credential(
@@ -402,9 +398,8 @@ pub(crate) async fn create_credential(
         Some(workspace),
         "credential.created",
         Some(("credential", credential.id)),
-        json!({"kind": credential.kind, "name": credential.name, "key": credential.key,
-               "fields": request.fields.keys().collect::<Vec<_>>(),
-               "secret_fields": names_of(&request.secret)}),
+        json!({"kind": credential.kind, "field_count": request.fields.len(),
+               "secret_field_count": request.secret.len()}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -474,7 +469,7 @@ pub(crate) async fn update_credential(
         Some(workspace),
         "credential.updated",
         Some(("credential", credential.id)),
-        json!({"name": credential.name, "fields": changed}),
+        json!({"fields": changed}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -543,8 +538,7 @@ pub(crate) async fn rotate_credential(
         Some(workspace),
         "credential.rotated",
         Some(("credential", id)),
-        json!({"kind": credential.kind, "name": credential.name,
-               "secret_fields": names_of(&request.secret)}),
+        json!({"kind": credential.kind, "secret_field_count": request.secret.len()}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -568,7 +562,7 @@ pub(crate) async fn archive_credential(
                 Some(workspace),
                 "credential.archived",
                 Some(("credential", credential.id)),
-                json!({"kind": credential.kind, "name": credential.name}),
+                json!({"kind": credential.kind, }),
             )
             .await?;
             zirv_flow_store::commit(tx).await?;

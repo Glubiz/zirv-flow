@@ -12,6 +12,7 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::Dimensions;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::events::{
     EMAIL_BOUNCED_EVENT, EMAIL_FAILED_EVENT, EMAIL_SENT_EVENT, EMAIL_SKIPPED_EVENT,
 };
@@ -62,13 +63,13 @@ fn event_of(status: MessageStatus, reason: Option<&str>) -> Option<&'static str>
     }
 }
 
-/// The outcome of the `message.send` decision; none for a message that has not ended.
-const fn outcome_of(status: MessageStatus) -> Option<&'static str> {
+/// The `message.send` decision; none for a message that has not ended.
+const fn outcome_of(status: MessageStatus) -> Option<&'static DecisionSpec> {
     match status {
         MessageStatus::Pending | MessageStatus::Sending => None,
-        MessageStatus::Sent => Some("sent"),
-        MessageStatus::Skipped => Some("skipped"),
-        MessageStatus::Failed => Some("failed"),
+        MessageStatus::Sent => Some(&decision_actions::MESSAGE_SEND_SENT),
+        MessageStatus::Skipped => Some(&decision_actions::MESSAGE_SEND_SKIPPED),
+        MessageStatus::Failed => Some(&decision_actions::MESSAGE_SEND_FAILED),
     }
 }
 
@@ -169,9 +170,12 @@ pub async fn record_send_outcome(
             graph: graph.clone(),
             workspace_id: message.workspace,
             trace: outcome.trace.clone(),
-            action: "send.gate",
-            outcome: if gate.passed { "passed" } else { "blocked" },
-            reason: Some(gate.gate),
+            spec: if gate.passed {
+                &decision_actions::SEND_GATE_PASSED
+            } else {
+                &decision_actions::SEND_GATE_BLOCKED
+            },
+            detail: Some(gate.gate),
             subject_ids: subject_ids(gate.detail),
             job: outcome.job,
         })
@@ -180,9 +184,8 @@ pub async fn record_send_outcome(
         graph,
         workspace_id: message.workspace,
         trace: outcome.trace.clone(),
-        action: "message.send",
-        outcome: result,
-        reason: message.reason,
+        spec: result,
+        detail: message.reason,
         subject_ids: subject_ids(None),
         job: outcome.job,
     });
@@ -417,9 +420,18 @@ mod tests {
         assert_eq!(bounce_of(Some(HARD_BOUNCE)), Some("hard"));
         assert_eq!(bounce_of(Some(SOFT_BOUNCE)), Some("soft"));
         assert_eq!(bounce_of(Some("delivery_unconfirmed")), None);
-        assert_eq!(outcome_of(MessageStatus::Sent), Some("sent"));
-        assert_eq!(outcome_of(MessageStatus::Skipped), Some("skipped"));
-        assert_eq!(outcome_of(MessageStatus::Failed), Some("failed"));
+        assert_eq!(
+            outcome_of(MessageStatus::Sent),
+            Some(&decision_actions::MESSAGE_SEND_SENT)
+        );
+        assert_eq!(
+            outcome_of(MessageStatus::Skipped),
+            Some(&decision_actions::MESSAGE_SEND_SKIPPED)
+        );
+        assert_eq!(
+            outcome_of(MessageStatus::Failed),
+            Some(&decision_actions::MESSAGE_SEND_FAILED)
+        );
         assert_eq!(event_of(MessageStatus::Pending, None), None);
         assert_eq!(outcome_of(MessageStatus::Pending), None);
         for status in [

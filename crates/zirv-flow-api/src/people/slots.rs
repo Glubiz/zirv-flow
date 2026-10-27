@@ -118,7 +118,7 @@ pub(crate) async fn index_trait(
                 Some(workspace),
                 "trait.indexed",
                 None,
-                json!({ "key": key, "slot": slot.as_str() }),
+                json!({ "slot": slot.as_str() }),
             )
             .await?;
             let job = enqueue_job("traits.slot_backfill", workspace, key, slot, generation);
@@ -150,7 +150,7 @@ pub(crate) async fn unindex_trait(
                 Some(workspace),
                 "trait.unindexed",
                 None,
-                json!({ "key": key, "slot": slot.as_str() }),
+                json!({ "slot": slot.as_str() }),
             )
             .await?;
             let job = enqueue_job("traits.slot_clear", workspace, key, slot, generation);

@@ -4,9 +4,11 @@
 //! `ManualClock`, the render host, PostgreSQL, the local SMTP sink, the fixture DNS resolver and
 //! the fake email provider. See [`tests::the_send_path_and_its_trace_hold_end_to_end`].
 
+mod decisions;
 mod harness;
 mod mail;
 mod privacy;
+mod restore;
 mod trace;
 
 #[cfg(test)]

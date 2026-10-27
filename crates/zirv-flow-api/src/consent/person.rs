@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -21,7 +21,7 @@ use zirv_flow_store::{
 
 use super::{invalid, origin};
 use crate::AppState;
-use crate::admin::AdminError;
+use crate::admin::{self, AdminError, Context};
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
@@ -311,6 +311,7 @@ async fn read_of(
 /// person's states afterwards.
 pub(crate) async fn set_person_consent(
     pool: &PgPool,
+    context: &Context,
     workspace: WorkspaceId,
     person: Uuid,
     request: &SetConsentRequest,
@@ -355,6 +356,22 @@ pub(crate) async fn set_person_consent(
         ConsentOutcome::Unchanged | ConsentOutcome::Superseded | ConsentOutcome::Changed { .. } => {
         }
     }
+    let changed = matches!(outcome, ConsentOutcome::Changed { .. });
+    admin::audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "consent.person_set",
+        Some(("person", person)),
+        json!({
+            "channel": request.channel,
+            "topic_id": topic,
+            "status": status.as_str(),
+            "dimension_keys": request.dimensions.keys().collect::<Vec<_>>(),
+            "changed": changed,
+        }),
+    )
+    .await?;
     zirv_flow_store::commit(tx).await?;
     states_of(pool, workspace, person)
         .await?
@@ -436,6 +453,7 @@ pub(crate) async fn set(
     let (source, actor) = origin(&principal);
     let states = set_person_consent(
         &state.pool,
+        &principal.context(),
         workspace.id,
         path_id(&id)?,
         &body,

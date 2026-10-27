@@ -178,7 +178,7 @@ pub(crate) async fn create_sender_identity(
         Some(workspace),
         "sender_identity.created",
         Some(("sender_identity", identity.id)),
-        json!({"domain_id": identity.domain_id, "from_address": identity.from_address}),
+        json!({"domain_id": identity.domain_id}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -246,7 +246,7 @@ pub(crate) async fn update_sender_identity(
         Some(workspace),
         "sender_identity.updated",
         Some(("sender_identity", identity.id)),
-        json!({"from_address": identity.from_address, "fields": fields}),
+        json!({"fields": fields}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -279,7 +279,7 @@ pub(crate) async fn archive_sender_identity(
         Some(workspace),
         "sender_identity.archived",
         Some(("sender_identity", identity.id)),
-        json!({"from_address": identity.from_address}),
+        json!({"archived": true}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

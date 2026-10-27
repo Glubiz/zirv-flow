@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::{HmacKey, TraceContext, WorkspaceId};
 
 use crate::events::{
@@ -279,7 +280,12 @@ pub async fn commit_sync_batch(
                     seen.get(upsert.record.record_key.as_str())
                         .map(|id| ("source_record", *id)),
                 );
-                decisions.push(decision(batch, "applied", None, subjects));
+                decisions.push(decision(
+                    batch,
+                    &decision_actions::SYNC_RECORD_APPLIED,
+                    None,
+                    subjects,
+                ));
                 continue;
             }
             Some(ProfileOutcome::Unchanged { .. }) => {
@@ -317,7 +323,7 @@ pub async fn commit_sync_batch(
             counts.deleted += 1;
             decisions.push(decision(
                 batch,
-                "deleted",
+                &decision_actions::SYNC_RECORD_DELETED,
                 Some(why),
                 vec![("source_record", removed.record_id)],
             ));
@@ -347,7 +353,12 @@ pub async fn commit_sync_batch(
             .reasons
             .first()
             .map_or("rejected", |(_, code)| *code);
-        decisions.push(decision(batch, "rejected", Some(code), subjects));
+        decisions.push(decision(
+            batch,
+            &decision_actions::SYNC_RECORD_REJECTED,
+            Some(code),
+            subjects,
+        ));
     }
     append_decisions(&mut tx, &decisions).await?;
 
@@ -430,17 +441,16 @@ fn threshold_exceeded(read: i64, rejected: i64, threshold: f64) -> bool {
 
 fn decision(
     batch: &SyncBatch<'_>,
-    outcome: &'static str,
-    reason: Option<&'static str>,
+    spec: &'static DecisionSpec,
+    detail: Option<&'static str>,
     subject_ids: Vec<(&'static str, Uuid)>,
 ) -> NewDecision {
     NewDecision {
         graph: None,
         workspace_id: batch.workspace,
         trace: batch.trace.clone(),
-        action: "sync.record",
-        outcome,
-        reason,
+        spec,
+        detail,
         subject_ids,
         job: Some((batch.job_id, batch.attempt)),
     }

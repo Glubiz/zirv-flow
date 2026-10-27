@@ -506,7 +506,15 @@ async fn slice(
     };
 
     // The credential is opened right before the read and dropped with it.
-    let credential = open_credential(ctx, pool, ids.workspace, source.credential_id).await?;
+    // A consumer opens it every slice, so the use is one row an hour.
+    let credential = open_credential(
+        ctx,
+        pool,
+        ids.workspace,
+        source.credential_id,
+        Some(Duration::from_secs(3600)),
+    )
+    .await?;
     let mut batches = driver.read(
         context,
         &source.config,

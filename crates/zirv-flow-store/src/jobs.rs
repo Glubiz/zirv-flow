@@ -11,6 +11,7 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::{PgPool, StoreError};
@@ -438,8 +439,8 @@ pub async fn fail_job<'e>(
              INSERT INTO decision_records \
                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
                  job_id, attempt) \
-             SELECT gen_random_uuid(), workspace_id, trace_id, 'job.attempt', \
-                    CASE WHEN state = 'dead' THEN 'exhausted' ELSE 'failed' END, \
+             SELECT gen_random_uuid(), workspace_id, trace_id, $5::text, \
+                    CASE WHEN state = 'dead' THEN $6::text ELSE $7::text END, \
                     $4, cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
@@ -448,6 +449,9 @@ pub async fn fail_job<'e>(
     .bind(lease_token)
     .bind(retry_in.as_secs_f64())
     .bind(truncate_error(error))
+    .bind(decision_actions::JOB_ATTEMPT_FAILED.action())
+    .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome())
+    .bind(decision_actions::JOB_ATTEMPT_FAILED.outcome())
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;
@@ -528,12 +532,15 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
              INSERT INTO decision_records \
                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
                  job_id, attempt) \
-             SELECT gen_random_uuid(), workspace_id, trace_id, 'job.attempt', \
-                    CASE WHEN state = 'dead' THEN 'exhausted' ELSE 'lease_expired' END, \
+             SELECT gen_random_uuid(), workspace_id, trace_id, $1::text, \
+                    CASE WHEN state = 'dead' THEN $2::text ELSE $3::text END, \
                     'lease expired', cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
+    .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.action())
+    .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome())
+    .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.outcome())
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;

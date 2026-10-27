@@ -5,6 +5,7 @@
 
 use sqlx::{PgConnection, PgExecutor};
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -154,8 +155,7 @@ pub(super) async fn merge_people(
             connection,
             workspace,
             trace,
-            "person.merge",
-            "merged",
+            &decision_actions::PERSON_MERGED,
             None,
             vec![
                 ("person", survivor),
@@ -232,9 +232,8 @@ pub(super) async fn merge_people(
             connection,
             workspace,
             trace,
-            "trait.change",
-            "changed",
-            Some("merged"),
+            &decision_actions::TRAIT_CHANGED_MERGED,
+            None,
             vec![("person", survivor)],
         )
         .await?;
@@ -447,9 +446,8 @@ pub async fn rewrite_merged_person(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "person.merge.rewrite",
-            outcome: "completed",
-            reason: None,
+            spec: &decision_actions::PERSON_MERGE_REWRITE_COMPLETED,
+            detail: None,
             subject_ids: vec![
                 ("person", survivor),
                 ("survivor", survivor),

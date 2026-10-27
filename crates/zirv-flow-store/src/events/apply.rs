@@ -14,6 +14,7 @@ use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::events::{
     EventFlag, RESERVED_EVENT_CODE, Reason, UnplannedPolicy, ValidationState, apply_time_rules,
     check_properties, evaluate, infer_properties, is_reserved_event_name, mask_sample, redact,
@@ -390,8 +391,7 @@ async fn judge_event_record(
             batch,
             workspace,
             record,
-            "person.created",
-            "created",
+            &decision_actions::PERSON_CREATED,
             None,
             vec![("person", person_id)],
         );
@@ -466,8 +466,11 @@ async fn judge_event_record(
         batch,
         workspace,
         record,
-        "event.accepted",
-        state.as_str(),
+        match state {
+            ValidationState::Valid => &decision_actions::EVENT_ACCEPTED_VALID,
+            ValidationState::Flagged => &decision_actions::EVENT_ACCEPTED_FLAGGED,
+            ValidationState::Unplanned => &decision_actions::EVENT_ACCEPTED_UNPLANNED,
+        },
         None,
         vec![("event", event_id), ("person", person_id)],
     );
@@ -656,8 +659,7 @@ async fn refuse(
         batch,
         workspace,
         record,
-        "event.rejected",
-        "rejected",
+        &decision_actions::EVENT_REJECTED,
         Some(refusal.reason),
         subjects,
     );
@@ -727,10 +729,10 @@ pub(crate) async fn reject_apply_failed(
     if inserted.is_none() {
         return Ok(());
     }
-    let action = if item.kind == "event" {
-        "event.rejected"
+    let (spec, detail) = if item.kind == "event" {
+        (&decision_actions::EVENT_REJECTED, Some("apply_failed"))
     } else {
-        "record.rejected"
+        (&decision_actions::RECORD_REJECTED_APPLY_FAILED, None)
     };
     append_decision(
         connection,
@@ -738,9 +740,8 @@ pub(crate) async fn reject_apply_failed(
             graph: None,
             workspace_id: workspace,
             trace: item.trace.clone(),
-            action,
-            outcome: "rejected",
-            reason: Some("apply_failed"),
+            spec,
+            detail,
             subject_ids: vec![("reject", reject_id)],
             job: None,
         },
@@ -752,18 +753,16 @@ fn decide(
     batch: &mut EventBatch,
     workspace: WorkspaceId,
     record: &EventRecord,
-    action: &'static str,
-    outcome: &'static str,
-    reason: Option<&'static str>,
+    spec: &'static DecisionSpec,
+    detail: Option<&'static str>,
     subject_ids: Vec<(&'static str, Uuid)>,
 ) {
     batch.decisions.push(NewDecision {
         graph: None,
         workspace_id: workspace,
         trace: record.trace.clone(),
-        action,
-        outcome,
-        reason,
+        spec,
+        detail,
         subject_ids,
         job: None,
     });

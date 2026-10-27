@@ -1,7 +1,7 @@
 //! Flow test mode (architecture 9.4, ruling 90fa390a): a stateless, deterministic walk of one
 //! person through a draft, a version or an inline graph. It reads (a real person, the graph and
-//! the catalog, in one read-only snapshot under a statement timeout) and writes nothing: no
-//! enrollment, job, event, decision or audit row.
+//! the catalog, in one read-only snapshot under a statement timeout) and writes one audit row
+//! (`flow.test_run`, ids only): no enrollment, job, event or decision row.
 //!
 //! Bounds, each a problem+json with a stable code: a script of at most
 //! [`walk::MAX_SCRIPT_STEPS`] steps (`flow_test_script_too_long`), times that never go back
@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use axum::Json;
 use axum::extract::{Path, State};
 use chrono_tz::Tz;
+use serde_json::json;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, NodeKind, validate_graph};
@@ -32,6 +33,7 @@ use self::walk::{
 };
 use super::{draft_of, issue_problems, parse_graph};
 use crate::AppState;
+use crate::admin;
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -198,6 +200,11 @@ pub(crate) async fn test(
             format!("a snapshot holds at most {EXPLAIN_EVENT_CAP} events"),
         ));
     }
+    let ran_as = if body.person_id.is_some() {
+        "person"
+    } else {
+        "snapshot"
+    };
     let given = body
         .snapshot
         .as_ref()
@@ -293,6 +300,17 @@ pub(crate) async fn test(
         ),
         Refusal::NoEntry => ApiError::flow_invalid(Vec::new()),
     })?;
+    let mut audit_tx = zirv_flow_store::begin(&state.pool).await?;
+    admin::audit(
+        &mut audit_tx,
+        &principal.context(),
+        Some(workspace.id),
+        "flow.test_run",
+        Some(("flow", flow_id)),
+        json!({"subject": ran_as, "graph": source}),
+    )
+    .await?;
+    zirv_flow_store::commit(audit_tx).await?;
     Ok(Json(FlowTestBody {
         flow_id,
         source,

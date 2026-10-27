@@ -66,6 +66,7 @@ use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::consent::{Dimensions, SuppressionReason};
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{HmacKey, TraceContext};
 use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
@@ -672,8 +673,12 @@ async fn dropped(
     job: &SendJob,
     reason: &'static str,
 ) -> Result<Step, JobError> {
-    ctx.record_decision("message.send", "dropped", Some(reason), decision_ids(job))
-        .await?;
+    ctx.record_decision(
+        &decision_actions::MESSAGE_SEND_DROPPED,
+        Some(reason),
+        decision_ids(job),
+    )
+    .await?;
     Ok(Step::Over)
 }
 
@@ -699,9 +704,8 @@ enum Wait {
 /// a decision says so (ids only), apart from the gate record's note.
 async fn note_zone_fallback(ctx: &mut JobContext<'_>, job: &SendJob) -> Result<(), JobError> {
     ctx.record_decision(
-        "message.send",
-        "noted",
-        Some(gates::TIMEZONE_FALLBACK),
+        &decision_actions::MESSAGE_SEND_NOTED,
+        None,
         decision_ids(job),
     )
     .await
@@ -751,8 +755,12 @@ async fn defer(
     next.max_attempts = (ctx.max_attempts() - (attempts - 1)).max(1);
     next.unique_key = Some(format!("{}:defer:{}", job.key, job.deferrals + 1));
     ctx.enqueue(&next).await?;
-    ctx.record_decision("message.send", "deferred", Some(reason), decision_ids(job))
-        .await?;
+    ctx.record_decision(
+        &decision_actions::MESSAGE_SEND_DEFERRED,
+        Some(reason),
+        decision_ids(job),
+    )
+    .await?;
     Ok(Step::Over)
 }
 
@@ -3182,6 +3190,18 @@ mod tests {
         let captured = sink.messages();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].mail_from, "news@example.com");
+        // The job opened the destination's credential once: one system row with the credential id
+        // and the use, nothing else.
+        let used = zirv_flow_store::list_audit(&env.pool, 10).await.unwrap();
+        let used: Vec<_> = used
+            .iter()
+            .filter(|row| row.action == "credential.used")
+            .collect();
+        assert_eq!(used.len(), 1);
+        assert_eq!(used[0].actor_kind, "system");
+        assert_eq!(used[0].object_kind.as_deref(), Some("credential"));
+        assert_eq!(used[0].workspace_id, Some(env.ws.as_uuid()));
+        assert_eq!(used[0].summary, json!({"use": "send"}));
         assert_eq!(captured[0].recipients, ["ada@example.com"]);
         let data = &captured[0].data;
         assert_eq!(

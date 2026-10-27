@@ -569,6 +569,7 @@ mod tests {
                 .await;
             assert_eq!(n, count, "{action}");
         }
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -1909,6 +1910,7 @@ mod tests {
         let after = f.lead("POST", &exit_older(1), None).await;
         assert_eq!(after.status, StatusCode::CONFLICT);
         assert_eq!(after.body["code"], "flow_archived");
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -2230,9 +2232,12 @@ mod tests {
             trace_id: TraceId::from_uuid(mine_id),
             cause: Cause::api("t"),
         };
-        for (action, outcome, reason) in [
-            ("flow.step", "waiting", Some("wait.duration")),
-            ("flow.wait", "waiting", Some("duration")),
+        for (spec, detail) in [
+            (
+                &zirv_flow_core::decision_actions::FLOW_STEP_WAITING,
+                Some("wait.duration"),
+            ),
+            (&zirv_flow_core::decision_actions::FLOW_WAIT_DURATION, None),
         ] {
             append_decision(
                 &pool,
@@ -2243,9 +2248,8 @@ mod tests {
                     }),
                     workspace_id: f.ws,
                     trace: trace.clone(),
-                    action,
-                    outcome,
-                    reason,
+                    spec,
+                    detail,
                     subject_ids: vec![("flow", flow_id), ("enrollment", mine_id)],
                     job: None,
                 },

@@ -218,7 +218,7 @@ pub(crate) async fn publish_snippet(
         Some(workspace),
         "snippet.published",
         Some(("snippet", id)),
-        json!({ "name": snippet.name, "version": version.version, "warnings": issues.len() }),
+        json!({ "version": version.version, "warnings": issues.len() }),
     )
     .await?;
     let used = zirv_flow_store::snippet_where_used(&mut tx, workspace, id).await?;

@@ -19,6 +19,7 @@ use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use super::arrivals::Arrival;
@@ -282,9 +283,8 @@ async fn end_in_flight(
             graph: Some(GraphPoint::at(*version, node)),
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "flow.enrollment",
-            outcome: "exited",
-            reason: Some(reason),
+            spec: &decision_actions::FLOW_ENROLLMENT_EXITED,
+            detail: Some(reason),
             subject_ids: vec![("flow", *flow), ("enrollment", *id), ("person", *person)],
             job: None,
         })
@@ -385,9 +385,8 @@ pub async fn resume_batch(
             graph: Some(GraphPoint::at(row.flow_version, &row.node)),
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "flow.enrollment",
-            outcome: "resumed",
-            reason: Some("flow_resumed"),
+            spec: &decision_actions::FLOW_ENROLLMENT_RESUMED,
+            detail: None,
             subject_ids: vec![
                 ("flow", flow),
                 ("enrollment", row.id),
@@ -420,9 +419,8 @@ pub async fn resume_batch(
             graph: Some(GraphPoint::at(row.flow_version, &row.node)),
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "flow.enrollment",
-            outcome: "failed",
-            reason: Some(UNRESUMABLE),
+            spec: &decision_actions::FLOW_ENROLLMENT_FAILED,
+            detail: Some(UNRESUMABLE),
             subject_ids: vec![
                 ("flow", flow),
                 ("enrollment", row.id),
@@ -578,9 +576,12 @@ pub async fn resume_failed(
             graph: Some(GraphPoint::at(locked.flow_version, &node)),
             workspace_id: workspace,
             trace: decided,
-            action: "flow.enrollment",
-            outcome: if skip { "skipped" } else { "retried" },
-            reason: Some("operator"),
+            spec: if skip {
+                &decision_actions::FLOW_ENROLLMENT_SKIPPED
+            } else {
+                &decision_actions::FLOW_ENROLLMENT_RETRIED
+            },
+            detail: None,
             subject_ids: vec![
                 ("flow", flow),
                 ("enrollment", enrollment),
