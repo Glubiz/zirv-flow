@@ -8,7 +8,7 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::{mark_dirty, recompute};
 use crate::changes::request_reevaluation;
-use crate::{NewDecision, StoreError, append_decision};
+use crate::{NewDecision, StoreError, append_decisions};
 
 /// How many people one recompute batch covers.
 pub const RECOMPUTE_BATCH: i64 = 500;
@@ -41,25 +41,23 @@ pub async fn recompute_trait_batch(
     .await
     .map_err(StoreError::query)?;
     let keys = [key.to_owned()];
+    let mut decisions = Vec::new();
     for &person in &people {
         if recompute(connection, workspace, person, &keys).await? {
             mark_dirty(connection, workspace, person, ChangeClasses::TRAITS, trace).await?;
-            append_decision(
-                &mut *connection,
-                &NewDecision {
-                    graph: None,
-                    workspace_id: workspace,
-                    trace: trace.clone(),
-                    action: "trait.change",
-                    outcome: "changed",
-                    reason: Some("definition_changed"),
-                    subject_ids: vec![("person", person)],
-                    job,
-                },
-            )
-            .await?;
+            decisions.push(NewDecision {
+                graph: None,
+                workspace_id: workspace,
+                trace: trace.clone(),
+                action: "trait.change",
+                outcome: "changed",
+                reason: Some("definition_changed"),
+                subject_ids: vec![("person", person)],
+                job,
+            });
         }
     }
+    append_decisions(connection, &decisions).await?;
     if !people.is_empty() {
         request_reevaluation(connection, workspace).await?;
     }
