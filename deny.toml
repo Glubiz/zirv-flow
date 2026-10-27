@@ -2,7 +2,6 @@
 # https://github.com/EmbarkStudios/cargo-deny/blob/0.18.4/deny.template.toml
 
 [advisories]
-db-urls = ["https://github.com/RustSec/advisory-db"]
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa via openidconnect verifies public keys; DKIM signing uses ring. Reviewed 2026-10-27 in SECURITY.md; remove when rsa is fixed or absent." },
@@ -31,7 +30,6 @@ exceptions = [
 ]
 
 [bans]
-multiple-versions = "warn"
 wildcards = "deny"
 # Workspace path dependencies are allowed because every workspace crate is private.
 allow-wildcard-paths = true
@@ -89,5 +87,3 @@ skip = [
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
