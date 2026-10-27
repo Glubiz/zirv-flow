@@ -227,6 +227,39 @@ pub async fn append_decisions(
     Ok(())
 }
 
+/// Records waiting to be appended in one statement, in the order they were made. A batch that
+/// makes many decisions pushes them here and flushes once, on the connection of the transaction
+/// that holds the changes, so they commit or roll back together.
+#[derive(Debug, Default)]
+pub(crate) struct DecisionBuffer {
+    pending: Vec<NewDecision>,
+}
+
+impl DecisionBuffer {
+    pub(crate) fn push(&mut self, decision: NewDecision) {
+        self.pending.push(decision);
+    }
+
+    /// The position to hand to [`DecisionBuffer::discard_after`], taken before a savepoint.
+    pub(crate) fn mark(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Drops what was pushed after `mark`, for a savepoint that rolled back.
+    pub(crate) fn discard_after(&mut self, mark: usize) {
+        self.pending.truncate(mark);
+    }
+
+    /// Appends everything pushed so far, in push order, and empties the buffer.
+    pub(crate) async fn flush(&mut self, connection: &mut PgConnection) -> Result<(), StoreError> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending);
+        append_decisions(connection, &pending).await
+    }
+}
+
 /// The records of one trace in one workspace, oldest first, at most `limit`. The flag is
 /// true when more existed.
 pub async fn list_trace(
@@ -392,7 +425,7 @@ mod tests {
     /// architecture section 19. Run by hand with `ZIRV_FLOW_BENCH_DECISIONS=<batches>` (at least
     /// 500 are run; `ZIRV_FLOW_BENCH_DRAIN_BATCH` sets the batch size, default 500, the shipped
     /// `ingest.drain_batch_size`); without the variable it does nothing. It appends what a drain
-    /// writes, one `append_decision` per decision on the batch's transaction, and prints JSON
+    /// writes, one `append_decision` per decision on the batch's transaction (what the drain did before 0.144.0; it now appends a batch in one statement), and prints JSON
     /// with the p50, p95 and p99 per batch in milliseconds, with and without the commit. Progress goes to
     /// standard error every 50 batches; `ZIRV_FLOW_BENCH_DECISIONS_BUDGET_S` (default 600) caps the time per
     /// shape and a capped shape is reported with `partial_time_budget_hit` and the batches it ran.
@@ -507,6 +540,73 @@ mod tests {
         );
     }
 
+    /// Times 500 decisions appended one by one against one batched call, inside a transaction
+    /// that is rolled back. Run by hand with `ZIRV_FLOW_BENCH_DECISIONS_AB=<runs>`; without the
+    /// variable it does nothing. Prints JSON with the p50 and p95 of each in milliseconds.
+    #[cfg(not(feature = "bench-no-decisions"))]
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_DECISIONS_AB to measure"]
+    async fn five_hundred_decisions_one_by_one_against_one_batched_call(pool: PgPool) {
+        use std::time::Instant;
+
+        let Some(runs) = std::env::var("ZIRV_FLOW_BENCH_DECISIONS_AB")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            eprintln!("ZIRV_FLOW_BENCH_DECISIONS_AB is not set: skipping the timing run");
+            return;
+        };
+        let ws = workspace(&pool, "bench").await;
+        let trace = TraceContext::root(Cause::api("bench"));
+        let batch = || -> Vec<NewDecision> {
+            (0..500)
+                .map(|_| {
+                    let mut record = decision(ws, &trace, "event.accepted");
+                    record.outcome = "valid";
+                    record.subject_ids =
+                        vec![("event", Uuid::new_v4()), ("person", Uuid::new_v4())];
+                    record
+                })
+                .collect()
+        };
+        let mut single = Vec::with_capacity(runs);
+        let mut batched = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let records = batch();
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let started = Instant::now();
+            for record in &records {
+                append_decision(&mut *tx, record).await.unwrap();
+            }
+            single.push(started.elapsed().as_secs_f64() * 1000.0);
+            drop(tx);
+
+            let records = batch();
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let started = Instant::now();
+            append_decisions(&mut tx, &records).await.unwrap();
+            batched.push(started.elapsed().as_secs_f64() * 1000.0);
+            drop(tx);
+        }
+        let summary = |mut values: Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            serde_json::json!({
+                "p50_ms": percentile_ms(&values, 50.0),
+                "p95_ms": percentile_ms(&values, 95.0),
+            })
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "benchmark": "decision_append_ab",
+                "decisions": 500,
+                "runs": runs,
+                "one_by_one": summary(single),
+                "batched": summary(batched),
+            })
+        );
+    }
+
     #[test]
     fn the_benchmark_switch_is_off_unless_the_feature_is_enabled() {
         #[cfg(not(feature = "bench-no-decisions"))]
@@ -599,6 +699,64 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored, i64::try_from(subjects.len()).unwrap());
+    }
+
+    async fn statements_that_wrote(pool: &PgPool, ws: WorkspaceId) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(DISTINCT cmin::text) FROM decision_records WHERE workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_buffer_flushes_in_push_order_and_in_chunks_beyond_the_batch_limit(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let actions = numbered(MAX_BATCH + 5);
+        let mut buffer = DecisionBuffer::default();
+        for action in &actions {
+            buffer.push(of_enrollment(ws, &trace, enrollment, action));
+        }
+        let mut tx = crate::begin(&pool).await.unwrap();
+
+        buffer.flush(&mut tx).await.unwrap();
+        buffer.flush(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 5000).await.unwrap();
+        let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(stored, actions);
+        assert_eq!(statements_that_wrote(&pool, ws).await, 2);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_buffer_writes_one_statement_and_drops_what_a_rolled_back_savepoint_queued(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let mut buffer = DecisionBuffer::default();
+        buffer.push(of_enrollment(ws, &trace, enrollment, "kept-1"));
+        let mark = buffer.mark();
+        buffer.push(of_enrollment(ws, &trace, enrollment, "dropped"));
+        buffer.discard_after(mark);
+        buffer.push(of_enrollment(ws, &trace, enrollment, "kept-2"));
+        let mut tx = crate::begin(&pool).await.unwrap();
+
+        buffer.flush(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(stored, ["kept-1", "kept-2"]);
+        assert_eq!(statements_that_wrote(&pool, ws).await, 1);
     }
 
     #[sqlx::test]

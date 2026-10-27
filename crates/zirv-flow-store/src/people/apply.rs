@@ -24,6 +24,7 @@ use super::registry::{TraitDefinition, find_trait_definition, insert_inferred_de
 use super::resolve::{Resolution, resolve_person};
 use super::slots::{lock_and_read_writer_slots, lock_slots_shared, slot_assignments_sql};
 use crate::changes::mark_person;
+use crate::decisions::DecisionBuffer;
 use crate::{DeleteReason, NewDecision, PgPool, StoreError, append_decision, begin, commit};
 
 /// One record from a source, as the profile path receives it.
@@ -375,6 +376,20 @@ pub(crate) async fn apply_profile_record(
     workspace: WorkspaceId,
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
+    let mut decisions = DecisionBuffer::default();
+    let outcome = apply_profile_record_into(connection, workspace, record, &mut decisions).await?;
+    decisions.flush(connection).await?;
+    Ok(outcome)
+}
+
+/// [`apply_profile_record`] that leaves its decisions in `decisions` for the caller to flush in
+/// the same transaction, so a drain batch appends them in one statement.
+pub(crate) async fn apply_profile_record_into(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+    decisions: &mut DecisionBuffer,
+) -> Result<ProfileOutcome, StoreError> {
     // First, before any row lock: see the lock order in `slots`.
     lock_slots_shared(connection, workspace).await?;
     let identifiers = match normalize_identifiers(&record.identifiers) {
@@ -431,19 +446,19 @@ pub(crate) async fn apply_profile_record(
     .await?;
 
     if resolution.created {
-        record_decision(
-            connection,
+        buffer_decision(
+            decisions,
             workspace,
             &record.trace,
             "person.created",
             "created",
             None,
             vec![("person", person_id), ("source_record", record_id)],
-        )
-        .await?;
+        );
     }
     record_resolution(
         connection,
+        decisions,
         workspace,
         &record.trace,
         person_id,
@@ -466,16 +481,15 @@ pub(crate) async fn apply_profile_record(
             &record.trace,
         )
         .await?;
-        record_decision(
-            connection,
+        buffer_decision(
+            decisions,
             workspace,
             &record.trace,
             "trait.change",
             "changed",
             None,
             vec![("person", previous), ("source_record", record_id)],
-        )
-        .await?;
+        );
     }
 
     // Every key the row now holds, plus the keys it just retracted. A record that moved
@@ -496,16 +510,15 @@ pub(crate) async fn apply_profile_record(
         .await?;
     }
     if changed {
-        record_decision(
-            connection,
+        buffer_decision(
+            decisions,
             workspace,
             &record.trace,
             "trait.change",
             "changed",
             None,
             vec![("person", person_id), ("source_record", record_id)],
-        )
-        .await?;
+        );
     }
     Ok(ProfileOutcome::Applied {
         person_id,
@@ -521,6 +534,7 @@ pub(crate) async fn apply_profile_record(
 /// source record, with a decision for each new one. The source record is absent for an event.
 pub(crate) async fn record_resolution(
     connection: &mut PgConnection,
+    decisions: &mut DecisionBuffer,
     workspace: WorkspaceId,
     trace: &TraceContext,
     person_id: Uuid,
@@ -532,28 +546,26 @@ pub(crate) async fn record_resolution(
         subjects
     };
     if let Some(previous) = resolution.split_from {
-        record_decision(
-            connection,
+        buffer_decision(
+            decisions,
             workspace,
             trace,
             "identity.split",
             "new_person",
             Some("unique_kind"),
             with_source(vec![("person", person_id), ("previous_person", previous)]),
-        )
-        .await?;
+        );
     }
     if resolution.skipped > 0 {
-        record_decision(
-            connection,
+        buffer_decision(
+            decisions,
             workspace,
             trace,
             "identity.limit",
             "skipped",
             Some("max_per_person"),
             with_source(vec![("person", person_id)]),
-        )
-        .await?;
+        );
     }
     for conflict in &resolution.conflicts {
         let inserted: Option<Uuid> = sqlx::query_scalar(
@@ -579,8 +591,8 @@ pub(crate) async fn record_resolution(
         .await
         .map_err(StoreError::query)?;
         if inserted.is_some() {
-            record_decision(
-                connection,
+            buffer_decision(
+                decisions,
                 workspace,
                 trace,
                 "identity.conflict",
@@ -590,8 +602,7 @@ pub(crate) async fn record_resolution(
                     ("person", person_id),
                     ("other_person", conflict.other_person_id),
                 ],
-            )
-            .await?;
+            );
         }
     }
     Ok(())
@@ -1039,6 +1050,28 @@ pub(super) async fn mark_dirty(
     trace: &TraceContext,
 ) -> Result<(), StoreError> {
     mark_person(connection, workspace, person_id, classes, trace, None).await
+}
+
+/// Queues a decision for the caller's flush; the same record as [`record_decision`].
+pub(super) fn buffer_decision(
+    decisions: &mut DecisionBuffer,
+    workspace: WorkspaceId,
+    trace: &TraceContext,
+    action: &'static str,
+    outcome: &'static str,
+    reason: Option<&'static str>,
+    subject_ids: Vec<(&'static str, Uuid)>,
+) {
+    decisions.push(NewDecision {
+        graph: None,
+        workspace_id: workspace,
+        trace: trace.clone(),
+        action,
+        outcome,
+        reason,
+        subject_ids,
+        job: None,
+    });
 }
 
 pub(super) async fn record_decision(
