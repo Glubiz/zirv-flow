@@ -28,6 +28,10 @@ const OWNER_EMAIL: &str = "owner@browser-test.example";
 /// The one address the seeded test-send allowlist holds.
 const ALLOWLIST_ADDRESS: &str = "qa@browser-test.example";
 const DEFAULT_PORT: u16 = 47700;
+/// The public URL the server renders links and image addresses on. It is `https` because an
+/// email image on an `http` address is refused (the preview flags it as a broken asset); nothing
+/// is fetched from it.
+const PUBLIC_URL: &str = "https://flow.browser-test.example";
 /// How long open connections get to finish after a stop signal.
 const DRAIN: Duration = Duration::from_secs(5);
 
@@ -234,7 +238,7 @@ async fn serve(
     let stop = shared.stop.clone();
     // A stop while the world starts abandons it: nothing it started outlives the future yet.
     let world = tokio::select! {
-        world = World::start(pool, &base) => world,
+        world = World::start(pool, PUBLIC_URL) => world,
         () = stop.requested() => return Ok(()),
     };
     let router = world.router.clone();
@@ -385,6 +389,11 @@ async fn stop_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_public_url_is_https_so_email_images_are_accepted() {
+        assert!(PUBLIC_URL.starts_with("https://"));
+    }
 
     #[test]
     fn the_port_defaults_and_can_be_overridden() {
