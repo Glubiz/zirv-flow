@@ -151,6 +151,21 @@ pub(super) struct World {
     render: RenderPool,
     stop: watch::Sender<bool>,
     worker: Option<JoinHandle<()>>,
+    /// Set by [`Self::finish`], which ends every scenario with the no-personal-data invariant.
+    #[cfg(test)]
+    finished: bool,
+}
+
+/// A scenario that never calls [`World::finish`] skips the invariant check over the decision log,
+/// so dropping the world without it fails the test.
+#[cfg(test)]
+impl Drop for World {
+    fn drop(&mut self) {
+        assert!(
+            self.finished || std::thread::panicking(),
+            "a World was dropped without finish(), which runs the no-personal-data invariant"
+        );
+    }
 }
 
 impl World {
@@ -263,16 +278,34 @@ impl World {
             render,
             stop,
             worker: Some(worker),
+            #[cfg(test)]
+            finished: false,
         }
     }
 
-    /// Stops the worker and the render host.
+    /// Plants the personal values every decision must stay free of (see
+    /// [`zirv_flow_store::decisions_testing`]) in the workspace.
+    #[cfg(test)]
+    pub(super) async fn seed_personal_values(
+        &self,
+    ) -> zirv_flow_store::decisions_testing::PersonalSeed {
+        zirv_flow_store::decisions_testing::seed_personal_values(&self.pool, self.ws).await
+    }
+
+    /// Stops the worker and the render host. In a test it first checks the invariant over every
+    /// decision record and job: no stored value of a person, whatever the scenario did.
     pub(super) async fn finish(mut self) {
         let _ = self.stop.send(true);
         if let Some(worker) = self.worker.take() {
             let _ = worker.await;
         }
         self.render.shutdown().await;
+        #[cfg(test)]
+        {
+            self.finished = true;
+            zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&self.pool)
+                .await;
+        }
     }
 
     pub(super) fn path(&self, tail: &str) -> String {

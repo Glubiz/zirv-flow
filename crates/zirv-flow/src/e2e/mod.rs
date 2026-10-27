@@ -21,6 +21,10 @@ mod tests {
         verify_dkim_signature,
     };
 
+    use zirv_flow_store::decisions_testing::{
+        PERSONAL_MARKERS, assert_decisions_hold_no_personal_data,
+    };
+
     use super::harness::{PROVIDER_SECRET, PUBLIC_URL, Reply, World, call, call_form};
     use super::{mail, trace};
 
@@ -246,6 +250,8 @@ mod tests {
 
         // The person exists and subscribed.
         let person = world.subscribed_person(ADDRESS).await;
+        // Distinctive personal values sit in the data; none may reach a decision, a job or the trace.
+        let seeded = world.seed_personal_values().await;
 
         // Step 1 and 2: a track call moves the person into the segment, which starts the flow.
         let track_trace = world.track_order(ADDRESS).await;
@@ -417,7 +423,10 @@ mod tests {
         let shown = serde_json::to_string(&records).expect("text");
         assert!(!shown.contains('@'), "an address is in the trace");
         let body = tree.to_string();
-        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
+        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS]
+            .into_iter()
+            .chain(PERSONAL_MARKERS)
+        {
             assert!(!body.contains(marker), "{marker} is in the trace response");
         }
 
@@ -456,27 +465,23 @@ mod tests {
             .await;
         world.settle().await;
         assert_eq!(world.count("SELECT count(*) FROM test_sends").await, 1);
-        // No address in any stored decision or job, the test send's included.
-        let decisions = dump_text(&world.pool, Some(&["decision_records", "jobs"])).await;
-        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
-            assert!(
-                !decisions.contains(marker),
-                "{marker} is in a stored decision"
-            );
-        }
+        // No address and no seeded value in any stored decision or job, the test send's included.
+        assert_decisions_hold_no_personal_data(&world.pool).await;
 
         // The erasure scan, once, at the end: the person is erased, and nothing of them is left
         // in `messages`, `message_links` or `test_sends`, nor anywhere else.
         assert_eq!(world.count("SELECT count(*) FROM messages").await, 3);
         assert!(world.count("SELECT count(*) FROM message_links").await >= 1);
-        world
-            .api_ok(
-                "POST",
-                "/privacy/erasures",
-                Some(json!({"person_id": person})),
-                StatusCode::ACCEPTED,
-            )
-            .await;
+        for erased in [person, seeded.person] {
+            world
+                .api_ok(
+                    "POST",
+                    "/privacy/erasures",
+                    Some(json!({"person_id": erased})),
+                    StatusCode::ACCEPTED,
+                )
+                .await;
+        }
         world.settle().await;
         for table in ["messages", "message_links", "people", "identities"] {
             assert_eq!(
