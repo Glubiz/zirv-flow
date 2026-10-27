@@ -2085,6 +2085,8 @@ mod tests {
                 Some("render_error".into()),
             ]
         );
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     /// The suppression hash of an address, as the pipeline takes it.
@@ -2414,6 +2416,8 @@ mod tests {
                 Some("flow_paused".to_owned())
             )]
         );
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     #[sqlx::test]
@@ -2485,6 +2489,8 @@ mod tests {
         assert_eq!(env.sent()[0].to, "second@example.com");
         assert_eq!(env.events("email.failed").await.len(), 1);
         let _ = std::fs::remove_file(marker);
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     #[sqlx::test]

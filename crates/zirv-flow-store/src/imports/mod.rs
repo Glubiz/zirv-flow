@@ -523,6 +523,8 @@ mod tests {
         assert_eq!(sources, ["import"]);
         let list = crate::find_list(&pool, ws, list.id).await.unwrap().unwrap();
         assert_eq!(list.member_count, 3);
+        crate::decisions_testing::seed_personal_values(&pool, ws).await;
+        crate::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

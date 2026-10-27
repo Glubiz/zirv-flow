@@ -639,6 +639,8 @@ mod tests {
             "every row was applied exactly once"
         );
         assert_eq!(snapshot(&pool, ws).await.1, 1200);
+        zirv_flow_store::decisions_testing::seed_personal_values(&pool, ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

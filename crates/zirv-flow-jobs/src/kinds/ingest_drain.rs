@@ -462,6 +462,8 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(reasons, [("apply_failed".into(), Some("m-1".into()))]);
+        zirv_flow_store::decisions_testing::seed_personal_values(&pool, ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

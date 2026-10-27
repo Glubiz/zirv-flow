@@ -454,6 +454,8 @@ mod tests {
         .await;
         assert!(!is_suppressed(&pool, fx.ws, &[7_u8; 32]).await.unwrap());
         assert_eq!(fx.count("suppressions").await, 2);
+        zirv_flow_store::decisions_testing::seed_personal_values(&fx.pool, fx.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&fx.pool).await;
     }
 
     #[sqlx::test]

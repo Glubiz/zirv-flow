@@ -4211,6 +4211,12 @@ mod tests {
         )
         .await;
         assert_eq!(one.body["member_count"], 3);
+        zirv_flow_store::decisions_testing::seed_personal_values(
+            &pool,
+            zirv_flow_core::WorkspaceId::from_uuid(ws.parse().unwrap()),
+        )
+        .await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]
@@ -5464,6 +5470,12 @@ mod tests {
         )
         .await;
         assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+        zirv_flow_store::decisions_testing::seed_personal_values(
+            &pool,
+            zirv_flow_core::WorkspaceId::from_uuid(ws.parse().unwrap()),
+        )
+        .await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

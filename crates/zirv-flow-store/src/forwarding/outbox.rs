@@ -1155,6 +1155,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(enrollments, 0);
+        crate::decisions_testing::seed_personal_values(&pool, ws).await;
+        crate::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     async fn one_pending_row(pool: &PgPool, name: &str) -> (WorkspaceId, Uuid) {

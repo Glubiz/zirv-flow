@@ -1210,6 +1210,8 @@ mod tests {
             env.decisions(&enrolled.trace).await,
             [("failed".to_owned(), Some("http_4xx".to_owned()))]
         );
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     #[sqlx::test]

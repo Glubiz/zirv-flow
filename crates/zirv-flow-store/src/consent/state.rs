@@ -845,6 +845,8 @@ mod tests {
         .unwrap();
         assert!(!more);
         assert_eq!(rest[0].to_status, "subscribed");
+        crate::decisions_testing::seed_personal_values(&pool, ws).await;
+        crate::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

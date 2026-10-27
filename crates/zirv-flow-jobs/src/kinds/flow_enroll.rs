@@ -1645,6 +1645,8 @@ mod tests {
         )
         .await;
         assert_eq!(env.enrolled(flow).await, [ann]);
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     /// Exit criterion 4 of milestone 5: a segment-entry trigger for 100,000 people enrolls each

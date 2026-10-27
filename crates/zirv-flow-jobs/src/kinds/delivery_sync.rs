@@ -1028,6 +1028,8 @@ mod tests {
             ]
         );
         assert!(env.events("sync.succeeded").await.is_empty());
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     #[sqlx::test]

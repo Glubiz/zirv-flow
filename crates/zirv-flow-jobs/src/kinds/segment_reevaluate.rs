@@ -619,6 +619,8 @@ mod tests {
         .unwrap();
         assert_eq!(failed, 1);
         assert_eq!(dirty(&pool).await, 0);
+        zirv_flow_store::decisions_testing::seed_personal_values(&pool, ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

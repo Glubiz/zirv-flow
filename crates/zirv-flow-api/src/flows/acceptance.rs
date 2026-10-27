@@ -1843,7 +1843,9 @@ mod tests {
         // The accepted ones queue their work, record a decision on the enrollment's own trace
         // (cause manual) and audit the action with that trace.
         let retried = f.lead("POST", &retry(&failed), None).await;
-        let skipped = f.lead("POST", &skip(&also_failed), None).await;
+        // A free-text note sent with the skip is ignored: no decision may keep it.
+        let note = json!({"reason": zirv_flow_store::decisions_testing::OPERATOR_NOTE});
+        let skipped = f.lead("POST", &skip(&also_failed), Some(note)).await;
         let exited = f.lead("POST", &exit_older(1), None).await;
         assert_eq!(retried.status, StatusCode::ACCEPTED, "{:?}", retried.body);
         assert_eq!(skipped.status, StatusCode::ACCEPTED, "{:?}", skipped.body);
@@ -1909,6 +1911,8 @@ mod tests {
         let after = f.lead("POST", &exit_older(1), None).await;
         assert_eq!(after.status, StatusCode::CONFLICT);
         assert_eq!(after.body["code"], "flow_archived");
+        zirv_flow_store::decisions_testing::seed_personal_values(&f.pool, f.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&f.pool).await;
     }
 
     #[sqlx::test]

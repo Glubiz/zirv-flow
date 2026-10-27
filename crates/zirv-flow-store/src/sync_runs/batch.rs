@@ -998,6 +998,8 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stream_checkpoint, None);
+        crate::decisions_testing::seed_personal_values(&pool, fx.ws).await;
+        crate::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]

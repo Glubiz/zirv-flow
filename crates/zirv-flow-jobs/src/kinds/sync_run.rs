@@ -1649,6 +1649,8 @@ mod tests {
         assert_eq!(done.state, "succeeded");
         assert_eq!((done.records_read, done.records_applied), (1000, 1000));
         assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1000);
+        zirv_flow_store::decisions_testing::seed_personal_values(&pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]
