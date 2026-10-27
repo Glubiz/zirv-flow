@@ -33,7 +33,6 @@ pub(crate) struct TraceBody {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CauseKindBody {
     Event,
-    TraitChange,
     Schedule,
     Manual,
     Api,
@@ -45,7 +44,6 @@ impl From<CauseKind> for CauseKindBody {
     fn from(kind: CauseKind) -> Self {
         match kind {
             CauseKind::Event => Self::Event,
-            CauseKind::TraitChange => Self::TraitChange,
             CauseKind::Schedule => Self::Schedule,
             CauseKind::Manual => Self::Manual,
             CauseKind::Api => Self::Api,
@@ -162,7 +160,6 @@ mod tests {
     fn every_core_cause_kind_maps_to_the_schema_kind_with_the_same_wire_name() {
         let kinds = [
             CauseKind::Event,
-            CauseKind::TraitChange,
             CauseKind::Schedule,
             CauseKind::Manual,
             CauseKind::Api,
