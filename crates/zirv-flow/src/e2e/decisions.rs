@@ -332,7 +332,7 @@ mod tests {
                 Coverage::Test(test) if !tests.contains(*test) => {
                     problems.push(format!("{row}: the test {test} does not exist"));
                 }
-                Coverage::Untestable(why) if why.is_empty() => {
+                Coverage::Untestable("") => {
                     problems.push(format!("{row}: Untestable needs a reason"));
                 }
                 _ => {}
