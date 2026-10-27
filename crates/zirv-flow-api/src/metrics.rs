@@ -145,10 +145,7 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with('|'))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("\n");
         let listed = names_in(&table);
         emitted.difference(&listed).cloned().collect()
     }
