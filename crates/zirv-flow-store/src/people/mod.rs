@@ -3,6 +3,7 @@
 
 mod apply;
 mod conflicts;
+mod lock;
 mod merge;
 mod profile;
 mod profiles;
@@ -24,13 +25,14 @@ pub use apply::{
     DroppedTrait, ProfileOutcome, ProfileRecord, apply_profile_batch, remove_contribution,
 };
 pub(crate) use apply::{
-    apply_profile_record, apply_profile_records, apply_profile_records_singly,
-    remove_contribution_in,
+    apply_profile_record, apply_profile_record_into, apply_profile_records,
+    apply_profile_records_singly, remove_contribution_in,
 };
 pub(crate) use apply::{normalize_identifiers, record_resolution};
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
 };
+pub(crate) use lock::{PersonLock, lock_people_in_order};
 pub use merge::{REWRITE_BATCH, REWRITE_JOB_KIND, current_person, rewrite_merged_person};
 pub use profile::{IdentityGroup, Profile, ProfileMerge, ProfileTrait, load_profile};
 pub use profiles::{

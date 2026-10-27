@@ -26,6 +26,7 @@ use super::runtime::{
     EnrollmentStatus, StepJobInput, StepJobPayload, find_enrollment, lock_enrollment,
 };
 use super::state::FlowState;
+use crate::people::{PersonLock, lock_people_in_order};
 use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enqueue, enqueue_many};
 
 /// The kind of the job that matches the goal and exit criteria of a batch of enrollments.
@@ -144,15 +145,7 @@ async fn lock_people(
     found: &[(Uuid, Uuid)],
 ) -> Result<Vec<Uuid>, StoreError> {
     let people: Vec<Uuid> = found.iter().map(|(_, person)| *person).collect();
-    sqlx::query(
-        "SELECT id FROM people WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id \
-         FOR UPDATE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(&people)
-    .fetch_all(connection)
-    .await
-    .map_err(StoreError::query)?;
+    lock_people_in_order(connection, workspace, &people, PersonLock::Update).await?;
     Ok(found.iter().map(|(id, _)| *id).collect())
 }
 

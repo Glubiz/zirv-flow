@@ -59,6 +59,9 @@ pub struct Problem {
     /// The active flows whose running version sends a template (`template_in_use`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flows: Option<Vec<FlowRefProblem>>,
+    /// The draft's current revision (`template_draft_revision_mismatch`), to load it with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_revision: Option<i32>,
 }
 
 /// A live template that a new snippet or theme version would stop from sending.
@@ -158,6 +161,8 @@ struct SegmentExtra {
     templates: Option<(Vec<BrokenTemplateProblem>, u32)>,
     /// The active flows that send a template (`template_in_use`).
     flows: Option<Vec<FlowRefProblem>>,
+    /// The current revision of the draft a stale write named (`template_draft_revision_mismatch`).
+    current_revision: Option<i32>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -849,9 +854,13 @@ impl ApiError {
 
     /// A draft save that names a revision other than the current one: the draft was saved by
     /// someone else since the caller read it.
-    pub(crate) fn template_draft_revision_mismatch() -> Self {
+    pub(crate) fn template_draft_revision_mismatch(current: i32) -> Self {
         Self {
             code: Some("template_draft_revision_mismatch"),
+            segment: Some(Box::new(SegmentExtra {
+                current_revision: Some(current),
+                ..SegmentExtra::default()
+            })),
             ..Self::new(
                 StatusCode::CONFLICT,
                 "the draft was saved by someone else; read it again",
@@ -1285,6 +1294,10 @@ impl IntoResponse for ApiError {
             total: templates.as_ref().map(|(_, total)| *total),
             templates: templates.map(|(listed, _)| listed),
             flows: self.segment.as_mut().and_then(|extra| extra.flows.take()),
+            current_revision: self
+                .segment
+                .as_ref()
+                .and_then(|extra| extra.current_revision),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
@@ -1345,6 +1358,18 @@ mod tests {
             .as_ref()
             .and_then(|extra| extra.flows.as_ref());
         assert_eq!(flows.map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn a_stale_template_draft_write_is_a_409_naming_the_current_revision() {
+        let error = ApiError::template_draft_revision_mismatch(7);
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code(), Some("template_draft_revision_mismatch"));
+        assert_eq!(
+            error.segment.and_then(|extra| extra.current_revision),
+            Some(7)
+        );
     }
 
     #[test]

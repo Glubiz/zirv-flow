@@ -818,7 +818,7 @@ else's data.
   connections, including every broker address learned from metadata, pass the
   egress policy (16.1). Values are JSON only in v1; Avro and Protobuf with a
   schema registry come post-1.0 (OQ-31). The `rskafka` TLS and compression
-  features are validated on both musl release architectures (amd64, arm64).
+  features are validated on the musl release target (x86_64-unknown-linux-musl).
   Its zstd feature is off: `rskafka` 0.6 pins `zstd` 0.13, which has
   RUSTSEC-2026-0391, 0398, 0403 and 0410, and 0403 is reachable from broker
   bytes. Gzip, Snappy and LZ4 batches read; a zstd batch fails the read. It
@@ -1716,8 +1716,8 @@ As built (#303): the renderer and the validator resolve nothing; the caller pass
 ### 11.7 Versions, preview, test sends, webhook payloads
 
 - **Versions:** drafts are editable; publishing creates an immutable version. `action.send` references the template, not a version, and sends its current published version at send time, so a typo fix needs no flow republish. Publishing a template, snippet or theme returns the active flows that use it. Version history and where-used are available for templates, snippets and themes. A message row records `theme_id`, `theme_version` and `snippet_versions` (snippet id to version) beside `template_version`, and a test send records them too.
-- **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`; until M8 introduces that grant, owners and admins only) or a sample person built from registry types, at desktop and mobile widths (#307). The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks with their reasons and validation results.
-- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge. As built (#308): `template_preview_people` (migration 0064; `template_id`, `workspace_id`, `person_id`, `added_by`, `created_at`; primary key `(template_id, person_id)`) holds at most 20 rows per template, checked under the template row lock (`preview_people_limit`, 409). `GET`, `POST` and `DELETE /{person_id}` on `/templates/{id}/preview-people` are Admin only and audited as `template.preview_person_added` and `template.preview_person_removed` with ids only; a person already saved answers 200 and writes no second row or audit. The list shows each person with the strongest identifier masked as the people search masks it. The preview endpoint is unchanged: only an Admin previews a real person. A merge moves the loser's rows to the survivor in the merge transaction and drops a row when the survivor is already saved on that template.
+- **Preview:** rendered server-side through the same pipeline, as a real person (requires `view_pii`, implied for the owner and Admin and an explicit grant for an Editor or Publisher; ruling ca362e00, 16.2) or a sample person built from registry types, at desktop and mobile widths (#307). The SPA shows it in a sandboxed iframe (no `allow-scripts`, no same-origin) with the text part, subject, preheader, hidden blocks with their reasons and validation results.
+- **Saved preview people (#308):** a per-template list of people to preview as, managed by an Admin. The rows are erased with the person and move to the survivor when people merge. As built (#308): `template_preview_people` (migration 0064; `template_id`, `workspace_id`, `person_id`, `added_by`, `created_at`; primary key `(template_id, person_id)`) holds at most 20 rows per template, checked under the template row lock (`preview_people_limit`, 409). `GET`, `POST` and `DELETE /{person_id}` on `/templates/{id}/preview-people` are Admin only and audited as `template.preview_person_added` and `template.preview_person_removed` with ids only; a person already saved answers 200 and writes no second row or audit. The list shows each person with the strongest identifier masked as the people search masks it. The preview endpoint is unchanged: previewing a real person requires `view_pii` (implied for the owner and Admin, an explicit grant for an Editor or Publisher). A merge moves the loser's rows to the survivor in the merge transaction and drops a row when the survivor is already saved on that template.
 - **Template library (#332):** the list is the library. As built (#332): `GET /templates` takes `q` (a case-insensitive substring of the name, the draft's subject or a merge field the draft uses), `channel` (`email` or `webhook`), `status` (`live`, `changes`, `draft`, `archived`; without it everything except archived, and `archived=true` still adds archived ones), `theme` (a theme id, `default` or `none`) and `sort` (`edited`, the default, `name`, `most_used`: non-test messages of the last 30 days); an unknown value of any of them is a 400 that names the parameter. Each item adds `draft_changed`, `checks` (`{blocking, warnings}`, or null when the draft was not checked), `active_flows` (flows in the `published` state whose running version names the template, from one grouped query), `theme` (`"default"`, `"none"` or `{id, name}`, read from `blocks.theme` of the draft; code mode and webhooks are `"none"`), `edited_by_email` (null for an API key or a member who left) and `edited_at`. Migration 0067 adds the nullable `template_drafts.checks`; a draft save clears it, and once the save has committed `PUT /templates/{id}/draft` validates the saved document once as a publish does (`publish_inputs` and `publish_issues` in `templates/publish.rs`, through the render pool, with a 5 second cap) and stores the counts for that revision. A failed or skipped validation leaves it null and logs a warning with the template id only; the save and its response are unchanged. `DELETE /templates/{id}` is refused with 409 `template_in_use` and the flows (`flows`: `{flow_id, flow_name}`) while a `published` flow's running version names the template; a draft or paused flow does not block. A flow publish share-locks the templates it names, in id order, before it validates them, so an archive and a flow publish cannot both commit. The library page is `web/src/features/templates/TemplatesPage.tsx`.
 - **Assistant template drafts (#309):** a template tool (the ninth in the registry) drafts email copy, subject variants, block layouts and translations. The draft is an `ai_drafts` row of kind `template`, validated by template validation with bounded repair before it is stored. The response carries the field diff and a render diff at desktop and mobile widths. Accepting writes the template's ordinary draft after validation passes again and never publishes. An accepted translation updates only the current draft, including its `lang`; saving it as a new template is a separate marketer action.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
@@ -1900,9 +1900,11 @@ from the observed shape or rejecting them. Schema inference never publishes a
 schema. Before accepted properties are stored, ingest redaction drops or
 keyed-hashes configured properties and truncates IP addresses; validation uses
 the pre-redaction types but rejects and debugger samples apply the same masking
-rules. Property values flagged as PII are masked without `view_pii`; until M8
-adds that grant, only owners and admins can view them. Per-event-name retention
-may shorten or extend the deployment default within operator-set bounds.
+rules. Property values flagged as PII are masked without `view_pii`; the owner
+and Admin imply it, while Publisher, Editor and Viewer memberships need an
+explicit grant (ruling ca362e00, 16.2). Admin-scoped keys retain values; other
+keys need the additive `pii` scope. Per-event-name workspace retention may
+shorten the deployment default within operator-set bounds (16.3).
 
 **As built.** The store ships the registry, validation and storage of this section, and 7.1
 describes the ingestion API; the debugger, explorer and replay are described under 12.2 and 12.3. Versions are immutable
@@ -2064,8 +2066,10 @@ or deleted; identity merges; consent and trait changes; segment entry and exit;
 enrollment and flow step outcomes; sends or skips with the gate reason;
 delivery feedback; and forwarding attempts. Each record has `trace_id`, time,
 action type, outcome, durable domain ids and one typed cause: `event`,
-`trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`, with the
-cause id. It never stores identifier, trait or event-property values.
+`schedule`, `manual`, `api`, `definition_change` or `sync_run`, with the cause id.
+The M8 trace-completeness matrix covers these six active causes, including failure
+and skip paths. The `trait_change` cause returns when computed traits produce it
+(ruling 67953328). A decision never stores identifier, trait or event-property values.
 For enrollments a segment trigger keeps the cause of the membership change; an event
 trigger is cause `event` with the event id; a schedule trigger is cause `schedule`, the
 API trigger cause `api`, and operator actions (retry, skip, bulk exit, manual audience
@@ -2083,7 +2087,7 @@ the trace of its jobs and of every decision it writes. An applied record is
 `sync.record`/`applied` with the `person` and `source_record` ids; a rejected record is
 `sync.record`/`rejected` with the reason code and the `ingest_reject` id, and also the `source_record` ledger row when it has one (#114; a record refused on first sight is named by its reject row alone); a deleted record has
 the `contribution.removed` decision that retracting it writes. Unchanged records write none.
-Both `cause_kind` CHECKs (`jobs`, and the partitioned `decision_records`) list the seventh kind.
+Both `cause_kind` CHECKs (`jobs`, and the partitioned `decision_records`) include `sync_run`.
 
 The `trace_id` and cause cross transactional job enqueue, retries and external
 effects. Retries add attempts under the same logical record rather than hiding
@@ -2101,14 +2105,16 @@ flowchart LR
 ```
 
 Decision records are append-only and time-partitioned by record time. Their
-retention and volume policy is OQ-28; erasure removes records scoped to the
-person while preserving aggregate operational metrics.
+retention is set by `retention.decision_days`, default 13 months, bounded from
+30 days to 25 months, with whole-partition drops and no hard volume cap
+(OQ-28, ruling ca12b4e5; 16.3). Erasure removes records scoped to the person
+while preserving aggregate operational metrics.
 
 As built (M1 skeleton):
 
 - **Trace id and cause.** `TraceId` is a v4 UUID shown as 32 lowercase hex
-  characters (the W3C trace-id shape, so OTLP can carry it later). `Cause` is one
-  of the six kinds above plus an id, built only through typed constructors. The
+  characters (the W3C trace-id shape, so OTLP can carry it later). `Cause` carries
+  a typed kind and an id, built only through typed constructors. The
   HTTP layer mints a fresh trace per request with cause `api(<request id>)` and
   ignores any incoming trace header, so a client cannot graft its requests onto
   another trace. The scheduler mints one per fired slot with cause
@@ -2569,9 +2575,10 @@ POSTs. After 1.0, `/api/v1` changes only additively.
 
 **Authentication:** local accounts (argon2id), server-side sessions in
 HttpOnly SameSite cookies with CSRF tokens on mutations; API keys random, stored
-as SHA-256 hashes, workspace-scoped, with scopes `ingest` (write-only), `read`,
-`write`, `admin`. OIDC SSO works with any compliant provider, with Keycloak as
-the reference: the authorization-code flow with PKCE, a state cookie bound to a
+as SHA-256 hashes, workspace-scoped, with independent scopes `ingest` (write-only),
+`read`, `write`, `admin`, `publish` and `pii` (16.2). OIDC SSO works with any
+compliant provider, with Keycloak as the reference: the authorization-code flow
+with PKCE, a state cookie bound to a
 single-use server-side login, and ID-token verification in `zirv-flow-identity`.
 An identity links to a user by issuer and subject, or by a verified e-mail
 address; provider roles are not mapped, so an admin grants workspace access.
@@ -2731,24 +2738,55 @@ credential, zeroized after use, into `connectors` or `ai`, which never decrypt.
 
 As built (M3): `core::secrets` seals a secret with a random 32-byte data key and a random 24-byte nonce (XChaCha20-Poly1305). The associated data is `zirv-flow/secret/v1|<workspace_id>|<secret_id>|<purpose>`, so a ciphertext moved to another row or workspace does not open. The data key is wrapped by a key encryption key (HKDF-SHA256 over the master key bytes, info `zirv-flow/kek/v1`) and stored with the wrapping key id, in `encrypted_secrets` (workspace scope) or `deployment_keys` (deployment scope). `store::secrets` handles sealed values only; `api` and `jobs` open them right before use, into zeroizing values that have no `Display`, `Serialize` or `Clone`. The HMAC keys no longer derive from the master key but from the **HMAC root** in `deployment_keys`: it is created once, atomically, from the master key that produced the existing hashes (`insert ... on conflict do nothing`, then every start reads back the winner), keeps the same HKDF labels, and is re-wrapped, never changed, by `admin rotate-master-key`. A previous key is configured with `secrets.previous_master_key_file` or `secrets.previous_master_key` for the rotation window, and a start with a previous key and no root is refused so a root is never bootstrapped from a rotation's new key. Rotation re-wraps both tables in one transaction and audits key ids and the count. Rotation locks the HMAC root row `FOR UPDATE` first and is refused when it is absent; every secret insert and replace locks it `FOR SHARE` and proceeds only when its wrapping key is one the writer's keyring holds, so a process left on the old key cannot store a row after a rotation, and a write racing a rotation is either re-wrapped by it or refused. A write with no root is refused.
 
-| Role (proposed, confirmed in M8) | Scope | Can |
+The M8 role matrix is final (ruling 92d5483d); earlier "As built" notes describe
+their milestone's permissions. The owner is the instance flag
+`users.is_owner`, not a membership role, and can do everything, including
+workspaces, users, instance settings and key rotation. Workspace memberships
+use the four roles below; existing `member` rows become `editor`.
+
+| Role | Scope | Can |
 |------|-------|-----|
-| Owner | Organization | Everything: workspaces, users, instance settings, key rotation |
-| Admin | Workspace | Sources, destinations, credentials, API keys, members, retention, assistant provider and privacy settings |
-| Publisher | Workspace | Editor rights plus publish/pause flows, publish templates, snippets and the brand theme, run imports |
-| Editor | Workspace | Draft segments, flows, templates, snippets, lists; assistant drafts when enabled; previews, test mode and test sends |
+| Admin | Workspace | Publisher rights plus sources, destinations, credentials, API keys, members, retention, assistant provider and privacy settings; consent policy and event schema publish; privacy export and erase; suppressions, forwarding rules, sending domains and webhooks |
+| Publisher | Workspace | Editor rights plus publish, pause, resume and archive flows; operator retry, skip and exit; bulk exit of old-version enrollments and manual audience enrollment; publish templates, snippets and the brand theme; run imports |
+| Editor | Workspace | Viewer rights plus draft segments, flows, templates, snippets, lists; assistant drafts when enabled; validation, previews, test mode, test sends and the API trigger |
 | Viewer | Workspace | Read only; personal data masked unless granted `view_pii` |
 
 Editors create segments, save current segment versions (ruling e4aa60bb) and refresh a segment now; viewers read its members and history.
 
-Flow permissions until the M8 Publisher role exists (ruling 43163028). Read: flows, versions, enrollments and counts. Write (a member, or a write-scoped key): drafts, validation and test mode, and the API trigger `POST .../flows/{id}/enrollments`. Admin: publish, pause, resume and archive; operator retry and skip; the bulk exit of old-version enrollments; a manual audience enrollment.
+Flow permissions replace the interim split of ruling 43163028 with the final
+matrix of ruling 92d5483d. Viewer: flows, versions, enrollments and counts.
+Editor: drafts, validation and test mode, and the API trigger
+`POST .../flows/{id}/enrollments`. Publisher: publish, pause, resume and archive;
+operator retry, skip and exit; the bulk exit of old-version enrollments; manual
+audience enrollment. Admin and the owner retain these rights.
+
+**Personal data (ruling ca362e00).** The owner and Admin imply `view_pii`.
+Publisher, Editor and Viewer memberships carry a `view_pii` flag, default false.
+An Editor needs the grant for a real-person preview and for test mode that
+shows personal data; the grant does not confer editing or publishing rights.
+Admin-scoped API keys keep personal-data values; other keys need the additive
+`pii` scope as well as the scope for the operation.
+
+**Key scopes (ruling 90506547).** The four existing scopes `ingest`, `read`,
+`write` and `admin` stay; no scope implies another. `write` means Editor-level
+draft operations, including validation, test mode and the API trigger. The new
+`publish` scope grants Publisher operations and the new `pii` scope grants
+personal-data values. `admin` is unchanged. A key needs each scope required by
+the operations it performs; `pii` alone grants no operation.
+
+**Last-admin rule.** Removing or demoting the last workspace Admin is refused
+unless the caller is the owner. **Invitations** are deferred past 1.0: the
+owner creates users, and workspace Admins add existing users as members.
 
 The per-workspace webhook signing secret for `action.webhook` (9.1) is stored in `encrypted_secrets`, rotatable and shown once.
 
-M1 ships owner, admin and member; the full matrix lands in M8. The **audit
-log** is append-only (actor, action, object, time, request id, change summary
-without personal data values) and covers sign-ins, membership and key changes,
+M8 uses the owner flag and the four workspace roles above. **Audit access** is
+Admin for workspace rows; instance rows (`workspace_id IS NULL`) are owner-only.
+The **audit log** is append-only (actor, action, object, time, request id, change
+summary without personal data values) and covers sign-ins, membership and key changes,
 credential access, publishes, imports, exports, erasures and configuration.
+Person references contain opaque ids only; they are references, not anonymous
+data, and survive erasure under the policy in 16.3 (ruling e3c37d2b).
 Assistant calls also write the dedicated call log in section 13.4 whether they succeed, fail validation or are stopped by policy or budget.
 
 **Sending-domain DNS lookups.** The check of a sending domain's DKIM, SPF and DMARC
@@ -2799,17 +2837,36 @@ person-scoped decision records, stored assistant transcripts, pending
 and dead forwarding payloads and pending exports, and delete saved preview-person
 rows (`template_preview_people`); (4) call `erase` on forwarding and delivery destinations that
 declare it and record results; (5) delete the person; (6) write an audit entry
-without personal data. Templates,
+without personal-data values. Templates,
 snippets, themes and assets hold no personal data by design. Each milestone
-that adds a table extends erasure, and a test asserts no row for an erased
-person survives anywhere. Backups keep erased data until they age out;
-after a restore, `zirv-flow admin replay-erasures` re-applies the ledger
-(keeping a ledger copy outside the database is OQ-13). **Retention** (proposed
-defaults, enforced by scheduler jobs): events 25 months deployment-wide, with
+that adds a table extends erasure, and a scan of every table asserts that only
+the suppression hash, the ledger entry and id-only audit rows survive.
+
+**Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
+names the directory holding one JSON file per completed erasure entry.
+`zirv-flow admin export-ledger` exports completed entries to that directory.
+Backups keep erased data until they age out; after a restore,
+`zirv-flow admin replay-erasures --from <dir>` re-applies the external ledger.
+The operator must back up the ledger directory separately from the database
+and make it available for every restore; restoring a database backup alone
+does not preserve erasures completed after that backup.
+
+**Audit rows and erasure (ruling e3c37d2b).** `audit_log` stays append-only:
+erasure neither deletes nor rewrites its rows. Person references are opaque ids
+only, never identifier, trait or event-property values. These ids are references,
+not anonymous data. The erasure scan treats `audit_log` like the erasure ledger:
+id-only rows are an allowed exception and do not fail the scan.
+
+**Retention** (enforced by scheduler jobs): events 25 months deployment-wide, with
 per-name workspace overrides (drop monthly partitions; batched deletes where
 an override is shorter; each purge of rows that show a destination handled a person leaves a
 handled marker, see "Handled markers" below), messages 13 months, ingest rejects (including those from syncs and imports) 30 days, import files 7 days after the import ends,
-job failure history 14 days, audit log 2 years. Decision-log retention is OQ-28.
+job failure history 14 days, audit log 2 years. Decision-log retention is set by
+`retention.decision_days`, default 13 months and bounded from 30 days to 25
+months; enforcement drops whole expired partitions, with no hard volume cap
+(OQ-28, ruling ca12b4e5). Only events, messages and the decision log can be
+shortened per workspace, within the deployment policy; audit, ingest rejects,
+import files and job history retention are deployment-only (ruling d732a27c).
 Assistant transcripts are not stored unless a workspace opts in to a 1 to 30
 day window (default 7), which a retention job purges (13.4, OQ-26).
 
@@ -2823,7 +2880,7 @@ run removes. The delivered outbox purge uses the pool too, releasing its locks b
 calls.
 
 As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs with their kinds,
-status, requester, trace); it is the one table the erasure scan skips on purpose.
+status, requester, trace); the M8 erasure scan applies the ledger and audit exceptions above.
 `POST /privacy/erasures` records the request and enqueues `privacy.erase` in one transaction;
 the job then runs in one transaction: it deletes the pending `ingest_inbox` rows whose
 identifiers, parsed and hashed, match any hash of the group (locked `FOR UPDATE`, so a drain either
@@ -2833,8 +2890,8 @@ upserts `erased` suppressions from the ledger hashes, calls `delete_person` for 
 people, and pending inbox rows by hash with the master key). Exports are `privacy_exports`:
 `privacy.export` builds the gzip JSON `zirv-flow.person-export/v1`, the download is
 admin-only, audited and answers 410 after 24 hours, and the leader's hourly upkeep drops expired
-content. A request whose job went dead reads as `failed`. Backup-copy handling of the ledger
-(OQ-13) is not built yet; enrollments joined the erasure in M5 (9.3).
+content. A request whose job went dead reads as `failed`. M8 requires the external ledger
+and restore procedure above (OQ-13); enrollments joined the erasure in M5 (9.3).
 M6 adds the rest: it erases the `messages` rows and their message links, the test-send log
 entries and the pending and dead forwarding payloads of the person, and calls
 `erase` on each forwarding or delivery destination that declares it, recording
@@ -2940,7 +2997,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
 | Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `ops` (`bind`, off by default: metrics and health listener for worker-only and scheduler-only processes), `log` (`filter`, an EnvFilter directive, default `info`; `format`, `json` or `text`, default `json`), `secrets` (`master_key_file`, `master_key`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
-| Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); a static Linux release binary from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Worker-only and scheduler-only processes serve `/metrics`, `/healthz` and `/readyz` on `ops.bind` (off by default); with `serve` the endpoints stay on `server.bind`. PostgreSQL 16 or newer is required. |
+| Packaging | GHCR image (multi-stage, non-root, linux/amd64); `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Worker-only and scheduler-only processes serve `/metrics`, `/healthz` and `/readyz` on `ops.bind` (off by default); with `serve` the endpoints stay on `server.bind`. PostgreSQL 16 or newer is required. |
 | Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M8. |
 | Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. Mixed-version rolling upgrades are OQ-17. |
 
@@ -2967,10 +3024,15 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 ## 19. Scalability envelope
 
 Every figure is a **TARGET to validate, not a measurement**; measurements are
-recorded in the "As measured" notes below the table. Each milestone measures its slice and M8 validates all of them on
-reference hardware (assumed: PostgreSQL 8 vCPU / 32 GB RAM / NVMe; two
-`zirv-flow` hosts of 4 vCPU). A missed target is fixed or revised in a recorded
-decision, never dropped silently. Beyond the envelope: more workers, a read
+recorded in the "As measured" notes below the table. Each milestone measures its
+slice and M8 validates all of them under **reference-resource emulation**
+(ruling ef99d178): PostgreSQL limited to 8 cores and 32 GB RAM, and two
+`zirv-flow` app containers limited to 4 cores each, with all three pinned to
+disjoint core sets. This emulates CPU and memory limits, not separate hosts:
+storage, network and host contention remain those of the benchmark machine,
+so it does not establish performance on dedicated reference hardware.
+Validation on real hardware remains outstanding. A missed target is fixed or
+revised in a recorded decision, never dropped silently. Beyond the envelope: more workers, a read
 replica for preview and explain (deferred, 8.3), event rollups (OQ-2), then the ADR-003 add-ons
 (external broker, analytical event store), only on measured need.
 
@@ -3002,7 +3064,8 @@ from a 2-minute run; #74): one workspace's drain applied about 3,400 mixed items
 shards shared one task. With each shard on its own task (#74) the drain applies about 4,000 to 4,400
 items per second, and a measured 10-minute burst at 10,000/s drained in 890 s (14.8 minutes), 10 s inside
 the 15-minute target, a thin margin. The figures
-are not a v1 sign-off; the targets are re-checked on reference hardware before 1.0.
+are not a v1 sign-off; the targets are re-checked under reference-resource emulation
+before 1.0, with validation on real hardware still outstanding.
 
 **As measured (M4).** The segment rows were measured at 10 million people and 50 million events on a
 development machine (PostgreSQL on cpuset `8-31`, the app at 4 vCPU) in
@@ -3021,10 +3084,10 @@ executions, a slot backfill left no statistics, and an aggregate was a correlate
 and 97.5 s uncapped; 503 at the 10 s limit, which also contradicted the 15 s target). An aggregate preview on
 a cold cache can take about 15 s. D4.1 on `jsonb` was not re-run. The figures are not a v1 sign-off.
 
-M5 measures timer lateness at 1 million waiting enrollments (exit criterion 8). The 10 million row stays the target for the M8 reference-hardware run.
+M5 measures timer lateness at 1 million waiting enrollments (exit criterion 8). The 10 million row stays the target for the M8 reference-resource run.
 
-**As measured (M5, provisional until the M8 hardware run).** Timer lateness at 1,000,000 waiting enrollments (900,000 spread over 40 minutes plus 100,000 waking in one minute, seeded by SQL from rows a product-path sample wrote, so no evidence of enrollment throughput) on a development machine, image 0.76.0, in [docs/benchmarks/m5-flows.md](benchmarks/m5-flows.md). With no ingest load the target is met, with a thin margin: p99 52.4 s and 51.8 s in two runs (max 55.8 s), the tail being the burst backlog, since one worker at concurrency 4 drains about 1,100 wake jobs/s (the job throughput row). With 2,000 events/s running at the same time it is missed: p99 136.4 s, max 141.7 s, the drain falling to 832 jobs/s with PostgreSQL at 480% CPU (#207). The ingest API p99 in that run was 1,016 ms server-side, beside #151.
-**As measured (M7, provisional until the M8 hardware run).** Template render of a typical block email (20 blocks, theme, snippet, asset image, 3 pre-evaluated conditions; 21 KB of HTML) through the real render pool on a development machine, in [docs/benchmarks/m7-render.md](benchmarks/m7-render.md): p50 1.40 ms, p95 1.57 ms, p99 1.67 ms at the production pool size of 2 (5000 renders, saturated). The target is met by a factor of about 30.
+**As measured (M5, provisional until the M8 reference-resource run).** Timer lateness at 1,000,000 waiting enrollments (900,000 spread over 40 minutes plus 100,000 waking in one minute, seeded by SQL from rows a product-path sample wrote, so no evidence of enrollment throughput) on a development machine, image 0.76.0, in [docs/benchmarks/m5-flows.md](benchmarks/m5-flows.md). With no ingest load the target is met, with a thin margin: p99 52.4 s and 51.8 s in two runs (max 55.8 s), the tail being the burst backlog, since one worker at concurrency 4 drains about 1,100 wake jobs/s (the job throughput row). With 2,000 events/s running at the same time it is missed: p99 136.4 s, max 141.7 s, the drain falling to 832 jobs/s with PostgreSQL at 480% CPU (#207). The ingest API p99 in that run was 1,016 ms server-side, beside #151.
+**As measured (M7, provisional until the M8 reference-resource run).** Template render of a typical block email (20 blocks, theme, snippet, asset image, 3 pre-evaluated conditions; 21 KB of HTML) through the real render pool on a development machine, in [docs/benchmarks/m7-render.md](benchmarks/m7-render.md): p50 1.40 ms, p95 1.57 ms, p99 1.67 ms at the production pool size of 2 (5000 renders, saturated). The target is met by a factor of about 30.
 
 ## 20. Key decisions
 
@@ -3087,7 +3150,7 @@ they were ruled as their capabilities were added to the plan.
 - **Options.** (1) Keep an informal catalog and diagnose from operational logs. (2) Put validation and every derived decision into the customer-event stream. (3) Use a versioned event schema registry and keep customer events, audit records, append-only decision records and operational logs distinct, linked by durable ids.
 - **Decision.** (3). Event schemas carry typed properties, required fields, enums, descriptions and PII flags, with per-event `allow`/`warn`/`block` validation and a workspace policy for unplanned names. Redaction precedes storage; rejects, debugger, explorer and replay make ingestion visible. Every derived action carries a propagated `trace_id` and typed cause into a personal-data-free, time-partitioned decision log and trace API. Client `messageId` dedupe gives effectively-once event storage; forwarding is at-least-once with stable keys and visible retries. Section 12 is authoritative.
 - **Consequences.** More writes and partitions buy deterministic investigation and safe replay. Every handler must append its decision record transactionally and extend erasure. The explorer stays on Postgres until measured targets justify an analytical add-on. Replays are explicit and do not silently re-trigger flows.
-- **Reverse if.** On reference hardware, partitioning and indexing cannot meet the section 19 debugger, explorer or decision-write targets without harming core ingestion, after the measured Postgres optimizations are exhausted. Then move the relevant query or append workload behind the same API to the analytical add-on; do not collapse the four record types or weaken trace semantics.
+- **Reverse if.** On the section 19 reference resources, partitioning and indexing cannot meet the section 19 debugger, explorer or decision-write targets without harming core ingestion, after the measured Postgres optimizations are exhausted. Then move the relevant query or append workload behind the same API to the analytical add-on; do not collapse the four record types or weaken trace semantics.
 
 ### ADR-008: Draft-only LLM assistance over typed tools
 
@@ -3109,16 +3172,23 @@ they were ruled as their capabilities were added to the plan.
 
 | ID | Question | Decide by |
 |----|----------|-----------|
-| OQ-13 | Where the erasure ledger is kept outside the database so it survives a restore | M8 |
 | OQ-16 | Is OIDC SSO required for v1.0, or post-1.0? Decided in M1: OIDC SSO through any compliant provider, with Keycloak as the reference. | Closed (M1) |
 | OQ-17 | Rolling, mixed-version upgrades with expand/contract migrations | Post-1.0 |
 | OQ-18 | Federated mode shape: which AST nodes run against a live source; freshness and identity there | M9 |
-| OQ-28 | What is the default decision-log retention, and what per-workspace volume limits preserve useful traces without unbounded storage? | M8, by retention and load validation |
 | OQ-29 | Which measured explorer workload triggers the optional analytical store: retained rows, query p95, write interference or all three? | M8 benchmark; M9 promotion decision |
 | OQ-30 | How does the post-1.0 MCP server authenticate users and API clients while preserving workspace RBAC and per-call audit? | M9, before an MCP milestone is promoted |
 
 ### 21.1 Decided questions
 
+- **OQ-13:** The erasure ledger lives outside the database in `privacy.ledger_dir`,
+  one JSON file per completed entry (ruling cae7a407). `admin export-ledger`
+  exports completed entries; `replay-erasures --from <dir>` re-applies them after
+  a restore. The operator backs up that directory separately and makes it
+  available for restores (16.3).
+- **OQ-28:** `retention.decision_days` defaults to 13 months, bounded from 30 days
+  to 25 months, enforced by whole-partition drops with no hard volume cap
+  (ruling ca12b4e5). A workspace can shorten decision-log retention under the
+  deployment policy (ruling d732a27c; 16.3).
 - **OQ-21:** Asset limits. Per file 5 MiB and per workspace 1 GiB, both config keys; at most 8192
   px per side and 40 megapixels, read from the image header before any decode. PostgreSQL is the only
   asset store in v1.0; S3-compatible object storage stays an optional post-1.0 add-on and is never
@@ -3151,7 +3221,7 @@ they were ruled as their capabilities were added to the plan.
   `segment.entered` p95 4.05 s against 60 s) after #149; the miss on 0.57.0 (278 s) was
   a custom plan of the re-evaluation batch statement, not the aggregate compile
   (`docs/benchmarks/m4-segments.md`, section 4.3, follow-up D). Revisit rollups only if
-  M8 on reference hardware misses the preview target with a warm cache. See
+  M8 under reference-resource emulation (19) misses the preview target with a warm cache. See
   [docs/benchmarks/m4-segments.md](benchmarks/m4-segments.md).
 
 - **OQ-4:** Custom object types are post-1.0. v1 sources map to people, events
@@ -3165,8 +3235,8 @@ they were ruled as their capabilities were added to the plan.
   the partitions and fetches each from per-partition next offsets stored in our
   database, written in the apply-batch transaction with the lease fenced inside
   it. JSON values only in v1; Avro and Protobuf with a schema registry come
-  post-1.0. The TLS and compression features are validated on both musl
-  architectures (amd64, arm64). Sections 7.6 and 14.
+  post-1.0. The TLS and compression features are validated on the musl
+  release target (x86_64-unknown-linux-musl). Sections 7.6 and 14.
 - **OQ-26:** Assistant transcripts are not stored by default. A workspace admin
   can opt in to a debugging window of 1 to 30 days (default 7), purged by a
   retention job; changing the setting is audited. The content-free call audit
@@ -3184,7 +3254,8 @@ they were ruled as their capabilities were added to the plan.
 
 - **OQ-7:** Decided for v1 (ruling 469cfc51). In-flight enrollments do not migrate: they stay
   pinned to their version until they end. Publishing shows how many active enrollments stay
-  on older versions. An Admin can end every enrollment of an older version in bulk; each one
+  on older versions. A Publisher or Admin can end every enrollment of an older version in bulk
+  (M8 role matrix, ruling 92d5483d); each one
   exits with cause `manual` and gets its own decision. Migration stays a post-1.0 theme
   (9.1, 9.4).
 - **OQ-14:** There is no automatic pause in v1 (ruling 5c679ecb). Every external-effect step

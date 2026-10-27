@@ -15,6 +15,7 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
 use crate::changes::{mark_people, request_reevaluation};
+use crate::people::{PersonLock, lock_people_in_order};
 use crate::{NewDecision, StoreError, append_decision, append_decisions};
 
 /// The most people one add or remove takes.
@@ -133,15 +134,8 @@ async fn lock_current_people(
         let mut targets: Vec<Uuid> = rows.iter().map(|(_, current)| *current).collect();
         targets.sort_unstable();
         targets.dedup();
-        let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT id, merged_into FROM people \
-             WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR SHARE",
-        )
-        .bind(workspace.as_uuid())
-        .bind(&targets)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+        let locked =
+            lock_people_in_order(&mut *connection, workspace, &targets, PersonLock::Share).await?;
         // A person merged away while the lock was awaited is resolved again.
         if locked.len() == targets.len() && locked.iter().all(|(_, merged)| merged.is_none()) {
             return Ok(rows.into_iter().collect());

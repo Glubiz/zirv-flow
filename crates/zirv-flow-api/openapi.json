@@ -21995,6 +21995,23 @@
             }
           }
         ],
+        "requestBody": {
+          "description": "Optional: an empty body or `null` converts unconditionally; otherwise an object naming the draft revision the caller read",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ConvertTemplateDraftRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "The template with its converted draft",
@@ -22037,7 +22054,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`)",
+            "description": "The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`, with `current_revision`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -28589,6 +28606,19 @@
               "null"
             ],
             "description": "Pass as `after` for the next page; null on the last page."
+          }
+        }
+      },
+      "ConvertTemplateDraftRequest": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision the caller read. When given and the draft has been saved since, the\nconversion is a 409 `template_draft_revision_mismatch` and writes nothing. Absent converts\nunconditionally."
           }
         }
       },
@@ -36026,6 +36056,14 @@
               "null"
             ],
             "description": "A stable machine-readable code for a failure a client acts on, such as\n`search_timeout`; absent for the rest."
+          },
+          "current_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft's current revision (`template_draft_revision_mismatch`), to load it with."
           },
           "cycle": {
             "type": [
