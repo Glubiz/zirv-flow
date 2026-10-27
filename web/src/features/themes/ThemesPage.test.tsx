@@ -160,6 +160,23 @@ describe("the theme list", () => {
     expect(calls.find((call) => call.method === "POST")?.body).toEqual({ name: "Warm" });
   });
 
+  it("offers a viewer no new theme and no menu, and an admin the menu", async () => {
+    mockApi(themeRoutes({ role: "reader", list: twoThemes() }));
+    const viewer = mount();
+
+    await screen.findByRole("link", { name: "Cool" });
+    expect(screen.queryByRole("button", { name: "New theme" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /More actions/ })).not.toBeInTheDocument();
+    viewer.unmount();
+
+    mockApi(themeRoutes({ list: twoThemes() }));
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole("button", { name: "More actions for Cool" }));
+    expect(screen.getByRole("menuitem", { name: "Set as default" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Archive/ })).toBeInTheDocument();
+  });
+
   it("offers a writer a new theme but no default or archive", async () => {
     mockApi(themeRoutes({ role: "editor", list: twoThemes() }));
     mount();

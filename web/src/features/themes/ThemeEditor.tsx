@@ -278,12 +278,12 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, canPubli
                 </div>
               </>
             ) : (
-              <p className="muted">Members of the workspace can preview a theme.</p>
+              <p className="muted">Previewing a theme needs the editor role.</p>
             )}
           </div>
         </div>
       ) : null}
-      {tab === "versions" ? <ThemeVersions workspaceId={workspaceId} themeId={theme.id} reloadKey={reloadKey} /> : null}
+      {tab === "versions" ? <ThemeVersions workspaceId={workspaceId} themeId={theme.id} reloadKey={reloadKey} canPreview={canWrite} /> : null}
       {tab === "used" ? <WhereUsedView workspaceId={workspaceId} themeId={theme.id} reloadKey={reloadKey} /> : null}
 
       {publishing ? (

@@ -231,6 +231,33 @@ describe("the Send a test page", () => {
     expect(calls.map((call) => call.path)).not.toContain(`${WS}/templates/${TEMPLATE_ID}/preview-people`);
   });
 
+  it("lets an editor with the personal data grant pick another person and sends their id", async () => {
+    const calls = mockApi(
+      routes(
+        {
+          [SEND]: () => json(row({ render_context: "person" }), 202),
+          [`POST ${WS}/people/search`]: () => json({ people: [{ id: "p-9", display: { kind: "email", masked: false, value: "ada@example.test" } }], next_cursor: null }),
+          "GET /api/v1/workspaces/ws1/members": () => json(TEAM.map((entry) => ({ ...entry, view_pii: entry.user_id === MEMBER.id }))),
+        },
+        { role: "editor" },
+      ),
+    );
+    const user = userEvent.setup();
+    mount();
+
+    await user.selectOptions(await screen.findByLabelText("Fill fields as"), "other");
+    await user.type(await screen.findByLabelText("Person's email address"), "ada@example.test");
+    await user.click(screen.getByRole("button", { name: "Search" }));
+    await user.click(await screen.findByRole("button", { name: "Preview as ada@example.test" }));
+    await user.selectOptions(screen.getByLabelText("Send through"), DESTINATION_ID);
+    await pick(user, MEMBER.email);
+    await user.click(screen.getByRole("button", { name: "Send 1 test" }));
+
+    await waitFor(() => expect(sent(calls)).toHaveLength(1), WAIT);
+    expect(sent(calls)[0]).toMatchObject({ person_id: "p-9" });
+    expect(calls.map((call) => call.path)).not.toContain(`${WS}/templates/${TEMPLATE_ID}/preview-people`);
+  });
+
   it("blocks a send that is more than the tests left this hour", async () => {
     mockApi(routes({ [`GET ${WS}/test-sends/quota`]: () => json({ ...QUOTA, member: { used: 9, limit: 10 } }) }));
     const user = userEvent.setup();

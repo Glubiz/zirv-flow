@@ -150,6 +150,15 @@ describe("the snippet page", () => {
     expect(screen.getByRole("button", { name: "Save draft" })).toBeInTheDocument();
   });
 
+  it("shows a viewer neither Save draft nor Publish", async () => {
+    mockApi(snippetRoutes({ role: "reader" }));
+    mount();
+
+    expect(await screen.findByRole("heading", { level: 1 })).toBeInTheDocument();
+    for (const name of ["Publish…", "Save draft"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add heading/ })).not.toBeInTheDocument();
+  });
+
   it("lists the versions and shows one read only", async () => {
     mockApi({
       ...snippetRoutes({ versions: [{ version: 2, published_at: "2026-10-05T09:00:00Z", warnings: 1, published_by: null }] }),

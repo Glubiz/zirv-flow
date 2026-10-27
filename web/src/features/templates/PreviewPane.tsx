@@ -254,7 +254,7 @@ function HiddenBlocks({ hidden, who, onGoToBlock }: { hidden: readonly { id: str
   );
 }
 
-function PersonPicker({ workspaceId, chosen, onChoose }: { workspaceId: string; chosen: PersonChoice | null; onChoose: (person: PersonChoice) => void }) {
+export function PersonPicker({ workspaceId, chosen, onChoose }: { workspaceId: string; chosen: PersonChoice | null; onChoose: (person: PersonChoice) => void }) {
   const [value, setValue] = useState("");
   const [searching, setSearching] = useState(false);
   const [found, setFound] = useState<PersonChoice[] | null>(null);
