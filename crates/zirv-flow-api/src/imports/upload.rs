@@ -274,7 +274,16 @@ async fn receive(
         if total > limits.max_file_bytes {
             return Err(too_large());
         }
-        upload.write(&piece).await?;
+        upload.write(&piece).await.map_err(|error| {
+            if error.is_erased() {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "the import was erased while it was being uploaded",
+                )
+            } else {
+                error.into()
+            }
+        })?;
         scan.push(&piece).map_err(csv_problem)?;
     }
     let mut scanned = scan.finish().map_err(csv_problem)?;

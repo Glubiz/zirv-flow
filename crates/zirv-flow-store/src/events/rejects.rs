@@ -207,12 +207,16 @@ pub async fn erase_unattributed_rejects(
         return Ok(0);
     }
     let done: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        r"WITH n AS (SELECT lower(x) AS needle FROM unnest($2::text[]) AS x WHERE x <> ''),
+        r"WITH n AS (SELECT lower(x) AS needle FROM unnest($2::text[]) AS x WHERE x ~ ('[^,;|' || chr(34) || '[:space:]]')),
          pat AS (SELECT {plain} AS re),
          gone AS (
             DELETE FROM ingest_rejects r WHERE r.workspace_id = $1 AND r.person_id IS NULL
               AND (EXISTS (
                     SELECT 1 FROM jsonb_path_query(r.payload, 'strict $.**') AS v
+                    WHERE jsonb_typeof(v) NOT IN ('object', 'array')
+                      AND lower(v #>> '{{}}') IN (SELECT needle FROM n))
+                OR EXISTS (
+                    SELECT 1 FROM jsonb_path_query(r.sample, 'strict $.**') AS v
                     WHERE jsonb_typeof(v) NOT IN ('object', 'array')
                       AND lower(v #>> '{{}}') IN (SELECT needle FROM n))
                 OR lower(r.message_id) IN (SELECT needle FROM n)

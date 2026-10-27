@@ -403,6 +403,7 @@ enum StoreErrorKind {
     Retryable,
     Timeout,
     RunActive,
+    Erased,
 }
 
 impl StoreError {
@@ -517,6 +518,17 @@ impl StoreError {
         matches!(self.kind, StoreErrorKind::RunActive)
     }
 
+    /// An upload that an erasure ended: the import is no longer `uploading` and nothing was
+    /// written.
+    pub(crate) fn erased() -> Self {
+        Self::new(StoreErrorKind::Erased)
+    }
+
+    /// Whether the write was refused because an erasure ended the import being uploaded.
+    pub fn is_erased(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::Erased)
+    }
+
     /// Whether the query ran past its statement timeout and PostgreSQL cancelled it.
     pub fn is_timeout(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Timeout)
@@ -582,6 +594,9 @@ impl fmt::Display for StoreError {
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
             StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
+            StoreErrorKind::Erased => {
+                formatter.write_str("the import was erased while it was being uploaded")
+            }
             StoreErrorKind::Retryable => {
                 formatter
                     .write_str("the transaction conflicted with another and can be retried")?;

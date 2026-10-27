@@ -1088,6 +1088,33 @@ mod tests {
         assert_eq!(left, expected);
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_id_with_a_comma_matches_its_quoted_cell_and_a_lone_comma_deletes_nothing(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "one").await;
+        let quoted = stored_file(&pool, ws, b"id,n\n\"a,b\",1\n").await;
+        let split = stored_file(&pool, ws, b"id,n\na,b\n").await;
+        let empties = stored_file(&pool, ws, b"id,n,m\n1,,\n,,\n").await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let erased = erase_import_values(&mut connection, ws, &["a,b".into(), ",".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(erased.chunks, 1);
+        assert!(
+            read_import_chunk(&pool, quoted.id, 0)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        for kept in [split.id, empties.id] {
+            assert!(read_import_chunk(&pool, kept, 0).await.unwrap().is_some());
+        }
+    }
+
     async fn second_chunk(pool: &PgPool, ws: WorkspaceId, import: Uuid, data: &[u8]) {
         sqlx::query(
             "INSERT INTO import_chunks (import_id, seq, workspace_id, data) VALUES ($1, 1, $2, $3)",

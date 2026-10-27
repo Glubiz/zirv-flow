@@ -587,7 +587,10 @@ fn usable_needles(values: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut needles: Vec<String> = Vec::new();
     for value in values {
         let value = value.trim();
-        if !value.is_empty() && !needles.iter().any(|known| known == value) {
+        let meaningful = value
+            .chars()
+            .any(|c| !(matches!(c, ',' | ';' | '|' | '"') || c.is_whitespace()));
+        if meaningful && !needles.iter().any(|known| known == value) {
             needles.push(value.to_owned());
         }
     }
@@ -708,6 +711,7 @@ mod tests {
                 " Ada@Example.com ",
                 "",
                 "  ",
+                " , ; \"| ",
                 "ada@example.com",
                 "Ada@Example.com",
             ]

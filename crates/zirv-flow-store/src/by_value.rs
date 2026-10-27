@@ -18,11 +18,26 @@ pub(crate) fn field_pattern(array: &str, encoded: bool) -> String {
     } else {
         "x"
     };
+    let escape =
+        |value: &str| format!(r#"regexp_replace({value}, '([\\^$.|?*+()\[\]{{}}])', '\\\1', 'g')"#);
+    let (plain, quoted) = (
+        escape(spelled),
+        escape(&format!("replace({spelled}, '\"', '\"\"')")),
+    );
+    // An identifier holding a delimiter, a quote or a newline would run across cells, so it
+    // matches only as one correctly quoted cell (encoded file) or as a whole value (a parsed
+    // cell). One made only of delimiters, quotes and whitespace matches nothing.
+    let whole = if encoded {
+        format!(r#"'(?:^|[\n\r,;\t|])"' || {quoted} || '"(?:$|[\n\r,;\t|])'"#)
+    } else {
+        format!("'^' || {plain} || '$'")
+    };
     format!(
-        r#"(SELECT string_agg(CASE WHEN position('@' IN x) > 0 THEN e
-            ELSE '(?:^|[\n\r",;\t|])' || e || '(?:$|[\n\r",;\t|])' END, '|')
-          FROM (SELECT x, regexp_replace({spelled}, '([\\^$.|?*+()\[\]{{}}])', '\\\1', 'g') AS e
-                FROM unnest({array}::text[]) AS x WHERE x <> '') AS s)"#
+        r#"(SELECT string_agg(CASE
+                WHEN position('@' IN x) > 0 THEN {plain}
+                WHEN x ~ '[,;|"\t\r\n]' THEN {whole}
+                ELSE '(?:^|[\n\r",;\t|])' || {plain} || '(?:$|[\n\r",;\t|])' END, '|')
+          FROM unnest({array}::text[]) AS x WHERE x ~ '[^,;|"[:space:]]')"#
     )
 }
 
@@ -71,8 +86,8 @@ mod tests {
             assert!(matches(&pool, &["a.b+c"], "x,a.b+c,y", encoded).await);
             assert!(!matches(&pool, &["a.b+c"], "x,aXbbc,y", encoded).await);
             assert!(!matches(&pool, &["a.b+c"], "x,a.bbc,y", encoded).await);
-            assert!(matches(&pool, &["(x)|[y]{2}^$"], "(x)|[y]{2}^$", encoded).await);
-            assert!(!matches(&pool, &["(x)|[y]{2}"], "y", encoded).await);
+            assert!(matches(&pool, &["(x)[y]{2}^$"], "(x)[y]{2}^$", encoded).await);
+            assert!(!matches(&pool, &["(x)[y]{2}"], "y", encoded).await);
         }
     }
 
@@ -88,5 +103,48 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(none, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_needle_with_a_delimiter_matches_only_as_one_quoted_cell(pool: PgPool) {
+        for needle in ["a,b", "a;b", "a|b"] {
+            let quoted = format!("x,\"{needle}\",y");
+            assert!(matches(&pool, &[needle], &quoted, true).await, "{quoted}");
+            assert!(matches(&pool, &[needle], &format!("\"{needle}\""), true).await);
+            let split = needle.replace([',', ';', '|'], ",");
+            assert!(!matches(&pool, &[needle], &split, true).await, "{split}");
+            assert!(!matches(&pool, &[needle], &format!("x,{needle},y"), true).await);
+            assert!(matches(&pool, &[needle], needle, false).await);
+            assert!(!matches(&pool, &[needle], &format!("x,{needle}"), false).await);
+        }
+        assert!(!matches(&pool, &["a,b"], "a;b,\"a\",\"b\"", true).await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_needle_with_a_quote_matches_only_its_doubled_quoted_cell(pool: PgPool) {
+        assert!(matches(&pool, &["x\"y"], "1,\"x\"\"y\",2", true).await);
+        assert!(!matches(&pool, &["x\"y"], "1,x\"y,2", true).await);
+        assert!(!matches(&pool, &["x\"y"], "1,\"x\"y\",2", true).await);
+        assert!(matches(&pool, &["x\"y"], "x\"y", false).await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_needle_of_only_delimiters_quotes_and_whitespace_matches_nothing(pool: PgPool) {
+        for needle in [",", ";;", "| |", "\"", " \t", ",\""] {
+            for encoded in [false, true] {
+                let hit: Option<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT ',,;;' ~* {}",
+                    field_pattern("$1", encoded)
+                )))
+                .bind(vec![needle.to_owned()])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_ne!(hit, Some(true), "{needle:?}");
+            }
+        }
     }
 }

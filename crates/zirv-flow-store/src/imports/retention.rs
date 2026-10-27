@@ -2,6 +2,7 @@
 //! import ends, the refused rows' cells 30 days after they were written. The import row, its
 //! counters and its reject codes' count stay.
 
+use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
 use crate::by_value::field_pattern;
@@ -114,6 +115,11 @@ pub struct ImportErasure {
 /// transaction, before the chunks go, every such import that has not ended is set `failed` with
 /// the code `erased` (the file held an erased person's data). A worker that already read rows
 /// then cannot commit them: the batch checkpoint locks the import row and requires `running`.
+/// A streaming upload share-locks its import row with every chunk it writes, so the fence waits
+/// for a chunk in flight, the chunks are deleted by a second statement that sees it, and a later
+/// chunk is refused (`StoreError::is_erased`). An identifier holding a delimiter, a quote or a
+/// newline matches only as one correctly quoted cell; one made only of those and whitespace is
+/// ignored.
 ///
 /// Cost: the workspace's chunks (a 7 day window) are read once per erase, each window decoded
 /// once and tested against one combined pattern for all needles, never once per needle. The
@@ -131,7 +137,7 @@ pub async fn erase_import_values(
     if needles.is_empty() {
         return Ok(ImportErasure::default());
     }
-    let chunks = sqlx::query(sqlx::AssertSqlSafe(format!(
+    let hit: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         r"WITH pat AS (SELECT {encoded} AS re,
                 (SELECT max(octet_length(x)) FROM unnest($2::text[]) AS x) AS len),
          hit AS (
@@ -153,16 +159,24 @@ pub async fn erase_import_values(
             WHERE workspace_id = $1 AND id IN (SELECT import_id FROM hit)
               AND status NOT IN ('succeeded', 'failed', 'cancelled')
             RETURNING id)
-         DELETE FROM import_chunks WHERE workspace_id = $1
-            AND import_id IN (SELECT import_id FROM hit)",
+         SELECT import_id FROM hit",
         encoded = field_pattern("$2", true)
     )))
     .bind(workspace.as_uuid())
     .bind(needles)
-    .execute(&mut *connection)
+    .fetch_all(&mut *connection)
     .await
-    .map_err(StoreError::query)?
-    .rows_affected();
+    .map_err(StoreError::query)?;
+    // A second statement, so its snapshot sees a chunk an upload committed while the fence
+    // waited for that upload's share lock on the import row.
+    let chunks =
+        sqlx::query("DELETE FROM import_chunks WHERE workspace_id = $1 AND import_id = ANY($2)")
+            .bind(workspace.as_uuid())
+            .bind(&hit)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?
+            .rows_affected();
     let rejects = sqlx::query(sqlx::AssertSqlSafe(format!(
         r"DELETE FROM import_rejects r WHERE r.workspace_id = $1 AND EXISTS (
             SELECT 1 FROM jsonb_path_query(r.raw, 'strict $.**') AS cell

@@ -482,7 +482,7 @@ pub async fn erase_contact_idempotency(
     let done = sqlx::query(
         r"DELETE FROM contact_idempotency k WHERE k.workspace_id = $1 AND EXISTS (
             SELECT 1 FROM unnest($2::text[]) AS needle
-            WHERE needle <> '' AND (lower(k.key) = lower(needle)
+            WHERE needle ~ ('[^,;|' || chr(34) || '[:space:]]') AND (lower(k.key) = lower(needle)
                 OR (position('@' IN needle) > 0
                     AND position(lower(needle) IN lower(k.key)) > 0)))",
     )
