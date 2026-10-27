@@ -3,6 +3,7 @@
 
 mod apply;
 mod conflicts;
+mod lock;
 mod merge;
 mod profile;
 mod profiles;
@@ -29,6 +30,7 @@ pub(crate) use apply::{normalize_identifiers, record_resolution};
 pub use conflicts::{
     ConflictResolution, ResolveError, find_conflict, list_conflicts, resolve_conflict,
 };
+pub(crate) use lock::{PersonLock, lock_people_in_order};
 pub use merge::{REWRITE_BATCH, REWRITE_JOB_KIND, current_person, rewrite_merged_person};
 pub use profile::{IdentityGroup, Profile, ProfileMerge, ProfileTrait, load_profile};
 pub use profiles::{
