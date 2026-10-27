@@ -338,13 +338,13 @@ drafting, on the renderer that sends (architecture section 11, ADR-006).
 pages and forms; blocks beyond the v1 set plus the snippet block.
 
 **Exit criteria.**
-- [ ] A browser end-to-end test builds the reference newsletter layout without code, using a theme, a snippet and an uploaded asset, and test-sends it to an SMTP sink; the captured HTML equals the preview render apart from tracking tokens.
-- [ ] Publishing an email with an unknown merge field, or a `marketing` email without an unsubscribe link, is rejected for block, MJML and HTML templates.
-- [ ] After a snippet update is published, later sends use it, and the message log records the template, snippet and theme versions each message used.
-- [ ] One template rendered under two themes differs only in theme tokens; changing the workspace default theme changes only templates that follow the default.
-- [ ] A document saved under schema v1 opens and renders byte-identically after migration to the current schema (golden test).
-- [ ] A raw HTML block containing a script runs no script in the app preview, and an SVG or type-mismatched upload is rejected (tests).
-- [ ] The fake provider drafts copy, subject variants, a layout and a translation; invalid merge fields are repaired or returned as errors, the render diff is reviewable, and acceptance changes only the template draft.
+- [x] A browser end-to-end test builds the reference newsletter layout without code, using a theme, a snippet and an uploaded asset, and test-sends it to an SMTP sink; the captured HTML equals the preview render apart from tracking tokens.
+- [x] Publishing an email with an unknown merge field, or a `marketing` email without an unsubscribe link, is rejected for block, MJML and HTML templates.
+- [x] After a snippet update is published, later sends use it, and the message log records the template, snippet and theme versions each message used.
+- [x] One template rendered under two themes differs only in theme tokens; changing the workspace default theme changes only templates that follow the default.
+- [x] A document saved under schema v1 opens and renders byte-identically after migration to the current schema (golden test).
+- [x] A raw HTML block containing a script runs no script in the app preview, and an SVG or type-mismatched upload is rejected (tests).
+- [x] The fake provider drafts copy, subject variants, a layout and a translation; invalid merge fields are repaired or returned as errors, the render diff is reviewable, and acceptance changes only the template draft.
 - [x] Render benchmark attached against the section 19 target (p95 < 50 ms for a typical block email): [`m7-render.md`](benchmarks/m7-render.md), p95 1.57 ms at the production pool size, met.
 
 **Dependencies.** M6 (renderer, block editor, send pipeline, destinations), and through it M5.
