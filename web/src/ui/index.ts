@@ -10,6 +10,7 @@ export type { MenuEntry } from "./Menu";
 export { PageHeader, Panel } from "./Page";
 export { Pill } from "./Pill";
 export type { Tone } from "./Pill";
+export { previewDocument } from "./previewDocument";
 export { ResourceView } from "./ResourceView";
 export { Sheet } from "./Sheet";
 export { SkipLink } from "./SkipLink";
