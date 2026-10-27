@@ -111,7 +111,10 @@ describe("the block editor in snippet mode", () => {
     expect(await screen.findByText(/An image has no alt text/, undefined, WAIT)).toBeInTheDocument();
     const frame = await screen.findByTitle("Preview of the snippet");
     expect(frame).toHaveAttribute("sandbox", "");
-    expect(frame).toHaveAttribute("srcdoc", "<p>Free returns</p>");
+    const document = new DOMParser().parseFromString(frame.getAttribute("srcdoc") ?? "", "text/html");
+    expect(document.head.firstElementChild?.localName).toBe("meta");
+    expect(document.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
+    expect(document.body.innerHTML).toBe("<p>Free returns</p>");
     expect(screen.getByRole("button", { name: "Mobile" })).toBeInTheDocument();
   });
 
