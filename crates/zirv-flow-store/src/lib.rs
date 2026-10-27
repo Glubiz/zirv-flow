@@ -647,7 +647,7 @@ mod tests {
 
     /// Tables that hold instance-level data and so carry no `workspace_id`. Every other
     /// table is workspace-scoped and must have the column.
-    const INSTANCE_LEVEL_TABLES: [&str; 9] = [
+    const INSTANCE_LEVEL_TABLES: [&str; 10] = [
         "users",
         "user_identities",
         "oidc_logins",
@@ -657,6 +657,7 @@ mod tests {
         "deployment_keys",
         "debugger_epoch",
         "_sqlx_migrations",
+        "retention_runs",
     ];
 
     #[sqlx::test]
