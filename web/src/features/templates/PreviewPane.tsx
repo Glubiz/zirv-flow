@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
-import { Button, ErrorState, InlineError, LoadingState, SelectField, TextField } from "../../ui";
+import { Button, ErrorState, InlineError, LoadingState, previewDocument, SelectField, TextField } from "../../ui";
 import type { TemplatePreview } from "./model";
 
 export type PreviewState =
@@ -221,7 +221,7 @@ function Rendered({
       </div>
       {view === "html" ? (
         <div className={width === "mobile" ? "tp-frame tp-frame-mobile" : "tp-frame"}>
-          <iframe title="Preview of the message" sandbox="" srcDoc={data.html ?? ""} className="tp-iframe" />
+          <iframe title="Preview of the message" sandbox="" srcDoc={previewDocument(data.html ?? "")} className="tp-iframe" />
         </div>
       ) : (
         <pre className="fl-code tp-text" aria-label="Text part">

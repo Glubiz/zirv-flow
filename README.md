@@ -2539,6 +2539,17 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+CI also gates dependencies with cargo-deny 0.20.2 (`cargo deny --locked check`) and
+`npm audit --omit=dev --audit-level=high` in `web/`. Run
+`bash scripts/check-dependency-policy.sh` and its `--self-test` mode to check Docker
+image digests and advisory review coverage without compiling. The weekly audit
+checks `main` for new advisories; see [the dependency policy](SECURITY.md#dependency-audits)
+for the reviewed exceptions and their exit conditions.
+
+Parser fuzz properties run in the normal suite on every platform. The separate `fuzz/`
+workspace and bounded nightly libFuzzer runs are documented in
+[Contributing](CONTRIBUTING.md#parser-properties-and-fuzzing).
+
 PostgreSQL-backed tests are ignored by default. To run them against the two CI
 versions locally:
 

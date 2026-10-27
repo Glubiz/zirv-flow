@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [dependencies]
 argon2.workspace = true
@@ -29,6 +30,10 @@ time.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
+proptest = { workspace = true, optional = true }
+
+[features]
+test-support = ["dep:proptest"]
 
 [dev-dependencies]
 proptest.workspace = true
