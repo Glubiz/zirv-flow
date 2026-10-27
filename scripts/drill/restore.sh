@@ -229,8 +229,8 @@ check() {
 }
 
 wait_for() {
-  local db="$1" query="$2" want="$3" i
-  for i in $(seq 1 120); do
+  local db="$1" query="$2" want="$3"
+  for _ in $(seq 1 120); do
     if [[ "$(sql "$db" "$query")" == "$want" ]]; then return 0; fi
     sleep 0.5
   done
@@ -294,7 +294,7 @@ took
 step "5. ANALYZE, then replay the erasures from the ledger directory"
 sql "$TARGET_DB" "ANALYZE" >/dev/null
 REPLAY="$(run_bin "$TARGET_DB" admin replay-erasures --from "$(native "$LEDGER")")"
-printf -- '- replay-erasures output: `%s`\n' "$(tr '\n' ' ' <<<"$REPLAY" | sed 's/ *$//')"
+printf -- "- replay-erasures output: \`%s\`\n" "$(tr '\n' ' ' <<<"$REPLAY" | sed 's/ *$//')"
 took
 
 step "6. Assertions through SQL"
