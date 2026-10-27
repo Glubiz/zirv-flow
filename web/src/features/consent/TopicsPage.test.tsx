@@ -20,7 +20,7 @@ const NEWS = {
 };
 const OFFERS = { ...NEWS, id: "t-offers", key: "offers", name: "Offers", description: "", policy: "opt_in" };
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -66,7 +66,7 @@ describe("topics", () => {
   it("is read-only for a member who is not an admin", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       "GET /api/v1/workspaces/ws1/topics": () => json([NEWS]),
     });
     renderRoute("/w/ws1/topics", ROUTE, <TopicsPage />);

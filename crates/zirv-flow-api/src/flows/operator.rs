@@ -1,7 +1,7 @@
 //! The controls an operator has over the enrollments of a flow (architecture 9.4, ruling
 //! 43163028): retry or skip a failed enrollment, and end every in-flight enrollment of an older
-//! version in bulk. All of them need the workspace admin role (ruling 43163028), are audited, and
-//! record a decision per enrollment with the cause `manual` (the signed-in user). A retry or a skip
+//! version in bulk. All of them need the workspace publisher role (rulings 43163028 and 92d5483d), are
+//! audited, and record a decision per enrollment with the cause `manual` (the signed-in user). A retry or a skip
 //! is recorded under the enrollment's own trace, so one trace reads from the trigger to the
 //! operator's action (architecture 12.4); the response and the audit entry name that trace. A bulk
 //! exit records its decisions under a trace of its own, which its response and audit entry name. A
@@ -61,7 +61,7 @@ async fn act(
     ids: (&str, &str),
     skip: bool,
 ) -> Result<(StatusCode, Json<EnrollmentActionBody>), ApiError> {
-    let workspace = authorize(state, principal, path_id(ws)?, Need::Admin).await?;
+    let workspace = authorize(state, principal, path_id(ws)?, Need::Publish).await?;
     let (flow, enrollment): (Uuid, Uuid) = (path_id(ids.0)?, path_id(ids.1)?);
     let trace = operator_trace(principal);
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
@@ -111,7 +111,7 @@ async fn act(
     responses(
         (status = 202, description = "The retry was queued", body = EnrollmentActionBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or enrollment, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The enrollment is not failed (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)", body = Problem, content_type = "application/problem+json")
     ),
@@ -142,7 +142,7 @@ pub(crate) async fn retry(
     responses(
         (status = 202, description = "The skip was queued", body = EnrollmentActionBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or enrollment, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The enrollment is not failed or its failure cannot be skipped (`code` is `enrollment_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)", body = Problem, content_type = "application/problem+json")
     ),
@@ -173,7 +173,7 @@ pub(crate) async fn skip(
     responses(
         (status = 202, description = "The exit was queued", body = ExitVersionBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow or version, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is a draft or the version is not older than the current one (`code` is `flow_state`), or the flow is archived (`flow_archived`) or paused (`flow_paused`)", body = Problem, content_type = "application/problem+json")
     ),
@@ -184,7 +184,7 @@ pub(crate) async fn exit_version(
     principal: Principal,
     Path((ws, id, n)): Path<(String, String, String)>,
 ) -> Result<(StatusCode, Json<ExitVersionBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let (id, version): (Uuid, i32) = (path_id(&id)?, path_id(&n)?);
     let flow = zirv_flow_store::find_flow(&state.pool, workspace.id, id)
         .await?

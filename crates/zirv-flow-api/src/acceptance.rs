@@ -401,7 +401,7 @@ mod tests {
             &router,
             "PUT",
             &format!("/api/v1/workspaces/{ws}/members/{user_id}"),
-            Some(json!({"role": "member"})),
+            Some(json!({"role": "editor"})),
             Auth::SessionWithoutCsrf(&owner),
         )
         .await;
@@ -582,7 +582,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Acme").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (key_id, _) = make_key(&router, &owner, &ws, &["read"]).await;
 
         let read = call(
@@ -644,7 +644,7 @@ mod tests {
 
         assert_eq!(read.status, StatusCode::OK);
         assert_eq!(members.status, StatusCode::OK);
-        assert_eq!(members.body[0]["role"], "member");
+        assert_eq!(members.body[0]["role"], "editor");
         for (name, reply) in [
             ("list keys", list_keys),
             ("create key", create_key),
@@ -1110,7 +1110,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Acme").await;
         let (jane_id, jane) = user(&pool, &router, "jane@example.com").await;
-        add_member(&router, &owner, &ws, jane_id, "member").await;
+        add_member(&router, &owner, &ws, jane_id, "editor").await;
         let (key_id, key) = make_key(&router, &owner, &ws, &["read"]).await;
         call(
             &router,
@@ -1351,7 +1351,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let other = workspace(&router, &owner, "Beta").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, outsider) = user(&pool, &router, "outsider@example.com").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
@@ -2002,7 +2002,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         make_trait(&router, &owner, &ws, "plan", "string").await;
         make_trait(&router, &owner, &ws, "tags", "string_list").await;
@@ -2301,7 +2301,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         call(
             &router,
             "POST",
@@ -2728,7 +2728,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let (_, _, id) = seed_conflict(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let uri = format!("{}/{id}", conflicts_uri(&ws));
@@ -2949,7 +2949,7 @@ mod tests {
         let theirs = workspace(&router, &owner, "Beta").await;
         let (_, _, id) = seed_conflict(&pool, &mine).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &mine, member_id, "member").await;
+        add_member(&router, &owner, &mine, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &mine, &["read"]).await;
         let (_, theirs_key) = make_key(&router, &owner, &theirs, &["admin"]).await;
         let uri = format!("{}/{id}/resolve", conflicts_uri(&mine));
@@ -3282,7 +3282,7 @@ mod tests {
         let mine = workspace(&router, &owner, "Mine").await;
         let theirs = workspace(&router, &owner, "Theirs").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &mine, member_id, "member").await;
+        add_member(&router, &owner, &mine, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &mine, &["read"]).await;
         make_schema(&router, &owner, &mine, "order").await;
         make_schema(&router, &owner, &theirs, "other").await;
@@ -3617,7 +3617,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let id = make_list(&router, Auth::Session(&member), &ws, "Newsletter").await;
         let duplicate = call(
@@ -3897,7 +3897,7 @@ mod tests {
             .await;
         }
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin", "read"]).await;
 
@@ -4548,7 +4548,7 @@ mod tests {
         let other = workspace(&router, &owner, "Beta").await;
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let body = json!({"key": "x", "name": "x", "channel": "email", "policy": "opt_in"});
@@ -4652,7 +4652,7 @@ mod tests {
         let other = workspace(&router, &owner, "Beta").await;
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, stranger) = user(&pool, &router, "stranger@example.com").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
@@ -5413,7 +5413,7 @@ mod tests {
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let put = |body: serde_json::Value| {
             let router = router.clone();
@@ -5663,7 +5663,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let other = workspace(&router, &owner, "Beta").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let identifier = json!({"kind": "email", "value": "ada@example.com"});
@@ -6057,7 +6057,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
         let put = call(
@@ -6309,7 +6309,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
         let (survivor, merged) = seed_profile(&pool, &ws).await;
@@ -6433,7 +6433,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (survivor, _) = seed_profile(&pool, &ws).await;
         let uri = people_uri(&ws, "/search");
@@ -6547,7 +6547,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (survivor, merged) = seed_profile(&pool, &ws).await;
         let uri = people_uri(&ws, &format!("/{merged}/timeline"));
 
@@ -6699,7 +6699,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (survivor, _) = seed_profile(&pool, &ws).await;
         let uri = people_uri(&ws, "/search");
@@ -6777,7 +6777,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
@@ -7036,7 +7036,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
@@ -7155,7 +7155,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let uri = privacy_uri(&ws, "/exports");
@@ -7262,7 +7262,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let uri = privacy_uri(&ws, "/exports");
 
@@ -7306,7 +7306,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let uri = privacy_uri(&ws, "/settings");
 
         let default = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
@@ -7496,7 +7496,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let (status, body) = upload_csv(
             &router,
@@ -8030,7 +8030,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let id = mapped_import(&router, &owner, &ws).await;
         seed_rejects(&pool, &ws, &id).await;
 
@@ -8662,7 +8662,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         publish_order(&router, &owner, &ws, "warn").await;
         put_policy(
             &router,
@@ -8744,7 +8744,17 @@ email,b@example.com,
         assert!(owner_frames.iter().all(|frame| frame.event == "item"));
         let seqs: Vec<i64> = owner_frames
             .iter()
-            .map(|frame| frame.id.as_ref().unwrap().parse().unwrap())
+            .map(|frame| {
+                frame
+                    .id
+                    .as_ref()
+                    .unwrap()
+                    .split_once(':')
+                    .unwrap()
+                    .1
+                    .parse()
+                    .unwrap()
+            })
             .collect();
         assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(owner_frames[1].data["reasons"][0]["reason"], "wrong_type");
@@ -9012,7 +9022,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         seed_explorer(&pool, &router, &owner, &ws).await;
         let scope = with_range(json!({
             "name": "order",
@@ -9160,7 +9170,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         seed_explorer(&pool, &router, &owner, &ws).await;
         let by_email = with_range(json!({"name": "order", "property": "email"}));
         let prefix = with_range(json!({"name": "order", "bucket": "day",
@@ -9353,7 +9363,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         publish_order(&router, &owner, &ws, "block").await;
         inv_store(
@@ -9682,16 +9692,311 @@ email,b@example.com,
         notify_feed(&pool, &ws).await;
         let second = viewer.take(1).await;
 
-        assert_eq!(first[0].data["name"], "from_b");
         assert_eq!(second[0].data["name"], "from_a");
         // The first frame could not claim a position past the open writer; the second can.
-        assert_eq!(first[0].id.as_deref(), Some("0"));
-        assert_eq!(second[0].id.as_deref(), Some("2"));
+        assert_eq!(first[0].data["name"], "from_b");
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(first[0].id, Some(format!("{epoch}:0")));
+        assert_eq!(second[0].id, Some(format!("{epoch}:2")));
         assert!(
             viewer
                 .next(std::time::Duration::from_millis(600))
                 .await
                 .is_none()
+        );
+    }
+
+    /// The app with the debugger patience cut to `patience`, so its lookback (twice it) is short.
+    async fn quick_state(pool: &PgPool, patience: std::time::Duration) -> (Router, AppState) {
+        zirv_flow_store::migrate(pool).await.unwrap();
+        let (router, state) = app_with_state(pool).await;
+        state.debugger.set_patience_for_test(patience);
+        (router, state)
+    }
+
+    fn names(frames: &[Frame]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| frame.data["name"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_from_before_a_crash_is_answered_with_a_reset_not_a_skip(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut before =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..3)
+                .map(|_| inv_record("a@example.com", "before", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        let last = before.take(3).await[2].id.clone().unwrap();
+        drop(before);
+        // A crash empties the unlogged feed and its epoch, and the sequence starts over; the
+        // restarted server writes more rows than the client had seen.
+        sqlx::query("TRUNCATE debugger_feed RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        inv_store(
+            &pool,
+            &ws,
+            (0..5)
+                .map(|_| inv_record("a@example.com", "after", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+
+        let mut again = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some(&last),
+        )
+        .await;
+        let frames = again.take(6).await;
+
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].data["reset"], true);
+        assert_eq!(names(&frames[1..]), ["after"; 5]);
+        assert_ne!(
+            frames[1]
+                .id
+                .as_deref()
+                .and_then(|id| id.split_once(':'))
+                .map(|(epoch, _)| epoch),
+            last.split_once(':').map(|(epoch, _)| epoch),
+            "the new life of the feed has a new epoch"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_writer_open_below_a_fresh_viewers_start_is_delivered_once_it_commits(pool: PgPool) {
+        let patience = std::time::Duration::from_millis(2000);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        // Writer A takes seq 1 and stays open; writer B takes seq 2 and commits. Both are older
+        // than the patience when the viewer connects, so it starts at seq 2.
+        let mut writer_a = pool.begin().await.unwrap();
+        feed_row(&mut *writer_a, &ws, "from_a").await;
+        feed_row(&pool, &ws, "from_b").await;
+        tokio::time::sleep(patience + std::time::Duration::from_millis(300)).await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+
+        writer_a.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let late = viewer.take(1).await;
+
+        assert_eq!(names(&late), ["from_a"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(600))
+                .await
+                .is_none(),
+            "the row B committed before the connection is history, and nothing is sent twice"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_the_watermark_passed_is_filled_when_its_writer_commits_in_the_window(
+        pool: PgPool,
+    ) {
+        let patience = std::time::Duration::from_millis(2000);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        // Writers 1 and 2 stay open; writer 3 commits.
+        let mut writer_1 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_1, &ws, "from_1").await;
+        let mut writer_2 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_2, &ws, "from_2").await;
+        feed_row(&pool, &ws, "from_3").await;
+        notify_feed(&pool, &ws).await;
+        let first = viewer.take(1).await;
+        // Past the patience the watermark gives up on seq 1 and 2.
+        tokio::time::sleep(patience + std::time::Duration::from_millis(300)).await;
+        notify_feed(&pool, &ws).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        writer_2.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let second = viewer.take(1).await;
+        writer_1.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+        let third = viewer.take(1).await;
+
+        assert_eq!(names(&first), ["from_3"]);
+        assert_eq!(names(&second), ["from_2"]);
+        assert_eq!(names(&third), ["from_1"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(600))
+                .await
+                .is_none(),
+            "no row is sent twice"
+        );
+    }
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_that_commits_after_the_window_is_not_delivered(pool: PgPool) {
+        let patience = std::time::Duration::from_millis(500);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        // Writer 1 stays open; writer 2 commits, so seq 1 becomes a hole.
+        let mut writer_1 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_1, &ws, "from_1").await;
+        feed_row(&pool, &ws, "from_2").await;
+        notify_feed(&pool, &ws).await;
+        let first = viewer.take(1).await;
+        // The window is twice the patience; a wake after it drops the hole.
+        tokio::time::sleep(patience * 2 + std::time::Duration::from_millis(400)).await;
+        notify_feed(&pool, &ws).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        writer_1.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+
+        assert_eq!(names(&first), ["from_2"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(800))
+                .await
+                .is_none(),
+            "a row that commits after its hole expired is the documented limit"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_open_stream_notices_a_crash_on_its_poll_and_resets(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..3)
+                .map(|_| inv_record("a@example.com", "before", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        let before = viewer.take(3).await;
+        let old_epoch = before[2].id.clone().unwrap();
+        // A crash empties the feed and its epoch and restarts the sequence below the stream's
+        // watermark; the restarted server then writes two rows.
+        sqlx::query("TRUNCATE debugger_feed RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        feed_row(&pool, &ws, "after").await;
+        feed_row(&pool, &ws, "after").await;
+
+        let frames = viewer.take(3).await;
+
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].data["reset"], true);
+        assert_eq!(names(&frames[1..]), ["after", "after"]);
+        let epoch_of = |id: &str| id.split_once(':').map(|(epoch, _)| epoch.to_owned());
+        let new_epoch = epoch_of(frames[1].id.as_deref().unwrap());
+        assert_ne!(new_epoch, epoch_of(&old_epoch));
+        assert_eq!(new_epoch, epoch_of(frames[2].id.as_deref().unwrap()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_after_rows_below_it_were_purged_has_no_holes(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        for _ in 0..5 {
+            feed_row(&pool, &ws, "old").await;
+        }
+        sqlx::query("DELETE FROM debugger_feed")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        let resume = format!("{epoch}:5");
+
+        let mut viewer = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some(&resume),
+        )
+        .await;
+        feed_row(&pool, &ws, "new").await;
+        notify_feed(&pool, &ws).await;
+        let frames = viewer.take(1).await;
+
+        assert_eq!(names(&frames), ["new"]);
+        assert_eq!(
+            frames[0].id,
+            Some(format!("{epoch}:6")),
+            "numbers 1 to 5 are not holes: the id is not pulled below the resume point"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_another_workspace_fills_settles_the_position_without_a_frame(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Mine").await;
+        let theirs = workspace(&router, &owner, "Theirs").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&mine, ""), Auth::Session(&owner), None).await;
+        // Another workspace's writer takes seq 1 and stays open; mine commits seq 2.
+        let mut writer = pool.begin().await.unwrap();
+        feed_row(&mut *writer, &theirs, "theirs").await;
+        feed_row(&pool, &mine, "first").await;
+        notify_feed(&pool, &mine).await;
+        let first = viewer.take(1).await;
+        writer.commit().await.unwrap();
+        feed_row(&pool, &mine, "second").await;
+        notify_feed(&pool, &mine).await;
+        let second = viewer.take(1).await;
+
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(first[0].id, Some(format!("{epoch}:0")), "seq 1 is a hole");
+        assert_eq!(names(&second), ["second"]);
+        assert_eq!(
+            second[0].id,
+            Some(format!("{epoch}:3")),
+            "the other workspace's row settled the hole"
+        );
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(500))
+                .await
+                .is_none(),
+            "the other workspace's row is not delivered"
         );
     }
 
@@ -9889,7 +10194,8 @@ email,b@example.com,
         assert_eq!(frames[0].data["name"], "yours");
         assert!(!frames[0].raw.contains("not_yours"));
         // No wait for the numbers of the other workspace: the position is already past them.
-        assert_eq!(frames[0].id.as_deref(), Some("3"));
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(frames[0].id, Some(format!("{epoch}:3")));
         assert!(
             viewer
                 .next(std::time::Duration::from_millis(300))
@@ -10161,7 +10467,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let defaults = call(
             &router,
@@ -11672,7 +11978,7 @@ email,b@example.com,
         let ws = workspace(&router, &owner, "Alpha").await;
         define_plan(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let created =
             make_segment(&router, Auth::Session(&member), &ws, "Pro", plan_is("pro")).await;
@@ -12056,7 +12362,7 @@ email,b@example.com,
         .await
         .unwrap();
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let uri = format!("{}/preview", segments_uri(&ws));
         let body = json!({"definition": plan_is("pro"), "sample_size": 1});
@@ -12234,7 +12540,7 @@ email,b@example.com,
         let ws = workspace(&router, &owner, "Alpha").await;
         define_plan(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let id = make_segment(&router, Auth::Session(&owner), &ws, "Pros", plan_is("pro"))
             .await
@@ -12812,7 +13118,7 @@ email,b@example.com,
         define_trait(&pool, &ws, "plan", false).await;
         define_order(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (admin_id, admin) = user(&pool, &router, "admin@example.com").await;
         add_member(&router, &owner, &ws, admin_id, "admin").await;
         let definition = json!({"v": 1, "all": [
@@ -13174,7 +13480,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let draft = json!({"revision": 0, "rules": [
@@ -13356,7 +13662,7 @@ email,b@example.com,
         let ws = workspace(&router, &owner, "Alpha").await;
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let unpublished = evaluate_policy_as(
             &router,
@@ -13679,7 +13985,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, outsider) = user(&pool, &router, "outsider@example.com").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, ingest_key) = make_key(&router, &owner, &ws, &["ingest"]).await;
@@ -13903,5 +14209,289 @@ email,b@example.com,
 
         assert_eq!(foreign.status, StatusCode::NOT_FOUND);
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    }
+
+    /// One workspace with a viewer, an editor, a publisher and an admin, in that order.
+    async fn four_roles(pool: &PgPool, router: &Router, owner: &Login, ws: &str) -> [Login; 4] {
+        let mut logins = Vec::new();
+        for role in ["viewer", "editor", "publisher", "admin"] {
+            let (id, login) = user(pool, router, &format!("{role}@example.com")).await;
+            add_member(router, owner, ws, id, role).await;
+            logins.push(login);
+        }
+        logins.try_into().ok().unwrap()
+    }
+
+    /// The statuses of `method uri` for each login, in order.
+    async fn statuses(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        logins: &[Login; 4],
+    ) -> Vec<StatusCode> {
+        let mut out = Vec::new();
+        for login in logins {
+            out.push(
+                call(router, method, uri, body.clone(), Auth::Session(login))
+                    .await
+                    .status,
+            );
+        }
+        out
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_role_is_refused_the_routes_above_its_level(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let roles = four_roles(&pool, &router, &owner, &ws).await;
+        let missing = Uuid::now_v7();
+
+        // An edit route: a list.
+        let mut edit = Vec::new();
+        for (index, login) in roles.iter().enumerate() {
+            let reply = call(
+                &router,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/lists"),
+                Some(json!({"name": format!("Newsletter {index}")})),
+                Auth::Session(login),
+            )
+            .await;
+            edit.push(reply.status);
+        }
+        // A publish route: pausing a flow that does not exist is a 404 once the role passes.
+        let publish = statuses(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/flows/{missing}/pause"),
+            None,
+            &roles,
+        )
+        .await;
+        // An admin route: the key list.
+        let admin = statuses(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            None,
+            &roles,
+        )
+        .await;
+
+        let forbidden = StatusCode::FORBIDDEN;
+        assert_eq!(edit[0], forbidden, "viewer edits");
+        assert_eq!(edit[1], StatusCode::CREATED, "editor edits");
+        assert_eq!(edit[2], StatusCode::CREATED, "publisher edits");
+        assert_eq!(edit[3], StatusCode::CREATED, "admin edits");
+        assert_eq!(publish[0], forbidden, "viewer publishes");
+        assert_eq!(publish[1], forbidden, "editor publishes");
+        assert_eq!(publish[2], StatusCode::NOT_FOUND, "publisher publishes");
+        assert_eq!(publish[3], StatusCode::NOT_FOUND, "admin publishes");
+        assert_eq!(admin[0], forbidden, "viewer administers");
+        assert_eq!(admin[1], forbidden, "editor administers");
+        assert_eq!(admin[2], forbidden, "publisher administers");
+        assert_eq!(admin[3], StatusCode::OK, "admin administers");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_refusal_names_the_role_the_route_needs_under_one_stable_problem(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let [viewer, editor, publisher, _] = four_roles(&pool, &router, &owner, &ws).await;
+        let missing = Uuid::now_v7();
+
+        let edit = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/lists"),
+            Some(json!({"name": "Newsletter"})),
+            Auth::Session(&viewer),
+        )
+        .await;
+        let publish = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/flows/{missing}/pause"),
+            None,
+            Auth::Session(&editor),
+        )
+        .await;
+        let admin = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            None,
+            Auth::Session(&publisher),
+        )
+        .await;
+
+        for (reply, role) in [
+            (&edit, "editor"),
+            (&publish, "publisher"),
+            (&admin, "admin"),
+        ] {
+            assert_eq!(reply.status, StatusCode::FORBIDDEN);
+            assert_eq!(reply.body["title"], "Forbidden");
+            assert_eq!(
+                reply.body["detail"],
+                format!("this needs the {role} role in the workspace")
+            );
+            assert!(reply.body.get("code").is_none_or(Value::is_null));
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_write_key_cannot_publish_and_a_publish_key_cannot_edit(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (_, write) = make_key(&router, &owner, &ws, &["write"]).await;
+        let (_, publish) = make_key(&router, &owner, &ws, &["publish"]).await;
+        let missing = Uuid::now_v7();
+        let lists = format!("/api/v1/workspaces/{ws}/lists");
+        let pause = format!("/api/v1/workspaces/{ws}/flows/{missing}/pause");
+
+        let write_edits = call(
+            &router,
+            "POST",
+            &lists,
+            Some(json!({"name": "A"})),
+            Auth::Key(&write),
+        )
+        .await;
+        let write_publishes = call(&router, "POST", &pause, None, Auth::Key(&write)).await;
+        let publish_edits = call(
+            &router,
+            "POST",
+            &lists,
+            Some(json!({"name": "B"})),
+            Auth::Key(&publish),
+        )
+        .await;
+        let publish_publishes = call(&router, "POST", &pause, None, Auth::Key(&publish)).await;
+
+        assert_eq!(write_edits.status, StatusCode::CREATED);
+        assert_eq!(write_publishes.status, StatusCode::FORBIDDEN);
+        assert_eq!(publish_edits.status, StatusCode::FORBIDDEN);
+        assert_eq!(publish_publishes.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_key_is_created_with_the_publish_scope_and_a_member_role_is_no_longer_accepted(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (id, _) = user(&pool, &router, "jane@example.com").await;
+
+        let key = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            Some(json!({"name": "release", "scopes": ["publish", "read"]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let member = call(
+            &router,
+            "PUT",
+            &format!("/api/v1/workspaces/{ws}/members/{id}"),
+            Some(json!({"role": "member"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(key.status, StatusCode::CREATED, "{:?}", key.body);
+        assert_eq!(key.body["scopes"], json!(["publish", "read"]));
+        assert_eq!(member.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_last_admin_cannot_be_demoted_or_removed_by_an_admin_but_can_by_the_owner(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (lone_id, lone) = user(&pool, &router, "lone@example.com").await;
+        add_member(&router, &owner, &ws, lone_id, "admin").await;
+        let member_uri = format!("/api/v1/workspaces/{ws}/members/{lone_id}");
+
+        let demote = call(
+            &router,
+            "PUT",
+            &member_uri,
+            Some(json!({"role": "viewer"})),
+            Auth::Session(&lone),
+        )
+        .await;
+        let remove = call(&router, "DELETE", &member_uri, None, Auth::Session(&lone)).await;
+        let role_after_refusals = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/members"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let owner_demotes = call(
+            &router,
+            "PUT",
+            &member_uri,
+            Some(json!({"role": "viewer"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        for refused in [&demote, &remove] {
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "last_admin");
+        }
+        assert_eq!(role_after_refusals.body[0]["role"], "admin");
+        assert_eq!(owner_demotes.status, StatusCode::OK);
+        assert_eq!(owner_demotes.body["role"], "viewer");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_admin_frees_the_first_and_the_owner_may_remove_the_last(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (first_id, first) = user(&pool, &router, "first@example.com").await;
+        let (second_id, _) = user(&pool, &router, "second@example.com").await;
+        add_member(&router, &owner, &ws, first_id, "admin").await;
+        add_member(&router, &owner, &ws, second_id, "admin").await;
+        let first_uri = format!("/api/v1/workspaces/{ws}/members/{first_id}");
+        let second_uri = format!("/api/v1/workspaces/{ws}/members/{second_id}");
+
+        let demote_with_two = call(
+            &router,
+            "PUT",
+            &first_uri,
+            Some(json!({"role": "editor"})),
+            Auth::Session(&first),
+        )
+        .await;
+        // The second admin is now the last one; the owner removes them anyway.
+        let owner_removes = call(&router, "DELETE", &second_uri, None, Auth::Session(&owner)).await;
+
+        assert_eq!(
+            demote_with_two.status,
+            StatusCode::OK,
+            "{:?}",
+            demote_with_two.body
+        );
+        assert_eq!(owner_removes.status, StatusCode::NO_CONTENT);
     }
 }

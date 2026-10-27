@@ -179,7 +179,7 @@ describe("building with blocks", () => {
   });
 
   it("lets a writer who is not an admin pick the sender by name on the Message tab", async () => {
-    mockApi(templateRoutes({ role: "member", detail: detailOf(blocksDocument()) }));
+    mockApi(templateRoutes({ role: "editor", detail: detailOf(blocksDocument()) }));
     const user = userEvent.setup();
     mount();
 

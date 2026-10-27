@@ -18,9 +18,9 @@ interface Placed {
   reachable: boolean;
 }
 
-function sizeOf(node: FlowNode | null): { width: number; height: number } {
-  if (node === null) return { width: NODE_WIDTH, height: 84 };
-  return { width: NODE_WIDTH, height: portsOf(node).length > 1 ? 120 : 92 };
+function sizeOf(node: FlowNode | null, extra: number): { width: number; height: number } {
+  if (node === null) return { width: NODE_WIDTH, height: 84 + extra };
+  return { width: NODE_WIDTH, height: (portsOf(node).length > 1 ? 120 : 92) + extra };
 }
 
 interface Layout {
@@ -35,8 +35,9 @@ interface Layout {
  * A layered top-down layout. A node sits one row below the lowest row of anything that leads into
  * it, and the nodes of a row follow the order in which a walk from the entry node, taking each port
  * in turn, first reaches them. The graph carries no positions, so this runs on every change.
+ * `extra` is the height a step needs on top of its usual card, by step id (its row of count badges).
  */
-export function layout(graph: Graph): Layout {
+export function layout(graph: Graph, extra: ReadonlyMap<string, number> = new Map()): Layout {
   const byId = new Map(graph.nodes.map((node) => [node.id, node]));
   const targets = (node: FlowNode): string[] =>
     portsOf(node).flatMap((port) => {
@@ -96,7 +97,7 @@ export function layout(graph: Graph): Layout {
     const ids = rowsById.get(row);
     if (!ids) continue;
     rows.push(ids);
-    const sizes = ids.map((id) => sizeOf(id === TRIGGER_ID ? null : (byId.get(id) ?? null)));
+    const sizes = ids.map((id) => sizeOf(id === TRIGGER_ID ? null : (byId.get(id) ?? null), extra.get(id) ?? 0));
     const total = sizes.reduce((sum, size) => sum + size.width, 0) + GAP_X * (ids.length - 1);
     let x = -total / 2;
     const tallest = Math.max(...sizes.map((size) => size.height));

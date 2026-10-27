@@ -24,7 +24,7 @@ const SUMMARIES = [
 const PEOPLE = [{ person_id: "p-1", display: { kind: "email", masked: false, value: "mia@example.test" }, created_at: "2026-10-26T00:00:00Z" }];
 
 interface Options {
-  role?: "admin" | "member";
+  role?: "admin" | "editor";
   versions?: unknown[];
   put?: (body: { document: Doc; revision?: number }, asked: number) => Response;
 }
@@ -134,7 +134,7 @@ describe("the Versions and use page", () => {
   });
 
   it("gives a writer who is not an admin the sample person only", async () => {
-    const calls = mockApi(routes({ role: "member" }));
+    const calls = mockApi(routes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
 

@@ -2,7 +2,7 @@ import { json } from "./mockApi";
 
 /** Fixtures and a stand-in for XMLHttpRequest shared by the image library and picker tests. */
 
-export function members(role: "admin" | "member", userId: string) {
+export function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 

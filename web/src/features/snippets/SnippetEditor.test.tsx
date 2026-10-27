@@ -142,7 +142,7 @@ describe("the snippet page", () => {
   });
 
   it("hides publishing from a writer", async () => {
-    mockApi(snippetRoutes({ role: "member" }));
+    mockApi(snippetRoutes({ role: "editor" }));
     mount();
 
     await screen.findByTitle("Preview of the snippet");

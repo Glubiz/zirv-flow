@@ -39,6 +39,7 @@ mod tests {
         read: String,
         write: String,
         admin: String,
+        publish: String,
         /// A key with all three scopes, for the setup and the checks around the matrix.
         all: String,
         other_admin: String,
@@ -133,7 +134,7 @@ mod tests {
                     .plaintext
             }
         };
-        const ALL: &[Scope] = &[Scope::Read, Scope::Write, Scope::Admin];
+        const ALL: &[Scope] = &[Scope::Read, Scope::Write, Scope::Publish, Scope::Admin];
         Fixture {
             pool: pool.clone(),
             router,
@@ -142,6 +143,7 @@ mod tests {
             read: key(ws, &[Scope::Read]).await,
             write: key(ws, &[Scope::Write]).await,
             admin: key(ws, &[Scope::Admin]).await,
+            publish: key(ws, &[Scope::Publish]).await,
             all: key(ws, ALL).await,
             other_admin: key(other_ws, &[Scope::Admin]).await,
             other_all: key(other_ws, ALL).await,
@@ -400,14 +402,15 @@ mod tests {
         let f = fixture(&pool).await;
         let theme = f.published("Brand", tokens("#112233")).await;
         let id = |tail: &str| format!("/themes/{theme}{tail}");
-        let credentials: [(&str, Auth<'_>, u8); 5] = [
+        let credentials: [(&str, Auth<'_>, u8); 6] = [
             ("anonymous", Auth::Anonymous, 0),
             ("read key", Auth::Key(&f.read), 1),
             ("write key", Auth::Key(&f.write), 2),
             ("admin key", Auth::Key(&f.admin), 3),
+            ("publish key", Auth::Key(&f.publish), 4),
             ("other workspace's admin", Auth::Key(&f.other_admin), 9),
         ];
-        // A key holds exactly one scope; the level a route needs is 1 read, 2 write, 3 admin.
+        // A key holds exactly one scope; the level a route needs is 1 read, 2 write, 3 admin, 4 publish.
         let requests: [(&str, &str, String, Option<Value>, u8); 12] = [
             ("list", "GET", "/themes".into(), None, 1),
             ("get", "GET", id(""), None, 1),
@@ -430,7 +433,7 @@ mod tests {
                 2,
             ),
             ("preview", "POST", id("/preview"), Some(json!({})), 2),
-            ("publish", "POST", id("/publish"), None, 3),
+            ("publish", "POST", id("/publish"), None, 4),
             (
                 "set default",
                 "PUT",

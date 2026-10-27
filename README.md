@@ -531,17 +531,37 @@ Passwords are 12 to 1024 characters.
   DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
   needs none.
 - **API keys.** A workspace admin creates a key with scopes (`ingest`, `read`,
-  `write`, `admin`); the response shows the `zfk_...` key once, and only a hash
-  is stored. Send it as `Authorization: Bearer <key>`. A key works only in its
-  own workspace and never on instance-level endpoints (`/users`, creating
-  workspaces, `/session`). `read` allows GETs, `admin` allows members and keys;
-  scopes do not imply one another.
+  `write`, `publish`, `admin`); the response shows the `zfk_...` key once, and
+  only a hash is stored. Send it as `Authorization: Bearer <key>`. A key works
+  only in its own workspace and never on instance-level endpoints (`/users`,
+  creating workspaces, `/session`). `read` allows GETs, `write` the editor-level
+  drafts, `publish` the publisher actions and `admin` members, keys and the
+  rest of the admin routes; scopes do not imply one another, so a `write` key
+  cannot publish and a `publish` key cannot edit.
+- **Roles.** A workspace membership is `admin`, `publisher`, `editor` or
+  `viewer`; the instance owner is a flag on the user, not a role. A viewer
+  reads. An editor also changes drafts (segments, flows, templates, snippets,
+  themes, lists, contacts), previews, test mode and test sends. A publisher
+  also publishes, pauses, resumes and archives flows, retries, skips and exits
+  enrollments, starts a flow for an audience, publishes templates, snippets and
+  themes, and runs imports. An admin also manages sources, destinations,
+  credentials, keys, members, retention, privacy, consent policy, event
+  schemas, suppressions, forwarding, sending domains and webhooks. A refused
+  request is a 403 that names the role the route needs. Older `member` rows
+  became `editor`. Removing or demoting a workspace's last admin is refused
+  with a 409 (`last_admin`) unless the caller is the instance owner. Where a
+  section below says "any member", read editor or above; "admin" on a publish
+  route reads publisher or above.
+- **Upgrading to roles.** Migration 0073 gives every existing `admin` key the
+  `publish` scope, so deployed admin keys keep publishing. A `write` key that
+  runs imports (`POST .../imports/{id}/run`) needs `publish` added by hand.
+  Former members are now editors, who may also create assistant drafts.
 - **Sign-in throttling.** Five failures in a row lock the account for
   `min(2^(failures-5) seconds, 15 minutes)`. An unknown e-mail, a wrong password
   and a locked account give the same 401.
 - **Isolation.** A caller with no access to a workspace gets 404 for it, never
-  403. Workspace members can read the workspace and its member list; admins and
-  the owner also manage members and keys.
+  403. Workspace members of any role can read the workspace and its member list;
+  admins and the owner also manage members and keys.
 - **Audit log.** Sign-ins (including failures), sign-outs, user, workspace,
   membership and key events and password resets are appended to `audit_log`.
   Rows hold ids, the request id and a small summary, never e-mails, passwords,
@@ -767,7 +787,14 @@ workspace has at most 20 streams per server process (more get 429), and the page
 the server's notifier is down and updates are delayed.
 Ingestion writes the feed only while someone watches the workspace (a viewer renews a 30 s
 watch every 10 s); with nobody watching it pays nothing extra, and feed rows older than 15
-minutes are deleted. The feed is unlogged and holds redacted values only.
+minutes are deleted. The feed is unlogged and holds redacted values only. Frames can arrive out of order: a row whose writer commits late is sent when it does, and the
+page shows it once whatever its `seq`. Each frame id is `<epoch>:<position>`; after a database
+crash the unlogged feed starts over, and a stream resumed from before it is told with a
+`gap` frame whose `reset` is true (the page clears its list and says so). The remaining limit:
+a row whose writer commits more than about 20 seconds after the row was written is past the
+lookback window and can still be missed. A stream resumed from `Last-Event-ID` does not deliver
+a late row below its resume point whose writer committed while the client was away; the
+lookback covers live streams only. An open stream also notices a crash and sends the reset.
 
 **Masking and reveal.** Values are masked per viewer as in the person timeline: only
 properties the published schema declares non-PII are shown, and every other value is null and

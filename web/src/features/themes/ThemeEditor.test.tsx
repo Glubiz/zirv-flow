@@ -167,7 +167,7 @@ describe("the theme editor", () => {
 
 describe("roles", () => {
   it("hides publish, set as default and archive from a writer but keeps Save draft", async () => {
-    mockApi(themeRoutes({ role: "member" }));
+    mockApi(themeRoutes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
 

@@ -276,7 +276,7 @@ describe("publish dialog", () => {
 
 describe("publishing is for admins", () => {
   it("offers a member who may edit no way to publish", async () => {
-    mockApi(flowRoutes({ role: "member", flow: { state: "published", current_version: 2 } }));
+    mockApi(flowRoutes({ role: "editor", flow: { state: "published", current_version: 2 } }));
     mount();
 
     await screen.findByRole("group", { name: /^Wait: 1 day/ });

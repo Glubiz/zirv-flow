@@ -1,5 +1,5 @@
 //! Publishing a flow into an immutable version, the dry-run impact preview, and pausing, resuming
-//! and archiving. All of them need the workspace admin role (ruling 43163028).
+//! and archiving. All of them need the workspace publisher role (rulings 43163028 and 92d5483d).
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
@@ -241,7 +241,7 @@ async fn publish_now(
         (status = 201, description = "The flow and its new version", body = PublishedBody),
         (status = 400, description = "dry_run is not true or false", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is archived (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has issues (`code` is `flow_invalid`, with `flow_issues`)", body = Problem, content_type = "application/problem+json")
@@ -254,7 +254,7 @@ pub(crate) async fn publish(
     Path((ws, id)): Path<(String, String)>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let id = path_id(&id)?;
     if dry_run_param(query.as_deref())? {
         let body = impact(&state, workspace.id, id).await?;
@@ -321,7 +321,7 @@ async fn lifecycle(
     responses(
         (status = 200, description = "The paused flow", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is not published (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json")
     ),
@@ -332,7 +332,7 @@ pub(crate) async fn pause(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<FlowDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let flow = lifecycle(
         &state,
         &principal,
@@ -357,7 +357,7 @@ pub(crate) async fn pause(
     responses(
         (status = 200, description = "The resumed flow", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is not paused (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json")
     ),
@@ -368,7 +368,7 @@ pub(crate) async fn resume(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<FlowDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let flow = lifecycle(
         &state,
         &principal,
@@ -394,7 +394,7 @@ pub(crate) async fn resume(
     responses(
         (status = 200, description = "The archived flow", body = FlowDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or flow, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is already archived (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json")
     ),
@@ -405,7 +405,7 @@ pub(crate) async fn archive(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<FlowDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let flow = lifecycle(
         &state,
         &principal,
