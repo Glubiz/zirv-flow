@@ -312,12 +312,7 @@ mod tests {
     }
 
     async fn present(pool: &PgPool, ids: &[Uuid]) -> i64 {
-        count(
-            pool,
-            "SELECT count(*) FROM people WHERE id = ANY($1)",
-            ids,
-        )
-        .await
+        count(pool, "SELECT count(*) FROM people WHERE id = ANY($1)", ids).await
     }
 
     async fn erased_suppressions(pool: &PgPool) -> i64 {
@@ -363,7 +358,10 @@ mod tests {
 
         assert_eq!(report.merged, 2, "the two later ledger files are merged in");
         assert_eq!(report.requests, 3);
-        assert_eq!(report.people, 2, "the merged group counts once, and the later person");
+        assert_eq!(
+            report.people, 2,
+            "the merged group counts once, and the later person"
+        );
         assert_eq!(report.suppressions, 3);
         assert_eq!(report.inbox_rows, 1);
         assert_eq!(report.skipped_workspaces, 0);
@@ -479,5 +477,55 @@ mod tests {
         assert_eq!(report.merged, 2);
         assert_eq!(present(&drill.pool, &drill.erased).await, 0);
         drill.pool.close().await;
+    }
+
+    /// Git for Windows ships the bash the script needs; the one first on the path there can be
+    /// the WSL launcher.
+    fn bash() -> std::process::Command {
+        let git = std::env::var_os("EXEPATH").map(PathBuf::from);
+        let found = git
+            .into_iter()
+            .flat_map(|dir| [dir.join("bash.exe"), dir.join("bin/bash.exe")]);
+        let program = found
+            .into_iter()
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from("bash"));
+        std::process::Command::new(program)
+    }
+
+    fn drill_script() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/drill/restore.sh")
+    }
+
+    #[test]
+    fn the_drill_script_refuses_a_database_that_is_not_named_as_scratch() {
+        for (source, target) in [("postgres", "zf_drill_ok"), ("zf_drill_ok", "zirv_flow")] {
+            let output = bash()
+                .arg(drill_script())
+                .env("ZF_DRILL_SOURCE_DB", source)
+                .env("ZF_DRILL_TARGET_DB", target)
+                .output()
+                .expect("bash runs the script");
+
+            assert_eq!(output.status.code(), Some(2), "{source} -> {target}");
+            let message = String::from_utf8_lossy(&output.stderr);
+            assert!(message.contains("refusing to touch database"), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_drill_script_passes_shellcheck_when_it_is_installed() {
+        let Ok(output) = std::process::Command::new("shellcheck")
+            .arg(drill_script())
+            .output()
+        else {
+            return;
+        };
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }
