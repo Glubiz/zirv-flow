@@ -4730,6 +4730,70 @@ main:focus {
   gap: 8px;
 }
 
+.retention-table .retention-label {
+  background: transparent;
+  border-top: 1px solid var(--line);
+  padding: 12px;
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  vertical-align: middle;
+}
+
+.retention-table .retention-label:first-child {
+  padding-left: 24px;
+}
+
+@media (max-width: 640px) {
+  .retention-table,
+  .retention-table tbody,
+  .retention-table tr,
+  .retention-table td,
+  .retention-table .retention-label {
+    display: block;
+  }
+
+  .retention-table thead {
+    display: none;
+  }
+
+  .retention-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .retention-table tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .retention-table td,
+  .retention-table td:first-child,
+  .retention-table td:last-child,
+  .retention-table .retention-label,
+  .retention-table .retention-label:first-child {
+    padding: 0;
+    border-top: 0;
+  }
+
+  .retention-table .retention-value {
+    justify-self: end;
+  }
+
+  .retention-table .retention-change {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .retention-table .retention-menu {
+    justify-self: end;
+  }
+}
+
 .window-input {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 140px;

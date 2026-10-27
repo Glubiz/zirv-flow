@@ -108,7 +108,7 @@ export function RetentionSection({ workspaceId, canAdmin }: { workspaceId: strin
       <ResourceView resource={retention} loadingLabel="Loading retention">
         {(data) => (
           <div className="table-scroll">
-            <table className="table">
+            <table className="table retention-table">
               <caption>Retention windows</caption>
               <thead>
                 <tr>
@@ -123,12 +123,14 @@ export function RetentionSection({ workspaceId, canAdmin }: { workspaceId: strin
               <tbody>
                 {data.windows.map((window) => (
                   <tr key={window.key}>
-                    <td className="strong">{labelOf(window)}</td>
-                    <td>{window.value == null ? "Off" : formatWindow(window.value)}</td>
-                    <td>
+                    <th scope="row" className="retention-label">
+                      {labelOf(window)}
+                    </th>
+                    <td className="retention-value">{window.value == null ? "Off" : formatWindow(window.value)}</td>
+                    <td className="retention-change">
                       <Change workspaceId={workspaceId} window={window} canAdmin={canAdmin} onShorten={(w) => setEditing(toEditable(w))} />
                     </td>
-                    <td>
+                    <td className="retention-menu">
                       <PurgeMenu window={window} />
                     </td>
                   </tr>
