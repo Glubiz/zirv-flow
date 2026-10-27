@@ -72,7 +72,159 @@ pub(crate) fn method_label(method: &Method) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
     use super::*;
+
+    /// Series the architecture names that the code does not emit yet: the decision-log size gauge
+    /// belongs to the partition work (#378). Remove an entry when its series is emitted.
+    const NOT_EMITTED_YET: [&str; 1] = ["zirv_flow_decision_log_bytes"];
+
+    /// The metric names passed as the first literal of a `counter!`, `gauge!` or `histogram!`
+    /// call in `source`.
+    fn series_in(source: &str) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        for macro_name in ["counter!(", "gauge!(", "histogram!("] {
+            for (at, _) in source.match_indices(macro_name) {
+                let rest = source[at + macro_name.len()..].trim_start();
+                let Some(rest) = rest.strip_prefix("\"zirv_flow_") else {
+                    continue;
+                };
+                if let Some(end) = rest.find('"') {
+                    found.insert(format!("zirv_flow_{}", &rest[..end]));
+                }
+            }
+        }
+        found
+    }
+
+    fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
+    fn root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// Every series emitted anywhere under `crates/`.
+    fn series_in_crates() -> BTreeSet<String> {
+        let mut files = Vec::new();
+        rust_files(&root().join("crates"), &mut files);
+        files
+            .iter()
+            .flat_map(|path| series_in(&std::fs::read_to_string(path).unwrap()))
+            .collect()
+    }
+
+    /// The `zirv_flow_` names that appear in `text`, `prefix` excluded.
+    fn names_in(text: &str) -> BTreeSet<String> {
+        let mut found = BTreeSet::new();
+        for (at, _) in text.match_indices("zirv_flow_") {
+            let name: String = text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if name.len() > "zirv_flow_".len() && !name.ends_with('_') {
+                found.insert(name);
+            }
+        }
+        found
+    }
+
+    /// The series of `emitted` that no table row of `readme` names.
+    fn missing_from_table(emitted: &BTreeSet<String>, readme: &str) -> Vec<String> {
+        let table: String = readme
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        let listed = names_in(&table);
+        emitted.difference(&listed).cloned().collect()
+    }
+
+    #[test]
+    fn every_series_the_code_emits_is_in_the_readme_table() {
+        let emitted = series_in_crates();
+        assert!(emitted.len() > 50, "the scan found only {emitted:?}");
+        let readme = std::fs::read_to_string(root().join("README.md")).unwrap();
+
+        let missing = missing_from_table(&emitted, &readme);
+
+        assert!(
+            missing.is_empty(),
+            "the README metric table lacks these series: {}",
+            missing.join(", ")
+        );
+    }
+
+    #[test]
+    fn every_series_the_architecture_row_names_is_emitted_or_pending() {
+        let emitted = series_in_crates();
+        let architecture = std::fs::read_to_string(root().join("docs/architecture.md")).unwrap();
+        let row = architecture
+            .lines()
+            .find(|line| line.starts_with("| Metrics |"))
+            .expect("the architecture 17 Metrics row");
+
+        let unknown: Vec<String> = names_in(row)
+            .into_iter()
+            .filter(|name| !emitted.contains(name) && !NOT_EMITTED_YET.contains(&name.as_str()))
+            .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "architecture 17 names series the code does not emit: {}",
+            unknown.join(", ")
+        );
+        for pending in NOT_EMITTED_YET {
+            assert!(
+                !emitted.contains(pending),
+                "{pending} is emitted now: drop it from NOT_EMITTED_YET and list it in the README table"
+            );
+        }
+    }
+
+    #[test]
+    fn the_drift_guard_names_a_series_the_table_lacks() {
+        let call = format!(
+            "{}!(
+    \"zirv_flow_{}\",
+    \"a\" => b,
+)",
+            "counter", "drifted_total"
+        );
+        let other = format!("{}!(\"zirv_flow_{}\")", "gauge", "listed");
+        let ignored = format!("{}!(\"not_ours\")", "gauge");
+        let emitted = series_in(&format!(
+            "{call}
+{other}
+{ignored}"
+        ));
+        assert_eq!(
+            emitted.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["zirv_flow_drifted_total", "zirv_flow_listed"]
+        );
+
+        let readme = "| `zirv_flow_listed` | gauge |
+prose about zirv_flow_drifted_total
+";
+
+        assert_eq!(
+            missing_from_table(&emitted, readme),
+            ["zirv_flow_drifted_total"]
+        );
+    }
 
     #[test]
     fn standard_methods_keep_their_label_and_others_share_one() {
