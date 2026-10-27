@@ -75,6 +75,9 @@ for body in '[unrelated](https://example.com/decision)' "[decision](https://gith
   mv next.json "$GITHUB_EVENT_PATH"
   expect 1 unrelated-link bash "$gate" "$base" "$head"
 done
+jq --arg body "See $link." '.pull_request.body = $body' "$GITHUB_EVENT_PATH" > next.json
+mv next.json "$GITHUB_EVENT_PATH"
+expect 0 approved-removal-period bash "$gate" "$base" "$head" "$base"
 for link in "$link" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$sha/.zirv/work/decision/decision.md"; do
   jq --arg body "[Decision]($link)" '.pull_request.body = $body' "$GITHUB_EVENT_PATH" > next.json
   mv next.json "$GITHUB_EVENT_PATH"

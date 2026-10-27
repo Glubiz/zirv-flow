@@ -8,6 +8,7 @@ has_decision_link() {
   local body="$1" url relative sha path
   local root="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:?}"
   while IFS= read -r url; do
+    while [[ "$url" == *[.,\;:!] ]]; do url=${url%?}; done
     url=${url%%#*}
     [[ "$url" == "$root/"* ]] || continue
     relative=${url#"$root/"}

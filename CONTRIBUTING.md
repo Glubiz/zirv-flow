@@ -114,9 +114,11 @@ job keeps `npm run gen:api:check`; regenerate the client whenever the schema cha
 Removing paths, methods or response fields, narrowing accepted types, requiring new
 request fields, removing request enum values, or breaking status/security contracts
 fails the gate. New paths and optional fields pass. Clients must tolerate new response
-enum values (#406); `scripts/openapi-gate/severity.txt` records that policy exception
-to oasdiff's rules. The document's `info.version` stays `"1"`, and paths stay under
-`/api/v1/`, with exactly three documented exceptions:
+enum values (#406); `scripts/openapi-gate/severity.txt` lowers the
+[property enum](https://github.com/oasdiff/oasdiff/blob/v1.34.0/checker/rules.go#L570)
+and [body enum](https://github.com/oasdiff/oasdiff/blob/v1.34.0/checker/rules.go#L649)
+rules from their default ERR to info. The document's `info.version` stays `"1"`,
+and paths stay under `/api/v1/`, with exactly three documented exceptions:
 
 - `/hooks/{id}`: public inbound webhook, documenting HMAC signing and WebhookPanel types.
 - `/healthz`: unversioned liveness probe.

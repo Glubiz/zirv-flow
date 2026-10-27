@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SemVer 2.0 precedence: prints -1, 0 or 1; invalid input exits 2.
 # Also sourced by changelog/release scripts; no arithmetic on version identifiers.
+# Sourced comparators set semver_result without printing or spawning subshells.
 set -euo pipefail
 
 semver_valid() {
@@ -22,20 +23,20 @@ semver_valid() {
 semver_identifier_compare() {
   local left="$1" right="$2" LC_ALL=C
   if [[ "$left" == "$right" ]]; then
-    echo 0
+    semver_result=0
   elif [[ "$left" =~ ^[0-9]+$ && "$right" =~ ^[0-9]+$ ]]; then
-    if (( ${#left} < ${#right} )); then echo -1
-    elif (( ${#left} > ${#right} )); then echo 1
-    elif [[ "$left" < "$right" ]]; then echo -1
-    else echo 1; fi
-  elif [[ "$left" =~ ^[0-9]+$ ]]; then echo -1
-  elif [[ "$right" =~ ^[0-9]+$ ]]; then echo 1
-  elif [[ "$left" < "$right" ]]; then echo -1
-  else echo 1; fi
+    if (( ${#left} < ${#right} )); then semver_result=-1
+    elif (( ${#left} > ${#right} )); then semver_result=1
+    elif [[ "$left" < "$right" ]]; then semver_result=-1
+    else semver_result=1; fi
+  elif [[ "$left" =~ ^[0-9]+$ ]]; then semver_result=-1
+  elif [[ "$right" =~ ^[0-9]+$ ]]; then semver_result=1
+  elif [[ "$left" < "$right" ]]; then semver_result=-1
+  else semver_result=1; fi
 }
 
 semver_compare() {
-  local left="$1" right="$2" result i
+  local left="$1" right="$2" i
   if ! semver_valid "$left" || ! semver_valid "$right"; then
     echo "invalid SemVer: $left or $right" >&2
     return 2
@@ -45,17 +46,17 @@ semver_compare() {
   IFS=. read -r -a a <<< "${left%%-*}"
   IFS=. read -r -a b <<< "${right%%-*}"
   for i in 0 1 2; do
-    result=$(semver_identifier_compare "${a[$i]}" "${b[$i]}")
-    if [[ "$result" != 0 ]]; then echo "$result"; return; fi
+    semver_identifier_compare "${a[$i]}" "${b[$i]}"
+    if [[ "$semver_result" != 0 ]]; then return; fi
   done
-  if [[ "$left" == "$right" ]]; then echo 0; return; fi
-  if [[ "$left" != *-* ]]; then echo 1; return; fi
-  if [[ "$right" != *-* ]]; then echo -1; return; fi
+  if [[ "$left" == "$right" ]]; then semver_result=0; return; fi
+  if [[ "$left" != *-* ]]; then semver_result=1; return; fi
+  if [[ "$right" != *-* ]]; then semver_result=-1; return; fi
   IFS=. read -r -a a <<< "${left#*-}"
   IFS=. read -r -a b <<< "${right#*-}"
   for ((i = 0; i < ${#a[@]} && i < ${#b[@]}; i++)); do
-    result=$(semver_identifier_compare "${a[$i]}" "${b[$i]}")
-    if [[ "$result" != 0 ]]; then echo "$result"; return; fi
+    semver_identifier_compare "${a[$i]}" "${b[$i]}"
+    if [[ "$semver_result" != 0 ]]; then return; fi
   done
   semver_identifier_compare "${#a[@]}" "${#b[@]}"
 }
@@ -63,9 +64,11 @@ semver_compare() {
 semver_self_test() {
   local left right expected actual invalid status
   while read -r left right expected; do
-    actual=$(semver_compare "$left" "$right")
+    semver_compare "$left" "$right"
+    actual=$semver_result
     [[ "$actual" == "$expected" ]] || { echo "FAIL: $left vs $right: $actual != $expected" >&2; return 1; }
-    actual=$(semver_compare "$right" "$left")
+    semver_compare "$right" "$left"
+    actual=$semver_result
     [[ "$actual" == "$((-expected))" ]] || return 1
   done <<'CASES'
 0.142.0 1.0.0-rc.1 -1
@@ -102,6 +105,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     semver_self_test
   elif [[ $# == 2 ]]; then
     semver_compare "$1" "$2"
+    echo "$semver_result"
   else
     echo "usage: $0 <left> <right> | --self-test" >&2
     exit 2
