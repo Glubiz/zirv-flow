@@ -198,15 +198,29 @@ pub async fn append_decisions(
     connection: &mut PgConnection,
     decisions: &[NewDecision],
 ) -> Result<(), StoreError> {
+    let identified: Vec<(Uuid, &NewDecision)> = decisions
+        .iter()
+        .map(|decision| (Uuid::now_v7(), decision))
+        .collect();
+    insert_identified(connection, &identified).await
+}
+
+/// Inserts records under the ids they are given, at most [`MAX_BATCH`] to a statement.
+async fn insert_identified(
+    connection: &mut PgConnection,
+    decisions: &[(Uuid, &NewDecision)],
+) -> Result<(), StoreError> {
     if BENCH_NO_DECISIONS {
         return Ok(());
     }
     for chunk in decisions.chunks(MAX_BATCH) {
         let mut query = QueryBuilder::<Postgres>::new(
-            "INSERT INTO decision_records                 (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id,                  subject_ids, job_id, attempt) ",
+            "INSERT INTO decision_records \
+                (id, workspace_id, trace_id, action, outcome, reason, cause_kind, cause_id, \
+                 subject_ids, job_id, attempt) ",
         );
-        query.push_values(chunk, |mut row, decision| {
-            row.push_bind(Uuid::now_v7())
+        query.push_values(chunk, |mut row, (id, decision)| {
+            row.push_bind(*id)
                 .push_bind(decision.workspace_id.as_uuid())
                 .push_bind(decision.trace.trace_id.as_uuid())
                 .push_bind(decision.action)
@@ -229,15 +243,17 @@ pub async fn append_decisions(
 
 /// Records waiting to be appended in one statement, in the order they were made. A batch that
 /// makes many decisions pushes them here and flushes once, on the connection of the transaction
-/// that holds the changes, so they commit or roll back together.
+/// that holds the changes, so they commit or roll back together. A record takes its id when it is
+/// pushed, so its place among the records written directly in the same transaction (which share
+/// one `recorded_at` and are ordered by id) is the order in which the decisions were made.
 #[derive(Debug, Default)]
 pub(crate) struct DecisionBuffer {
-    pending: Vec<NewDecision>,
+    pending: Vec<(Uuid, NewDecision)>,
 }
 
 impl DecisionBuffer {
     pub(crate) fn push(&mut self, decision: NewDecision) {
-        self.pending.push(decision);
+        self.pending.push((Uuid::now_v7(), decision));
     }
 
     /// The position to hand to [`DecisionBuffer::discard_after`], taken before a savepoint.
@@ -256,7 +272,11 @@ impl DecisionBuffer {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending);
-        append_decisions(connection, &pending).await
+        let identified: Vec<(Uuid, &NewDecision)> = pending
+            .iter()
+            .map(|(id, decision)| (*id, decision))
+            .collect();
+        insert_identified(connection, &identified).await
     }
 }
 
@@ -757,6 +777,30 @@ mod tests {
         let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
         assert_eq!(stored, ["kept-1", "kept-2"]);
         assert_eq!(statements_that_wrote(&pool, ws).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_buffered_decision_precedes_a_direct_one_written_after_it(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        let enrollment = Uuid::new_v4();
+        let mut buffer = DecisionBuffer::default();
+        let mut tx = crate::begin(&pool).await.unwrap();
+
+        buffer.push(of_enrollment(ws, &trace, enrollment, "person.created"));
+        append_decision(
+            &mut *tx,
+            &of_enrollment(ws, &trace, enrollment, "person.merge"),
+        )
+        .await
+        .unwrap();
+        buffer.flush(&mut tx).await.unwrap();
+        crate::commit(tx).await.unwrap();
+
+        let (records, _) = list_trace(&pool, ws, trace.trace_id, 10).await.unwrap();
+        let stored: Vec<&str> = records.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(stored, ["person.created", "person.merge"]);
     }
 
     #[sqlx::test]
