@@ -102,6 +102,8 @@ pub use contacts::{
     find_contact_definition, list_contacts, put_contact_definition, search_contacts,
     typed_definition, write_contact,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use decisions::testing as decisions_testing;
 pub use decisions::{
     Decision, DecisionLogSize, DecisionRetention, DecisionRetentionReport, GraphPoint, NewDecision,
     append_decision, append_decisions, apply_decision_retention, apply_decision_retention_for,
