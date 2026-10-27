@@ -109,13 +109,14 @@ impl Destination for Webhook {
             .ok_or_else(|| missing("signing_secret"))?;
         // Nothing is sent: the host must resolve to addresses the egress policy allows.
         let parsed = crate::http::parse_url(url)?;
-        if !matches!(parsed.scheme(), "http" | "https") || !parsed.has_host() {
-            return Err(DestinationError::Config {
+        let host = parsed
+            .host_str()
+            .filter(|_| matches!(parsed.scheme(), "http" | "https"))
+            .ok_or_else(|| DestinationError::Config {
                 field: "url".to_owned(),
                 reason: "must be an http or https URL".to_owned(),
-            });
-        }
-        ctx.resolve_checked(parsed.host_str().unwrap()).await?;
+            })?;
+        ctx.resolve_checked(host).await?;
         Ok(())
     }
 

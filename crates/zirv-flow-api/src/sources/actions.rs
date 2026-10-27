@@ -119,12 +119,7 @@ pub(crate) async fn test_source(
     )
     .await
     .map_err(|_| timed_out())?;
-    let denied = matches!(
-        &result,
-        Err(SourceError::Egress(
-            zirv_flow_connectors::http::HttpError::EgressDenied { .. }
-        ))
-    );
+    let denied = result.as_ref().err().is_some_and(egress_denied);
     let body = TestBody {
         ok: result.is_ok(),
         error: result.err().map(|error| error.to_string()),
@@ -352,12 +347,16 @@ pub(crate) async fn read_stream_records(
         .0)
 }
 
-/// A failed call to the source, shown as the source's own failure.
-pub(super) fn upstream(error: SourceError) -> ApiError {
-    if matches!(
+fn egress_denied(error: &SourceError) -> bool {
+    matches!(
         error,
         SourceError::Egress(zirv_flow_connectors::http::HttpError::EgressDenied { .. })
-    ) {
+    )
+}
+
+/// A failed call to the source, shown as the source's own failure.
+pub(super) fn upstream(error: SourceError) -> ApiError {
+    if egress_denied(&error) {
         return ApiError::new(
             StatusCode::BAD_GATEWAY,
             "the source's address is not allowed by the egress policy",

@@ -1133,7 +1133,7 @@ export interface paths {
         put?: never;
         /**
          * Checks the destination's settings and stored credential without delivering anything. A failed
-         *     check is a 200 with `ok` false and the reason. Workspace admins only. Audited as
+         *     check is a 200 with `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as
          *     `destination.checked`.
          */
         post: operations["check_destination"];
@@ -3364,7 +3364,7 @@ export interface paths {
         put?: never;
         /**
          * Tests the connection to the source with its stored credential. A failed test is a 200 with
-         *     `ok` false and the reason. Workspace admins only. Audited as `source.tested`.
+         *     `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as `source.tested`.
          */
         post: operations["test_source"];
         delete?: never;
@@ -15615,6 +15615,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The egress policy refused the destination (`egress_denied`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The server has no master key to open the credential */
             503: {
                 headers: {
@@ -18234,7 +18243,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events */
+            /** @description An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events; `egress_denied` when its address is refused */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -24914,6 +24923,15 @@ export interface operations {
             };
             /** @description The source type is not in this build */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The egress policy refused the source (`egress_denied`) */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
