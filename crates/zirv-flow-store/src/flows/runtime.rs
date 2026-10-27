@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
+use crate::people::{PersonLock, lock_people_in_order};
 use crate::{NewJob, StoreError};
 
 /// The kind of the job that advances an enrollment.
@@ -223,15 +224,8 @@ async fn lock_enrollment_within(
         let group = [person, survivor];
         // A (nested) transaction for the round: rolling it back releases the round's locks.
         let mut round = connection.begin().await.map_err(StoreError::query)?;
-        let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) \
-             ORDER BY id FOR UPDATE",
-        )
-        .bind(workspace.as_uuid())
-        .bind(&group[..])
-        .fetch_all(&mut *round)
-        .await
-        .map_err(StoreError::query)?;
+        let locked =
+            lock_people_in_order(&mut round, workspace, &group[..], PersonLock::Update).await?;
         let Some((_, now_merged)) = locked.iter().find(|(locked, _)| *locked == person) else {
             // Erased: the enrollment went with the person.
             round.commit().await.map_err(StoreError::query)?;

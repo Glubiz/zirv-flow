@@ -17,6 +17,7 @@ use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 
 use super::runtime::{StepJobInput, StepJobPayload};
 use super::state::FlowState;
+use crate::people::{PersonLock, lock_people_in_order};
 use crate::{GraphPoint, NewDecision, NewJob, StoreError, append_decisions, enqueue_many};
 
 /// The most people one enroll takes (the size of a `flow.enroll` job).
@@ -513,15 +514,13 @@ async fn lock_people(
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
-        let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) \
-             ORDER BY id FOR KEY SHARE",
+        let locked = lock_people_in_order(
+            &mut *connection,
+            request.workspace,
+            &people,
+            PersonLock::KeyShare,
         )
-        .bind(request.workspace.as_uuid())
-        .bind(&people)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+        .await?;
         if locked.iter().any(|(_, merged_into)| merged_into.is_some()) {
             sqlx::query("ROLLBACK TO SAVEPOINT enroll_people")
                 .execute(&mut *connection)
