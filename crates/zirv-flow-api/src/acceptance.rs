@@ -14618,7 +14618,7 @@ email,b@example.com,
             &router,
             "POST",
             &format!("/api/v1/workspaces/{ws}/lists"),
-            Some(json!({})),
+            Some(json!({"name": "Newsletter"})),
             Auth::Session(&viewer),
         )
         .await;
