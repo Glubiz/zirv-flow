@@ -58,6 +58,7 @@ pub fn ops_router(state: OpsState) -> Router {
         .route("/metrics", get(metrics))
         .fallback(|| async { ApiError::not_found() })
         .method_not_allowed_fallback(problem::method_not_allowed)
+        .layer(from_fn(crate::metrics::record))
         .layer(from_fn(request_id::assign))
         .with_state(state)
 }
@@ -148,6 +149,39 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let problem: Value = serde_json::from_str(&body(response).await).unwrap();
         assert_eq!(problem["detail"], "database unreachable");
+    }
+
+    #[test]
+    fn a_503_from_readyz_and_a_metrics_scrape_are_counted_by_route() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        metrics::with_local_recorder(&recorder, || {
+            runtime.block_on(async {
+                let reason = Some("the worker loop has stopped");
+                let down = get(state(unreachable_pool(), reason), "/readyz").await;
+                assert_eq!(down.status(), StatusCode::SERVICE_UNAVAILABLE);
+                get(state(unreachable_pool(), None), "/metrics").await;
+            });
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains(
+                r#"zirv_flow_http_requests_total{method="GET",route="/readyz",status="503"} 1"#
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                r#"zirv_flow_http_requests_total{method="GET",route="/metrics",status="200"} 1"#
+            ),
+            "{output}"
+        );
     }
 
     #[tokio::test]

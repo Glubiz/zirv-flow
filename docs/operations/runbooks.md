@@ -629,9 +629,10 @@ Escalate when the pool is full with no slow statement and no traffic growth.
 ### What it means
 
 `/readyz` answered 503 in the last 5 minutes, for 5 minutes. It is 503 when the database is
-unreachable, a check takes over 2 seconds, or the schema is not up to date with this binary. The
-counter exists only for processes that serve the API (`serve`, `all`); for a `worker` or
-`scheduler` on `ops.bind`, check `GET /readyz` there directly.
+unreachable, a check takes over 2 seconds, the schema is not up to date with this binary, or (on a
+`worker` or `scheduler`) a role loop has stopped or shutdown has begun. `serve`, `all` and the
+`ops.bind` listener of a `worker` or `scheduler` all count their requests, so scrape every
+process.
 
 ### User-visible effect
 
