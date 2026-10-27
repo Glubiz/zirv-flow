@@ -54,18 +54,12 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const [demoting, setDemoting] = useState<{ member: Member; role: string } | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
-  const [refused, setRefused] = useState<string | null>(null);
 
   const name = workspaces.status === "ready" ? workspaces.data.find((item) => item.id === ws)?.name : undefined;
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
   const canAdmin = access?.canAdmin ?? false;
   const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
   const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1;
-  const reasonShown = (member: Member) => lastAdmin(member) || refused === member.user_id;
-  const refuse = (member: Member) => {
-    setRefused(member.user_id);
-    members.reload();
-  };
 
   function changeRole(member: Member, role: string) {
     // An admin who steps down loses this page, unless they are the owner, who keeps every right.
@@ -80,7 +74,6 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   async function save(member: Member, body: { role: string; view_pii?: boolean }) {
     setBusyUser(member.user_id);
     setFailure(null);
-    setRefused(null);
     try {
       await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/members/{user_id}", {
@@ -91,7 +84,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
       members.reload();
     } catch (error) {
       if (error instanceof ApiError && error.code === "last_admin") {
-        refuse(member);
+        members.reload();
       } else {
         setFailure(describeError(error));
       }
@@ -160,9 +153,9 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                             <select
                               className="select"
                               aria-label={`Role for ${member.email}`}
-                              aria-describedby={reasonShown(member) ? reasonId(member) : undefined}
+                              aria-describedby={lastAdmin(member) ? reasonId(member) : undefined}
                               value={member.role}
-                              disabled={busyUser === member.user_id || reasonShown(member)}
+                              disabled={busyUser === member.user_id || lastAdmin(member)}
                               onChange={(event) => changeRole(member, event.target.value)}
                             >
                               {ROLE_OPTIONS.map((option) => (
@@ -171,7 +164,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                                 </option>
                               ))}
                             </select>
-                            {reasonShown(member) ? (
+                            {lastAdmin(member) ? (
                               <span id={reasonId(member)} className="faint">
                                 {LAST_ADMIN}
                               </span>
@@ -189,10 +182,13 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                               role="switch"
                               className="switch"
                               aria-label={`Personal data for ${member.email}`}
-                              checked={member.owner || member.role === "admin" || member.view_pii}
-                              disabled={member.owner || member.role === "admin" || busyUser === member.user_id}
+                              checked={member.owner === true || member.role === "admin" || member.view_pii}
+                              disabled={member.owner === true || member.role === "admin" || busyUser === member.user_id}
                               onChange={(event) => void save(member, { role: member.role, view_pii: event.target.checked })}
                             />
+                            <span className="switch-text" aria-hidden="true">
+                              Personal data
+                            </span>
                           </label>
                         </td>
                       ) : null}
@@ -203,8 +199,8 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                             <Button
                               onClick={() => setRemoving(member)}
                               aria-label={`Remove ${member.email}`}
-                              aria-describedby={reasonShown(member) ? reasonId(member) : undefined}
-                              disabled={reasonShown(member)}
+                              aria-describedby={lastAdmin(member) ? reasonId(member) : undefined}
+                              disabled={lastAdmin(member)}
                             >
                               Remove
                             </Button>
@@ -255,7 +251,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
           member={removing}
           onClose={() => setRemoving(null)}
           onRefused={() => {
-            refuse(removing);
+            members.reload();
             setRemoving(null);
           }}
           onRemoved={() => {

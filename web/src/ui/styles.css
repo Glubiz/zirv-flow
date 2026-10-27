@@ -4551,6 +4551,10 @@ main:focus {
   cursor: pointer;
 }
 
+.switch-text {
+  display: none;
+}
+
 .switch {
   appearance: none;
   position: relative;
@@ -4648,6 +4652,13 @@ main:focus {
 
   .members-table .members-pii {
     justify-self: end;
+  }
+
+  .members-table .switch-text {
+    display: inline;
+    margin-left: 8px;
+    font-size: 13.5px;
+    color: var(--ink-2);
   }
 
   .members-table .members-actions {

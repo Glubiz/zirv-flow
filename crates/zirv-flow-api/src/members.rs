@@ -26,7 +26,9 @@ pub(crate) struct MemberBody {
     /// Whether a publisher, editor or viewer sees personal values unmasked. An admin always does.
     view_pii: bool,
     /// Whether this member is the instance owner, who has every right in every workspace.
-    owner: bool,
+    /// Present for workspace admins and the owner only; left out for everyone else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<bool>,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     added_at: OffsetDateTime,
@@ -39,7 +41,7 @@ impl From<&Member> for MemberBody {
             email: member.email.clone(),
             role: member.role,
             view_pii: member.view_pii,
-            owner: member.is_owner,
+            owner: Some(member.is_owner),
             added_at: member.created_at,
         }
     }
@@ -84,7 +86,21 @@ pub(crate) async fn list(
 ) -> Result<Json<Vec<MemberBody>>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::ReadMembers).await?;
     let members = zirv_flow_store::list_members(&state.pool, workspace.id).await?;
-    Ok(Json(members.iter().map(MemberBody::from).collect()))
+    let may_see_owner = authorize(&state, &principal, workspace.id, Need::Admin)
+        .await
+        .is_ok();
+    Ok(Json(
+        members
+            .iter()
+            .map(|member| {
+                let mut body = MemberBody::from(member);
+                if !may_see_owner {
+                    body.owner = None;
+                }
+                body
+            })
+            .collect(),
+    ))
 }
 
 /// Adds a user to the workspace or changes their role. Workspace admins and the owner only.

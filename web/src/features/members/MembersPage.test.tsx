@@ -145,11 +145,12 @@ describe("members", () => {
     expect(screen.getByRole("combobox", { name: `Role for ${MEMBER.email}` })).toBeEnabled();
   });
 
-  it("refetches, shows the reason and disables the role control after a last_admin refusal of a role change", async () => {
+  it("refetches after a last_admin refusal of a role change and shows the reason when only one admin is left", async () => {
+    let reads = 0;
     const calls = mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("admin")),
+      "GET /api/v1/workspaces/ws1/members": () => json(members((reads += 1) === 1 ? "admin" : "editor")),
       "PUT /api/v1/workspaces/ws1/members/u-boss": () => problem(409, "Conflict", "last admin", undefined, "last_admin"),
     });
     const user = userEvent.setup();
@@ -163,11 +164,30 @@ describe("members", () => {
     expect(screen.getByRole("button", { name: "Remove boss@example.test" })).toBeDisabled();
   });
 
-  it("shows the same reason, not a dialog error, when a removal is refused with last_admin", async () => {
+  it("leaves the controls enabled when the refetch after a last_admin refusal shows another admin", async () => {
     const calls = mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin")),
+      "PUT /api/v1/workspaces/ws1/members/u-boss": () => problem(409, "Conflict", "last admin", undefined, "last_admin"),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Role for boss@example.test" }), "editor");
+
+    await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/members"))).toHaveLength(2));
+    expect(await screen.findByRole("combobox", { name: "Role for boss@example.test" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Remove boss@example.test" })).toBeEnabled();
+    expect(screen.queryByText("A workspace needs an admin")).not.toBeInTheDocument();
+  });
+
+  it("shows the same reason, not a dialog error, when a removal is refused with last_admin", async () => {
+    let reads = 0;
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json(members((reads += 1) === 1 ? "admin" : "editor")),
       "DELETE /api/v1/workspaces/ws1/members/u-boss": () => problem(409, "Conflict", "last admin", undefined, "last_admin"),
     });
     const user = userEvent.setup();
