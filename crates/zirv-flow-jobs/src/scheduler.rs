@@ -713,7 +713,7 @@ mod tests {
     async fn migrated(pool: &PgPool) {
         zirv_flow_store::migrate(pool).await.unwrap();
         // The tests walk the clock far ahead and count the slots they created themselves.
-        sqlx::query("DELETE FROM schedules WHERE kind IN ('events.retention', 'messages.retention', 'maintenance.ai_transcripts')")
+        sqlx::query("DELETE FROM schedules WHERE kind IN ('events.retention', 'messages.retention', 'decisions.retention', 'maintenance.ai_transcripts')")
             .execute(pool)
             .await
             .unwrap();
