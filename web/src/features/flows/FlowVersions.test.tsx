@@ -51,7 +51,7 @@ describe("versions list", () => {
     expect(within(panel).getByRole("button", { name: "Publish…" })).toBeInTheDocument();
     view.unmount();
 
-    mockApi({ ...flowRoutes({ role: "member" }), [VERSIONS]: () => json([]) });
+    mockApi({ ...flowRoutes({ role: "editor" }), [VERSIONS]: () => json([]) });
     mount();
     const memberPanel = await openVersions(user);
 

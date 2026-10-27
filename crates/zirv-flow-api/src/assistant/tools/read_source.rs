@@ -24,6 +24,7 @@ use crate::assistant::prompt::{
     render_stream_context, sample_fields,
 };
 use crate::assistant::schema::tool_parameters;
+use crate::auth::Need;
 use crate::problem::ApiError;
 use crate::sources::{is_push, read_stream_records, saved_mapping_body};
 
@@ -76,7 +77,7 @@ impl AiTool<ToolContext> for ReadSource {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Admin).await?;
             let schema = Self::parameters().map_err(|_| ToolError::Failed(ApiError::internal()))?;
             check_arguments(&schema, arguments)?;
             let args: ReadSourceArgs =

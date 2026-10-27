@@ -128,6 +128,22 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(zirv_flow_core::fuzz::config())]
+
+        #[test]
+        fn fuzz_migration_is_idempotent(value in zirv_flow_core::fuzz::with_fixtures(vec![v1(),
+            serde_json::from_str(include_str!("../tests/fixtures/blocks/migrations/image.v2.json")).unwrap()])) {
+            let started = std::time::Instant::now();
+            let once = v1_to_v2(value.clone());
+            prop_assert_eq!(v1_to_v2(once.clone()), once);
+            if let Ok(current) = migrate_to_current(value) {
+                prop_assert_eq!(migrate_to_current(current.clone()), Ok(current));
+            }
+            prop_assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        }
+    }
+
+    proptest! {
         #[test]
         fn migrating_is_idempotent_and_leaves_schema_two_alone(
             subject in ".{0,40}",

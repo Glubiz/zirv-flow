@@ -320,7 +320,7 @@ pub(crate) async fn options(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<SenderIdentityOptionBody>>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let identities =
         zirv_flow_store::list_sender_identities(&state.pool, workspace.id, None, true).await?;
     Ok(Json(

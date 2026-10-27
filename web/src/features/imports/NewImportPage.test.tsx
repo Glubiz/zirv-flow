@@ -7,7 +7,7 @@ import { json, MEMBER, mockApi, OWNER, session } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { NewImportPage, uploadUrl } from "./NewImportPage";
 
-const members = (role: "admin" | "member", userId: string) => [
+const members = (role: "admin" | "editor", userId: string) => [
   { user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" },
 ];
 

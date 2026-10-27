@@ -18,8 +18,8 @@ function mount() {
 }
 
 const TEAM = [
-  { user_id: MEMBER.id, email: MEMBER.email, role: "member", added_at: "2026-10-01T09:00:00Z" },
-  { user_id: OTHER_MEMBER, email: "other@example.test", role: "member", added_at: "2026-10-01T09:00:00Z" },
+  { user_id: MEMBER.id, email: MEMBER.email, role: "editor", added_at: "2026-10-01T09:00:00Z" },
+  { user_id: OTHER_MEMBER, email: "other@example.test", role: "editor", added_at: "2026-10-01T09:00:00Z" },
 ];
 
 /** The writer's routes with two team members, so a test can pick several recipients. */
@@ -222,7 +222,7 @@ describe("the Send a test page", () => {
     expect(await within(select).findByRole("option", { name: "Mia Jensen" })).toBeInTheDocument();
     admin.unmount();
 
-    const calls = mockApi(routes({}, { role: "member", saved: [{ person_id: "p-1", display: { value: "Mia Jensen" } }] }));
+    const calls = mockApi(routes({}, { role: "editor", saved: [{ person_id: "p-1", display: { value: "Mia Jensen" } }] }));
     mount();
     const writerSelect = await screen.findByLabelText("Fill fields as");
 

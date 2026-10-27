@@ -161,7 +161,7 @@ describe("the theme list", () => {
   });
 
   it("offers a writer a new theme but no default or archive", async () => {
-    mockApi(themeRoutes({ role: "member", list: twoThemes() }));
+    mockApi(themeRoutes({ role: "editor", list: twoThemes() }));
     mount();
 
     expect(await screen.findByRole("button", { name: "New theme" })).toBeInTheDocument();

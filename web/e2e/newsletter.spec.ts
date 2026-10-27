@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+import { PREVIEW_CSP_META } from "../src/ui/previewDocument";
 import { signIn } from "./support";
 import { asLines, normaliseTracking, unifiedDiff } from "./tracking";
 
@@ -186,7 +187,7 @@ async function previewOf(page: Page): Promise<Captured> {
   const text = await page.getByLabel("Text part").textContent();
   await page.getByRole("button", { name: "HTML", exact: true }).click();
   if (html === null || text === null) throw new Error("the preview shows no message");
-  return { html: asLines(html), text: asLines(text) };
+  return { html: asLines(html.replace(PREVIEW_CSP_META, "")), text: asLines(text) };
 }
 
 /** Test-sends the published template to the allowlisted address, and returns the message the sink got. */

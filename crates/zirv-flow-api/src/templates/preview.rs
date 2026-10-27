@@ -8,6 +8,8 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::{HeaderValue, header};
+use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
@@ -25,10 +27,22 @@ use crate::AppState;
 use crate::admin;
 use crate::auth::{Principal, path_id};
 use crate::json::ApiJson;
+use crate::oidc::NO_STORE;
 use crate::problem::{ApiError, Problem, TemplateIssueProblem};
 
 /// Where an inert link points: the structure of a real tracked link, none of its meaning.
 const INERT_BASE_URL: &str = "https://preview.sample.invalid/t";
+
+/// Preview bodies can contain personal data, including when the renderer refuses a request.
+pub(crate) async fn headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, NO_STORE);
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
 
 #[derive(Deserialize, ToSchema)]
 pub(crate) struct TemplatePreviewRequest {

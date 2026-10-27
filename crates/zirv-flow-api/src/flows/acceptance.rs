@@ -46,6 +46,7 @@ mod tests {
         read: String,
         write: String,
         admin: String,
+        publish: String,
         other_admin: String,
         /// A workspace member: may read and write, not administer.
         member: Login,
@@ -141,9 +142,10 @@ mod tests {
         let read = key(ws, Scope::Read).await;
         let write = key(ws, Scope::Write).await;
         let admin_key = key(ws, Scope::Admin).await;
+        let publish = key(ws, Scope::Publish).await;
         let other_admin = key(other_ws, Scope::Admin).await;
         for (email, role) in [
-            ("member@example.com", Role::Member),
+            ("member@example.com", Role::Editor),
             ("lead@example.com", Role::Admin),
         ] {
             let user = admin::create_user(pool, &Context::system(), email, PASSWORD)
@@ -164,6 +166,7 @@ mod tests {
             read,
             write,
             admin: admin_key,
+            publish,
             other_admin,
             member,
             lead,
@@ -301,18 +304,19 @@ mod tests {
         let f = fixture(&pool).await;
         let flow = f.create("Welcome", simple_graph(), manual()).await;
         let id = |tail: &str| format!("/{flow}{tail}");
-        let credentials: [(&str, Auth<'_>, u8); 7] = [
+        let credentials: [(&str, Auth<'_>, u16); 8] = [
             ("anonymous", Auth::Anonymous, 0),
             ("read key", Auth::Key(&f.read), 1),
             ("write key", Auth::Key(&f.write), 2),
             ("admin key", Auth::Key(&f.admin), 3),
+            ("publish key", Auth::Key(&f.publish), 4),
             ("member", Auth::Session(&f.member), 12),
-            ("workspace admin", Auth::Session(&f.lead), 123),
+            ("workspace admin", Auth::Session(&f.lead), 1234),
             ("other workspace's admin key", Auth::Key(&f.other_admin), 9),
         ];
-        // The levels each credential holds: 1 read, 2 write, 3 admin. A key holds one scope; a
-        // member reads and writes; a workspace admin does all three.
-        let held = |code: u8, need: u8| code.to_string().contains(&need.to_string());
+        // The levels each credential holds: 1 read, 2 write, 3 admin, 4 publish. A key holds one
+        // scope; an editor reads and writes; a workspace admin holds all four.
+        let held = |code: u16, need: u8| code.to_string().contains(&need.to_string());
         let requests: [(&str, &str, String, Option<Value>, u8); 9] = [
             ("list", "GET", String::new(), None, 1),
             ("get", "GET", id(""), None, 1),
@@ -337,10 +341,10 @@ mod tests {
                 "POST",
                 id("/publish?dry_run=true"),
                 None,
-                3,
+                4,
             ),
-            ("pause", "POST", id("/pause"), None, 3),
-            ("archive", "POST", id("/archive"), None, 3),
+            ("pause", "POST", id("/pause"), None, 4),
+            ("archive", "POST", id("/archive"), None, 4),
         ];
 
         for (label, method, tail, body, need) in requests {
@@ -381,7 +385,9 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn publish_pause_resume_and_archive_need_admin_and_publish_is_not_a_write(pool: PgPool) {
+    async fn publish_pause_resume_and_archive_need_the_publish_scope_and_publish_is_not_a_write(
+        pool: PgPool,
+    ) {
         let f = fixture(&pool).await;
         let flow = f.create("Welcome", simple_graph(), manual()).await;
         let tail = |action: &str| format!("/{flow}/{action}");
@@ -391,6 +397,7 @@ mod tests {
             for (who, auth) in [
                 ("write key", Auth::Key(&f.write)),
                 ("read key", Auth::Key(&f.read)),
+                ("admin key", Auth::Key(&f.admin)),
                 ("member", Auth::Session(&f.member)),
             ] {
                 let reply = f.call("POST", &uri, None, auth).await;
@@ -403,7 +410,7 @@ mod tests {
                 "POST",
                 &f.flows(&tail("publish")),
                 None,
-                Auth::Key(&f.admin),
+                Auth::Key(&f.publish),
             )
             .await;
         assert_eq!(
@@ -1465,7 +1472,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn enrolling_through_the_api_takes_write_and_a_manual_start_takes_admin(pool: PgPool) {
+    async fn enrolling_through_the_api_takes_write_and_a_manual_start_takes_publish(pool: PgPool) {
         let f = fixture(&pool).await;
         let api = f.live("By api", api_trigger()).await;
         let manual_flow = f.live("By hand", manual()).await;
@@ -1474,16 +1481,17 @@ mod tests {
             .await
             .unwrap()
             .id;
-        let credentials: [(&str, Auth<'_>, u8); 7] = [
+        let credentials: [(&str, Auth<'_>, u16); 8] = [
             ("anonymous", Auth::Anonymous, 0),
             ("read key", Auth::Key(&f.read), 1),
             ("write key", Auth::Key(&f.write), 2),
             ("admin key", Auth::Key(&f.admin), 3),
+            ("publish key", Auth::Key(&f.publish), 4),
             ("member", Auth::Session(&f.member), 12),
-            ("workspace admin", Auth::Session(&f.lead), 123),
+            ("workspace admin", Auth::Session(&f.lead), 1234),
             ("other workspace's admin key", Auth::Key(&f.other_admin), 9),
         ];
-        let held = |code: u8, need: u8| code.to_string().contains(&need.to_string());
+        let held = |code: u16, need: u8| code.to_string().contains(&need.to_string());
         let requests = [
             (
                 "enroll",
@@ -1495,7 +1503,7 @@ mod tests {
                 "start",
                 f.flows(&format!("/{manual_flow}/start")),
                 json!({"list_id": list}),
-                3,
+                4,
             ),
         ];
 
@@ -1674,7 +1682,7 @@ mod tests {
                 "POST",
                 &uri,
                 Some(json!({"list_id": list})),
-                Auth::Key(&f.admin),
+                Auth::Key(&f.publish),
             )
             .await;
 

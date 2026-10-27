@@ -7,6 +7,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
 
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -28,6 +29,7 @@ use crate::{credentials, passwords};
 pub struct Context {
     actor: Actor,
     request_id: Option<String>,
+    owner: bool,
 }
 
 impl Context {
@@ -36,6 +38,7 @@ impl Context {
         Self {
             actor: Actor::system(),
             request_id: None,
+            owner: false,
         }
     }
 
@@ -44,6 +47,7 @@ impl Context {
         Self {
             actor: Actor::anonymous(),
             request_id: None,
+            owner: false,
         }
     }
 
@@ -51,6 +55,7 @@ impl Context {
         Self {
             actor: Actor::user(id.as_uuid()),
             request_id: None,
+            owner: false,
         }
     }
 
@@ -58,7 +63,20 @@ impl Context {
         Self {
             actor: Actor::api_key(id.as_uuid()),
             request_id: None,
+            owner: false,
         }
+    }
+
+    /// Marks the actor as the instance owner, who may remove or demote a workspace's last admin.
+    pub fn with_owner(mut self, owner: bool) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    /// Whether the actor may take away a workspace's last admin: the instance owner, or the
+    /// operator on the command line.
+    fn may_remove_last_admin(&self) -> bool {
+        self.owner || self.actor.kind == zirv_flow_store::ActorKind::System
     }
 
     pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
@@ -67,13 +85,25 @@ impl Context {
     }
 }
 
+/// The refusal text of [`AdminError::LastAdmin`].
+pub(crate) const LAST_ADMIN: &str =
+    "the workspace would have no admin; only the owner can remove or demote its last admin";
+
 /// Why an operation did not happen. The messages are safe to show to callers.
 #[derive(Debug)]
 pub enum AdminError {
     Invalid(ValidationError),
     Conflict(&'static str),
     NotFound(&'static str),
+    /// The change would leave the workspace with no admin and the caller is not the owner; the
+    /// problem carries the code `last_admin`.
+    LastAdmin,
     Store(StoreError),
+    /// A ledger file that cannot be merged; names the file, never a value.
+    Merge(String),
+    /// An erasure ledger file or directory that could not be read or written. Names a file or
+    /// directory, never a value.
+    Ledger(zirv_flow_store::LedgerFileError),
     /// A trait slot change that was refused; the problem carries its own code.
     Slot(zirv_flow_store::SlotError),
     /// A stored secret could not be re-wrapped. Names a key id, never key or plaintext bytes.
@@ -93,7 +123,10 @@ impl fmt::Display for AdminError {
             Self::Invalid(error) => error.fmt(formatter),
             Self::Conflict(message) => formatter.write_str(message),
             Self::NotFound(what) => write!(formatter, "no such {what}"),
+            Self::LastAdmin => formatter.write_str(LAST_ADMIN),
             Self::Store(error) => error.fmt(formatter),
+            Self::Ledger(error) => error.fmt(formatter),
+            Self::Merge(message) => formatter.write_str(message),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
             Self::Utm { detail, .. } => formatter.write_str(detail),
@@ -106,8 +139,14 @@ impl Error for AdminError {
         match self {
             Self::Invalid(error) => Some(error),
             Self::Store(error) => Some(error),
+            Self::Ledger(error) => Some(error),
             Self::Secret(error) => Some(error),
-            Self::Conflict(_) | Self::NotFound(_) | Self::Slot(_) | Self::Utm { .. } => None,
+            Self::Conflict(_)
+            | Self::NotFound(_)
+            | Self::LastAdmin
+            | Self::Merge(_)
+            | Self::Slot(_)
+            | Self::Utm { .. } => None,
         }
     }
 }
@@ -121,6 +160,12 @@ impl From<ValidationError> for AdminError {
 impl From<SecretError> for AdminError {
     fn from(error: SecretError) -> Self {
         Self::Secret(error)
+    }
+}
+
+impl From<zirv_flow_store::LedgerFileError> for AdminError {
+    fn from(error: zirv_flow_store::LedgerFileError) -> Self {
+        Self::Ledger(error)
     }
 }
 
@@ -319,6 +364,32 @@ pub async fn create_workspace(
     Ok(workspace)
 }
 
+/// Refuses to take `user` out of the admin role when they are the workspace's only admin, unless
+/// the caller is the owner (or the operator). The memberships are locked until the transaction
+/// ends, so two concurrent demotions cannot each leave the other admin in place.
+async fn refuse_last_admin(
+    tx: &mut PgConnection,
+    context: &Context,
+    workspace: WorkspaceId,
+    user: UserId,
+) -> Result<(), AdminError> {
+    let members = zirv_flow_store::lock_memberships(tx, workspace).await?;
+    if context.may_remove_last_admin() {
+        return Ok(());
+    }
+    let is_admin = members
+        .iter()
+        .any(|(member, role)| *member == user && *role == Role::Admin);
+    let admins = members
+        .iter()
+        .filter(|(_, role)| *role == Role::Admin)
+        .count();
+    if is_admin && admins == 1 {
+        return Err(AdminError::LastAdmin);
+    }
+    Ok(())
+}
+
 /// Adds a user to a workspace or changes their role.
 pub async fn set_member(
     pool: &PgPool,
@@ -331,6 +402,9 @@ pub async fn set_member(
     zirv_flow_store::find_user(&mut *tx, user)
         .await?
         .ok_or(AdminError::NotFound("user"))?;
+    if role != Role::Admin {
+        refuse_last_admin(&mut tx, context, workspace, user).await?;
+    }
     let membership = zirv_flow_store::set_membership(&mut *tx, workspace, user, role).await?;
     audit(
         &mut tx,
@@ -353,6 +427,7 @@ pub async fn remove_member(
     user: UserId,
 ) -> Result<(), AdminError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
+    refuse_last_admin(&mut tx, context, workspace, user).await?;
     if !zirv_flow_store::remove_membership(&mut *tx, workspace, user).await? {
         return Err(AdminError::NotFound("member"));
     }
@@ -464,11 +539,18 @@ pub async fn workspace_by_slug(pool: &PgPool, slug: &str) -> Result<WorkspaceId,
 /// backup restore: re-adds the `erased` suppressions, erases every ledger person that exists
 /// again, and removes pending inbox rows that name an erased identifier. Returns counts only,
 /// and audits them as `privacy.erasures_replayed`.
+///
+/// With `from`, the ledger files of that directory are read first and all validated: one corrupt
+/// or unknown-format file fails the call, naming it, before anything changes. The entries the
+/// database lacks (of the workspace, when one is given) are then merged in as completed, files
+/// for a workspace that does not exist here are skipped and counted, and the replay runs over
+/// the merged ledger.
 pub async fn replay_erasures(
     pool: &PgPool,
     context: &Context,
     workspace: Option<&str>,
     root: &HmacRoot,
+    from: Option<&Path>,
 ) -> Result<ReplayReport, AdminError> {
     let workspace = match workspace {
         Some(slug) => {
@@ -482,9 +564,26 @@ pub async fn replay_erasures(
         }
         None => None,
     };
+    let mut entries = match from {
+        Some(dir) => zirv_flow_store::read_ledger_dir(dir)?,
+        None => Vec::new(),
+    };
+    if let Some(only) = workspace {
+        entries.retain(|entry| entry.workspace_id == only.as_uuid());
+    }
+    let merge = zirv_flow_store::merge_ledger_entries(pool, &entries)
+        .await
+        .map_err(|error| match error {
+            zirv_flow_store::MergeError::Store(error) => AdminError::Store(error),
+            other @ zirv_flow_store::MergeError::IdInOtherWorkspace { .. } => {
+                AdminError::Merge(other.to_string())
+            }
+        })?;
     let key = root.hmac_key(HmacPurpose::Identifier);
     let trace = TraceContext::root(Cause::api("admin.replay-erasures"));
-    let report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;
+    let mut report = zirv_flow_store::replay_erasures(pool, workspace, Some(&key), &trace).await?;
+    report.merged = merge.merged;
+    report.skipped_workspaces = merge.skipped_workspaces;
     let mut tx = zirv_flow_store::begin(pool).await?;
     audit(
         &mut tx,
@@ -497,11 +596,28 @@ pub async fn replay_erasures(
             "suppressions": report.suppressions,
             "people": report.people,
             "inbox_rows": report.inbox_rows,
+            "merged": report.merged,
+            "skipped_workspaces": report.skipped_workspaces,
         }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
     Ok(report)
+}
+
+/// Writes a ledger file into `out` for every completed erasure of the database, a full snapshot
+/// that also covers entries made before `privacy.ledger_dir` was set. Returns counts. Like the
+/// other operations that only read the database it writes no audit entry.
+pub async fn export_ledger(
+    pool: &PgPool,
+    out: &Path,
+) -> Result<zirv_flow_store::ExportReport, AdminError> {
+    zirv_flow_store::export_ledger(pool, out)
+        .await
+        .map_err(|error| match error {
+            zirv_flow_store::ExportError::Store(error) => AdminError::Store(error),
+            zirv_flow_store::ExportError::File(error) => AdminError::Ledger(error),
+        })
 }
 
 /// What [`rotate_master_key`] re-wrapped.
@@ -1169,7 +1285,7 @@ mod tests {
             .await
             .unwrap();
         let clash = create_workspace(&pool, &context, "Other", Some("acme-corp")).await;
-        set_member(&pool, &context, ws.id, user.id, Role::Member)
+        set_member(&pool, &context, ws.id, user.id, Role::Editor)
             .await
             .unwrap();
         let created = create_api_key(&pool, &context, ws.id, " ci ", &[Scope::Read, Scope::Read])
@@ -1205,6 +1321,56 @@ mod tests {
                 "membership.removed"
             ]
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_last_admin_stays_unless_the_caller_is_the_owner_or_the_operator(pool: PgPool) {
+        migrated(&pool).await;
+        let operator = Context::system();
+        let admin_user = create_user(&pool, &operator, "a@example.com", PASSWORD)
+            .await
+            .unwrap();
+        let other = create_user(&pool, &operator, "b@example.com", PASSWORD)
+            .await
+            .unwrap();
+        let ws = create_workspace(&pool, &operator, "Acme", None)
+            .await
+            .unwrap();
+        set_member(&pool, &operator, ws.id, admin_user.id, Role::Admin)
+            .await
+            .unwrap();
+        let as_admin = Context::user(admin_user.id);
+
+        let demoted = set_member(&pool, &as_admin, ws.id, admin_user.id, Role::Publisher).await;
+        let removed = remove_member(&pool, &as_admin, ws.id, admin_user.id).await;
+        // Adding a second member, or keeping the role, is not a demotion.
+        set_member(&pool, &as_admin, ws.id, other.id, Role::Viewer)
+            .await
+            .unwrap();
+        set_member(&pool, &as_admin, ws.id, admin_user.id, Role::Admin)
+            .await
+            .unwrap();
+        let by_owner = Context::user(admin_user.id).with_owner(true);
+        set_member(&pool, &by_owner, ws.id, admin_user.id, Role::Publisher)
+            .await
+            .unwrap();
+        assert_eq!(
+            zirv_flow_store::membership_role(&pool, ws.id, admin_user.id)
+                .await
+                .unwrap(),
+            Some(Role::Publisher)
+        );
+        for user in [admin_user.id, other.id] {
+            set_member(&pool, &operator, ws.id, user, Role::Admin)
+                .await
+                .unwrap();
+        }
+        let with_two = set_member(&pool, &as_admin, ws.id, other.id, Role::Viewer).await;
+
+        assert!(matches!(demoted, Err(AdminError::LastAdmin)));
+        assert!(matches!(removed, Err(AdminError::LastAdmin)));
+        assert!(with_two.is_ok());
     }
 
     #[sqlx::test]
@@ -1522,6 +1688,439 @@ mod tests {
         assert_eq!(rotations[1].summary["key_id"], new.key_id());
         assert_eq!(rotations[1].summary["from_key_ids"], json!([old.key_id()]));
         assert_eq!(rotations[0].summary["rows"], 0);
+    }
+
+    const ALLOWED_ADDRESS: &str = "rot@example.com";
+
+    /// A legacy source or destination credential: the sealed row and the `credentials` row that
+    /// points at it, which is how `open_credential` reaches it. Returns the credential id.
+    async fn seed_legacy(
+        pool: &PgPool,
+        keys: &Keyring,
+        ws: WorkspaceId,
+        purpose: SecretPurpose,
+    ) -> Uuid {
+        let secret = create_secret(
+            pool,
+            &Context::system(),
+            keys,
+            ws,
+            purpose,
+            &SecretBytes::new(br#"{"password":"legacy-value"}"#.to_vec()),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::create_credential(
+            pool,
+            ws,
+            &zirv_flow_store::NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: purpose.as_str(),
+                name: purpose.as_str(),
+                kind: "basic",
+                schema: None,
+                fields: &json!({"username": "u"}),
+                secret_id: secret,
+                hints: &json!({"password": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    /// Stores one secret of `purpose` through the writer its feature uses and returns the id of
+    /// the row that refers to it (the source, hook, domain or credential), or nil when the
+    /// secret is found some other way. The match has no wildcard, so a new purpose does not
+    /// compile until it is seeded here and read back in `read_back`.
+    async fn seed_purpose(
+        purpose: SecretPurpose,
+        state: &crate::AppState,
+        keys: &Keyring,
+        ws: WorkspaceId,
+    ) -> Uuid {
+        let context = Context::system();
+        let pool = &state.pool;
+        match purpose {
+            SecretPurpose::ConnectorCredential | SecretPurpose::DestinationCredential => {
+                seed_legacy(pool, keys, ws, purpose).await
+            }
+            SecretPurpose::WorkspaceCredential => {
+                let request = serde_json::from_value(json!({
+                    "kind": "api_key",
+                    "name": "Rotation",
+                    "secret": {"api_key": "rotation-value"},
+                }))
+                .unwrap();
+                crate::workspace_credentials::crud::create_credential(
+                    state, &context, ws, None, &request,
+                )
+                .await
+                .unwrap()
+                .id
+            }
+            SecretPurpose::OAuthToken => {
+                let tokens = zirv_flow_store::StoredTokens {
+                    access_token: zirv_flow_core::SecretString::new("oauth-access".into()),
+                    refresh_token: zirv_flow_core::SecretString::new("oauth-refresh".into()),
+                    expires_at: None,
+                    binding: "binding".into(),
+                };
+                let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+                let source = zirv_flow_store::create_source(
+                    &mut *tx,
+                    ws,
+                    &zirv_flow_store::NewSource {
+                        id: Uuid::now_v7(),
+                        kind: "http",
+                        name: "Rotation source",
+                        config: &json!({}),
+                        credential_id: None,
+                        schedule: None,
+                        created_by: None,
+                    },
+                )
+                .await
+                .unwrap();
+                let secret = create_secret_in(
+                    &mut tx,
+                    &context,
+                    keys,
+                    ws,
+                    purpose,
+                    &tokens.to_plaintext().unwrap(),
+                )
+                .await
+                .unwrap();
+                zirv_flow_store::link_tokens(&mut tx, ws, source.id, Some(secret))
+                    .await
+                    .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+                source.id
+            }
+            SecretPurpose::AiProviderKey => {
+                save_ai_settings(pool, &context, Some(keys), ws, &ai_change())
+                    .await
+                    .unwrap();
+                Uuid::nil()
+            }
+            SecretPurpose::WebhookSecret => {
+                let request = serde_json::from_value(json!({
+                    "name": "Rotation hook",
+                    "dedupe_field": "id",
+                }))
+                .unwrap();
+                let (hook, _) =
+                    crate::webhooks::ops::create_webhook(state, &context, ws, None, &request)
+                        .await
+                        .unwrap();
+                hook.id
+            }
+            SecretPurpose::WebhookSigning => {
+                let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+                let id = create_secret_in(
+                    &mut tx,
+                    &context,
+                    keys,
+                    ws,
+                    purpose,
+                    &SecretBytes::new(b"signing-value".to_vec()),
+                )
+                .await
+                .unwrap();
+                let created = zirv_flow_store::create_signing_key(
+                    &mut tx,
+                    ws,
+                    id,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await
+                .unwrap();
+                assert!(created);
+                zirv_flow_store::commit(tx).await.unwrap();
+                Uuid::nil()
+            }
+            SecretPurpose::DkimKey => {
+                let request =
+                    serde_json::from_value(json!({"domain": "rotation-test.com"})).unwrap();
+                let trace = TraceContext::root(Cause::api("test.rotation"));
+                let (domain, _) = crate::sending::domains::create_sending_domain(
+                    state, &context, ws, None, trace, &request,
+                )
+                .await
+                .unwrap();
+                domain.id
+            }
+            SecretPurpose::TestSendAddress => {
+                let identifier =
+                    zirv_flow_core::people::Identifier::parse("email", ALLOWED_ADDRESS).unwrap();
+                let hash = zirv_flow_core::people::identifier_hash(
+                    state.identifier_key.as_deref().unwrap(),
+                    &identifier,
+                );
+                let id = Uuid::now_v7();
+                let sealed = seal(
+                    keys,
+                    identifier.value().as_bytes(),
+                    &secret_aad(ws, SecretId::from_uuid(id), purpose),
+                );
+                let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+                let entry = zirv_flow_store::add_allowlist_entry(
+                    &mut tx,
+                    &keys.key_ids(),
+                    ws,
+                    id,
+                    &hash,
+                    &zirv_flow_store::masked_hint(identifier.value()),
+                    &sealed,
+                )
+                .await
+                .unwrap();
+                assert!(entry.is_some());
+                zirv_flow_store::commit(tx).await.unwrap();
+                id
+            }
+        }
+    }
+
+    /// Reads the secret of `purpose` back the way production does, with the state's keyring, and
+    /// returns its plaintext. `parent` is what `seed_purpose` returned. Nothing here prints a
+    /// value; a failure names the purpose.
+    async fn read_back(
+        purpose: SecretPurpose,
+        state: &crate::AppState,
+        ws: WorkspaceId,
+        parent: Uuid,
+    ) -> Vec<u8> {
+        let name = purpose.as_str();
+        let pool = &state.pool;
+        let keys = state.keyring().unwrap();
+        match purpose {
+            SecretPurpose::ConnectorCredential
+            | SecretPurpose::DestinationCredential
+            | SecretPurpose::WorkspaceCredential => {
+                // The one opener every credential read goes through (the legacy purposes
+                // included): sources, destinations and the credential test call it.
+                let opened = zirv_flow_store::open_credential(pool, keys, ws, parent)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not open"));
+                opened.secret.expose().to_vec()
+            }
+            SecretPurpose::OAuthToken => {
+                let tokens = zirv_flow_store::load_tokens(pool, keys, ws, parent)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not load"))
+                    .unwrap_or_else(|| panic!("{name} has no tokens"));
+                tokens
+                    .to_plaintext()
+                    .unwrap_or_else(|_| panic!("{name} did not encode"))
+                    .expose()
+                    .to_vec()
+            }
+            SecretPurpose::AiProviderKey => {
+                let settings = zirv_flow_store::find_ai_settings(pool, ws)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{name} has no settings"));
+                let secret = settings
+                    .provider_key_secret_id
+                    .unwrap_or_else(|| panic!("{name} is not linked"));
+                let key = crate::assistant::dispatch::open_provider_key(state, ws, secret)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not open"));
+                key.expose().as_bytes().to_vec()
+            }
+            SecretPurpose::WebhookSecret => {
+                let hook = zirv_flow_store::find_for_receive(pool, parent)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{name} has no hook"));
+                zirv_flow_store::secrets::open_json(
+                    pool,
+                    keys,
+                    ws,
+                    SecretId::from_uuid(hook.secret_id),
+                    purpose,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not open"))
+                .expose()
+                .to_vec()
+            }
+            SecretPurpose::WebhookSigning => {
+                let mut connection = pool.acquire().await.unwrap();
+                let live = zirv_flow_store::live_signing_keys(
+                    &mut connection,
+                    ws,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name} has no key"));
+                zirv_flow_store::secrets::open_json(
+                    &mut *connection,
+                    keys,
+                    ws,
+                    live.current.secret_id,
+                    purpose,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not open"))
+                .expose()
+                .to_vec()
+            }
+            SecretPurpose::DkimKey => {
+                let domain = zirv_flow_store::find_sending_domain(pool, ws, parent)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{name} has no domain"));
+                let key = zirv_flow_store::secrets::open_json(
+                    pool,
+                    keys,
+                    ws,
+                    SecretId::from_uuid(domain.dkim_secret_id),
+                    purpose,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not open"));
+                let signer = zirv_flow_connectors::destinations::DkimSigner::from_pkcs8(
+                    &domain.domain,
+                    &domain.selector,
+                    key.expose(),
+                );
+                assert!(signer.is_ok(), "{name} is not a usable key");
+                key.expose().to_vec()
+            }
+            SecretPurpose::TestSendAddress => {
+                let identifier =
+                    zirv_flow_core::people::Identifier::parse("email", ALLOWED_ADDRESS).unwrap();
+                let hash = zirv_flow_core::people::identifier_hash(
+                    state.identifier_key.as_deref().unwrap(),
+                    &identifier,
+                );
+                let mut connection = pool.acquire().await.unwrap();
+                zirv_flow_store::open_allowlist_address(&mut connection, keys, ws, &hash)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not open"))
+                    .unwrap_or_else(|| panic!("{name} has no entry"))
+                    .expose()
+                    .to_vec()
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotation_keeps_a_secret_of_every_purpose_and_every_hash_valid(pool: PgPool) {
+        use zirv_flow_core::people::{Identifier, identifier_hash};
+        use zirv_flow_core::tracking::{self, TokenKind};
+
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let old = MasterKey::generate();
+        let new = MasterKey::generate();
+        let before = keyring(&old, None);
+        seed_root(&pool, &before).await;
+        let root = HmacRoot::bootstrap_from(&old);
+        let state = crate::AppState::new(pool.clone(), std::sync::Arc::new(String::new))
+            .with_keyring(std::sync::Arc::new(keyring(&old, None)))
+            .with_hmac_root(&root);
+        let mut parents = Vec::new();
+        for purpose in SecretPurpose::ALL {
+            parents.push((purpose, seed_purpose(purpose, &state, &before, ws.id).await));
+        }
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT id, purpose FROM encrypted_secrets ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for purpose in SecretPurpose::ALL {
+            let count = rows
+                .iter()
+                .filter(|(_, stored)| stored == purpose.as_str())
+                .count();
+            assert_eq!(
+                count,
+                1,
+                "{} should have exactly one secret",
+                purpose.as_str()
+            );
+        }
+        // What each purpose reads as before the rotation, through the same reader.
+        let mut expected = Vec::new();
+        for (purpose, parent) in &parents {
+            expected.push(read_back(*purpose, &state, ws.id, *parent).await);
+        }
+        let identifier = Identifier::parse("email", "hash@example.com").unwrap();
+        let identifier_before =
+            identifier_hash(&root.hmac_key(HmacPurpose::Identifier), &identifier);
+        let redaction_before = zirv_flow_core::credentials::fingerprint(
+            &root.hmac_key(HmacPurpose::Redaction),
+            b"redacted",
+        );
+        let message = Uuid::now_v7();
+        let token = tracking::sign(
+            &root.hmac_key(HmacPurpose::Tracking),
+            TokenKind::Click,
+            message,
+            3,
+        );
+
+        let report = rotate_master_key(&pool, &context, &keyring(&new, Some(&old)))
+            .await
+            .unwrap();
+
+        assert_eq!(report.rows, rows.len() + 1);
+        // The old key is gone: everything below reads with a keyring that holds only the new one.
+        let only_new = keyring(&new, None);
+        let after = crate::AppState::new(pool.clone(), std::sync::Arc::new(String::new))
+            .with_keyring(std::sync::Arc::new(keyring(&new, None)))
+            .with_hmac_root(&root);
+        for ((purpose, parent), expected) in parents.iter().zip(&expected) {
+            let name = purpose.as_str();
+            let read = read_back(*purpose, &after, ws.id, *parent).await;
+            assert!(read == *expected, "{name} changed in rotation");
+        }
+        for (id, _) in &rows {
+            let id = SecretId::from_uuid(*id);
+            let stored = secrets::get(&pool, ws.id, id).await.unwrap().unwrap();
+            assert_eq!(
+                stored.sealed.key_id,
+                new.key_id(),
+                "{}",
+                stored.purpose.as_str()
+            );
+        }
+        let sealed_root = secrets::hmac_root(&pool).await.unwrap().unwrap();
+        let aad = deployment_key_aad(secrets::HMAC_ROOT);
+        let rotated = HmacRoot::from_bytes(&open(&only_new, &sealed_root, &aad).unwrap()).unwrap();
+        assert!(
+            identifier_hash(&rotated.hmac_key(HmacPurpose::Identifier), &identifier)
+                == identifier_before,
+            "the identifier hash changed"
+        );
+        assert_eq!(
+            zirv_flow_core::credentials::fingerprint(
+                &rotated.hmac_key(HmacPurpose::Redaction),
+                b"redacted"
+            ),
+            redaction_before,
+            "the redaction hash changed"
+        );
+        let claims = tracking::verify(
+            &rotated.hmac_key(HmacPurpose::Tracking),
+            TokenKind::Click,
+            &token,
+        );
+        assert_eq!(
+            claims.map(|claims| (claims.message, claims.link)),
+            Some((message, 3))
+        );
     }
 
     #[sqlx::test]

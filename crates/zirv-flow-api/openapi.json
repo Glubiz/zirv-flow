@@ -1577,7 +1577,7 @@
         "tags": [
           "ai"
         ],
-        "summary": "Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,\n`segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a\n`simulation` of a few synthetic people; a template draft names its template in `template_id`\nand its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns\n`renders`, the template's draft and the result rendered for the sample person) with the\nassistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
+        "summary": "Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,\n`segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a\n`simulation` of a few synthetic people; a template draft names its template in `template_id`\nand its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns\n`renders`, the template's draft and the result rendered for the sample person) with the\nassistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Editors and above who are\nsigned in (a mapping or manifest draft reads a source, so it takes an admin); an API key is\nrefused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
         "operationId": "create_ai_draft",
         "parameters": [
           {
@@ -1633,7 +1633,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, or an API key (`ai_user_required`)",
+            "description": "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1728,7 +1728,7 @@
         "tags": [
           "ai"
         ],
-        "summary": "Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not\nchanged since and that it still passes the rules a save applies, then returns it for the\neditor to load as its unsaved draft. Nothing is written to the stream or the source; saving\nstays a separate action. Audited as `ai.draft.accepted`. Workspace admins who are signed in.",
+        "summary": "Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not\nchanged since and that it still passes the rules a save applies, then returns it for the\neditor to load as its unsaved draft. Nothing is written to the stream or the source; saving\nstays a separate action. Audited as `ai.draft.accepted`. Editors and above who are signed in.",
         "operationId": "accept_ai_draft",
         "parameters": [
           {
@@ -1774,7 +1774,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, or an API key (`ai_user_required`)",
+            "description": "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -8616,7 +8616,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9076,7 +9076,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9177,7 +9177,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9268,7 +9268,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9388,7 +9388,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9489,7 +9489,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -9534,7 +9534,7 @@
         "tags": [
           "flows"
         ],
-        "summary": "Starts a flow whose trigger is `manual` for an audience: the current members of a segment or\nthe members of a list. Admin only, and audited as `flow.started`. The audience is queued as a\n`flow.enroll` job that pages through it, a thousand people at a time, under the cause\n`manual`. A paused flow takes nobody and records the skip.",
+        "summary": "Starts a flow whose trigger is `manual` for an audience: the current members of a segment or\nthe members of a list. Publisher and above, and audited as `flow.started`. The audience is queued as a\n`flow.enroll` job that pages through it, a thousand people at a time, under the cause\n`manual`. A paused flow takes nobody and records the skip.",
         "operationId": "start_flow",
         "parameters": [
           {
@@ -9590,7 +9590,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10170,7 +10170,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -12105,7 +12105,7 @@
         "tags": [
           "imports"
         ],
-        "summary": "Starts the run: applies every row in batches of 500, each batch one transaction that\nwrites the profile records, adds the list members, keeps the rejects and advances the\ncheckpoint. A crash resumes from the checkpoint. The run fails with `reject_threshold` once\nmore than 1,000 rows are done and the rejected share is above the import's threshold; the\nbatches already applied stay applied. Running the same file again with the same source and\nstream changes nothing. The answer is the import in `running`; poll it. Audited as\n`import.run_started`.",
+        "summary": "Starts the run: applies every row in batches of 500, each batch one transaction that\nwrites the profile records, adds the list members, keeps the rejects and advances the\ncheckpoint. A crash resumes from the checkpoint. The run fails with `reject_threshold` once\nmore than 1,000 rows are done and the rejected share is above the import's threshold; the\nbatches already applied stay applied. Running the same file again with the same source and\nstream changes nothing. The answer is the import in `running`; poll it. Audited as\n`import.run_started`. Publishers and above, or a key with the `publish` scope.",
         "operationId": "run_import",
         "parameters": [
           {
@@ -12151,7 +12151,7 @@
             }
           },
           "403": {
-            "description": "A key without the write scope, or a missing CSRF token",
+            "description": "A key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -13343,7 +13343,7 @@
         "tags": [
           "members"
         ],
-        "summary": "The members of a workspace. Any member can read this.",
+        "summary": "The members of a workspace. Any member, whatever the role, can read this.",
         "operationId": "list_members",
         "parameters": [
           {
@@ -13492,6 +13492,16 @@
               }
             }
           },
+          "409": {
+            "description": "The change would leave the workspace with no admin (`last_admin`); only the owner may do that",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Invalid role",
             "content": {
@@ -13566,6 +13576,16 @@
           },
           "404": {
             "description": "No such workspace or member, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The change would leave the workspace with no admin (`last_admin`); only the owner may do that",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -15106,7 +15126,7 @@
         "tags": [
           "privacy"
         ],
-        "summary": "Asks for an export of everything held about a person: profile, identities, ledger\ncontributions, events, consent and its history, lists and their history, merges and\nidentity conflicts, with the data of merged people under the survivor. A background job\nbuilds it; it can be downloaded for 24 hours once it is ready. The request is given as a\n`person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.\nAudited as `privacy.export_requested`.",
+        "summary": "Asks for an export of everything held about a person: profile, identities, ledger\ncontributions, events, consent and its history, lists and segments and their history, merges\nand identity conflicts, flow enrollments with their steps, waits and entries, the message log\nand its links, forwarding rows and handled markers, ingest rejects, decision records and saved\ntemplate previews, with the data of merged people under the survivor. A document past the\nsize cap fails with the code `export_too_large`. A background job\nbuilds it; it can be downloaded for 24 hours once it is ready. The request is given as a\n`person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.\nAudited as `privacy.export_requested`.",
         "operationId": "request_export",
         "parameters": [
           {
@@ -18596,7 +18616,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22559,7 +22579,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -24539,7 +24559,7 @@
             }
           },
           "403": {
-            "description": "Not a workspace admin, a key without the admin scope, or a missing CSRF token",
+            "description": "Not a publisher, a key without the publish scope, or a missing CSRF token",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -27526,7 +27546,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Any of `ingest`, `read`, `write`, `admin`.",
+            "description": "Any of `ingest`, `read`, `write`, `publish`, `admin`.",
             "example": [
               "read"
             ]
@@ -28639,7 +28659,7 @@
             "items": {
               "type": "string"
             },
-            "description": "At least one of `ingest`, `read`, `write`, `admin`.",
+            "description": "At least one of `ingest`, `read`, `write`, `publish`, `admin`.",
             "example": [
               "read"
             ]
@@ -31965,6 +31985,13 @@
             "format": "date-time",
             "description": "24 hours after `ready_at`; the download answers 410 from then on."
           },
+          "failure_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the export failed, when known: `export_too_large` when the document passed\n`privacy.export_max_bytes`. Null otherwise."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -32002,7 +32029,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`pending`, `ready`, `failed` once the job ran out of attempts, or `expired`.",
+            "description": "`pending`, `ready`, `failed` once the job ran out of attempts or the document passed\nthe size cap, or `expired`.",
             "example": "ready"
           },
           "trace_id": {
@@ -34880,8 +34907,8 @@
           },
           "role": {
             "type": "string",
-            "description": "`admin` or `member`.",
-            "example": "member"
+            "description": "`admin`, `publisher`, `editor` or `viewer`.",
+            "example": "editor"
           },
           "user_id": {
             "type": "string",
@@ -37111,7 +37138,7 @@
         "properties": {
           "role": {
             "type": "string",
-            "example": "member"
+            "example": "editor"
           },
           "user_id": {
             "type": "string",
@@ -39191,7 +39218,7 @@
         "properties": {
           "role": {
             "type": "string",
-            "description": "`admin` or `member`."
+            "description": "`admin`, `publisher`, `editor` or `viewer`."
           }
         }
       },

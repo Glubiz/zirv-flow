@@ -15,7 +15,7 @@ const POLICY = {
 
 const URI = "/api/v1/workspaces/ws1/event-policy";
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -43,7 +43,7 @@ describe("event settings", () => {
   it("is read-only for a member who is not an admin", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       [`GET ${URI}`]: () => json(POLICY),
     });
     open();

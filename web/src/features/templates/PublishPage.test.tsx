@@ -110,6 +110,9 @@ describe("the Review and publish page", () => {
 
     await waitFor(() => expect(screen.getByTitle("Version 2 draft").getAttribute("srcdoc")).toContain(".zf-block-t1{outline:2px solid #2e9d5b"));
     expect(screen.getByTitle("Version 2 draft").getAttribute("srcdoc")).not.toContain("zf-block-h1");
+    const document = new DOMParser().parseFromString(screen.getByTitle("Version 2 draft").getAttribute("srcdoc") ?? "", "text/html");
+    expect(document.head.firstElementChild?.localName).toBe("meta");
+    expect(document.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
     expect(await screen.findByTitle("Version 1")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "v2 only" }));
     expect(screen.queryByTitle("Version 1")).not.toBeInTheDocument();
@@ -242,7 +245,7 @@ describe("the Review and publish page", () => {
   });
 
   it("offers a member who is not an admin the sample person only, and no way to publish", async () => {
-    const calls = mockApi({ ...templateRoutes({ role: "member", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
+    const calls = mockApi({ ...templateRoutes({ role: "editor", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
     mount();
 
     expect(await screen.findByText("Only workspace admins can publish.")).toBeInTheDocument();

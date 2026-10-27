@@ -20,6 +20,7 @@ use zirv_flow_core::flow::{
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::flow_context::issue_line;
 use crate::assistant::schema::tool_parameters;
+use crate::auth::Need;
 use crate::flows::crud::check_document_read;
 use crate::problem::ApiError;
 
@@ -201,7 +202,7 @@ impl AiTool<ToolContext> for DraftFlow {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Edit).await?;
             let DraftTarget::Flow = &context.target else {
                 return Err(ToolError::Failed(ApiError::internal()));
             };

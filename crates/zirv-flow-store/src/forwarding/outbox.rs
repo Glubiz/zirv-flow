@@ -153,7 +153,10 @@ pub async fn ensure_forward_job(
              FROM gen WHERE NOT EXISTS (SELECT 1 FROM ready) \
              ON CONFLICT DO NOTHING RETURNING 1) \
          SELECT pg_notify($5, 'event.forward') \
-         FROM (SELECT 1 FROM inserted UNION ALL SELECT 1 FROM pulled) woken LIMIT 1",
+         FROM (SELECT 1 FROM inserted UNION ALL SELECT 1 FROM pulled) woken \
+         WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE kind = 'event.forward' AND state = 'ready' \
+                           AND run_at <= now()) \
+         LIMIT 1",
     )
     .bind(workspace.as_uuid())
     .bind(destination)
@@ -274,6 +277,9 @@ pub async fn settle_row(
     .await
     .map_err(StoreError::query)?
     .rows_affected();
+    if changed > 0 && matches!(how, Settled::Dead) {
+        metrics::counter!("zirv_flow_destination_forwarding_dead_total").increment(1);
+    }
     Ok(changed > 0)
 }
 
@@ -961,6 +967,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_claim_counts_the_attempt_and_a_settle_is_fenced_on_its_token(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
         let (ws, destination) = fixture(&pool, "claim").await;
         add_rule(
             &pool,
@@ -1048,6 +1057,12 @@ mod tests {
         assert_eq!(
             (letters[0].last_error.as_deref(), letters[0].attempts),
             (Some("http_5xx"), 2)
+        );
+        // Only the settle that changed the row counts: the fenced one did not.
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_destination_forwarding_dead_total 1"),
+            "{output}"
         );
     }
 
@@ -1359,6 +1374,42 @@ mod tests {
             .unwrap();
         let pulled = ready(&mut connection).await.unwrap();
         assert_eq!((pulled.len(), pulled[0].1), (1, false));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_forward_job_wakes_an_idle_queue_but_not_a_backlog(pool: PgPool) {
+        let (ws, destination) = fixture(&pool, "wake").await;
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+            .await
+            .unwrap();
+        listener.listen(NOTIFY_CHANNEL).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        ensure_forward_job(&mut connection, ws, destination, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), listener.recv())
+            .await
+            .expect("an idle queue is woken")
+            .unwrap();
+
+        sqlx::query("UPDATE jobs SET run_at = now() + interval '1 hour' WHERE state = 'ready'")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+             VALUES (gen_random_uuid(), 'event.forward', '{}', gen_random_uuid(), 'api', 'x')",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        ensure_forward_job(&mut connection, ws, destination, None)
+            .await
+            .unwrap();
+        let heard = tokio::time::timeout(Duration::from_millis(300), listener.recv()).await;
+        assert!(heard.is_err(), "a runnable backlog is already awake");
     }
 
     #[sqlx::test]

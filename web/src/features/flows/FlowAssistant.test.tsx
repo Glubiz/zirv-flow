@@ -81,7 +81,7 @@ const EXPLAINED = {
 };
 
 interface Options {
-  role?: "writer" | "member" | "reader";
+  role?: "writer" | "editor" | "reader";
   enabled?: boolean;
   routes?: Record<string, Handler>;
 }
@@ -217,7 +217,7 @@ describe("the assistant in the flow editor", () => {
     expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
     off.unmount();
 
-    const calls = mockApi(routes({ role: "member" }));
+    const calls = mockApi(routes({ role: "editor" }));
     mount();
     await screen.findByRole("group", { name: /^Wait: 1 day/ });
     expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();

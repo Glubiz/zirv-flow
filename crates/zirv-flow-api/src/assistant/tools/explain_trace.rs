@@ -22,6 +22,7 @@ use super::explain_segment::{MAX_NODE_TEXT_CHARS, MAX_SUMMARY_CHARS, check_text}
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::flow_context::record_label;
 use crate::assistant::schema::tool_parameters;
+use crate::auth::Need;
 use crate::problem::ApiError;
 
 pub(crate) struct ExplainTrace;
@@ -139,7 +140,7 @@ impl AiTool<ToolContext> for ExplainTrace {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Admin).await?;
             let DraftTarget::ExplainTrace { record_ids } = &context.target else {
                 return Err(ToolError::Failed(ApiError::internal()));
             };

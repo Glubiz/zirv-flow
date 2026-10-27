@@ -44,6 +44,7 @@ use zirv_flow_store::{
 
 use super::delivery_send::Queued;
 use super::segment_refresh::{catalog_of, sql_query};
+use crate::metrics::record_wake_lateness;
 use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct FlowStep;
@@ -118,6 +119,12 @@ impl JobKind for FlowStep {
             let run_at = due.max(now + time::Duration::seconds(5));
             enqueue(conn, &job.job(&enrollment.trace, Some(run_at), key)).await?;
             return Ok(());
+        }
+
+        if let (StepJobInput::Wake, Some(due)) = (&job.input, enrollment.wake_at)
+            && at.1 == 1
+        {
+            record_wake_lateness((now - due).as_seconds_f64());
         }
 
         let mut savepoint = conn.begin().await?;
@@ -1869,6 +1876,140 @@ pub(super) mod tests {
                 .await,
             0
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_wake_records_how_late_it_ran_and_the_start_records_nothing(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        let env = Env::new(pool).await;
+        env.define_trait("tier", TraitType::String).await;
+        let list = env.list("Golden").await;
+        let ada = env.person("ada@example.com", json!({})).await;
+        let flow = env.flow("Late", walk_graph(list)).await;
+        env.enroll(flow, 1, &[ada]).await;
+
+        env.run_due().await;
+        let after_start = handle.render();
+        env.advance(100);
+        env.run_due().await;
+
+        assert!(
+            !after_start.contains("zirv_flow_timer_wake_lateness_seconds"),
+            "{after_start}"
+        );
+        let output = handle.render();
+        let sample = |name: &str| {
+            output.lines().find_map(|line| {
+                line.strip_prefix(name)?
+                    .strip_prefix(' ')?
+                    .parse::<f64>()
+                    .ok()
+            })
+        };
+        assert_eq!(
+            sample("zirv_flow_timer_wake_lateness_seconds_count"),
+            Some(1.0),
+            "{output}"
+        );
+        let late = sample("zirv_flow_timer_wake_lateness_seconds_sum").unwrap();
+        assert!((39.0..41.0).contains(&late), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_wake_records_its_lateness_once(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 60},
+            {"id": "bump", "type": "action.update_trait", "key": "plan",
+             "change": {"op": "increment", "by": 1.0}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]});
+        let flow = env.flow("Retried", graph).await;
+        env.enroll(flow, 1, &[ada]).await;
+        env.run_due().await;
+        sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE kind = 'flow.step'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        env.advance(100);
+
+        let mut attempts = Vec::new();
+        for _ in 0..2 {
+            env.hold_others(None, None).await;
+            let claimed = env.claim().await.unwrap();
+            env.release().await;
+            attempts.push(claimed.attempts);
+            let _ = env.execute(claimed).await;
+        }
+
+        assert_eq!(attempts, [1, 2]);
+        let output = handle.render();
+        let count = output
+            .lines()
+            .find_map(|line| line.strip_prefix("zirv_flow_timer_wake_lateness_seconds_count "));
+        assert_eq!(count, Some("1"), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_leader_publishes_the_enrollment_gauges_and_the_lateness_of_a_seeded_timer(
+        pool: PgPool,
+    ) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        let env = Env::new(pool.clone()).await;
+        env.define_trait("tier", TraitType::String).await;
+        let list = env.list("Golden").await;
+        let flow = env.flow("Sampled", walk_graph(list)).await;
+        for email in ["ada@example.com", "bob@example.com"] {
+            let person = env.person(email, json!({})).await;
+            env.enroll(flow, 1, &[person]).await;
+        }
+        env.run_due().await;
+        sqlx::query(
+            "UPDATE enrollments SET wake_at = now() - interval '90 seconds'              WHERE id = (SELECT id FROM enrollments ORDER BY id LIMIT 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut leader = crate::scheduler::Scheduler::new(
+            pool.clone(),
+            crate::scheduler::SchedulerConfig::default(),
+        );
+
+        leader.tick().await.unwrap();
+
+        let output = handle.render();
+        let gauge = |series: &str| {
+            output.lines().find_map(|line| {
+                line.strip_prefix(series)?
+                    .strip_prefix(' ')?
+                    .parse::<f64>()
+                    .ok()
+            })
+        };
+        assert_eq!(
+            gauge("zirv_flow_enrollments{state=\"waiting\"}"),
+            Some(2.0),
+            "{output}"
+        );
+        assert_eq!(
+            gauge("zirv_flow_enrollments{state=\"active\"}"),
+            Some(0.0),
+            "{output}"
+        );
+        let late = gauge("zirv_flow_timer_lateness_seconds").unwrap();
+        assert!((90.0..100.0).contains(&late), "{output}");
     }
 
     #[sqlx::test]

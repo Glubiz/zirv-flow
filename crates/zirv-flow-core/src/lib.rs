@@ -12,6 +12,8 @@ pub mod events;
 pub mod flow;
 pub mod forwarding;
 pub mod freshness;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fuzz;
 mod ids;
 pub mod mapping;
 pub mod password;
@@ -32,7 +34,7 @@ mod workspace;
 pub use email::Email;
 pub use freshness::{Freshness, FreshnessInput, Threshold, effective_threshold, freshness};
 pub use ids::{ApiKeyId, AssetId, SecretId, UserId, WorkspaceId};
-pub use role::Role;
+pub use role::{Capability, Role};
 pub use scope::Scope;
 pub use secrets::{
     HmacKey, HmacPurpose, HmacRoot, Keyring, KeyringError, MasterKey, MasterKeyError, Sealed,

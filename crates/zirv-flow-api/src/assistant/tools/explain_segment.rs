@@ -19,6 +19,7 @@ use super::draft_segment::line;
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
 use crate::assistant::segment_context::nodes;
+use crate::auth::Need;
 use crate::problem::ApiError;
 
 pub(crate) struct ExplainSegment;
@@ -166,7 +167,7 @@ impl AiTool<ToolContext> for ExplainSegment {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Admin).await?;
             let DraftTarget::Explain { definition } = &context.target else {
                 return Err(ToolError::Failed(ApiError::internal()));
             };

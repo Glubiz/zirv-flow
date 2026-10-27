@@ -19,7 +19,7 @@ const ORDER = {
 };
 const SEEN = { ...ORDER, name: "page_seen", mode: "warn", description: "", current_version: null, has_draft: true, inferred: true };
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -68,7 +68,7 @@ describe("event schemas", () => {
   it("is read-only for a member who is not an admin", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       "GET /api/v1/workspaces/ws1/event-schemas": () => json([ORDER]),
     });
     open();

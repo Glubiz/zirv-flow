@@ -432,7 +432,7 @@ pub(crate) async fn set(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<SetConsentRequest>,
 ) -> Result<Json<ConsentBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let (source, actor) = origin(&principal);
     let states = set_person_consent(
         &state.pool,

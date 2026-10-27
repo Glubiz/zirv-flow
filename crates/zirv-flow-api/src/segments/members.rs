@@ -308,7 +308,7 @@ pub(crate) async fn refresh(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<RefreshQueuedBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let segment: Uuid = path_id(&id)?;
     let cause = match principal.user_id() {
         Some(user) => Cause::manual(user),

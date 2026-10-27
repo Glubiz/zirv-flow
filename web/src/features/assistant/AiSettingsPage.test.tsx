@@ -194,7 +194,7 @@ describe("AI assistant settings", () => {
       admin({
         "GET /api/v1/session": () => json(session(MEMBER)),
         "GET /api/v1/workspaces/ws1/members": () =>
-          json([{ user_id: MEMBER.id, email: MEMBER.email, role: "member", added_at: "2026-10-01T09:00:00Z" }]),
+          json([{ user_id: MEMBER.id, email: MEMBER.email, role: "editor", added_at: "2026-10-01T09:00:00Z" }]),
       }),
     );
     open();

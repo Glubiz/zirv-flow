@@ -184,7 +184,7 @@ pub(crate) async fn put_mapping(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<MappingBody>,
 ) -> Result<Json<CsvImportBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id: Uuid = path_id(&id)?;
     let import = find_import(&state.pool, workspace.id, id)
         .await?
@@ -277,7 +277,7 @@ pub(crate) async fn dry_run(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<CsvImportBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id: Uuid = path_id(&id)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let import = start_import_dry_run(&mut tx, workspace.id, id)
@@ -301,7 +301,7 @@ pub(crate) async fn dry_run(
 /// more than 1,000 rows are done and the rejected share is above the import's threshold; the
 /// batches already applied stay applied. Running the same file again with the same source and
 /// stream changes nothing. The answer is the import in `running`; poll it. Audited as
-/// `import.run_started`.
+/// `import.run_started`. Publishers and above, or a key with the `publish` scope.
 #[utoipa::path(
     post,
     operation_id = "run_import",
@@ -314,7 +314,7 @@ pub(crate) async fn dry_run(
     responses(
         (status = 202, description = "The run was queued", body = CsvImportBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or import, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The import has no mapping, is busy, or has ended", body = Problem, content_type = "application/problem+json")
     ),
@@ -325,7 +325,7 @@ pub(crate) async fn run(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<CsvImportBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let id: Uuid = path_id(&id)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let import = start_import_run(&mut tx, workspace.id, id)
@@ -370,7 +370,7 @@ pub(crate) async fn cancel(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<CsvImportBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id: Uuid = path_id(&id)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let import = cancel_import(&mut tx, workspace.id, id)

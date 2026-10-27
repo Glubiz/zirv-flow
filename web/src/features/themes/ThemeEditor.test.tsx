@@ -46,7 +46,10 @@ describe("the theme editor", () => {
 
     const frame = await screen.findByTitle("Preview of the theme");
     expect(frame).toHaveAttribute("sandbox", "");
-    expect(frame).toHaveAttribute("srcdoc", "<p>A heading</p>");
+    const document = new DOMParser().parseFromString(frame.getAttribute("srcdoc") ?? "", "text/html");
+    expect(document.head.firstElementChild?.localName).toBe("meta");
+    expect(document.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
+    expect(document.body.innerHTML).toBe("<p>A heading</p>");
     expect(screen.getByRole("button", { name: "Mobile" })).toBeInTheDocument();
   });
 
@@ -164,7 +167,7 @@ describe("the theme editor", () => {
 
 describe("roles", () => {
   it("hides publish, set as default and archive from a writer but keeps Save draft", async () => {
-    mockApi(themeRoutes({ role: "member" }));
+    mockApi(themeRoutes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
 

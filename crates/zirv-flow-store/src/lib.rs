@@ -132,16 +132,16 @@ pub use flows::{
     AudienceSource, ControlError, DELIVERY_UNCONFIRMED, ENROLL_JOB_KIND, EffectError, EndedOrphan,
     EnrollEntries, EnrollEntry, EnrollError, EnrollJobPayload, EnrollOutcome, EnrollRequest,
     EnrollWork, Enrolled, Enrollment, EnrollmentCursor, EnrollmentFilter, EnrollmentPage,
-    EnrollmentPath, EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate, ExitBatch, Flow,
-    FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion, HARD_BOUNCE,
-    INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction, LifecycleBatch,
-    LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow, NewStepExecution,
-    NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation, SEND_JOB_KIND,
-    SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND, SendOutcome,
-    SettleItem, SettlePayload, Signal, SigningKey, SigningKeys, StepJobInput, StepJobPayload,
-    StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind, TriggeredFlow,
-    UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult, WebhookSubject,
-    apply_flow_list, apply_flow_trait, archive_flow, audience_page, clear_waits,
+    EnrollmentPath, EnrollmentSample, EnrollmentStatus, EnrollmentSummary, EnrollmentUpdate,
+    ExitBatch, Flow, FlowAction, FlowError, FlowPatch, FlowState, FlowTraitWrite, FlowVersion,
+    HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD, LIFECYCLE_BATCH, LIFECYCLE_JOB_KIND, LifecycleAction,
+    LifecycleBatch, LifecyclePayload, LockedFlow, MAX_ENROLL_PEOPLE, MAX_PATH_DECISIONS, NewFlow,
+    NewStepExecution, NewWait, NodeCount, Occurrence, PathEventWait, PathStep, Rotation,
+    SEND_JOB_KIND, SETTINGS_GOAL_NODE, SETTLE_JOB_KIND, SOFT_BOUNCE, STEP_JOB_KIND, SYNC_JOB_KIND,
+    SendOutcome, SettleItem, SettlePayload, Signal, SigningKey, SigningKeys, StepJobInput,
+    StepJobPayload, StepOutcome, StepRecord, StoredEvent, SyncDetail, TriggerEvent, TriggerKind,
+    TriggeredFlow, UnhealthyInput, WEBHOOK_JOB_KIND, WebhookOutcome, WebhookPerson, WebhookResult,
+    WebhookSubject, apply_flow_list, apply_flow_trait, archive_flow, audience_page, clear_waits,
     count_in_flight_enrollments, create_flow, create_signing_key, end_orphaned_messages,
     enqueue_lifecycle, enroll, enroll_entries, enroll_page_key, exit_batch, find_enrollment,
     find_event_of_person, find_events, find_flow, find_flow_version, flow_source,
@@ -151,9 +151,9 @@ pub use flows::{
     publish_flow, read_webhook_subject, reconcile_flow_schedules, record_send_outcome,
     record_steps, record_sync_evidence, record_webhook_outcome, register_wait, release_enrollment,
     reopen_failed_step, resolve_survivors, resume_batch, resume_failed, resume_flow,
-    rotate_signing_key, save_enrollment, segment_is_watched, segment_trigger_flows,
-    settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft, version_node_counts,
-    wait_filters,
+    rotate_signing_key, sample_enrollments, save_enrollment, segment_is_watched,
+    segment_trigger_flows, settle_wait_step, step_zones, unhealthy_inputs, update_flow_draft,
+    version_node_counts, wait_filters,
 };
 pub use forwarding::{
     ClaimedRow, DELIVERED_RETENTION, DeadLetter, FORWARD_JOB_KIND, ForwardRef, ForwardingRule,
@@ -196,7 +196,8 @@ pub use lists::{
 };
 pub use messages::{
     GateRecord, LoggedMessage, Message, MessageLogCursor, MessageLogFilter, MessageLogPage,
-    MessageStatus, NewMessage, WaitFilter, WaitReason, clear_message_in_flight, find_message,
+    MessageRetention, MessageRetentionReport, MessageStatus, NewMessage, WaitFilter, WaitReason,
+    apply_message_retention, apply_message_retention_for, clear_message_in_flight, find_message,
     insert_message, list_person_messages, load_person_message_log, mark_message_sending,
     mark_message_unconfirmed, message_address_hash, message_in_flight, message_status,
     message_unconfirmed, read_send_address,
@@ -224,13 +225,17 @@ pub use people::{
 pub use pool::{PgPool, Tx, begin, commit, connect, observe_pool, sized_like};
 pub use privacy::{
     BuildOutcome, DeleteReason, ERASE_CALL_ATTEMPTS, ERASE_CALL_JOB_KIND, ERASE_JOB_KIND,
-    EXPORT_FORMAT, EXPORT_JOB_KIND, EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseOutcome,
-    EraseTarget, ErasureCall, ErasureCursor, ErasureRequest, ErasureStatus, ExportCursor,
-    ExportDownload, ExportStatus, ExternalKey, MISSING_KEY, PrivacyExport, ReplayReport,
-    build_export, delete_person, download_export, erase_person, expire_exports,
-    find_erasure_request, find_privacy_export, finish_erasure_call, idempotency_key,
-    list_erasure_calls, list_erasure_requests, list_privacy_exports, lock_person_call_shared,
-    replay_erasures, request_erasure, request_export,
+    EXPORT_EXCLUDED, EXPORT_FORMAT, EXPORT_JOB_KIND, EXPORT_MAX_BYTES_DEFAULT,
+    EXPORT_MAX_BYTES_MAX, EXPORT_MAX_BYTES_MIN, EXPORT_SECTIONS, EXPORT_TOO_LARGE,
+    EXTERNAL_KEY_FIELD, EraseCallOutcome, EraseOutcome, EraseTarget, ErasureCall, ErasureCursor,
+    ErasureRequest, ErasureStatus, ExportCursor, ExportDownload, ExportError, ExportReport,
+    ExportStatus, ExternalKey, LEDGER_FORMAT, LedgerEntry, LedgerFileError, LedgerWrite,
+    MISSING_KEY, MergeError, MergeReport, PrivacyExport, ReplayReport, build_export,
+    check_ledger_dir, delete_person, download_export, erase_person, expire_exports, export_ledger,
+    find_erasure_request, find_ledger_entry, find_privacy_export, finish_erasure_call,
+    idempotency_key, list_erasure_calls, list_erasure_requests, list_privacy_exports,
+    lock_person_call_shared, merge_ledger_entries, read_ledger_dir, reconcile_ledger_file,
+    replay_erasures, request_erasure, request_export, update_ledger_lists, write_ledger_file,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;
@@ -366,9 +371,9 @@ pub use workspace_credentials::{
 };
 pub use workspaces::{
     Member, Membership, UtmSettings, Workspace, create_workspace, find_workspace,
-    find_workspace_by_slug, list_members, list_workspaces_for_user, membership_role, orphan_policy,
-    remove_membership, set_membership, set_orphan_policy, set_workspace_timezone,
-    set_workspace_utm,
+    find_workspace_by_slug, list_members, list_workspaces_for_user, lock_memberships,
+    membership_role, orphan_policy, remove_membership, set_membership, set_orphan_policy,
+    set_workspace_timezone, set_workspace_utm,
 };
 /// The operator master key, its derived keys and the sealing of secrets, and the workspace and role
 /// types the test server seeds with, re-exported so the

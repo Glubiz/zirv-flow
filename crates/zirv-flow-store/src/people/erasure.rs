@@ -17,26 +17,12 @@ use crate::decisions::ID_SUBJECTS;
 /// intentionally keeps the person id of an erased person, so that a restore can be erased
 /// again (architecture section 16.3).
 pub(crate) async fn rows_referencing_person(pool: &PgPool, person: Uuid) -> Vec<(String, i64)> {
-    let mut places: Vec<(String, String)> = sqlx::query_as(
-        "SELECT table_name::text, column_name::text FROM information_schema.columns \
-         WHERE table_schema = current_schema() AND data_type = 'uuid' \
-           AND (column_name = 'person_id' OR column_name LIKE '%\\_person\\_id') \
-           AND table_name <> 'erasure_requests' \
-           AND NOT EXISTS (SELECT 1 FROM pg_class c \
-                           JOIN pg_namespace n ON n.oid = c.relnamespace \
-                           WHERE n.nspname = table_schema::text \
-                             AND c.relname = table_name::text AND c.relispartition) \
-         ORDER BY 1, 2",
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap();
-    places.push(("people".into(), "id".into()));
-    places.push(("people".into(), "merged_into".into()));
-
     let mut found = Vec::new();
-    for (table, column) in places {
-        // Names come from the catalog and this function, never from input.
+    for (table, column) in person_reference_places(pool).await {
+        if (table.as_str(), column.as_str()) == DECISION_SUBJECTS {
+            continue;
+        }
+        // Names come from the catalog and this module, never from input.
         let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
             "SELECT count(*) FROM {table} WHERE {column} = $1"
         )))
@@ -79,6 +65,36 @@ pub(crate) async fn rows_referencing_person(pool: &PgPool, person: Uuid) -> Vec<
     }
     found.sort();
     found
+}
+
+/// The `(table, column)` of decision records' subject ids, the one place a person is named inside
+/// a JSON column.
+const DECISION_SUBJECTS: (&str, &str) = ("decision_records", "subject_ids");
+
+/// Every `(table, column)` that can hold a person, sorted: each column named `person_id` or
+/// ending in `_person_id` (a partition counts through its parent, `erasure_requests` is skipped),
+/// plus `people.id`, `people.merged_into` and `decision_records.subject_ids`. The erasure scan and
+/// the export catalog both read this list, so neither can drift from the other.
+pub(crate) async fn person_reference_places(pool: &PgPool) -> Vec<(String, String)> {
+    let mut places: Vec<(String, String)> = sqlx::query_as(
+        "SELECT table_name::text, column_name::text FROM information_schema.columns \
+         WHERE table_schema = current_schema() AND data_type = 'uuid' \
+           AND (column_name = 'person_id' OR column_name LIKE '%\\_person\\_id') \
+           AND table_name <> 'erasure_requests' \
+           AND NOT EXISTS (SELECT 1 FROM pg_class c \
+                           JOIN pg_namespace n ON n.oid = c.relnamespace \
+                           WHERE n.nspname = table_schema::text \
+                             AND c.relname = table_name::text AND c.relispartition) \
+         ORDER BY 1, 2",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    places.push(("people".into(), "id".into()));
+    places.push(("people".into(), "merged_into".into()));
+    places.push((DECISION_SUBJECTS.0.into(), DECISION_SUBJECTS.1.into()));
+    places.sort();
+    places
 }
 
 #[cfg(test)]

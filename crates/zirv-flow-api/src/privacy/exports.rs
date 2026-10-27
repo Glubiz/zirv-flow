@@ -29,7 +29,8 @@ use crate::trace;
 pub(crate) struct ExportBody {
     id: Uuid,
     person_id: Uuid,
-    /// `pending`, `ready`, `failed` once the job ran out of attempts, or `expired`.
+    /// `pending`, `ready`, `failed` once the job ran out of attempts or the document passed
+    /// the size cap, or `expired`.
     #[schema(example = "ready")]
     status: String,
     /// The user who asked; null for an API key.
@@ -48,6 +49,9 @@ pub(crate) struct ExportBody {
     size_bytes: Option<i64>,
     /// The trace of the request and of its job: 32 lowercase hex characters.
     trace_id: String,
+    /// Why the export failed, when known: `export_too_large` when the document passed
+    /// `privacy.export_max_bytes`. Null otherwise.
+    failure_code: Option<String>,
 }
 
 impl From<PrivacyExport> for ExportBody {
@@ -62,6 +66,7 @@ impl From<PrivacyExport> for ExportBody {
             expires_at: export.expires_at,
             size_bytes: export.size_bytes,
             trace_id: TraceId::from_uuid(export.trace_id).to_string(),
+            failure_code: export.failure_code,
         }
     }
 }
@@ -142,8 +147,11 @@ pub(crate) async fn download(
 }
 
 /// Asks for an export of everything held about a person: profile, identities, ledger
-/// contributions, events, consent and its history, lists and their history, merges and
-/// identity conflicts, with the data of merged people under the survivor. A background job
+/// contributions, events, consent and its history, lists and segments and their history, merges
+/// and identity conflicts, flow enrollments with their steps, waits and entries, the message log
+/// and its links, forwarding rows and handled markers, ingest rejects, decision records and saved
+/// template previews, with the data of merged people under the survivor. A document past the
+/// size cap fails with the code `export_too_large`. A background job
 /// builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
 /// `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
 /// Audited as `privacy.export_requested`.
@@ -295,6 +303,7 @@ mod tests {
             expires_at: Some(OffsetDateTime::UNIX_EPOCH + time::Duration::hours(24)),
             size_bytes: Some(120),
             trace_id: Uuid::nil(),
+            failure_code: None,
         };
 
         let shown = serde_json::to_value(ExportBody::from(export)).unwrap();
@@ -303,6 +312,28 @@ mod tests {
         assert_eq!(shown["expires_at"], "1970-01-02T00:00:00Z");
         assert_eq!(shown["size_bytes"], 120);
         assert_eq!(shown["trace_id"].as_str().unwrap().len(), 32);
+        assert!(shown["failure_code"].is_null());
         assert!(shown.get("content").is_none());
+    }
+
+    #[test]
+    fn a_failed_export_shows_the_code_it_stopped_with() {
+        let export = PrivacyExport {
+            id: Uuid::nil(),
+            person_id: Uuid::nil(),
+            status: ExportStatus::Failed,
+            requested_by: None,
+            requested_at: OffsetDateTime::UNIX_EPOCH,
+            ready_at: None,
+            expires_at: None,
+            size_bytes: None,
+            trace_id: Uuid::nil(),
+            failure_code: Some(zirv_flow_store::EXPORT_TOO_LARGE.to_owned()),
+        };
+
+        let shown = serde_json::to_value(ExportBody::from(export)).unwrap();
+
+        assert_eq!(shown["status"], "failed");
+        assert_eq!(shown["failure_code"], "export_too_large");
     }
 }

@@ -394,8 +394,9 @@ export interface paths {
          *     assistant: the model is asked, its answer validated
          *     with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
          *     repairs. The answer is the validated draft with its diff against the saved version and a dry
-         *     run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
-         *     signed in; an API key is refused. Every attempt is a gated model call: it counts against the
+         *     run, or the last problems. Only a validated draft can be accepted. Editors and above who are
+         *     signed in (a mapping or manifest draft reads a source, so it takes an admin); an API key is
+         *     refused. Every attempt is a gated model call: it counts against the
          *     budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
          *     proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
          */
@@ -419,7 +420,7 @@ export interface paths {
          * Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not
          *     changed since and that it still passes the rules a save applies, then returns it for the
          *     editor to load as its unsaved draft. Nothing is written to the stream or the source; saving
-         *     stays a separate action. Audited as `ai.draft.accepted`. Workspace admins who are signed in.
+         *     stays a separate action. Audited as `ai.draft.accepted`. Editors and above who are signed in.
          */
         post: operations["accept_ai_draft"];
         delete?: never;
@@ -1611,7 +1612,7 @@ export interface paths {
         put?: never;
         /**
          * Starts a flow whose trigger is `manual` for an audience: the current members of a segment or
-         *     the members of a list. Admin only, and audited as `flow.started`. The audience is queued as a
+         *     the members of a list. Publisher and above, and audited as `flow.started`. The audience is queued as a
          *     `flow.enroll` job that pages through it, a thousand people at a time, under the cause
          *     `manual`. A paused flow takes nobody and records the skip.
          */
@@ -2074,7 +2075,7 @@ export interface paths {
          *     more than 1,000 rows are done and the rejected share is above the import's threshold; the
          *     batches already applied stay applied. Running the same file again with the same source and
          *     stream changes nothing. The answer is the import in `running`; poll it. Audited as
-         *     `import.run_started`.
+         *     `import.run_started`. Publishers and above, or a key with the `publish` scope.
          */
         post: operations["run_import"];
         delete?: never;
@@ -2239,7 +2240,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The members of a workspace. Any member can read this. */
+        /** The members of a workspace. Any member, whatever the role, can read this. */
         get: operations["list_members"];
         put?: never;
         post?: never;
@@ -2525,8 +2526,11 @@ export interface paths {
         put?: never;
         /**
          * Asks for an export of everything held about a person: profile, identities, ledger
-         *     contributions, events, consent and its history, lists and their history, merges and
-         *     identity conflicts, with the data of merged people under the survivor. A background job
+         *     contributions, events, consent and its history, lists and segments and their history, merges
+         *     and identity conflicts, flow enrollments with their steps, waits and entries, the message log
+         *     and its links, forwarding rows and handled markers, ingest rejects, decision records and saved
+         *     template previews, with the data of merged people under the survivor. A document past the
+         *     size cap fails with the code `export_too_large`. A background job
          *     builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
          *     `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
          *     Audited as `privacy.export_requested`.
@@ -4633,7 +4637,7 @@ export interface components {
             /** Format: date-time */
             revoked_at?: string | null;
             /**
-             * @description Any of `ingest`, `read`, `write`, `admin`.
+             * @description Any of `ingest`, `read`, `write`, `publish`, `admin`.
              * @example [
              *       "read"
              *     ]
@@ -5118,7 +5122,7 @@ export interface components {
              */
             name: string;
             /**
-             * @description At least one of `ingest`, `read`, `write`, `admin`.
+             * @description At least one of `ingest`, `read`, `write`, `publish`, `admin`.
              * @example [
              *       "read"
              *     ]
@@ -6600,6 +6604,11 @@ export interface components {
              * @description 24 hours after `ready_at`; the download answers 410 from then on.
              */
             expires_at?: string | null;
+            /**
+             * @description Why the export failed, when known: `export_too_large` when the document passed
+             *     `privacy.export_max_bytes`. Null otherwise.
+             */
+            failure_code?: string | null;
             /** Format: uuid */
             id: string;
             /** Format: uuid */
@@ -6619,7 +6628,8 @@ export interface components {
              */
             size_bytes?: number | null;
             /**
-             * @description `pending`, `ready`, `failed` once the job ran out of attempts, or `expired`.
+             * @description `pending`, `ready`, `failed` once the job ran out of attempts or the document passed
+             *     the size cap, or `expired`.
              * @example ready
              */
             status: string;
@@ -7644,8 +7654,8 @@ export interface components {
             added_at: string;
             email: string;
             /**
-             * @description `admin` or `member`.
-             * @example member
+             * @description `admin`, `publisher`, `editor` or `viewer`.
+             * @example editor
              */
             role: string;
             /** Format: uuid */
@@ -8566,7 +8576,7 @@ export interface components {
             to_person_id: string;
         };
         RoleBody: {
-            /** @example member */
+            /** @example editor */
             role: string;
             /** Format: uuid */
             user_id: string;
@@ -9324,7 +9334,7 @@ export interface components {
             theme_id: string;
         };
         SetRoleRequest: {
-            /** @description `admin` or `member`. */
+            /** @description `admin`, `publisher`, `editor` or `viewer`. */
             role: string;
         };
         SetupRequest: {
@@ -12175,7 +12185,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            /** @description Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -12281,7 +12291,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            /** @description Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -16982,7 +16992,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17263,7 +17273,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17326,7 +17336,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17387,7 +17397,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17469,7 +17479,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17539,7 +17549,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17604,7 +17614,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17971,7 +17981,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -19259,7 +19269,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the write scope, or a missing CSRF token */
+            /** @description A key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -20158,6 +20168,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The change would leave the workspace with no admin (`last_admin`); only the owner may do that */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Invalid role */
             422: {
                 headers: {
@@ -20210,6 +20229,15 @@ export interface operations {
             };
             /** @description No such workspace or member, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The change would leave the workspace with no admin (`last_admin`); only the owner may do that */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23535,7 +23563,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -26175,7 +26203,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -27491,7 +27519,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;

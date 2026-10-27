@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { json, mockApi, OWNER, problem, session, type Call, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { drafts, emailDocument, SENDER_ID, templateDetail, templateRoutes, TEMPLATE_ID, WS } from "../../test/templatesApi";
+import { previewDocument } from "../../ui";
 import { DEBOUNCE_MS } from "./TemplateEditor";
 import { TemplateAssistant } from "./TemplateAssistant";
 import { TemplatePage } from "./TemplatePage";
@@ -92,8 +93,8 @@ describe("the template assistant", () => {
       await user.type(screen.getByLabelText(task === "translation" ? "Instructions" : "What do you want?"), text);
       await user.click(screen.getByRole("button", { name: /^Draft/ }));
       expect(await screen.findByRole("table", { name: "What the draft changes" })).toBeInTheDocument();
-      expect(screen.getByTitle("Before render")).toHaveAttribute("srcdoc", "<p>old copy</p>");
-      expect(screen.getByTitle("After render")).toHaveAttribute("srcdoc", "<p>new copy</p>");
+      expect(screen.getByTitle("Before render")).toHaveAttribute("srcdoc", previewDocument("<p>old copy</p>"));
+      expect(screen.getByTitle("After render")).toHaveAttribute("srcdoc", previewDocument("<p>new copy</p>"));
       await user.clear(screen.getByLabelText(task === "translation" ? "Instructions" : "What do you want?"));
     }
 
@@ -264,7 +265,7 @@ describe("the template assistant", () => {
   });
 
   it("offers the assistant to an admin only", async () => {
-    mockApi(templateRoutes({ role: "member" }));
+    mockApi(templateRoutes({ role: "editor" }));
     renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
 
     await screen.findByRole("textbox", { name: /source/ });
