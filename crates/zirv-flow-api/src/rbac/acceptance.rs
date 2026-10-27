@@ -832,7 +832,7 @@ pub(in crate::rbac) mod tests {
     }
 
     /// A world whose process runs a render host, so a render reaches the data.
-    async fn rendering_world(pool: &PgPool) -> World {
+    pub(in crate::rbac) async fn rendering_world(pool: &PgPool) -> World {
         let command = zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

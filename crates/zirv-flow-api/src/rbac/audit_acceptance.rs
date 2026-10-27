@@ -9,7 +9,6 @@
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::time::Duration;
 
     use axum::Router;
     use axum::body::Body;
@@ -19,10 +18,10 @@ mod tests {
     use sqlx::PgPool;
     use tower::ServiceExt;
     use uuid::Uuid;
-    use zirv_flow_render::{ChildCommand, PoolConfig, RenderPool};
 
     use crate::rbac::acceptance::tests::{
-        Auth, Operations, PASSWORD, PERSONAL, Seeded, Who, World, build_world, found, seed, sign_in,
+        Auth, Operations, PASSWORD, PERSONAL, Seeded, Who, World, found, rendering_world, seed,
+        sign_in,
     };
     use crate::rbac::{Audit, ROUTES};
 
@@ -121,40 +120,6 @@ mod tests {
     /// The route key a step covers.
     fn key(method: &str, template: &str) -> String {
         format!("{} {template}", method.to_lowercase())
-    }
-
-    /// The walk: its world, the ids it has made, what it covered and what went wrong.
-    /// The render host of the pool under test: a no-op unless the pool started it.
-    #[test]
-    fn render_host_child() {
-        if std::env::var("ZIRV_FLOW_TEST_AUDIT_HOST").is_err() {
-            return;
-        }
-        std::process::exit(i32::from(zirv_flow_render::host::run(None)));
-    }
-
-    async fn start_pool() -> RenderPool {
-        let command = ChildCommand::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "rbac::audit_acceptance::tests::render_host_child",
-                "--nocapture",
-            ])
-            .args(["--test-threads", "1", "-q"])
-            .env("ZIRV_FLOW_TEST_AUDIT_HOST", "serve")
-            .skip_stdout_until(
-                "running 1 test
-",
-            );
-        RenderPool::start(
-            command,
-            PoolConfig {
-                size: 1,
-                deadline: Duration::from_secs(10),
-            },
-        )
-        .await
-        .unwrap()
     }
 
     /// What a call sends.
@@ -407,7 +372,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_audited_route_leaves_one_row_and_every_not_audited_route_none(pool: PgPool) {
-        let world = build_world(&pool, Some(start_pool().await)).await;
+        let world = rendering_world(&pool).await;
         let seeded = seed(&world).await;
         let mut walk = Walk::new(&world);
 
