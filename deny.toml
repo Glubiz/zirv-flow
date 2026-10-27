@@ -1,5 +1,5 @@
-# Schema: cargo-deny 0.18.4, pinned in both audit workflows.
-# https://github.com/EmbarkStudios/cargo-deny/blob/0.18.4/deny.template.toml
+# Schema: cargo-deny 0.20.2, pinned in both audit workflows.
+# https://github.com/EmbarkStudios/cargo-deny/blob/0.20.2/deny.template.toml
 
 [advisories]
 yanked = "deny"

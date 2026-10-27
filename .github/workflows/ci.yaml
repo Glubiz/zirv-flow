@@ -461,7 +461,7 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2.87.20
         with:
-          tool: cargo-deny@0.18.4
+          tool: cargo-deny@0.20.2
 
       - name: Audit Dependencies
         run: cargo deny --locked check

@@ -25,7 +25,7 @@ Expect acknowledgement within 7 days.
 ## Dependency audits
 
 Pull requests run all four `cargo deny --locked check` checks with cargo-deny
-0.18.4 and `npm audit --omit=dev --audit-level=high` in `web/`. Rust policy and
+0.20.2 and `npm audit --omit=dev --audit-level=high` in `web/`. Rust policy and
 advisory ignores live in `deny.toml`. The weekly dependency audit runs advisories
 and the same npm command against `main` every Monday at 04:23 UTC, or through
 `workflow_dispatch`. Failures are reported in the workflow log; no issue is opened.

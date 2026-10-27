@@ -2527,7 +2527,7 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI also gates dependencies with cargo-deny 0.18.4 (`cargo deny --locked check`) and
+CI also gates dependencies with cargo-deny 0.20.2 (`cargo deny --locked check`) and
 `npm audit --omit=dev --audit-level=high` in `web/`. Run
 `bash scripts/check-dependency-policy.sh` and its `--self-test` mode to check Docker
 image digests and advisory review coverage without compiling. The weekly audit
