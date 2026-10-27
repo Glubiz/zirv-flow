@@ -90,10 +90,11 @@ first (for example with `pg_dump`).
    Rows of `encrypted_secrets` stay: nothing at start reads them, and the next steps replace them.
 4. Start one `serve` or `worker` process. With no stored root and no previous key it creates a new
    root from the new key and logs `master key loaded` with the new key id. Then start the rest.
-5. List the secrets the lost key still wraps, using the key id from that log line:
+5. List the secrets the lost key still wraps. The new root is sealed by the new key, so the query
+   reads the new key id from it:
 
    ```sql
-   SELECT workspace_id, purpose, count(*) FROM encrypted_secrets WHERE key_id <> '<new key id>' GROUP BY workspace_id, purpose ORDER BY workspace_id, purpose;
+   SELECT workspace_id, purpose, count(*) FROM encrypted_secrets WHERE key_id <> (SELECT key_id FROM deployment_keys WHERE name = 'hmac_root') GROUP BY workspace_id, purpose ORDER BY workspace_id, purpose;
    ```
 
 6. Re-create each one through the web UI or the API, and run the query again. A row that is

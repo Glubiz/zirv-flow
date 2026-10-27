@@ -360,8 +360,7 @@ mod tests {
         assert_eq!(digest(&new_root), digest(&HmacRoot::bootstrap_from(&b)));
 
         // Step 5: the lost key still wraps the credential's secret, and nothing else.
-        let list = guide_sql("SELECT workspace_id, purpose, count(*)")
-            .replace("<new key id>", &b.key_id());
+        let list = guide_sql("SELECT workspace_id, purpose, count(*)");
         let stale: Vec<(Uuid, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(list.clone()))
             .fetch_all(&pool)
             .await
@@ -409,7 +408,10 @@ mod tests {
         let opened = zirv_flow_store::open_credential(&pool, &under_b, ws, credential)
             .await
             .unwrap();
-        assert_eq!(opened.secret.expose(), br#"{"password":"new-value"}"#);
+        assert!(
+            opened.secret.expose() == br#"{"password":"new-value"}"#,
+            "the re-created credential did not open"
+        );
         let c = MasterKey::generate();
         let report = admin::rotate_master_key(&pool, &context, &keyring(&c, Some(&b)))
             .await
