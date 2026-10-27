@@ -331,6 +331,37 @@ describe("audit log", () => {
     expect(row).toHaveFocus();
   });
 
+  it("holds the entry sheet modal: Tab stays inside, the page behind is inert, and Escape and the backdrop close it", async () => {
+    mockApi(routes({ "GET /api/v1/workspaces/ws1/audit": () => json({ entries: [entry(1)], next_cursor: null }) }));
+    const view = page();
+    const user = userEvent.setup();
+
+    const row = await screen.findByRole("button", { name: "Open entry membership.set" });
+    await user.click(row);
+    const sheet = await screen.findByRole("dialog", { name: "Membership set" });
+    expect(sheet).toHaveAttribute("aria-modal", "true");
+    expect(view.container).toHaveAttribute("inert");
+
+    const link = within(sheet).getByRole("link", { name: "Open trace" });
+    link.focus();
+    await user.tab();
+    expect(sheet.contains(document.activeElement)).toBe(true);
+    await user.tab({ shift: true });
+    await user.tab({ shift: true });
+    expect(sheet.contains(document.activeElement)).toBe(true);
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(view.container).not.toHaveAttribute("inert");
+    expect(row).toHaveFocus();
+
+    await user.click(row);
+    await screen.findByRole("dialog");
+    await user.click(document.querySelector(".sheet-backdrop") as HTMLElement);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(row).toHaveFocus();
+  });
+
   it("shows a loading state, then the empty state", async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {

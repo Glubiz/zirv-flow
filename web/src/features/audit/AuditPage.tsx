@@ -136,9 +136,7 @@ function AuditContent({ ws }: { ws: string }) {
           </p>
         </div>
         {selected ? (
-          <div className="audit-side">
-            <AuditEntrySheet key={selected.id} workspaceId={ws} entry={selected} onClose={() => setSelected(null)} />
-          </div>
+          <AuditEntrySheet key={selected.id} workspaceId={ws} entry={selected} onClose={() => setSelected(null)} />
         ) : null}
       </div>
     </div>

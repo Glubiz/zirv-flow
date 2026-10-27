@@ -4695,19 +4695,17 @@ main:focus {
   gap: 16px;
 }
 
-.audit-side {
+.sheet-backdrop {
   position: fixed;
   z-index: 90;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  inset: 0;
   display: flex;
-  width: min(420px, 100vw);
+  justify-content: flex-end;
+  background: rgba(14, 20, 28, 0.35);
 }
 
-.audit-side > .sheet {
-  flex: 1;
-  min-width: 0;
+.sheet-modal {
+  width: min(420px, 100vw);
   border-radius: 0;
   border-width: 0 0 0 1px;
 }
@@ -4920,7 +4918,7 @@ main:focus {
     margin-left: 8px;
   }
 
-  .audit-side {
+  .sheet-modal {
     width: 100vw;
   }
 }

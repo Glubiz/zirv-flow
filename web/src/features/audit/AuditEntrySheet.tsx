@@ -24,6 +24,7 @@ export function AuditEntrySheet({ workspaceId, entry, onClose }: Props) {
       eyebrow="Audit entry"
       closeLabel="Close entry"
       onClose={onClose}
+      modal
     >
       <p className="mono audit-code">{entry.action}</p>
       <dl className="audit-facts">
