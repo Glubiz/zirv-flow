@@ -225,6 +225,40 @@ describe("event debugger", () => {
     expect(screen.queryByText(/Live updates are delayed/)).not.toBeInTheDocument();
   });
 
+  it("shows rows that arrive out of order, each once, in arrival order", async () => {
+    signedInAs(OWNER, "admin");
+    open();
+    const source = await connected();
+
+    act(() => {
+      source.emit("item", item(3, { name: "newer_first" }), "epoch1:0");
+      source.emit("item", item(2, { name: "late_one" }), "epoch1:3");
+      source.emit("item", item(2, { name: "late_one" }), "epoch1:3");
+    });
+
+    expect(await screen.findByText("late_one")).toBeInTheDocument();
+    expect(screen.getAllByText("late_one")).toHaveLength(1);
+    expect(screen.getByText("newer_first")).toBeInTheDocument();
+  });
+
+  it("clears the list on a reset so restarted seq numbers are not taken for repeats", async () => {
+    signedInAs(OWNER, "admin");
+    open();
+    const source = await connected();
+    act(() => {
+      source.emit("item", item(1, { name: "before_crash" }), "epoch1:1");
+    });
+    await screen.findByText("before_crash");
+
+    act(() => {
+      source.emit("gap", { skipped: 0, reset: true });
+      source.emit("item", item(1, { name: "after_crash" }), "epoch2:1");
+    });
+
+    expect(await screen.findByText("after_crash")).toBeInTheDocument();
+    expect(screen.queryByText("before_crash")).not.toBeInTheDocument();
+  });
+
   it("says when the feed was reset and lets the notice be dismissed", async () => {
     signedInAs(OWNER, "admin");
     const user = userEvent.setup();

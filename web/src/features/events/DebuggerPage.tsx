@@ -168,6 +168,9 @@ function LiveFeed({ workspaceId, url, onReconnect }: { workspaceId: string; url:
       const count = typeof gap === "object" && gap !== null && "skipped" in gap && typeof gap.skipped === "number" ? gap.skipped : 0;
       setSkipped((total) => total + count);
       if (typeof gap === "object" && gap !== null && "reset" in gap && gap.reset === true) {
+        // The sequence started over, so a new row can carry the seq of one already shown.
+        setItems([]);
+        setHeld([]);
         setReset(true);
       }
     });
