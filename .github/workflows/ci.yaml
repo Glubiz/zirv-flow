@@ -155,6 +155,9 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Audit Production Dependencies
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Lint
         run: npm run lint
 
@@ -383,30 +386,33 @@ jobs:
           --run-ignored all --no-fail-fast -E 'test(kafka)'
 
   dependency-audit:
-    name: Dependency Advisory Check
+    name: Dependency Audit
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-      checks: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4.4.0
 
-      - name: Audit Dependencies
-        uses: rustsec/audit-check@v2.0.0
+      - name: Dependency policy gate
+        run: bash scripts/check-dependency-policy.sh
+
+      - name: Dependency policy gate self-test
+        run: bash scripts/check-dependency-policy.sh --self-test
+
+      - name: Set Up Rust Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2.87.20
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2023-0071 (rsa, via openidconnect): the Marvin timing side
-          # channel affects private-key operations. zirv-flow verifies
-          # ID-token signatures with the provider's public keys, and uses rsa
-          # to generate DKIM keys (sending domains), never to sign or decrypt:
-          # DKIM signing uses ring. Remove this once rsa ships a fixed release.
-          # RUSTSEC-2026-0387 (crypto-bigint 0.5, via openidconnect, p256/p384
-          # and elliptic-curve 0.13): timing side channels in operations on
-          # secret integers. zirv-flow only verifies ID-token signatures with
-          # public keys and performs no elliptic-curve private-key operation.
-          # Remove this once openidconnect moves to elliptic-curve 0.14 (#269).
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0387
+          tool: cargo-deny@0.20.2
+
+      - name: Audit Dependencies
+        run: cargo deny --locked check
 
   # PRs into `release/**` integration branches share one pinned release
   # version, so they are exempt. This check still guards every PR into main,

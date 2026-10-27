@@ -29,7 +29,7 @@ function watchConsole(page: Page): ConsoleMessage[] {
   return lines;
 }
 
-test("a script in a raw HTML block never runs in the preview, and the detection works", async ({ page, context }) => {
+test("the preview has its own CSP and blocks scripts, top navigation, forms and base URLs", async ({ page, context }) => {
   await listenForMessages(page);
   const logged = watchConsole(page);
 
@@ -43,7 +43,10 @@ test("a script in a raw HTML block never runs in the preview, and the detection 
 
   await page.getByRole("button", { name: "Add a section with 1 column" }).click();
   await page.getByRole("button", { name: "Add raw html block" }).click();
-  await page.getByLabel("HTML", { exact: true }).fill(`<p>sandbox probe</p>${SCRIPT}`);
+  await page.getByLabel("HTML", { exact: true }).fill(`<p>sandbox probe</p>${SCRIPT}
+    <base href="https://preview-escape.invalid/" target="_top">
+    <a href="https://preview-escape.invalid/link" target="_top">Escape the preview</a>
+    <form action="https://preview-escape.invalid/submitted" method="post"><button type="submit">Submit probe</button></form>`);
 
   await page.getByRole("tab", { name: "Message" }).click();
   await page.getByLabel("Sender identity").selectOption({ index: 1 });
@@ -53,13 +56,30 @@ test("a script in a raw HTML block never runs in the preview, and the detection 
   // sandbox="" grants nothing, so no allow-scripts.
   await expect(frame).toHaveAttribute("sandbox", "");
   await expect(frame.contentFrame().getByText("sandbox probe")).toBeVisible();
+  const preview = frame.contentFrame();
+  const policy = preview.locator("head > :first-child");
+  await expect(policy).toHaveAttribute("http-equiv", "Content-Security-Policy");
+  await expect(policy).toHaveAttribute("content", "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+
+  const topUrl = page.url();
+  await expect(preview.locator("base")).toHaveAttribute("href", "https://preview-escape.invalid/");
+  expect(await preview.locator("html").evaluate((element) => element.ownerDocument.baseURI)).toBe(topUrl);
+  const navigations: string[] = [];
+  page.on("request", (request) => {
+    if (request.isNavigationRequest()) navigations.push(request.url());
+  });
+  await preview.getByRole("link", { name: "Escape the preview" }).click();
+  await preview.getByRole("button", { name: "Submit probe" }).click();
 
   // Give a script that did run every chance to be heard.
   await page.waitForTimeout(1000);
   expect(await received(page)).not.toContain(MARKER);
   expect(logged).toEqual([]);
+  await expect(page).toHaveURL(topUrl);
+  await expect(preview.getByText("sandbox probe")).toBeVisible();
+  expect(navigations).toEqual([]);
 
-  // The control: the same markup in an unsandboxed frame of a blank page is heard.
+  // The control removes both restrictions, so the same script must be heard.
   const probe = await frame.getAttribute("srcdoc");
   expect(probe).toContain("parent.postMessage");
 
@@ -68,8 +88,10 @@ test("a script in a raw HTML block never runs in the preview, and the detection 
   const controlLogged = watchConsole(control);
   await control.goto("about:blank");
   await control.evaluate((html) => {
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    parsed.querySelectorAll('meta[http-equiv="Content-Security-Policy"]').forEach((meta) => meta.remove());
     const unsandboxed = document.createElement("iframe");
-    unsandboxed.srcdoc = html;
+    unsandboxed.srcdoc = parsed.documentElement.outerHTML;
     document.body.append(unsandboxed);
   }, probe ?? "");
   await expect.poll(() => received(control)).toContain(MARKER);

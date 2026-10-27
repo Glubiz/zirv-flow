@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "channel": "email",
+  "mode": "blocks",
+  "blocks": {
+    "subject": "Hi {{ person.name }}",
+    "preheader": "A preview for {{ person.name }}",
+    "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+    "lang": "en",
+    "category": "transactional",
+    "sections": [
+      {
+        "id": "s1",
+        "columns": [
+          [
+            {
+              "type": "text",
+              "id": "t0",
+              "content": "<p>Hello <b>{{ person.~ame }>b <}/,<i>welcome</i> and <u>enjoy</u>.<br>Se oldcnine with a <a href=\"https://shop.example/a?x=1&am*************************************----------------------- person.plan }}</li></u,><ol><li>First</li><li>Second</li></ol>",
+              "align": "left"
+            },
+            {
+              "type": "text",
+              "id": "t2",
+              "content": "<p>Cedefaultntered yyyyyyyyyyyyyyyyyyyyyyyyy<![ifyyyyyyyyyyyyyyyyyyyyand <a href=\"mailto:help@example.com\">mail us</a></p>",
+              "align": "center"
+            }
+          ]
+        ]
+      }
+    ]
+  }
+}
