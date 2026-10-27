@@ -574,7 +574,10 @@ Passwords are 12 to 1024 characters.
   membership and key events and password resets are appended to `audit_log`.
   Rows hold ids, the request id and a small summary, never e-mails, passwords,
   tokens or key secrets. The log is append-only: the code offers no update or
-  delete.
+  delete. Ids are not commit-ordered, so an entry committed during a page walk
+  or an export may be missing from it; the `rows` count in `audit.exported` is
+  the rows streamed. Only the owning role may execute `audit_purge`; an
+  operator who runs the app under a separate role grants it EXECUTE.
 
 | Endpoint | Who |
 |----------|-----|

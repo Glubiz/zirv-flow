@@ -3,6 +3,7 @@ use utoipa::{Modify, OpenApi};
 
 use crate::assets;
 use crate::assistant;
+use crate::audit;
 use crate::consent::{dimensions, person, policy, suppressions, topics, transfer};
 use crate::contacts;
 use crate::destinations;
@@ -331,6 +332,11 @@ use crate::workspaces::{
         traces::get,
         setup::status,
         setup::complete,
+        audit::list,
+        audit::list_instance,
+        audit::actions,
+        audit::export::workspace,
+        audit::export::instance,
         jobs_admin::depth,
         jobs_admin::dead,
         jobs_admin::retry,
@@ -775,6 +781,10 @@ use crate::workspaces::{
         KindDepthBody,
         JobBody,
         DeadJobsBody,
+        audit::AuditEntryBody,
+        audit::AuditPageBody,
+        audit::AuditAreaBody,
+        audit::AuditActionsBody,
         privacy::PersonTarget,
         privacy::TargetIdentifier,
         erasures::ErasureBody,

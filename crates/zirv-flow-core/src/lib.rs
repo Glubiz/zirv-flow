@@ -2,6 +2,7 @@
 //!
 //! This crate is pure: no database, HTTP or network dependencies.
 
+pub mod audit;
 pub mod consent;
 pub mod contacts;
 pub mod credentials;
