@@ -85,6 +85,27 @@ pub(crate) fn clean_rendered(html: &str) -> String {
     builder(|_| false).clean(html).to_string()
 }
 
+/// Exercise both sanitizer entry points on a bounded source, including merge tags.
+#[cfg(any(test, feature = "test-support"))]
+pub fn check_sanitize_source(data: &[u8]) {
+    if data.len() > super::MAX_RICH_TEXT_BYTES + 1 {
+        return;
+    }
+    let started = std::time::Instant::now();
+    if let Ok(source) = std::str::from_utf8(data) {
+        let _cleaned = sanitize_source(source);
+        let rendered = clean_rendered(source);
+        assert!(
+            check(&rendered, |_| false).is_empty(),
+            "disallowed rendered output: {rendered:?}"
+        );
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "sanitizer sample exceeded five seconds"
+    );
+}
+
 /// What the allowlist would remove from `source`, as short descriptions (an element or attribute
 /// name, or a URL scheme), in the order they appear. Empty when the source is clean.
 pub(crate) fn violations(source: &str) -> Vec<String> {
@@ -571,6 +592,40 @@ mod tests {
                 prop_assert!(with_tokens(&output, |_| ()).is_some(), "cannot parse: {:?}", output);
                 prop_assert!(check(&output, |_| false).is_empty(), "disallowed output: {:?}", output);
             }
+        }
+    }
+
+    fn fuzz_sources() -> BoxedStrategy<String> {
+        let fixtures = vec![
+            serde_json::Value::String(
+                include_str!("../../../tests/fixtures/blocks/text.html").to_owned(),
+            ),
+            serde_json::Value::String(
+                include_str!("../../../tests/fixtures/email_marketing.expected.html").to_owned(),
+            ),
+            serde_json::Value::String("<p>{{ person.name }}</p>".to_owned()),
+        ];
+        prop_oneof![
+            hostile_html(),
+            zirv_flow_core::fuzz::with_fixtures(fixtures).prop_map(|value| match value {
+                serde_json::Value::String(text) => text,
+                value => value.to_string(),
+            }),
+        ]
+        .boxed()
+    }
+
+    proptest! {
+        #![proptest_config(zirv_flow_core::fuzz::config())]
+
+        #[test]
+        fn fuzz_sanitize_source(source in fuzz_sources()) {
+            check_sanitize_source(source.as_bytes());
+        }
+
+        #[test]
+        fn fuzz_sanitizer_source_limit(extra in 0usize..=1) {
+            check_sanitize_source("x".repeat(super::super::MAX_RICH_TEXT_BYTES + extra).as_bytes());
         }
     }
 

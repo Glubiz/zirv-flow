@@ -2527,6 +2527,10 @@ cargo fmt -- --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+Parser fuzz properties run in the normal suite on every platform. The separate `fuzz/`
+workspace and bounded nightly libFuzzer runs are documented in
+[Contributing](CONTRIBUTING.md#parser-properties-and-fuzzing).
+
 PostgreSQL-backed tests are ignored by default. To run them against the two CI
 versions locally:
 

@@ -44,6 +44,8 @@ rsa = { workspace = true, optional = true }
 test-support = ["dep:rcgen", "dep:rsa"]
 
 [dev-dependencies]
+proptest.workspace = true
+zirv-flow-core = { workspace = true, features = ["test-support"] }
 axum.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus.workspace = true
