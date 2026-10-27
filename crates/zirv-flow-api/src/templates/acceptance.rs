@@ -1394,6 +1394,74 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_mjml_publish_with_an_unknown_merge_field_is_a_422_and_writes_no_version(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = r#"<a href="{{ system.unsubscribe_url }}">Unsubscribe</a>"#;
+        let id = f
+            .create("Newsletter", mjml_doc("Hi {{ person.nope }}", footer))
+            .await;
+
+        let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "template_invalid");
+        let issues = refused.body["template_issues"].as_array().unwrap();
+        let unknown = issues
+            .iter()
+            .find(|issue| issue["code"] == "unknown_merge_field")
+            .expect("the unknown field is listed");
+        assert_eq!(unknown["field"], "person.nope");
+        assert_eq!(unknown["severity"], "blocking");
+        assert_eq!(unknown["at"], "/email/html");
+        assert_eq!(f.versions_written().await, 0);
+        let template = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(template.body["current_version"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_block_publish_with_an_unknown_merge_field_is_a_422_and_writes_no_version(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let mut document = blocks_doc("Hi", LINK);
+        document["blocks"]["sections"][0]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "text", "id": "note", "content": "<p>{{ person.nope }}</p>"}));
+        let id = f.create("Blocks", document).await;
+
+        let refused = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(
+            refused.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(refused.body["code"], "template_invalid");
+        let issues = refused.body["template_issues"].as_array().unwrap();
+        let unknown = issues
+            .iter()
+            .find(|issue| issue["code"] == "unknown_merge_field")
+            .expect("the unknown field is listed");
+        assert_eq!(unknown["field"], "person.nope");
+        assert_eq!(unknown["severity"], "blocking");
+        assert_eq!(unknown["at"], "/blocks/block/note/content");
+        assert_eq!(f.versions_written().await, 0);
+        let template = f.lead("GET", &format!("/{id}"), None).await;
+        assert_eq!(template.body["current_version"], Value::Null);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn publish_records_the_assets_the_template_names_and_refuses_a_missing_one(pool: PgPool) {
         use zirv_flow_store::NewAsset;
         let f = fixture(&pool).await;
