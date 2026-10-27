@@ -527,7 +527,10 @@ mod tests {
         let outcome = write_ledger_file(&dir.0, &entry).unwrap();
 
         assert_eq!(outcome, LedgerWrite::Created);
-        assert_eq!(read_ledger_dir(&dir.0).unwrap(), [entry.clone()]);
+        assert_eq!(
+            read_ledger_dir(&dir.0).unwrap(),
+            std::slice::from_ref(&entry)
+        );
         let names: Vec<_> = fs::read_dir(&dir.0)
             .unwrap()
             .map(|item| item.unwrap().file_name().into_string().unwrap())
