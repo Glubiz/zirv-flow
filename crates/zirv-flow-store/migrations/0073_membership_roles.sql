@@ -13,4 +13,4 @@ ALTER TABLE memberships
 -- Publishing moves from the admin scope to the new `publish` scope, so a deployed admin key keeps
 -- its rights by gaining it. Scopes never imply one another in code; `write` keys are left alone.
 UPDATE api_keys SET scopes = array_append(scopes, 'publish')
-WHERE 'admin' = ANY (scopes) AND NOT ('publish' = ANY (scopes));
+WHERE 'admin' = ANY (scopes) AND array_position(scopes, 'publish') IS NULL;

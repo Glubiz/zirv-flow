@@ -377,7 +377,8 @@ mod tests {
                 "('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000a1', 'admin', decode('01', 'hex'), ARRAY['read','admin']), ",
                 "('00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-0000000000a1', 'both', decode('02', 'hex'), ARRAY['publish','admin']), ",
                 "('00000000-0000-0000-0000-0000000000c3', '00000000-0000-0000-0000-0000000000a1', 'write', decode('03', 'hex'), ARRAY['write']), ",
-                "('00000000-0000-0000-0000-0000000000c4', '00000000-0000-0000-0000-0000000000a1', 'read', decode('04', 'hex'), ARRAY['read'])"
+                "('00000000-0000-0000-0000-0000000000c4', '00000000-0000-0000-0000-0000000000a1', 'read', decode('04', 'hex'), ARRAY['read']), ",
+                "('00000000-0000-0000-0000-0000000000c5', '00000000-0000-0000-0000-0000000000a1', 'nulls', decode('05', 'hex'), ARRAY['admin', NULL])"
             ),
         )
         .execute(&pool)
@@ -403,7 +404,7 @@ mod tests {
             ]
         );
         let keys: Vec<(String, Vec<String>)> =
-            sqlx::query_as("SELECT name, scopes FROM api_keys ORDER BY name")
+            sqlx::query_as("SELECT name, scopes FROM api_keys WHERE name <> 'nulls' ORDER BY name")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
@@ -417,6 +418,13 @@ mod tests {
                 ("write".to_owned(), scopes(&["write"])),
             ]
         );
+        let null_element_key_gained: bool = sqlx::query_scalar(
+            "SELECT array_position(scopes, 'publish') IS NOT NULL FROM api_keys WHERE name = 'nulls'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(null_element_key_gained, "an admin key with a null element");
         for role in ["publisher", "viewer"] {
             let allowed = sqlx::query("UPDATE memberships SET role = $1")
                 .bind(role)
