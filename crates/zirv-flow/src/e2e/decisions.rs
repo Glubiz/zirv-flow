@@ -11,8 +11,8 @@ mod tests {
     use zirv_flow_core::audit;
     use zirv_flow_core::decision_actions::{self, DecisionSpec};
 
-    /// The crates that write decisions.
-    const WRITERS: [&str; 3] = ["zirv-flow-store", "zirv-flow-api", "zirv-flow-jobs"];
+    /// The only production file that builds a `DecisionSpec`.
+    const SPEC_BUILDERS: [&str; 1] = ["zirv-flow-core/src/decision_actions.rs"];
 
     /// The only production files that insert into the decision log with SQL of their own; each
     /// binds its action and outcome from the registry.
@@ -164,48 +164,184 @@ mod tests {
         }
     }
 
-    /// The text of a file before its inline `#[cfg(test)] mod tests`.
-    fn production(text: &str) -> &str {
-        let mut offset = 0;
-        let mut lines = text.split_inclusive('\n').peekable();
-        while let Some(line) = lines.next() {
-            if line.trim_end() == "#[cfg(test)]"
-                && lines.peek().is_some_and(|next| {
-                    let next = next.trim_start();
-                    next.starts_with("mod ") || (next.starts_with("pub") && next.contains(" mod "))
-                })
-            {
-                return &text[..offset];
+    /// The index just past the item whose `{` is the first one at or after `from`: the matching
+    /// `}`. Comments, strings, raw strings and character literals do not count their braces.
+    fn after_block(text: &str, from: usize) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut at = from;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                    at += text[at..].find('\n').unwrap_or(bytes.len() - at);
+                }
+                b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                    at += text[at + 2..]
+                        .find("*/")
+                        .map_or(bytes.len() - at, |end| end + 4);
+                }
+                b'"' => {
+                    at += 1;
+                    while at < bytes.len() && bytes[at] != b'"' {
+                        at += if bytes[at] == b'\\' { 2 } else { 1 };
+                    }
+                    at += 1;
+                }
+                b'r' if matches!(bytes.get(at + 1), Some(b'"' | b'#'))
+                    && !(at > 0
+                        && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_')) =>
+                {
+                    let hashes = bytes[at + 1..].iter().take_while(|b| **b == b'#').count();
+                    if bytes.get(at + 1 + hashes) == Some(&b'"') {
+                        let close = format!("\"{}", "#".repeat(hashes));
+                        at += 2 + hashes;
+                        at += text[at..]
+                            .find(&close)
+                            .map_or(bytes.len() - at, |end| end + close.len());
+                    } else {
+                        at += 1;
+                    }
+                }
+                b'\'' => {
+                    // A character literal, unless it is a lifetime.
+                    if bytes.get(at + 1) == Some(&b'\\') {
+                        at += 2 + text[at + 2..].find('\'').map_or(0, |end| end + 1);
+                    } else if bytes.get(at + 2) == Some(&b'\'') {
+                        at += 3;
+                    } else {
+                        at += 1;
+                    }
+                }
+                b'{' => {
+                    depth += 1;
+                    at += 1;
+                }
+                b'}' => {
+                    depth = depth.saturating_sub(1);
+                    at += 1;
+                    if depth == 0 {
+                        return at;
+                    }
+                }
+                _ => at += 1,
             }
+        }
+        bytes.len()
+    }
+
+    /// The module line that follows the `#[cfg(test)]` line at `lines[at]`, skipping any further
+    /// attribute lines: its index and whether it declares a file module (`mod name;`).
+    fn test_module_after(lines: &[&str], at: usize) -> Option<(usize, bool)> {
+        let mut next = at + 1;
+        while lines
+            .get(next)
+            .is_some_and(|line| line.trim_start().starts_with("#["))
+        {
+            next += 1;
+        }
+        let line = lines.get(next)?.trim_start();
+        let line = line
+            .strip_prefix("pub")
+            .map_or(line, |rest| match rest.strip_prefix('(') {
+                Some(restricted) => restricted.split_once(')').map_or(rest, |(_, tail)| tail),
+                None => rest,
+            })
+            .trim_start();
+        let declared = line.strip_prefix("mod ")?;
+        Some((next, declared.trim_end().ends_with(';')))
+    }
+
+    /// The text of a file without the bodies of its inline `#[cfg(test)] mod name { .. }`.
+    /// A `#[cfg(test)] mod name;` declaration has no body here and is left alone.
+    fn production(text: &str) -> String {
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let mut starts = Vec::with_capacity(lines.len());
+        let mut offset = 0;
+        for line in &lines {
+            starts.push(offset);
             offset += line.len();
         }
-        text
+        let mut kept = String::new();
+        let mut at = 0;
+        while at < lines.len() {
+            if lines[at].trim_end() == "#[cfg(test)]"
+                && let Some((module, false)) = test_module_after(&lines, at)
+            {
+                let end = after_block(text, starts[module]);
+                at = starts.partition_point(|start| *start < end);
+                continue;
+            }
+            kept.push_str(lines[at]);
+            at += 1;
+        }
+        kept
+    }
+
+    /// The names of the file modules a file declares behind `#[cfg(test)]`.
+    fn test_module_files(text: &str) -> Vec<String> {
+        let lines: Vec<&str> = text.lines().collect();
+        (0..lines.len())
+            .filter(|at| lines[*at].trim_end() == "#[cfg(test)]")
+            .filter_map(|at| match test_module_after(&lines, at)? {
+                (module, true) => {
+                    let line = lines[module].trim_end().trim_end_matches(';');
+                    Some(line.rsplit(' ').next()?.to_owned())
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Whether a whole file is test support: the acceptance and test-helper modules, which their
-    /// parents declare behind `#[cfg(test)]`.
+    /// parents declare behind `#[cfg(test)]` or whose content is gated.
     fn is_test_file(path: &Path) -> bool {
         path.file_name()
             .is_some_and(|name| name == "acceptance.rs" || name == "testing.rs")
     }
 
-    /// The production source of the writer crates: (path relative to `crates/`, text).
+    /// The production source of every crate: (path relative to `crates/`, text). A file a parent
+    /// declares as `#[cfg(test)] mod name;` is test code and is left out.
     fn production_sources() -> Vec<(String, String)> {
         let mut found = Vec::new();
-        for name in WRITERS {
-            rust_files(&crates_dir().join(name).join("src"), &mut found);
+        let mut crates: Vec<_> = std::fs::read_dir(crates_dir())
+            .expect("the crates directory reads")
+            .map(|entry| entry.expect("a directory entry reads").path())
+            .filter(|path| path.join("src").is_dir())
+            .collect();
+        crates.sort();
+        for krate in crates {
+            rust_files(&krate.join("src"), &mut found);
         }
-        found
+        let texts: Vec<(PathBuf, String)> = found
             .into_iter()
-            .filter(|path| !is_test_file(path))
             .map(|path| {
                 let text = std::fs::read_to_string(&path).expect("a source file reads");
+                (path, text)
+            })
+            .collect();
+        let mut test_files: HashSet<PathBuf> = HashSet::new();
+        for (path, text) in &texts {
+            let stem = path.file_stem().and_then(|stem| stem.to_str());
+            let dir = path.parent().expect("a file has a directory");
+            let module_dir = match stem {
+                Some("mod" | "lib" | "main") | None => dir.to_path_buf(),
+                Some(stem) => dir.join(stem),
+            };
+            for name in test_module_files(text) {
+                test_files.insert(module_dir.join(format!("{name}.rs")));
+                test_files.insert(module_dir.join(&name).join("mod.rs"));
+            }
+        }
+        texts
+            .into_iter()
+            .filter(|(path, _)| !is_test_file(path) && !test_files.contains(path))
+            .map(|(path, text)| {
                 let relative = path
                     .strip_prefix(crates_dir())
                     .expect("the file is under crates")
                     .to_string_lossy()
                     .replace('\\', "/");
-                (relative, production(&text).to_owned())
+                (relative, production(&text))
             })
             .collect()
     }
@@ -213,7 +349,7 @@ mod tests {
     fn is_registered(action: &str) -> bool {
         decision_actions::ALL
             .iter()
-            .any(|spec| spec.action == action)
+            .any(|spec| spec.action() == action)
     }
 
     /// The `action: "..."` literals of `text` that name neither a decision nor an audit action.
@@ -241,18 +377,35 @@ mod tests {
         })
     }
 
+    /// Whether `text` holds an `INSERT INTO decision_records`, whatever its case, spacing or
+    /// schema prefix.
+    fn inserts_into_the_log(text: &str) -> bool {
+        let words: Vec<String> = text
+            .split_whitespace()
+            .map(|word| word.to_ascii_lowercase())
+            .collect();
+        words.windows(3).any(|at| {
+            at[0].ends_with("insert")
+                && at[1] == "into"
+                && at[2]
+                    .trim_start_matches("public.")
+                    .trim_start_matches('"')
+                    .starts_with("decision_records")
+        })
+    }
+
     /// What is wrong with one production file, as messages.
     fn problems(path: &str, text: &str) -> Vec<String> {
         let mut problems: Vec<String> = unregistered_actions(text)
             .into_iter()
             .map(|action| format!("{path}: the action \"{action}\" is not in the registry"))
             .collect();
-        if text.contains("INSERT INTO decision_records") && !SQL_WRITERS.contains(&path) {
+        if inserts_into_the_log(text) && !SQL_WRITERS.contains(&path) {
             problems.push(format!(
                 "{path}: writes decision_records outside the registry"
             ));
         }
-        if builds_a_spec(text) {
+        if builds_a_spec(text) && !SPEC_BUILDERS.contains(&path) {
             problems.push(format!("{path}: builds a DecisionSpec of its own"));
         }
         problems
@@ -283,8 +436,33 @@ mod tests {
             .collect()
     }
 
-    /// The names of every function the workspace defines, test or not.
-    fn function_names() -> HashSet<String> {
+    /// The names of the functions of `text` that a test attribute precedes.
+    fn test_names_in(text: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut tested = false;
+        for line in text.lines() {
+            let line = line.trim_start();
+            if line.starts_with("#[") {
+                tested |= ["#[test]", "#[tokio::test", "#[sqlx::test"]
+                    .iter()
+                    .any(|attribute| line.starts_with(attribute));
+            } else if let Some(at) = line.find("fn ").filter(|_| tested) {
+                names.push(
+                    line[at + 3..]
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect(),
+                );
+                tested = false;
+            } else if !(line.is_empty() || line.starts_with("//")) {
+                tested = false;
+            }
+        }
+        names
+    }
+
+    /// The names of every test function the workspace defines.
+    fn test_function_names() -> HashSet<String> {
         let mut found = Vec::new();
         rust_files(&crates_dir(), &mut found);
         let mut names = HashSet::new();
@@ -293,21 +471,13 @@ mod tests {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("a source file reads");
-            for line in text.lines() {
-                if let Some(at) = line.find("fn ") {
-                    let name: String = line[at + 3..]
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    names.insert(name);
-                }
-            }
+            names.extend(test_names_in(&text));
         }
         names
     }
 
     /// What is wrong with a coverage table, as messages: a row with no entry, an entry for no
-    /// row, a repeated entry, and a test that does not exist.
+    /// row, a repeated entry, and a test that is not a test function.
     fn coverage_problems(
         table: &[(&str, Coverage)],
         names: &[&str],
@@ -330,7 +500,7 @@ mod tests {
             }
             match coverage {
                 Coverage::Test(test) if !tests.contains(*test) => {
-                    problems.push(format!("{row}: the test {test} does not exist"));
+                    problems.push(format!("{row}: {test} is not a test function"));
                 }
                 Coverage::Untestable("") => {
                     problems.push(format!("{row}: Untestable needs a reason"));
@@ -404,6 +574,39 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_still_reads_a_writer_after_an_inline_test_module() {
+        let text = "#[cfg(test)]\nmod tests {\n    fn f() { let s = \"}\"; let c = '}'; }\n}\n\
+                    fn later() { sqlx::query(\"INSERT INTO decision_records (id)\"); }\n";
+
+        let found = problems("zirv-flow-api/src/x.rs", &production(text));
+
+        assert_eq!(
+            found,
+            ["zirv-flow-api/src/x.rs: writes decision_records outside the registry"]
+        );
+    }
+
+    #[test]
+    fn a_test_module_declaration_does_not_end_the_scan() {
+        let text = "#[cfg(test)]\nmod acceptance;\nfn later() { let _ = 1; }\n";
+
+        assert!(production(text).contains("fn later"));
+        assert_eq!(test_module_files(text), ["acceptance"]);
+        assert!(test_module_files("#[cfg(test)]\nmod t {\n}\n").is_empty());
+    }
+
+    #[test]
+    fn the_scan_catches_a_lower_case_multi_line_insert() {
+        let text = "sqlx::query(\"insert into\n    decision_records (id)\");";
+
+        assert_eq!(
+            problems("zirv-flow-api/src/x.rs", text),
+            ["zirv-flow-api/src/x.rs: writes decision_records outside the registry"]
+        );
+        assert!(!inserts_into_the_log("INSERT INTO audit_entries (id)"));
+    }
+
+    #[test]
     fn a_row_no_code_uses_is_found() {
         let sources = vec![(
             "x.rs".to_owned(),
@@ -421,7 +624,7 @@ mod tests {
 
     #[test]
     fn every_registry_row_has_a_producing_test_or_a_listed_gap() {
-        let problems = coverage_problems(COVERAGE, decision_actions::NAMES, &function_names());
+        let problems = coverage_problems(COVERAGE, decision_actions::NAMES, &test_function_names());
 
         assert!(problems.is_empty(), "{problems:#?}");
     }
@@ -436,7 +639,7 @@ mod tests {
 
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems[0].contains("B_ROW has no test"));
-        assert!(problems[1].contains("no_such_test does not exist"));
+        assert!(problems[1].contains("no_such_test is not a test function"));
         let fine: &[(&str, Coverage)] = &[
             ("A_ROW", Test("real_test")),
             ("B_ROW", Coverage::Untestable("needs a clock")),
@@ -448,6 +651,22 @@ mod tests {
             ("C", Pending(1)),
         ];
         assert_eq!(coverage_problems(stray, &names, &tests).len(), 1);
+    }
+
+    #[test]
+    fn a_function_that_is_not_a_test_does_not_cover_a_row() {
+        let text = "fn helper() {}\n\n#[test]\n#[ignore = \"x\"]\nfn real() {}\n\
+                    #[sqlx::test]\nasync fn db(pool: PgPool) {}\n#[tokio::test]\nasync fn rt() {}\n\
+                    #[test]\nfn first() {}\nfn after() {}\n";
+
+        let names = test_names_in(text);
+
+        assert_eq!(names, ["real", "db", "rt", "first"]);
+        let tests: HashSet<String> = names.into_iter().collect();
+        let table: &[(&str, Coverage)] = &[("A_ROW", Test("helper")), ("B_ROW", Test("real"))];
+        let found = coverage_problems(table, &["A_ROW", "B_ROW"], &tests);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("helper is not a test function"));
     }
 
     #[test]
