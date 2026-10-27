@@ -86,6 +86,9 @@ pub struct Membership {
     pub workspace_id: WorkspaceId,
     pub user_id: UserId,
     pub role: Role,
+    /// Whether a publisher, editor or viewer sees personal values. Stored for an admin too, and
+    /// ignored for them.
+    pub view_pii: bool,
 }
 
 /// A workspace member as listed to other members.
@@ -94,6 +97,7 @@ pub struct Member {
     pub user_id: UserId,
     pub email: String,
     pub role: Role,
+    pub view_pii: bool,
     pub created_at: OffsetDateTime,
 }
 
@@ -102,6 +106,7 @@ struct MemberRow {
     user_id: Uuid,
     email: String,
     role: String,
+    view_pii: bool,
     created_at: OffsetDateTime,
 }
 
@@ -177,27 +182,58 @@ pub async fn membership_role<'e>(
     Ok(role.and_then(|role| role.parse().ok()))
 }
 
-/// Adds a member or changes their role.
+/// The role and the `view_pii` grant of a member, or `None` for a user who is not one.
+pub async fn find_membership<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    user: UserId,
+) -> Result<Option<Membership>, StoreError> {
+    let row: Option<(String, bool)> = sqlx::query_as(
+        "SELECT role, view_pii FROM memberships WHERE workspace_id = $1 AND user_id = $2",
+    )
+    .bind(workspace.as_uuid())
+    .bind(user.as_uuid())
+    .fetch_optional(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(row.and_then(|(role, view_pii)| {
+        Some(Membership {
+            workspace_id: workspace,
+            user_id: user,
+            role: role.parse().ok()?,
+            view_pii,
+        })
+    }))
+}
+
+/// Adds a member or changes their role. `view_pii` of `None` keeps the stored grant (false for a
+/// new member).
 pub async fn set_membership<'e>(
     executor: impl PgExecutor<'e>,
     workspace: WorkspaceId,
     user: UserId,
     role: Role,
+    view_pii: Option<bool>,
 ) -> Result<Membership, StoreError> {
-    sqlx::query(
-        "INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, $3) \
-         ON CONFLICT (workspace_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+    let view_pii: bool = sqlx::query_scalar(
+        "INSERT INTO memberships (workspace_id, user_id, role, view_pii) \
+         VALUES ($1, $2, $3, COALESCE($4, false)) \
+         ON CONFLICT (workspace_id, user_id) DO UPDATE \
+         SET role = EXCLUDED.role, view_pii = COALESCE($4, memberships.view_pii) \
+         RETURNING view_pii",
     )
     .bind(workspace.as_uuid())
     .bind(user.as_uuid())
     .bind(role.as_str())
-    .execute(executor)
+    .bind(view_pii)
+    .fetch_one(executor)
     .await
     .map_err(StoreError::query)?;
     Ok(Membership {
         workspace_id: workspace,
         user_id: user,
         role,
+        view_pii,
     })
 }
 
@@ -240,7 +276,7 @@ pub async fn list_members<'e>(
     workspace: WorkspaceId,
 ) -> Result<Vec<Member>, StoreError> {
     let rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT m.user_id, u.email, m.role, m.created_at FROM memberships m \
+        "SELECT m.user_id, u.email, m.role, m.view_pii, m.created_at FROM memberships m \
          JOIN users u ON u.id = m.user_id WHERE m.workspace_id = $1 \
          ORDER BY m.created_at, m.user_id",
     )
@@ -255,6 +291,7 @@ pub async fn list_members<'e>(
                 user_id: UserId::from_uuid(row.user_id),
                 email: row.email,
                 role: row.role.parse().ok()?,
+                view_pii: row.view_pii,
                 created_at: row.created_at,
             })
         })
@@ -462,14 +499,14 @@ mod tests {
         let ws = workspace(&pool, "Acme").await;
         let jane = user(&pool, "jane@example.com").await;
 
-        set_membership(&pool, ws.id, jane, Role::Editor)
+        set_membership(&pool, ws.id, jane, Role::Editor, None)
             .await
             .unwrap();
         assert_eq!(
             membership_role(&pool, ws.id, jane).await.unwrap(),
             Some(Role::Editor)
         );
-        set_membership(&pool, ws.id, jane, Role::Admin)
+        set_membership(&pool, ws.id, jane, Role::Admin, None)
             .await
             .unwrap();
         assert_eq!(
@@ -488,18 +525,54 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn view_pii_defaults_to_false_and_an_unset_value_keeps_the_stored_one(pool: PgPool) {
+        let ws = workspace(&pool, "Acme").await;
+        let jane = user(&pool, "jane@example.com").await;
+
+        let added = set_membership(&pool, ws.id, jane, Role::Editor, None)
+            .await
+            .unwrap();
+        assert!(!added.view_pii);
+        let granted = set_membership(&pool, ws.id, jane, Role::Editor, Some(true))
+            .await
+            .unwrap();
+        assert!(granted.view_pii);
+        let kept = set_membership(&pool, ws.id, jane, Role::Viewer, None)
+            .await
+            .unwrap();
+        assert!(kept.view_pii);
+        assert_eq!(kept.role, Role::Viewer);
+
+        let found = find_membership(&pool, ws.id, jane).await.unwrap().unwrap();
+        assert_eq!((found.role, found.view_pii), (Role::Viewer, true));
+        assert!(list_members(&pool, ws.id).await.unwrap()[0].view_pii);
+        let revoked = set_membership(&pool, ws.id, jane, Role::Viewer, Some(false))
+            .await
+            .unwrap();
+        assert!(!revoked.view_pii);
+        let stranger = UserId::new();
+        assert!(
+            find_membership(&pool, ws.id, stranger)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn locking_memberships_returns_the_roles_of_that_workspace_only(pool: PgPool) {
         let a = workspace(&pool, "A").await;
         let b = workspace(&pool, "B").await;
         let jane = user(&pool, "jane@example.com").await;
         let joe = user(&pool, "joe@example.com").await;
-        set_membership(&pool, a.id, jane, Role::Admin)
+        set_membership(&pool, a.id, jane, Role::Admin, None)
             .await
             .unwrap();
-        set_membership(&pool, a.id, joe, Role::Viewer)
+        set_membership(&pool, a.id, joe, Role::Viewer, None)
             .await
             .unwrap();
-        set_membership(&pool, b.id, jane, Role::Publisher)
+        set_membership(&pool, b.id, jane, Role::Publisher, None)
             .await
             .unwrap();
 
@@ -518,7 +591,7 @@ mod tests {
         let a = workspace(&pool, "A").await;
         let b = workspace(&pool, "B").await;
         let jane = user(&pool, "jane@example.com").await;
-        set_membership(&pool, a.id, jane, Role::Admin)
+        set_membership(&pool, a.id, jane, Role::Admin, None)
             .await
             .unwrap();
 
@@ -532,7 +605,7 @@ mod tests {
         let a = workspace(&pool, "A").await;
         workspace(&pool, "B").await;
         let jane = user(&pool, "jane@example.com").await;
-        set_membership(&pool, a.id, jane, Role::Editor)
+        set_membership(&pool, a.id, jane, Role::Editor, None)
             .await
             .unwrap();
 
@@ -555,7 +628,7 @@ mod tests {
     async fn a_membership_for_an_unknown_user_is_refused(pool: PgPool) {
         let ws = workspace(&pool, "Acme").await;
 
-        let result = set_membership(&pool, ws.id, UserId::new(), Role::Editor).await;
+        let result = set_membership(&pool, ws.id, UserId::new(), Role::Editor, None).await;
 
         assert!(result.is_err());
     }

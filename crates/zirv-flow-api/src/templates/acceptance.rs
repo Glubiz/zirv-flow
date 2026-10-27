@@ -2128,6 +2128,54 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_editor_needs_the_view_pii_grant_for_a_real_person_preview(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f
+            .create(
+                "Welcome",
+                email_doc("Hi {{ person.plan }}", "{{ person.email }}"),
+            )
+            .await;
+        let person = f
+            .person(json!({"plan": "enterprise"}), Some("ann@example.com"))
+            .await;
+        let uri = f.templates(&format!("/{id}/preview"));
+        let body = Some(json!({"person_id": person}));
+        let editor = zirv_flow_core::UserId::from_uuid(
+            sqlx::query_scalar("SELECT id FROM users WHERE email = 'member@example.com'")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+        );
+        let context = Context::system();
+        let set = |view_pii| {
+            admin::set_member_grant(&pool, &context, f.ws, editor, Role::Editor, Some(view_pii))
+        };
+
+        let without = f
+            .call("POST", &uri, body.clone(), Auth::Session(&f.member))
+            .await;
+        set(true).await.unwrap();
+        let with = f
+            .call("POST", &uri, body.clone(), Auth::Session(&f.member))
+            .await;
+        set(false).await.unwrap();
+        let revoked = f.call("POST", &uri, body, Auth::Session(&f.member)).await;
+
+        assert_eq!(without.status, StatusCode::FORBIDDEN);
+        assert_eq!(without.body["code"], "template_preview_values_forbidden");
+        assert_eq!(with.status, StatusCode::OK, "{:?}", with.body);
+        assert!(
+            with.body["html"]
+                .as_str()
+                .unwrap()
+                .contains("ann@example.com")
+        );
+        assert_eq!(revoked.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_real_person_preview_is_refused_for_write_and_allowed_for_an_admin(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f

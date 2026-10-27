@@ -390,13 +390,26 @@ async fn refuse_last_admin(
     Ok(())
 }
 
-/// Adds a user to a workspace or changes their role.
+/// Adds a user to a workspace or changes their role. A new member has no `view_pii` grant; an
+/// existing one keeps theirs.
 pub async fn set_member(
     pool: &PgPool,
     context: &Context,
     workspace: WorkspaceId,
     user: UserId,
     role: Role,
+) -> Result<Membership, AdminError> {
+    set_member_grant(pool, context, workspace, user, role, None).await
+}
+
+/// As [`set_member`], and sets the `view_pii` grant when it is `Some`.
+pub async fn set_member_grant(
+    pool: &PgPool,
+    context: &Context,
+    workspace: WorkspaceId,
+    user: UserId,
+    role: Role,
+    view_pii: Option<bool>,
 ) -> Result<Membership, AdminError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
     zirv_flow_store::find_user(&mut *tx, user)
@@ -405,14 +418,15 @@ pub async fn set_member(
     if role != Role::Admin {
         refuse_last_admin(&mut tx, context, workspace, user).await?;
     }
-    let membership = zirv_flow_store::set_membership(&mut *tx, workspace, user, role).await?;
+    let membership =
+        zirv_flow_store::set_membership(&mut *tx, workspace, user, role, view_pii).await?;
     audit(
         &mut tx,
         context,
         Some(workspace),
         "membership.set",
         Some(("user", user.as_uuid())),
-        json!({ "role": role.as_str() }),
+        json!({ "role": role.as_str(), "view_pii": membership.view_pii }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -1320,6 +1334,43 @@ mod tests {
                 "api_key.revoked",
                 "membership.removed"
             ]
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn membership_set_audits_the_grant_as_a_boolean_and_never_the_email(pool: PgPool) {
+        migrated(&pool).await;
+        let context = Context::system();
+        let user = create_user(&pool, &context, "carol@example.com", PASSWORD)
+            .await
+            .unwrap();
+        let ws = create_workspace(&pool, &context, "Acme Corp", None)
+            .await
+            .unwrap();
+
+        set_member_grant(&pool, &context, ws.id, user.id, Role::Editor, Some(true))
+            .await
+            .unwrap();
+        let kept = set_member(&pool, &context, ws.id, user.id, Role::Viewer)
+            .await
+            .unwrap();
+
+        assert!(kept.view_pii);
+        let summaries: Vec<serde_json::Value> = zirv_flow_store::list_audit(&pool, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.action == "membership.set")
+            .map(|row| row.summary)
+            .collect();
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries.contains(&json!({ "role": "editor", "view_pii": true })));
+        assert!(summaries.contains(&json!({ "role": "viewer", "view_pii": true })));
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| !summary.to_string().contains("carol"))
         );
     }
 

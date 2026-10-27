@@ -20,7 +20,7 @@ use zirv_flow_store::{ImportPhase, ImportReject, PgPool, find_import, list_impor
 
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::parse_limit;
 use crate::problem::{ApiError, Problem};
 
@@ -250,7 +250,7 @@ pub(crate) async fn download(
     let import = find_import(&state.pool, workspace.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let with_cells = may_see_values(&state, &principal, workspace.id).await;
+    let with_cells = may_view_pii(&state, &principal, workspace.id).await;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     admin::audit(
         &mut tx,

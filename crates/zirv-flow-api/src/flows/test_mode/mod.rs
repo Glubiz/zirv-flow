@@ -32,7 +32,7 @@ use self::walk::{
 };
 use super::{draft_of, issue_problems, parse_graph};
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 use crate::segments::catalog_of;
@@ -187,7 +187,7 @@ pub(crate) async fn test(
             ));
         }
     }
-    if body.person_id.is_some() && !may_see_values(&state, &principal, workspace.id).await {
+    if body.person_id.is_some() && !may_view_pii(&state, &principal, workspace.id).await {
         return Err(ApiError::flow_test_values_forbidden());
     }
     if let Some(snapshot) = &body.snapshot

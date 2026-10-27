@@ -8,6 +8,7 @@ use time::{Date, Duration, Month, OffsetDateTime};
 use super::partitions::PARTITION_PREFIX;
 use crate::StoreError;
 use crate::decisions::next_month;
+use crate::drop_lock::{is_lock_timeout, set_drop_lock_timeout};
 
 /// Rows deleted per statement.
 pub const RETENTION_BATCH: i64 = 5_000;
@@ -55,10 +56,12 @@ fn default_delete() -> String {
 }
 
 /// What one run removed.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RetentionReport {
     pub events_deleted: u64,
     pub partitions_dropped: u64,
+    /// Partitions a drop gave up on because the table was locked; the next run retries them.
+    pub skipped_partitions: Vec<String>,
     pub rejects_deleted: u64,
     pub dedupe_deleted: u64,
     /// Test-send log rows past their 13 months (architecture 16.3).
@@ -125,7 +128,7 @@ async fn apply_event_retention_in_batches(
 
     report.test_sends_deleted = crate::delete_test_sends_before(pool, now).await?;
 
-    report.partitions_dropped = drop_old_partitions(pool, default_days, now).await?;
+    drop_old_partitions(pool, default_days, now, &mut report).await?;
     Ok(report)
 }
 
@@ -209,12 +212,15 @@ pub(crate) async fn lock_retention_overrides(
 /// Drops the monthly partitions whose whole range ends at or before the longest retention
 /// cutoff. The DEFAULT partition is never dropped. Each drop commits with its markers in its
 /// own transaction. The cutoff is read under `lock_retention_overrides`, which every override
-/// change takes first, so a change waits for the current drop and an earlier one is seen.
+/// change takes first, so a change waits for the current drop and an earlier one is seen. A drop
+/// that cannot get its lock within the drop lock timeout is counted as skipped and left for the
+/// next run.
 async fn drop_old_partitions(
     pool: &PgPool,
     default_days: i32,
     now: OffsetDateTime,
-) -> Result<u64, StoreError> {
+    report: &mut RetentionReport,
+) -> Result<(), StoreError> {
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid 
          WHERE i.inhparent = 'events'::regclass",
@@ -222,7 +228,6 @@ async fn drop_old_partitions(
     .fetch_all(pool)
     .await
     .map_err(StoreError::query)?;
-    let mut dropped = 0;
     for name in names {
         let Some(first) = month_of(&name) else {
             continue;
@@ -237,15 +242,22 @@ async fn drop_old_partitions(
                 .execute(&mut *tx)
                 .await
                 .map_err(StoreError::query)?;
-            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
+            set_drop_lock_timeout(&mut tx).await?;
+            match sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {name}")))
                 .execute(&mut *tx)
                 .await
-                .map_err(StoreError::query)?;
-            dropped += 1;
+            {
+                Ok(_) => report.partitions_dropped += 1,
+                Err(error) if is_lock_timeout(&error) => {
+                    report.skipped_partitions.push(name);
+                    continue;
+                }
+                Err(error) => return Err(StoreError::query(error)),
+            }
         }
         crate::commit(tx).await?;
     }
-    Ok(dropped)
+    Ok(())
 }
 
 /// The first day of the month a partition named `events_yYYYYmMM` covers.
@@ -571,9 +583,14 @@ mod tests {
         .await
         .unwrap();
 
-        let error = drop_old_partitions(&pool, 100, datetime!(2020-07-01 00:00 UTC))
-            .await
-            .unwrap_err();
+        let error = drop_old_partitions(
+            &pool,
+            100,
+            datetime!(2020-07-01 00:00 UTC),
+            &mut RetentionReport::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{error:?}").contains("later partition drop failed"));
         let partitions: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_class WHERE relname IN ('events_y2020m01', 'events_y2020m02')",
@@ -595,6 +612,96 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(overlap, 0, "only the dropped partition left a marker");
+    }
+
+    /// What one drop pass did.
+    async fn drop_pass(pool: &PgPool, default_days: i32, now: OffsetDateTime) -> RetentionReport {
+        let mut report = RetentionReport::default();
+        drop_old_partitions(pool, default_days, now, &mut report)
+            .await
+            .unwrap();
+        report
+    }
+
+    /// A pass at a time when only the two 2020 partitions of `two_old_partitions` are past it.
+    async fn drop_pass_2020(pool: &PgPool) -> RetentionReport {
+        drop_pass(pool, 100, datetime!(2020-07-01 00:00 UTC)).await
+    }
+
+    async fn two_old_partitions(pool: &PgPool) {
+        sqlx::raw_sql(
+            "CREATE TABLE events_y2020m01 PARTITION OF events
+             FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-02-01 00:00:00+00');
+             CREATE TABLE events_y2020m02 PARTITION OF events
+             FOR VALUES FROM ('2020-02-01 00:00:00+00') TO ('2020-03-01 00:00:00+00')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn exists(pool: &PgPool, name: &str) -> bool {
+        sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_held_lock_on_events_skips_the_drops_within_the_timeout_and_a_rerun_drops_them(
+        pool: PgPool,
+    ) {
+        two_old_partitions(&pool).await;
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE events IN ACCESS SHARE MODE")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let report = drop_pass_2020(&pool).await;
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(report.partitions_dropped, 0);
+        let mut skipped = report.skipped_partitions.clone();
+        skipped.sort();
+        assert_eq!(skipped, ["events_y2020m01", "events_y2020m02"]);
+        assert!(exists(&pool, "events_y2020m01").await);
+        holder.rollback().await.unwrap();
+
+        let again = drop_pass_2020(&pool).await;
+
+        assert_eq!(again.partitions_dropped, 2);
+        assert!(again.skipped_partitions.is_empty());
+        assert!(!exists(&pool, "events_y2020m01").await);
+        assert!(!exists(&pool, "events_y2020m02").await);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_partition_whose_drop_times_out_is_skipped_and_the_run_drops_the_other(pool: PgPool) {
+        two_old_partitions(&pool).await;
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE events_y2020m01 IN ACCESS SHARE MODE")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+
+        let report = drop_pass_2020(&pool).await;
+
+        assert_eq!(report.partitions_dropped, 1);
+        assert_eq!(report.skipped_partitions, ["events_y2020m01"]);
+        assert!(exists(&pool, "events_y2020m01").await);
+        assert!(!exists(&pool, "events_y2020m02").await);
+        holder.rollback().await.unwrap();
+
+        let again = drop_pass_2020(&pool).await;
+
+        assert_eq!(again.partitions_dropped, 1);
+        assert!(again.skipped_partitions.is_empty());
+        assert!(!exists(&pool, "events_y2020m01").await);
     }
 
     #[test]
@@ -822,7 +929,7 @@ mod tests {
         .unwrap();
 
         // The event deletes of a run would take the event first, so the drop is called alone.
-        let dropped = drop_old_partitions(&pool, 100, NOW).await.unwrap();
+        let dropped = drop_pass(&pool, 100, NOW).await.partitions_dropped;
 
         assert!(dropped >= 1);
         let table: Option<String> =
@@ -898,7 +1005,7 @@ mod tests {
         .unwrap();
         let drop = tokio::spawn({
             let pool = pool.clone();
-            async move { drop_old_partitions(&pool, 100, NOW).await.unwrap() }
+            async move { drop_pass(&pool, 100, NOW).await.partitions_dropped }
         });
         loop {
             let waiting: bool = sqlx::query_scalar(

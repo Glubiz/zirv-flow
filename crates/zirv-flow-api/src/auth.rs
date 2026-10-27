@@ -289,17 +289,53 @@ pub(crate) async fn authorize(
         .ok_or_else(ApiError::not_found)
 }
 
-/// Whether the caller may see personal values such as identifiers and consent evidence: the
-/// owner, a workspace admin or an `admin` key. Everyone else who may read the workspace sees
-/// them masked.
-pub(crate) async fn may_see_values(
+/// Who is asking, as far as seeing personal values goes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PiiHolder<'a> {
+    /// The instance owner.
+    Owner,
+    /// A workspace member with their role and `view_pii` grant.
+    Member { role: Role, view_pii: bool },
+    /// An API key with its scopes.
+    Key(&'a [Scope]),
+}
+
+/// Whether the holder sees personal values (ruling ca362e00): the owner, a workspace admin and an
+/// `admin` key always; a publisher, editor or viewer with the grant; any other key with the `pii`
+/// scope. `pii` alone reads nothing, because it does not imply `read`.
+pub(crate) fn reveals_pii(holder: PiiHolder<'_>) -> bool {
+    match holder {
+        PiiHolder::Owner => true,
+        PiiHolder::Member { role, view_pii } => role == Role::Admin || view_pii,
+        PiiHolder::Key(scopes) => scopes.contains(&Scope::Admin) || scopes.contains(&Scope::Pii),
+    }
+}
+
+/// Whether the caller may see personal values such as identifiers and consent evidence. Everyone
+/// else who may read the workspace sees them masked.
+pub(crate) async fn may_view_pii(
     state: &AppState,
     principal: &Principal,
     workspace: WorkspaceId,
 ) -> bool {
-    authorize(state, principal, workspace, Need::Admin)
-        .await
-        .is_ok()
+    match principal {
+        Principal::Key(key) => {
+            key.key.workspace_id == workspace && reveals_pii(PiiHolder::Key(&key.key.scopes))
+        }
+        Principal::Session(session) if session.user.is_owner => reveals_pii(PiiHolder::Owner),
+        Principal::Session(session) => {
+            zirv_flow_store::find_membership(&state.pool, workspace, session.user.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|member| {
+                    reveals_pii(PiiHolder::Member {
+                        role: member.role,
+                        view_pii: member.view_pii,
+                    })
+                })
+        }
+    }
 }
 
 /// Parses an id from a path segment; a malformed id is a plain 404.
@@ -399,6 +435,61 @@ mod tests {
         for other in [Scope::Read, Scope::Write, Scope::Publish, Scope::Admin] {
             assert!(!scopes_allow(&[other], Need::Ingest));
         }
+    }
+
+    #[test]
+    fn the_truth_table_of_who_sees_personal_values() {
+        assert!(reveals_pii(PiiHolder::Owner));
+        for (role, view_pii, expected) in [
+            (Role::Admin, false, true),
+            (Role::Admin, true, true),
+            (Role::Publisher, false, false),
+            (Role::Publisher, true, true),
+            (Role::Editor, false, false),
+            (Role::Editor, true, true),
+            (Role::Viewer, false, false),
+            (Role::Viewer, true, true),
+        ] {
+            assert_eq!(
+                reveals_pii(PiiHolder::Member { role, view_pii }),
+                expected,
+                "{role:?} with the grant {view_pii}"
+            );
+        }
+        let all = [
+            Scope::Ingest,
+            Scope::Read,
+            Scope::Write,
+            Scope::Publish,
+            Scope::Admin,
+            Scope::Pii,
+        ];
+        for mask in 0..(1_u32 << all.len()) {
+            let scopes: Vec<Scope> = all
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, scope)| *scope)
+                .collect();
+            let expected = scopes.contains(&Scope::Admin) || scopes.contains(&Scope::Pii);
+            assert_eq!(reveals_pii(PiiHolder::Key(&scopes)), expected, "{scopes:?}");
+        }
+    }
+
+    #[test]
+    fn the_pii_scope_alone_reads_nothing_and_adds_nothing_to_another_scope() {
+        for need in [
+            Need::Read,
+            Need::ReadMembers,
+            Need::Edit,
+            Need::Publish,
+            Need::Admin,
+            Need::Ingest,
+        ] {
+            assert!(!scopes_allow(&[Scope::Pii], need), "{need:?}");
+        }
+        assert!(scopes_allow(&[Scope::Read, Scope::Pii], Need::Read));
+        assert!(!scopes_allow(&[Scope::Read, Scope::Pii], Need::Edit));
     }
 
     #[test]
