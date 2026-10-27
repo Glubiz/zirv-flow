@@ -414,13 +414,29 @@ impl From<StoreError> for Abort {
 struct Budget {
     max: u64,
     used: u64,
+    /// How many values were charged.
+    #[cfg(test)]
+    taken: u64,
 }
 
 impl Budget {
+    fn new(max: u64) -> Self {
+        Self {
+            max,
+            used: 0,
+            #[cfg(test)]
+            taken: 0,
+        }
+    }
+
     fn take(&mut self, row: &Value) -> Result<(), Abort> {
         let mut counter = Counter(0);
         // Counting cannot fail.
         let _ = serde_json::to_writer(&mut counter, row);
+        #[cfg(test)]
+        {
+            self.taken += 1;
+        }
         self.used = self.used.saturating_add(counter.0).saturating_add(1);
         if self.used > self.max {
             return Err(Abort::TooLarge);
@@ -464,14 +480,20 @@ async fn person_document(
     .map_err(StoreError::query)?;
     let merged: Vec<&Uuid> = people.iter().filter(|id| **id != current).collect();
 
+    let generated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
+    let mut budget = Budget::new(max_bytes);
+    budget.take(&json!({
+        "format": EXPORT_FORMAT,
+        "generated_at": generated_at,
+        "person": { "id": current, "merged_ids": merged },
+    }))?;
     let mut section = Section {
         connection,
         workspace,
         people: &people,
-        budget: Budget {
-            max: max_bytes,
-            used: 0,
-        },
+        budget,
     };
     let profile = section
         .rows(
@@ -655,9 +677,6 @@ async fn person_document(
         )
         .await?;
 
-    let generated_at = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
     Ok(Some(json!({
         "format": EXPORT_FORMAT,
         "generated_at": generated_at,
@@ -716,12 +735,13 @@ impl Section<'_> {
         Ok(rows)
     }
 
-    /// Every event of every partition, oldest first, read in batches.
+    /// Every event of every partition, oldest first, read in keyset batches. Each row is charged
+    /// as it arrives, so a person past the cap is never read in full.
     async fn events(&mut self) -> Result<Vec<Value>, Abort> {
         let mut events = Vec::new();
         let mut after: Option<(OffsetDateTime, Uuid)> = None;
         loop {
-            let batch: Vec<(OffsetDateTime, Uuid, Value)> = sqlx::query_as(
+            let mut stream = sqlx::query_as::<_, (OffsetDateTime, Uuid, Value)>(
                 "SELECT occurred_at, id, to_jsonb(t) FROM ( \
                     SELECT id, name, schema_version, occurred_at, received_at, properties, \
                            source, message_id, trace_id, validation_state, validation_reasons, \
@@ -736,19 +756,15 @@ impl Section<'_> {
             .bind(after.map(|(at, _)| at))
             .bind(after.map(|(_, id)| id))
             .bind(EVENT_BATCH)
-            .fetch_all(&mut *self.connection)
-            .await
-            .map_err(StoreError::query)?;
-            let Some((at, id, _)) = batch.last() else {
-                return Ok(events);
-            };
-            after = Some((*at, *id));
-            let last_batch = batch.len() < EVENT_BATCH as usize;
-            for (_, _, event) in batch {
+            .fetch(&mut *self.connection);
+            let mut in_batch = 0;
+            while let Some((at, id, event)) = stream.try_next().await.map_err(StoreError::query)? {
                 self.budget.take(&event)?;
                 events.push(event);
+                after = Some((at, id));
+                in_batch += 1;
             }
-            if last_batch {
+            if in_batch < EVENT_BATCH {
                 return Ok(events);
             }
         }
@@ -793,26 +809,20 @@ mod tests {
         outcome
     }
 
-    /// Fails, naming them, on a table with a person column that the export neither reads nor
-    /// deliberately leaves out. The export twin of the erasure scan's catalog.
-    async fn check_catalog(pool: &PgPool) -> Result<(), String> {
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT table_name::text FROM information_schema.columns \
-             WHERE table_schema = current_schema() AND data_type = 'uuid' \
-               AND (column_name = 'person_id' OR column_name LIKE '%\\_person\\_id') \
-               AND NOT EXISTS (SELECT 1 FROM pg_class c \
-                               JOIN pg_namespace n ON n.oid = c.relnamespace \
-                               WHERE n.nspname = table_schema::text \
-                                 AND c.relname = table_name::text AND c.relispartition) \
-             ORDER BY 1",
-        )
-        .fetch_all(pool)
-        .await
-        .unwrap();
+    /// Fails, naming them, on a table with a person column that `sections` neither reads nor
+    /// the exclusions deliberately leave out. The export twin of the erasure scan's catalog, over
+    /// the same discovery.
+    async fn check_catalog(pool: &PgPool, sections: &[(&str, &[&str])]) -> Result<(), String> {
+        let mut tables: Vec<String> = crate::people::person_reference_places(pool)
+            .await
+            .into_iter()
+            .map(|(table, _)| table)
+            .collect();
+        tables.dedup();
         let unclassified: Vec<String> = tables
             .into_iter()
             .filter(|table| {
-                let read = EXPORT_SECTIONS
+                let read = sections
                     .iter()
                     .any(|(_, read)| read.contains(&table.as_str()));
                 let left_out = EXPORT_EXCLUDED
@@ -968,7 +978,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_table_with_a_person_column_is_exported_or_excluded_with_a_reason(pool: PgPool) {
-        let checked = check_catalog(&pool).await;
+        let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
 
         assert_eq!(checked, Ok(()));
         let known: Vec<String> = sqlx::query_scalar(
@@ -1002,7 +1012,7 @@ mod tests {
             .await
             .unwrap();
 
-        let checked = check_catalog(&pool).await;
+        let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
 
         let error = checked.unwrap_err();
         assert!(error.contains("unclassified_scratch"), "{error}");
@@ -1040,9 +1050,125 @@ mod tests {
         assert_eq!(built(&pool, ws, export.id).await, BuildOutcome::NotPending);
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_catalog_reads_the_people_and_decision_tables_from_the_shared_discovery(
+        pool: PgPool,
+    ) {
+        let discovered = crate::people::person_reference_places(&pool).await;
+        let tables: Vec<&str> = discovered.iter().map(|(table, _)| table.as_str()).collect();
+        assert!(tables.contains(&"people"));
+        assert!(tables.contains(&"decision_records"));
+
+        let without_decisions: Vec<(&str, &[&str])> = EXPORT_SECTIONS
+            .iter()
+            .filter(|(section, _)| *section != "decision_records")
+            .copied()
+            .collect();
+        let error = check_catalog(&pool, &without_decisions).await.unwrap_err();
+
+        assert!(error.contains("decision_records"), "{error}");
+        assert!(!error.contains("people"), "{error}");
+        let without_profile: Vec<(&str, &[&str])> = EXPORT_SECTIONS
+            .iter()
+            .filter(|(section, _)| *section != "profile")
+            .copied()
+            .collect();
+        let error = check_catalog(&pool, &without_profile).await.unwrap_err();
+        assert!(error.contains("people"), "{error}");
+    }
+
+    async fn seed_many_events(pool: &PgPool, ws: WorkspaceId, person: Uuid, count: i64) {
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                                 properties, source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), $1, $2, 'bulk', \
+                    now() - interval '1 day' - n * interval '1 second', now(), \
+                    jsonb_build_object('n', n), 'web', gen_random_uuid(), 'valid' \
+             FROM generate_series(1, $3) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn events_past_the_cap_stop_the_read_before_the_rest_are_fetched(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        seed_many_events(&pool, ws, person, 2500).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let people = [person];
+        let mut section = Section {
+            connection: &mut connection,
+            workspace: ws,
+            people: &people,
+            budget: Budget::new(2000),
+        };
+
+        let result = section.events().await;
+
+        assert!(matches!(result, Err(Abort::TooLarge)));
+        assert!(
+            section.budget.taken < 50,
+            "{} events were read",
+            section.budget.taken
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_whose_events_pass_the_cap_fails_with_export_too_large(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        seed_many_events(&pool, ws, person, 2500).await;
+        let export = requested(&pool, ws, person).await;
+
+        let outcome = built_with_cap(&pool, ws, export.id, 100_000).await;
+
+        assert_eq!(outcome, BuildOutcome::TooLarge);
+        let stored = find_privacy_export(&pool, ws, export.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn merged_ids_alone_past_the_cap_fail_with_export_too_large(pool: PgPool) {
+        let ws = crate::privacy::testing::workspace(&pool, "merged-cap").await;
+        let survivor = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(survivor)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let alone = requested(&pool, ws, survivor).await;
+        let fits = built_with_cap(&pool, ws, alone.id, 600).await;
+        for _ in 0..30 {
+            sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
+                .bind(Uuid::now_v7())
+                .bind(ws.as_uuid())
+                .bind(survivor)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let with_merged = requested(&pool, ws, survivor).await;
+
+        let too_large = built_with_cap(&pool, ws, with_merged.id, 600).await;
+
+        assert!(matches!(fits, BuildOutcome::Built { .. }), "{fits:?}");
+        assert_eq!(too_large, BuildOutcome::TooLarge);
+    }
+
     #[test]
     fn the_budget_stops_at_the_row_that_passes_the_cap() {
-        let mut budget = Budget { max: 20, used: 0 };
+        let mut budget = Budget::new(20);
 
         let first = budget.take(&json!({"a": 1}));
         let second = budget.take(&json!({"a": "a longer value than the cap allows"}));
