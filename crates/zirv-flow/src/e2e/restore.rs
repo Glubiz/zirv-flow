@@ -150,6 +150,13 @@ mod tests {
             .expect("a count")
     }
 
+    async fn scalar(pool: &PgPool, sql: &str) -> i64 {
+        sqlx::query_scalar(AssertSqlSafe(sql.to_owned()))
+            .fetch_one(pool)
+            .await
+            .expect("a count")
+    }
+
     async fn person_of(pool: &PgPool, address: &str) -> Uuid {
         sqlx::query_scalar("SELECT person_id FROM identities WHERE kind = 'email' AND value = $1")
             .bind(address)
@@ -193,8 +200,7 @@ mod tests {
             "erasure_requests",
             "ingest_inbox",
         ] {
-            let sql = format!("SELECT count(*) FROM {table} WHERE $1::uuid[] IS NOT NULL");
-            out.push(count(pool, &sql, &[]).await);
+            out.push(scalar(pool, &format!("SELECT count(*) FROM {table}")).await);
         }
         out
     }
@@ -299,7 +305,7 @@ mod tests {
         }
     }
 
-    async fn replay(restored: &Restored) -> ReplayReport {
+    async fn try_replay(restored: &Restored) -> Result<ReplayReport, admin::AdminError> {
         admin::replay_erasures(
             &restored.pool,
             &Context::system(),
@@ -308,7 +314,10 @@ mod tests {
             Some(&restored.dir.0),
         )
         .await
-        .expect("the replay")
+    }
+
+    async fn replay(restored: &Restored) -> ReplayReport {
+        try_replay(restored).await.expect("the replay")
     }
 
     async fn present(pool: &PgPool, ids: &[Uuid]) -> i64 {
@@ -316,21 +325,15 @@ mod tests {
     }
 
     async fn erased_suppressions(pool: &PgPool) -> i64 {
-        count(
+        scalar(
             pool,
-            "SELECT count(*) FROM suppressions WHERE reason = 'erased' AND $1::uuid[] IS NOT NULL",
-            &[],
+            "SELECT count(*) FROM suppressions WHERE reason = 'erased'",
         )
         .await
     }
 
     async fn pending_inbox(pool: &PgPool) -> i64 {
-        count(
-            pool,
-            "SELECT count(*) FROM ingest_inbox WHERE $1::uuid[] IS NOT NULL",
-            &[],
-        )
-        .await
+        scalar(pool, "SELECT count(*) FROM ingest_inbox").await
     }
 
     #[sqlx::test]
@@ -343,12 +346,7 @@ mod tests {
         // The restored database holds what was erased after the backup, and knows only one erasure.
         assert_eq!(present(pool, &drill.erased).await, 3);
         assert_eq!(
-            count(
-                pool,
-                "SELECT count(*) FROM erasure_requests WHERE $1::uuid[] IS NOT NULL",
-                &[]
-            )
-            .await,
+            scalar(pool, "SELECT count(*) FROM erasure_requests").await,
             1
         );
         assert_eq!(erased_suppressions(pool).await, 1);
@@ -378,11 +376,9 @@ mod tests {
         assert_eq!(erased_suppressions(pool).await, 4);
         assert_eq!(pending_inbox(pool).await, 0);
         assert_eq!(
-            count(
+            scalar(
                 pool,
-                "SELECT count(*) FROM erasure_requests \
-                 WHERE status = 'completed' AND $1::uuid[] IS NOT NULL",
-                &[]
+                "SELECT count(*) FROM erasure_requests WHERE status = 'completed'"
             )
             .await,
             3
@@ -408,11 +404,9 @@ mod tests {
             1
         );
         assert_eq!(
-            count(
+            scalar(
                 pool,
-                "SELECT count(*) FROM audit_log WHERE action = 'privacy.erasures_replayed' \
-                 AND $1::uuid[] IS NOT NULL",
-                &[]
+                "SELECT count(*) FROM audit_log WHERE action = 'privacy.erasures_replayed'"
             )
             .await,
             1
@@ -454,15 +448,9 @@ mod tests {
         fs::write(bad, b"{\"format\": \"zirv-flow-ledger/1\", \"id\": 7}").expect("a bad file");
         let before = totals(&drill.pool).await;
 
-        let refused = admin::replay_erasures(
-            &drill.pool,
-            &Context::system(),
-            Some("acme"),
-            &root(),
-            Some(&drill.dir.0),
-        )
-        .await
-        .expect_err("a bad file stops the read");
+        let refused = try_replay(&drill)
+            .await
+            .expect_err("a bad file stops the read");
 
         assert!(
             refused.to_string().contains(&bad_name),
