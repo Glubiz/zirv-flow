@@ -19,15 +19,16 @@ export interface NodeTally {
   skipped?: readonly { reason: string; count: number }[];
 }
 
-const COUNT_ROW = 22;
-const COUNT_GAP = 4;
-/** The short badges fit two to a line on a card; a skip reason takes a line of its own. */
-const SHORT_PER_LINE = 2;
+/** The badge grid of a card, in pixels. The stylesheet reads these through custom properties, so the card height below is exact. */
+export const COUNT_ROW = 22;
+export const COUNT_GAP = 4;
+/** The grid has two columns: a short badge takes one cell, a skip reason both. */
+const COUNT_COLUMNS = 2;
 
-/** The height the count badges of one step add to its card: their lines plus the gap above them. */
+/** The height the count badges of one step add to its card: their grid rows plus the gap above them. */
 export function countsHeight(counts: NodeTally): number {
   const short = 1 + (counts.waiting > 0 ? 1 : 0) + (counts.failed > 0 ? 1 : 0) + (counts.sent ? 1 : 0) + (counts.send_failed ? 1 : 0);
-  const lines = Math.ceil(short / SHORT_PER_LINE) + (counts.skipped?.length ?? 0);
+  const lines = Math.ceil(short / COUNT_COLUMNS) + (counts.skipped?.length ?? 0);
   return lines * COUNT_ROW + (lines - 1) * COUNT_GAP + COUNT_GAP;
 }
 

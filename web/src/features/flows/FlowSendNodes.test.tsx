@@ -19,9 +19,6 @@ import {
 import { lastGraph, mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
-import { layout } from "./layout";
-import type { Graph } from "./model";
-import { countsHeight } from "./overlay";
 
 beforeEach(() => {
   stubReactFlow();
@@ -326,17 +323,25 @@ describe("delivery counts on the canvas", () => {
     expect(send).toHaveAccessibleName(/20 sent, 5 skipped, There is no consent to send this message/);
   });
 
-  it("makes the card tall enough for its badge row, so the badges sit below the text", async () => {
+  it("makes the card tall enough for its badge grid, so the badges sit below the text", async () => {
     mockApi(countsRoutes());
     const user = userEvent.setup();
     mount();
     await openCounts(user);
 
+    // A wait card is 92 px; "30 entered" is one grid line: 22 px plus the 4 px gap above it.
     const wait = await screen.findByRole("group", { name: /^Wait: 1 day.*30 entered/ });
-    const plain = layout(JSON.parse(JSON.stringify(sendGraph())) as Graph).placed.get("n1")!;
-    const height = Number.parseFloat((wait.closest(".react-flow__node") as HTMLElement).style.height);
-    expect(height).toBe(plain.height + countsHeight({ entered: 30, waiting: 0, failed: 0 }));
-    expect(height).toBeGreaterThanOrEqual(plain.height + 22);
+    expect((wait.closest(".react-flow__node") as HTMLElement).style.height).toBe("118px");
+    const row = wait.querySelector(".fl-counts") as HTMLElement;
+    expect(row).toHaveStyle({ "--count-row": "22px", "--count-gap": "4px" });
+
+    // The send card is 92 px: sent, send failed and entered make two lines, two skips two more, each 22 px with 4 px gaps.
+    const send = await screen.findByRole("group", { name: /^Send an email.*30 entered/ });
+    expect((send.closest(".react-flow__node") as HTMLElement).style.height).toBe(`${92 + 4 * 22 + 3 * 4 + 4}px`);
+    const long = within(send).getByText("5 skipped: There is no consent to send this message");
+    expect(long).toHaveClass("fl-count-wide");
+    expect(long).toHaveAttribute("title", "5 skipped: There is no consent to send this message");
+    expect(within(send).getByText("20 sent")).not.toHaveClass("fl-count-wide");
   });
 
   it("shows no delivery counts on a step that sends nothing", async () => {

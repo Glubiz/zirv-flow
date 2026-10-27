@@ -44,5 +44,6 @@ describe("count badge height", () => {
     expect(countsHeight({ entered: 1, waiting: 1, failed: 0 })).toBe(26);
     expect(countsHeight({ entered: 1, waiting: 1, failed: 1 })).toBe(52);
     expect(countsHeight({ entered: 1, waiting: 0, failed: 0, skipped: [{ reason: "a", count: 1 }] })).toBe(52);
+    expect(countsHeight({ entered: 1, waiting: 0, failed: 0, skipped: [{ reason: "a", count: 1 }, { reason: "b", count: 2 }] })).toBe(78);
   });
 });
