@@ -9,6 +9,8 @@ use zirv_flow_store::apply_message_retention_for;
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
+/// The deletes commit batch by batch before the `retention.ran` row is written, so a failure
+/// after them leaves no row.
 pub(crate) struct MessagesRetention;
 
 impl JobKind for MessagesRetention {

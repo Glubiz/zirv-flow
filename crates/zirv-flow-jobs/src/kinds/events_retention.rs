@@ -9,6 +9,8 @@ use zirv_flow_store::{apply_event_retention, database_now};
 
 use crate::{JobContext, JobError, JobKind};
 
+/// The deletes commit batch by batch before the `retention.ran` row is written, so a failure
+/// after them leaves no row.
 pub(crate) struct EventsRetention;
 
 impl JobKind for EventsRetention {
@@ -31,6 +33,7 @@ impl JobKind for EventsRetention {
             partitions_skipped = report.skipped_partitions.len(),
             rejects_deleted = report.rejects_deleted,
             dedupe_deleted = report.dedupe_deleted,
+            test_sends_deleted = report.test_sends_deleted,
             "event retention ran"
         );
         ctx.audit_retention(
@@ -41,6 +44,7 @@ impl JobKind for EventsRetention {
                 ("partitions_dropped", report.partitions_dropped),
                 ("rejects_deleted", report.rejects_deleted),
                 ("dedupe_deleted", report.dedupe_deleted),
+                ("test_sends_deleted", report.test_sends_deleted),
             ],
         )
         .await?;
@@ -140,6 +144,7 @@ mod tests {
         assert_eq!(rows[0].workspace_id, None);
         assert_eq!(rows[0].summary["job"], "events.retention");
         assert_eq!(rows[0].summary["counts"]["events_deleted"], 1);
+        assert_eq!(rows[0].summary["counts"]["test_sends_deleted"], 0);
     }
 
     #[sqlx::test]

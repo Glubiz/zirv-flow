@@ -12,6 +12,8 @@ use zirv_flow_store::{
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
+/// The deletes commit batch by batch before the `retention.ran` row is written, so a failure
+/// after them leaves no row.
 pub(crate) struct DecisionsRetention;
 
 impl JobKind for DecisionsRetention {
