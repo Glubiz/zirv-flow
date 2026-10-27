@@ -12,14 +12,14 @@ mod tests {
     use zirv_flow_core::decision_actions::{self, DecisionSpec};
 
     /// The only production file that builds a `DecisionSpec`.
-    const SPEC_BUILDERS: [&str; 1] = ["zirv-flow-core/src/decision_actions.rs"];
+    const SPEC_BUILDERS: [&str; 1] = ["crates/zirv-flow-core/src/decision_actions.rs"];
 
     /// The only production files that insert into the decision log with SQL of their own; each
     /// binds its action and outcome from the registry.
     const SQL_WRITERS: [&str; 3] = [
-        "zirv-flow-store/src/decisions.rs",
-        "zirv-flow-store/src/jobs.rs",
-        "zirv-flow-store/src/segments/refresh.rs",
+        "crates/zirv-flow-store/src/decisions.rs",
+        "crates/zirv-flow-store/src/jobs.rs",
+        "crates/zirv-flow-store/src/segments/refresh.rs",
     ];
 
     /// What produces a registry row in a test.
@@ -164,8 +164,54 @@ mod tests {
         }
     }
 
+    /// Whether the byte before `at` continues an identifier, so a `b` or `r` at `at` is part of
+    /// a name and not a literal prefix.
+    fn after_identifier(bytes: &[u8], at: usize) -> bool {
+        at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_')
+    }
+
+    /// The index just past the string whose opening `"` is at `quote`, with `hashes` `#`s in
+    /// its raw delimiter (`None` for a string with escapes).
+    fn after_string(text: &str, quote: usize, hashes: Option<usize>) -> usize {
+        let bytes = text.as_bytes();
+        match hashes {
+            Some(hashes) => {
+                let close = format!("\"{}", "#".repeat(hashes));
+                text[quote + 1..]
+                    .find(&close)
+                    .map_or(bytes.len(), |end| quote + 1 + end + close.len())
+            }
+            None => {
+                let mut at = quote + 1;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+                (at + 1).min(bytes.len())
+            }
+        }
+    }
+
+    /// The index just past the block comment that starts at `at`; they nest.
+    fn after_block_comment(bytes: &[u8], at: usize) -> usize {
+        let mut level = 1;
+        let mut at = at + 2;
+        while at < bytes.len() && level > 0 {
+            if bytes[at..].starts_with(b"/*") {
+                level += 1;
+                at += 2;
+            } else if bytes[at..].starts_with(b"*/") {
+                level -= 1;
+                at += 2;
+            } else {
+                at += 1;
+            }
+        }
+        at.min(bytes.len())
+    }
+
     /// The index just past the item whose `{` is the first one at or after `from`: the matching
-    /// `}`. Comments, strings, raw strings and character literals do not count their braces.
+    /// `}`. Nested block comments, strings, byte strings, raw strings with any number of `#`s,
+    /// character and byte literals do not count their braces; a lifetime is not a literal.
     fn after_block(text: &str, from: usize) -> usize {
         let bytes = text.as_bytes();
         let mut depth = 0usize;
@@ -175,41 +221,38 @@ mod tests {
                 b'/' if bytes.get(at + 1) == Some(&b'/') => {
                     at += text[at..].find('\n').unwrap_or(bytes.len() - at);
                 }
-                b'/' if bytes.get(at + 1) == Some(&b'*') => {
-                    at += text[at + 2..]
-                        .find("*/")
-                        .map_or(bytes.len() - at, |end| end + 4);
-                }
-                b'"' => {
-                    at += 1;
-                    while at < bytes.len() && bytes[at] != b'"' {
-                        at += if bytes[at] == b'\\' { 2 } else { 1 };
-                    }
-                    at += 1;
-                }
-                b'r' if matches!(bytes.get(at + 1), Some(b'"' | b'#'))
-                    && !(at > 0
-                        && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_')) =>
-                {
-                    let hashes = bytes[at + 1..].iter().take_while(|b| **b == b'#').count();
-                    if bytes.get(at + 1 + hashes) == Some(&b'"') {
-                        let close = format!("\"{}", "#".repeat(hashes));
-                        at += 2 + hashes;
-                        at += text[at..]
-                            .find(&close)
-                            .map_or(bytes.len() - at, |end| end + close.len());
+                b'/' if bytes.get(at + 1) == Some(&b'*') => at = after_block_comment(bytes, at),
+                b'"' => at = after_string(text, at, None),
+                b'b' | b'r' if !after_identifier(bytes, at) => {
+                    let raw = if bytes[at] == b'b' { at + 1 } else { at };
+                    let hashes = bytes
+                        .get(raw + 1..)
+                        .unwrap_or_default()
+                        .iter()
+                        .take_while(|b| **b == b'#')
+                        .count();
+                    if bytes.get(raw) == Some(&b'r') && bytes.get(raw + 1 + hashes) == Some(&b'"') {
+                        at = after_string(text, raw + 1 + hashes, Some(hashes));
                     } else {
+                        // `b"` and `b'` continue as the string or character that follows.
                         at += 1;
                     }
                 }
                 b'\'' => {
-                    // A character literal, unless it is a lifetime.
                     if bytes.get(at + 1) == Some(&b'\\') {
-                        at += 2 + text[at + 2..].find('\'').map_or(0, |end| end + 1);
-                    } else if bytes.get(at + 2) == Some(&b'\'') {
-                        at += 3;
+                        // An escaped character, such as '\'' or '\u{7d}'.
+                        let body = at + 3;
+                        at = text[body.min(bytes.len())..]
+                            .find('\'')
+                            .map_or(bytes.len(), |end| body + end + 1);
                     } else {
-                        at += 1;
+                        let width = text[at + 1..].chars().next().map_or(1, char::len_utf8);
+                        if bytes.get(at + 1 + width) == Some(&b'\'') {
+                            at += width + 2;
+                        } else {
+                            // A lifetime.
+                            at += 1;
+                        }
                     }
                 }
                 b'{' => {
@@ -299,18 +342,53 @@ mod tests {
             .is_some_and(|name| name == "acceptance.rs" || name == "testing.rs")
     }
 
-    /// The production source of every crate: (path relative to `crates/`, text). A file a parent
-    /// declares as `#[cfg(test)] mod name;` is test code and is left out.
+    fn workspace_dir() -> PathBuf {
+        crates_dir().join("..")
+    }
+
+    /// The directories of the workspace members, from the `members` list of the root
+    /// `Cargo.toml`; a `dir/*` entry stands for every subdirectory that holds a `Cargo.toml`.
+    fn workspace_members() -> Vec<PathBuf> {
+        let manifest = std::fs::read_to_string(workspace_dir().join("Cargo.toml"))
+            .expect("the workspace manifest reads");
+        let after = manifest
+            .split_once("members")
+            .expect("the workspace lists members")
+            .1;
+        let list = after
+            .split_once('[')
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("the members are a list")
+            .0;
+        let mut members = Vec::new();
+        for entry in list.split('"').skip(1).step_by(2) {
+            match entry.strip_suffix("/*") {
+                Some(parent) => {
+                    let mut found: Vec<PathBuf> = std::fs::read_dir(workspace_dir().join(parent))
+                        .expect("a members directory reads")
+                        .map(|entry| entry.expect("a directory entry reads").path())
+                        .filter(|path| path.join("Cargo.toml").is_file())
+                        .collect();
+                    found.sort();
+                    members.extend(found);
+                }
+                None => members.push(workspace_dir().join(entry)),
+            }
+        }
+        members
+    }
+
+    /// The production source of every workspace member, its `build.rs` included: (path relative
+    /// to the workspace root, text). A file a parent declares as `#[cfg(test)] mod name;` is
+    /// test code and is left out.
     fn production_sources() -> Vec<(String, String)> {
         let mut found = Vec::new();
-        let mut crates: Vec<_> = std::fs::read_dir(crates_dir())
-            .expect("the crates directory reads")
-            .map(|entry| entry.expect("a directory entry reads").path())
-            .filter(|path| path.join("src").is_dir())
-            .collect();
-        crates.sort();
-        for krate in crates {
-            rust_files(&krate.join("src"), &mut found);
+        for member in workspace_members() {
+            rust_files(&member.join("src"), &mut found);
+            let build = member.join("build.rs");
+            if build.is_file() {
+                found.push(build);
+            }
         }
         let texts: Vec<(PathBuf, String)> = found
             .into_iter()
@@ -337,8 +415,8 @@ mod tests {
             .filter(|(path, _)| !is_test_file(path) && !test_files.contains(path))
             .map(|(path, text)| {
                 let relative = path
-                    .strip_prefix(crates_dir())
-                    .expect("the file is under crates")
+                    .strip_prefix(workspace_dir())
+                    .expect("the file is under the workspace")
                     .to_string_lossy()
                     .replace('\\', "/");
                 (relative, production(&text))
@@ -377,21 +455,64 @@ mod tests {
         })
     }
 
-    /// Whether `text` holds an `INSERT INTO decision_records`, whatever its case, spacing or
-    /// schema prefix.
-    fn inserts_into_the_log(text: &str) -> bool {
-        let words: Vec<String> = text
-            .split_whitespace()
-            .map(|word| word.to_ascii_lowercase())
+    /// `text` without its SQL comments: `--` to the end of the line (or to a literal `\n` in a
+    /// Rust string) and `/* .. */`, which nests. A comment that never closes is kept.
+    fn without_sql_comments(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut kept = String::with_capacity(text.len());
+        let mut at = 0;
+        let mut from = 0;
+        while at < bytes.len() {
+            let end = if bytes[at..].starts_with(b"--") {
+                let line = text[at..].find('\n').unwrap_or(bytes.len() - at);
+                let escaped = text[at..].find("\\n").unwrap_or(bytes.len() - at);
+                Some(at + line.min(escaped))
+            } else if bytes[at..].starts_with(b"/*") {
+                let end = after_block_comment(bytes, at);
+                bytes[..end].ends_with(b"*/").then_some(end)
+            } else {
+                None
+            };
+            match end {
+                Some(end) => {
+                    kept.push_str(&text[from..at]);
+                    kept.push(' ');
+                    at = end;
+                    from = end;
+                }
+                None => at += 1,
+            }
+        }
+        kept.push_str(&text[from..]);
+        kept
+    }
+
+    /// `text` in lower case with quotes and backslashes dropped, runs of white space as one
+    /// space, and no space around a dot.
+    fn normalised_sql(text: &str) -> String {
+        let flat: String = text
+            .to_ascii_lowercase()
+            .chars()
+            .filter(|c| *c != '"' && *c != '\\')
             .collect();
-        words.windows(3).any(|at| {
-            at[0].ends_with("insert")
-                && at[1] == "into"
-                && at[2]
-                    .trim_start_matches("public.")
-                    .trim_start_matches('"')
-                    .starts_with("decision_records")
-        })
+        flat.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" . ", ".")
+            .replace(" .", ".")
+            .replace(". ", ".")
+    }
+
+    /// Whether `text` holds an `INSERT INTO decision_records`, whatever its case, spacing,
+    /// quoting, comments in between or `public.` prefix.
+    fn inserts_into_the_log(text: &str) -> bool {
+        [text.to_owned(), without_sql_comments(text)]
+            .iter()
+            .map(|candidate| normalised_sql(candidate))
+            .any(|sql| {
+                sql.contains("insert into decision_records")
+                    || sql.contains("insert into public.decision_records")
+            })
     }
 
     /// What is wrong with one production file, as messages.
@@ -558,7 +679,7 @@ mod tests {
         );
         assert!(
             problems(
-                "zirv-flow-store/src/jobs.rs",
+                "crates/zirv-flow-store/src/jobs.rs",
                 "INSERT INTO decision_records"
             )
             .is_empty()
@@ -593,6 +714,101 @@ mod tests {
         assert!(production(text).contains("fn later"));
         assert_eq!(test_module_files(text), ["acceptance"]);
         assert!(test_module_files("#[cfg(test)]\nmod t {\n}\n").is_empty());
+    }
+
+    #[test]
+    fn the_scan_still_reads_a_writer_after_each_literal_a_test_module_can_hold() {
+        let writer = "fn later() { sqlx::query(\"INSERT INTO decision_records (id)\"); }\n";
+        let constructs = [
+            "/* /* */ } */",
+            "/* /* } */ */",
+            "let s = br##\"} \"# }\"##;",
+            "let s = br\"}\";",
+            "let s = r##\"\"# }\"##;",
+            "let s = b\"}\";",
+            "let c = b'}';",
+            "let c = '}';",
+            "let c = '\\'';",
+            "let c = '\\u{7d}';",
+            "fn f<'a>(x: &'a str) -> &'a str { x }",
+            "let s = \"\\\"}\";",
+            "// }",
+        ];
+        for construct in constructs {
+            let text = format!(
+                "#[cfg(test)]\nmod tests {{\n    fn f() {{
+{construct}
+    }}\n}}\n{writer}"
+            );
+
+            let found = problems("zirv-flow-api/src/x.rs", &production(&text));
+
+            assert_eq!(
+                found,
+                ["zirv-flow-api/src/x.rs: writes decision_records outside the registry"],
+                "{construct}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scan_drops_a_test_module_that_holds_each_literal() {
+        let text = "#[cfg(test)]\nmod tests {\n    fn f() { let s = br#\"}\"#; /* /* */ } */ let c = '}'; }\n    fn g() { INSERT INTO decision_records }\n}\nfn after() {}\n";
+
+        assert_eq!(production(text), "fn after() {}\n");
+    }
+
+    #[test]
+    fn the_scan_catches_an_insert_with_spaced_dots_quotes_and_comments() {
+        let spellings = [
+            "INSERT INTO public . decision_records (id)",
+            "INSERT INTO \"public\" . \"decision_records\" (id)",
+            "INSERT /* a */ INTO -- b\n decision_records (id)",
+            "insert /* a /* nested */ b */ into decision_records",
+            "insert into public.\n  decision_records",
+            "-- note\\nINSERT INTO decision_records (id)",
+            "INSERT INTO \\\"decision_records\\\" (id)",
+        ];
+        for sql in spellings {
+            assert!(inserts_into_the_log(sql), "{sql}");
+        }
+        assert!(!inserts_into_the_log(
+            "INSERT INTO public.audit_entries (id)"
+        ));
+    }
+
+    #[test]
+    fn the_workspace_members_come_from_the_manifest() {
+        let members: Vec<String> = workspace_members()
+            .iter()
+            .map(|member| {
+                let relative = member
+                    .strip_prefix(workspace_dir())
+                    .expect("under the root");
+                relative.to_string_lossy().replace('\\', "/")
+            })
+            .collect();
+
+        assert!(
+            members.contains(&"crates/zirv-flow-store".to_owned()),
+            "{members:?}"
+        );
+        assert!(members.contains(&"tools/loadgen".to_owned()), "{members:?}");
+        assert!(
+            members.contains(&"tools/renderbench".to_owned()),
+            "{members:?}"
+        );
+        let sources = production_sources();
+        for expected in [
+            "crates/zirv-flow-store/build.rs",
+            "crates/zirv-flow-api/build.rs",
+            "tools/loadgen/src/main.rs",
+        ] {
+            assert!(
+                sources.iter().any(|(path, _)| path == expected),
+                "{expected}"
+            );
+        }
     }
 
     #[test]
