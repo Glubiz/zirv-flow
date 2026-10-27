@@ -32,6 +32,19 @@ export function countsHeight(counts: NodeTally): number {
   return lines * COUNT_ROW + (lines - 1) * COUNT_GAP + COUNT_GAP;
 }
 
+/** The mark line a selected enrollment adds to a card, in pixels: its row and the gap above it. */
+export const MARK_ROW = 18;
+export const MARK_GAP = 2;
+
+/**
+ * The height a counted card needs on top of its usual one: its badge grid, and the mark line when an
+ * enrollment marks the step. A step without counts keeps its usual height, mark or not.
+ */
+export function overlayExtra(counts: NodeTally | undefined, marked: boolean): number {
+  if (!counts) return 0;
+  return countsHeight(counts) + (marked ? MARK_ROW + MARK_GAP : 0);
+}
+
 /** What is drawn over the canvas: a path with its numbers, counts per step, marks. */
 export interface Overlay {
   /** The numbers a step has on the path (a step can be reached twice), by step id. */

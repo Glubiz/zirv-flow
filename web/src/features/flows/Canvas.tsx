@@ -23,7 +23,7 @@ import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
-import { COUNT_GAP, COUNT_ROW, countsHeight, TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
+import { COUNT_GAP, COUNT_ROW, MARK_ROW, overlayExtra, TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
 import {
   connectionWire,
   entryOf,
@@ -120,7 +120,11 @@ const Step = memo(function Step({ data }: NodeProps<StepNode>) {
           {data.stepNumbers.join(", ")}
         </span>
       ) : null}
-      {data.mark ? <span className={`fl-mark fl-mark-${data.mark.tone}`}>{data.mark.text}</span> : null}
+      {data.mark ? (
+        <span className={`fl-mark fl-mark-${data.mark.tone}`} title={data.mark.text} style={{ "--mark-row": `${MARK_ROW}px` } as CSSProperties}>
+          {data.mark.text}
+        </span>
+      ) : null}
       {data.counts ? (
         <div className="fl-counts" style={{ "--count-row": `${COUNT_ROW}px`, "--count-gap": `${COUNT_GAP}px` } as CSSProperties}>
           {countBadges(data.counts).map((badge) => (
@@ -401,11 +405,12 @@ function Surface(props: CanvasProps) {
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(flashTimer.current), []);
   const counts = overlay?.counts;
+  const marks = overlay?.marks;
   const plan = useMemo(() => {
     const extra = new Map<string, number>();
-    for (const [id, tally] of counts ?? []) extra.set(id, countsHeight(tally));
+    for (const [id, tally] of counts ?? []) extra.set(id, overlayExtra(tally, marks?.has(id) === true));
     return layout(graph, extra);
-  }, [graph, counts]);
+  }, [graph, counts, marks]);
 
   const nodes = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));
