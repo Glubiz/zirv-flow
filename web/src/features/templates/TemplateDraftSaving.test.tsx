@@ -103,6 +103,54 @@ describe("saving the draft", () => {
   });
 });
 
+describe("a draft saved by someone else", () => {
+  const CONFLICT = problem(409, "Conflict", "the draft was saved by someone else; read it again", undefined, "template_draft_revision_mismatch");
+  const GET = `GET ${WS}/templates/${TEMPLATE_ID}`;
+
+  it("sends the revision it holds with every save", async () => {
+    const calls = mockApi(templateRoutes());
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("textbox", { name: /source/ }));
+    await user.paste("x");
+    await waitFor(() => expect(drafts(calls)).toHaveLength(1), WAIT);
+
+    const put = calls.find((call) => call.method === "PUT" && call.path.endsWith("/draft"));
+    expect((put?.body as { revision: number }).revision).toBe(1);
+  });
+
+  it("keeps the edit, says another change was saved, stops saving, and loads the newer draft on request", async () => {
+    const base = templateRoutes();
+    const newer = templateDetail({}, { schema: 1, channel: "email", mode: "code", email: { subject: "Newer", sender: "x", category: "marketing", syntax: "html", html: "<p>newer</p>", text: "" } });
+    let served: unknown = null;
+    const calls = mockApi({
+      ...base,
+      [PUT]: () => CONFLICT.clone(),
+      [GET]: async (request) => (served ? new Response(JSON.stringify(served), { headers: { "content-type": "application/json" } }) : (base[GET] as Handler)(request)),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    const field = await screen.findByRole("textbox", { name: /source/ });
+    await user.click(field);
+    await user.paste("MYEDIT");
+    expect(await screen.findByText(/Another change was saved to this draft/, undefined, WAIT)).toBeInTheDocument();
+    expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: /source/ }).value).toContain("MYEDIT");
+
+    await user.paste("MORE");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(drafts(calls)).toHaveLength(1);
+
+    served = { ...newer, draft: { ...newer.draft, revision: 3 } };
+    await user.click(screen.getByRole("button", { name: "Load the newer draft" }));
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: /source/ })).toHaveValue("<p>newer</p>"), WAIT);
+    expect(screen.queryByText(/Another change was saved to this draft/)).not.toBeInTheDocument();
+    expect(await screen.findByText("Draft saved", undefined, WAIT)).toBeInTheDocument();
+  });
+});
+
 describe("the other template fixes", () => {
   it("offers no test send for a webhook template", async () => {
     const document: Doc = { schema: 1, channel: "webhook", mode: "code", webhook: { headers: {}, body: "{}" } };

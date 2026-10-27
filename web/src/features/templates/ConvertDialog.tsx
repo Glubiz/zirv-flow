@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError } from "../../ui";
 import type { TemplateDetail } from "./model";
 
@@ -9,12 +9,16 @@ interface Props {
   templateId: string;
   /** Saves any pending edit first; resolves false when it could not. */
   flush: () => Promise<boolean>;
+  /** The draft revision the editor holds, read once the pending edit is saved. */
+  revision: () => number;
+  /** The draft was saved by someone else first; nothing was converted. */
+  onConflict: () => void;
   onClose: () => void;
   onConverted: (detail: TemplateDetail) => void;
 }
 
 /** Converting is one way, so the dialog says that before it does anything. */
-export function ConvertDialog({ workspaceId, templateId, flush, onClose, onConverted }: Props) {
+export function ConvertDialog({ workspaceId, templateId, flush, revision, onConflict, onClose, onConverted }: Props) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
@@ -28,10 +32,15 @@ export function ConvertDialog({ workspaceId, templateId, flush, onClose, onConve
         return;
       }
       const detail = await unwrap(
-        client.POST("/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml", { params: { path: { ws: workspaceId, id: templateId } } }),
+        client.POST("/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml", { params: { path: { ws: workspaceId, id: templateId } }, body: { revision: revision() } }),
       );
       onConverted(detail);
     } catch (error) {
+      if (error instanceof ApiError && error.code === "template_draft_revision_mismatch") {
+        onConflict();
+        onClose();
+        return;
+      }
       setFailure(describeError(error));
       setBusy(false);
     }
