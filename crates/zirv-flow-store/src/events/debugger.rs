@@ -346,6 +346,22 @@ pub async fn debugger_feed_start<'e>(
     .map_err(StoreError::query)
 }
 
+/// The name of this life of the feed: a random value kept in an unlogged one-row table, so a
+/// crash that empties the feed empties it too and the next call names a new life. It creates
+/// the row when it is missing; concurrent callers agree on one value.
+pub async fn debugger_epoch<'e>(executor: impl PgExecutor<'e>) -> Result<String, StoreError> {
+    sqlx::query_scalar(
+        "WITH made AS (\
+            INSERT INTO debugger_epoch (epoch) \
+            VALUES (left(replace(gen_random_uuid()::text, '-', ''), 12)) \
+            ON CONFLICT (singleton) DO NOTHING RETURNING epoch) \
+         SELECT epoch FROM made UNION ALL SELECT epoch FROM debugger_epoch LIMIT 1",
+    )
+    .fetch_one(executor)
+    .await
+    .map_err(StoreError::query)
+}
+
 /// Deletes feed rows older than [`FEED_RETENTION_MINUTES`] and watch marks that expired more
 /// than a minute ago. Returns the feed rows deleted.
 pub async fn prune_debugger_feed(pool: &crate::PgPool) -> Result<u64, StoreError> {
@@ -560,6 +576,22 @@ mod tests {
         assert_eq!(nothing_settled, 0);
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_epoch_is_stable_until_the_table_is_emptied_as_a_crash_does(pool: PgPool) {
+        let first = debugger_epoch(&pool).await.unwrap();
+        let again = debugger_epoch(&pool).await.unwrap();
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let after_crash = debugger_epoch(&pool).await.unwrap();
+
+        assert_eq!(first, again);
+        assert_eq!(first.len(), 12);
+        assert_ne!(first, after_crash);
+    }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn pruning_deletes_old_rows_and_keeps_recent_ones(pool: PgPool) {
