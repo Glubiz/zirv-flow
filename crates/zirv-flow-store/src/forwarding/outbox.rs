@@ -277,6 +277,9 @@ pub async fn settle_row(
     .await
     .map_err(StoreError::query)?
     .rows_affected();
+    if changed > 0 && matches!(how, Settled::Dead) {
+        metrics::counter!("zirv_flow_destination_forwarding_dead_total").increment(1);
+    }
     Ok(changed > 0)
 }
 
@@ -964,6 +967,9 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_claim_counts_the_attempt_and_a_settle_is_fenced_on_its_token(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
         let (ws, destination) = fixture(&pool, "claim").await;
         add_rule(
             &pool,
@@ -1051,6 +1057,12 @@ mod tests {
         assert_eq!(
             (letters[0].last_error.as_deref(), letters[0].attempts),
             (Some("http_5xx"), 2)
+        );
+        // Only the settle that changed the row counts: the fenced one did not.
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_destination_forwarding_dead_total 1"),
+            "{output}"
         );
     }
 

@@ -22,6 +22,7 @@ mod import_run;
 mod ingest_drain;
 mod ingest_replay;
 mod kafka_consume;
+mod messages_retention;
 mod noop;
 mod person_merge_rewrite;
 mod privacy_erase;
@@ -46,6 +47,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &traits_slot::TraitsSlotBackfill,
     &traits_slot::TraitsSlotClear,
     &events_retention::EventsRetention,
+    &messages_retention::MessagesRetention,
     &ai_transcripts::AiTranscripts,
     &ingest_drain::IngestDrain,
     &ingest_replay::IngestReplay,

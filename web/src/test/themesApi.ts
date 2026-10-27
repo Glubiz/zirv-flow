@@ -75,7 +75,7 @@ export function templateUse(n: number) {
 
 interface Options {
   /** `admin` publishes and archives; `member` edits; `reader` only looks. */
-  role?: "admin" | "member" | "reader";
+  role?: "admin" | "editor" | "reader";
   detail?: Record<string, unknown>;
   /** The list the themes page reads. */
   list?: unknown[];
@@ -95,7 +95,7 @@ export function themeRoutes({ role = "admin", detail, list, preview, uses = used
       ? { "GET /api/v1/session": () => json(session(OWNER)), "GET /api/v1/workspaces/ws1/members": () => json(members("admin")) }
       : {
           "GET /api/v1/session": () => json(session(MEMBER)),
-          "GET /api/v1/workspaces/ws1/members": () => json(members(role === "member" ? "member" : null)),
+          "GET /api/v1/workspaces/ws1/members": () => json(members(role === "editor" ? "editor" : null)),
         };
   return {
     ...actorRoutes,

@@ -17,7 +17,7 @@ const NEWSLETTER = {
 };
 const VIPS = { ...NEWSLETTER, id: "11111111-0000-4000-8000-000000000002", name: "VIPs", description: "", member_count: 1 };
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -105,7 +105,7 @@ describe("lists", () => {
   it("lets a member who is not an admin manage lists", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       "GET /api/v1/workspaces/ws1/lists": () => json([NEWSLETTER]),
     });
     mount();

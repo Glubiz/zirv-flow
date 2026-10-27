@@ -51,7 +51,7 @@ const LIST = "GET /api/v1/workspaces/ws1/identity-conflicts";
 const DETAIL_ROUTE = `GET /api/v1/workspaces/ws1/identity-conflicts/${CONFLICT.id}`;
 const RESOLVE_ROUTE = `POST /api/v1/workspaces/ws1/identity-conflicts/${CONFLICT.id}/resolve`;
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -316,7 +316,7 @@ describe("identity conflicts", () => {
   it("hides values and actions from a member who is not an admin", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       [LIST]: () => json({ conflicts: [CONFLICT], next_before: null }),
       [DETAIL_ROUTE]: () => json(MASKED_DETAIL),
     });

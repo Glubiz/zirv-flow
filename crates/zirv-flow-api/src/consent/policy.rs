@@ -502,7 +502,7 @@ pub(crate) async fn put_draft(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<SaveConsentPolicyDraftRequest>,
 ) -> Result<Json<ConsentPolicyDraftBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let policy = save_policy_draft(
         &state.pool,
         &principal.context(),

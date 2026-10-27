@@ -173,7 +173,7 @@ pub(crate) async fn test(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<FlowTestRequest>,
 ) -> Result<Json<FlowTestBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let flow_id: Uuid = path_id(&id)?;
     let script = script_of(&body.script)?;
     if body.version.is_some() && body.graph.is_some() {

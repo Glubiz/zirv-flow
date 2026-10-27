@@ -1247,9 +1247,15 @@ impl From<crate::admin::AdminError> for ApiError {
             AdminError::Invalid(error) => error.into(),
             AdminError::Conflict(detail) => Self::new(StatusCode::CONFLICT, detail),
             AdminError::NotFound(_) => Self::not_found(),
+            AdminError::LastAdmin => Self {
+                code: Some("last_admin"),
+                ..Self::new(StatusCode::CONFLICT, crate::admin::LAST_ADMIN)
+            },
             AdminError::Store(error) => error.into(),
             AdminError::Slot(error) => crate::people::slots::slot_problem(&error),
-            AdminError::Secret(_) => Self::internal(),
+            AdminError::Secret(_) | AdminError::Ledger(_) | AdminError::Merge(_) => {
+                Self::internal()
+            }
             AdminError::Utm { code, detail } => Self {
                 code: Some(code),
                 ..Self::unprocessable(detail)
@@ -1425,6 +1431,11 @@ mod tests {
         let status = |error| ApiError::from(error).status;
         assert_eq!(status(AdminError::Conflict("taken")), StatusCode::CONFLICT);
         assert_eq!(status(AdminError::NotFound("user")), StatusCode::NOT_FOUND);
+        assert_eq!(status(AdminError::LastAdmin), StatusCode::CONFLICT);
+        assert_eq!(
+            ApiError::from(AdminError::LastAdmin).code,
+            Some("last_admin")
+        );
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ function posted(calls: { method: string; path: string }[], action: string) {
 }
 
 describe("lifecycle actions are for admins", () => {
-  it.each(["member", "reader"] as const)("offers a %s none of publish, pause, resume or archive", async (role) => {
+  it.each(["editor", "reader"] as const)("offers a %s none of publish, pause, resume or archive", async (role) => {
     for (const state of ["published", "paused"]) {
       mockApi(flowRoutes({ role, flow: { state, current_version: 2 } }));
       const view = mount();

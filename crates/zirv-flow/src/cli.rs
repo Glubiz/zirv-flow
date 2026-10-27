@@ -93,6 +93,19 @@ pub(crate) enum AdminCommand {
         /// Only this workspace, by slug. All workspaces when omitted.
         #[arg(long, value_name = "SLUG")]
         workspace: Option<String>,
+        /// A privacy.ledger_dir to merge first: every file is validated (one bad file stops the
+        /// command, naming it, before anything changes), the entries the database lacks are
+        /// added as completed, and the replay then covers them.
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
+    /// Write a ledger file for every completed erasure in the database into a directory, a
+    /// full snapshot that also covers erasures made before privacy.ledger_dir was set. Prints
+    /// counts only. Needs no password and no master key.
+    ExportLedger {
+        /// The directory to write into; it must exist.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
     },
     /// Re-wrap every stored data key, and the HMAC root, with the current master key, in one
     /// transaction, and print the count. Ciphertexts are untouched, and a second run re-wraps
@@ -240,12 +253,14 @@ mod tests {
         assert!(matches!(
             all.command,
             Some(Command::Admin(AdminCommand::ReplayErasures {
-                workspace: None
+                workspace: None,
+                from: None
             }))
         ));
         match one.command {
-            Some(Command::Admin(AdminCommand::ReplayErasures { workspace })) => {
+            Some(Command::Admin(AdminCommand::ReplayErasures { workspace, from })) => {
                 assert_eq!(workspace.as_deref(), Some("acme"));
+                assert_eq!(from, None);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -254,6 +269,52 @@ mod tests {
                 .is_err()
         );
     }
+    #[test]
+    fn replay_erasures_takes_a_from_directory_and_export_ledger_an_out_directory() {
+        let replay = Cli::try_parse_from([
+            "zirv-flow",
+            "admin",
+            "replay-erasures",
+            "--from",
+            "/mnt/ledger",
+        ])
+        .unwrap();
+        let export = Cli::try_parse_from([
+            "zirv-flow",
+            "admin",
+            "export-ledger",
+            "--out",
+            "/mnt/ledger",
+        ])
+        .unwrap();
+
+        match replay.command {
+            Some(Command::Admin(AdminCommand::ReplayErasures { from, .. })) => {
+                assert_eq!(from, Some(PathBuf::from("/mnt/ledger")));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match export.command {
+            Some(Command::Admin(AdminCommand::ExportLedger { out })) => {
+                assert_eq!(out, PathBuf::from("/mnt/ledger"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["zirv-flow", "admin", "export-ledger"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "zirv-flow",
+                "admin",
+                "export-ledger",
+                "--out",
+                "x",
+                "--password",
+                "y"
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn evaluate_assistant_parses_workspace_and_case() {
         let all = Cli::try_parse_from([

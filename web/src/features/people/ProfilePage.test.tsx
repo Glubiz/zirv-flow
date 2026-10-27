@@ -92,7 +92,7 @@ const NOW_PAGE = {
   next_before: null,
 };
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -167,7 +167,7 @@ describe("a person's profile", () => {
   it("hides identifiers and PII traits from a member and says why", async () => {
     asOwner({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      [MEMBERS_ROUTE]: () => json(members("member", MEMBER.id)),
+      [MEMBERS_ROUTE]: () => json(members("editor", MEMBER.id)),
       [PROFILE_ROUTE]: () =>
         json(
           profile({

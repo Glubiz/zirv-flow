@@ -15,7 +15,7 @@ function mount() {
   return renderRoute("/w/ws1/images", "/w/:ws/images", <AssetLibraryPage />);
 }
 
-function asRole(role: "admin" | "member" | null, list = listBody([A, B]), more: Record<string, (r: Request) => Response> = {}) {
+function asRole(role: "admin" | "editor" | null, list = listBody([A, B]), more: Record<string, (r: Request) => Response> = {}) {
   const user = role === "admin" ? OWNER : MEMBER;
   return mockApi({
     "GET /api/v1/session": () => json(session(user, "csrf-img")),
@@ -106,7 +106,7 @@ describe("the image library", () => {
   });
 
   it("lets a member upload but not delete", async () => {
-    asRole("member");
+    asRole("editor");
     const user = userEvent.setup();
     mount();
 

@@ -8,6 +8,8 @@ use std::io::Write;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use futures_util::{Stream, TryStreamExt};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sqlx::PgConnection;
 use sqlx::prelude::FromRow;
@@ -27,12 +29,67 @@ pub const EXPORT_FORMAT: &str = "zirv-flow.person-export/v1";
 /// Events are read this many at a time.
 const EVENT_BATCH: i64 = 1000;
 
+/// The default of `privacy.export_max_bytes`: 256 MiB of uncompressed JSON.
+pub const EXPORT_MAX_BYTES_DEFAULT: u64 = 256 * 1024 * 1024;
+
+/// The bounds of `privacy.export_max_bytes`: 1 MiB to 4 GiB.
+pub const EXPORT_MAX_BYTES_MIN: u64 = 1024 * 1024;
+pub const EXPORT_MAX_BYTES_MAX: u64 = 4 * 1024 * 1024 * 1024;
+
+/// The code an export shows when it grew past the cap and was stopped.
+pub const EXPORT_TOO_LARGE: &str = "export_too_large";
+
+/// The sections of the document, each with the tables it reads. Every table that holds a person
+/// is here or in [`EXPORT_EXCLUDED`]; a catalog test fails on one that is in neither.
+pub const EXPORT_SECTIONS: &[(&str, &[&str])] = &[
+    ("profile", &["people"]),
+    ("identities", &["identities"]),
+    ("source_records", &["source_records"]),
+    ("events", &["events"]),
+    ("consent", &["consent"]),
+    ("consent_history", &["consent_changes"]),
+    ("lists", &["list_members"]),
+    ("segments", &["segment_members"]),
+    ("list_history", &["list_member_changes"]),
+    ("merges", &["person_merges"]),
+    ("identity_conflicts", &["identity_conflicts"]),
+    ("enrollments", &["enrollments"]),
+    ("step_executions", &["step_executions"]),
+    ("enrollment_waits", &["enrollment_waits"]),
+    ("flow_entries", &["flow_entries"]),
+    ("messages", &["messages"]),
+    ("message_links", &["message_links"]),
+    ("forwarding_outbox", &["forwarding_outbox"]),
+    ("erasure_handled_markers", &["erasure_handled_markers"]),
+    ("ingest_rejects", &["ingest_rejects"]),
+    ("decision_records", &["decision_records"]),
+    ("template_preview_people", &["template_preview_people"]),
+];
+
+/// Tables that hold or name a person and are deliberately not exported, with the reason.
+pub const EXPORT_EXCLUDED: &[(&str, &str)] = &[
+    ("person_changes", "internal change feed; ids and times only"),
+    ("privacy_exports", "the export itself"),
+    ("event_dedupe", "message ids only"),
+    ("debugger_feed", "a 15-minute buffer of event ids"),
+    (
+        "jobs",
+        "payload copies of data already exported; purged on erase",
+    ),
+    (
+        "ai_transcripts",
+        "free text matched by needle on erase only, so an export cannot find it",
+    ),
+    ("suppressions", "the ledger; kept on purpose"),
+    ("erasure_requests", "the ledger; kept on purpose"),
+];
+
 /// Where an export stands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportStatus {
     Pending,
     Ready,
-    /// The job ran out of attempts.
+    /// The job ran out of attempts, or the document passed the size cap.
     Failed,
     /// The 24 hours are over and the content is gone.
     Expired,
@@ -73,6 +130,9 @@ pub struct PrivacyExport {
     pub expires_at: Option<OffsetDateTime>,
     pub size_bytes: Option<i64>,
     pub trace_id: Uuid,
+    /// Why the export failed, when the build knows: [`EXPORT_TOO_LARGE`]. A job that ran out of
+    /// attempts carries none.
+    pub failure_code: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -86,6 +146,7 @@ struct ExportRow {
     expires_at: Option<OffsetDateTime>,
     size_bytes: Option<i64>,
     trace_id: Uuid,
+    failure_code: Option<String>,
 }
 
 impl ExportRow {
@@ -100,11 +161,13 @@ impl ExportRow {
             expires_at: self.expires_at,
             size_bytes: self.size_bytes,
             trace_id: self.trace_id,
+            failure_code: self.failure_code,
         })
     }
 }
 
-/// The columns of [`PrivacyExport`]. A pending export whose job went dead reads as failed,
+/// The columns of [`PrivacyExport`]. A row stored as failed was stopped by the size cap, the only
+/// failure the build records itself. A pending export whose job went dead reads as failed,
 /// and a ready one past its expiry as expired, even before the hourly upkeep has run.
 const EXPORT_COLUMNS: &str = "x.id, x.person_id, \
     CASE WHEN x.status = 'pending' AND EXISTS ( \
@@ -112,7 +175,8 @@ const EXPORT_COLUMNS: &str = "x.id, x.person_id, \
               AND j.unique_key = 'privacy.export:' || x.id::text) THEN 'failed' \
          WHEN x.status = 'ready' AND x.expires_at <= now() THEN 'expired' \
          ELSE x.status END AS status, \
-    x.requested_by, x.requested_at, x.ready_at, x.expires_at, x.size_bytes, x.trace_id";
+    x.requested_by, x.requested_at, x.ready_at, x.expires_at, x.size_bytes, x.trace_id, \
+    CASE WHEN x.status = 'failed' THEN 'export_too_large' END AS failure_code";
 
 /// Where the next page of exports starts: strictly before this `(requested_at, id)`.
 pub type ExportCursor = (OffsetDateTime, Uuid);
@@ -134,7 +198,7 @@ pub async fn request_export(
         "INSERT INTO privacy_exports (id, workspace_id, person_id, requested_by, trace_id) \
          VALUES ($1, $2, $3, $4, $5) \
          RETURNING id, person_id, status, requested_by, requested_at, ready_at, expires_at, \
-                   size_bytes, trace_id",
+                   size_bytes, trace_id, NULL::text AS failure_code",
     )
     .bind(id)
     .bind(workspace.as_uuid())
@@ -208,13 +272,18 @@ pub enum BuildOutcome {
     NotPending,
     /// The workspace has no such export, or its person is gone.
     NoSuchExport,
+    /// The document passed the size cap; the export is stored as failed, with no content.
+    TooLarge,
 }
 
-/// Builds the export in the caller's transaction and marks it ready.
+/// Builds the export in the caller's transaction and marks it ready. The uncompressed document
+/// may hold at most `max_bytes`; collection stops at the row that passes it and the export is
+/// stored as failed, with no content.
 pub async fn build_export(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     export: Uuid,
+    max_bytes: u64,
 ) -> Result<BuildOutcome, StoreError> {
     let row: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT person_id, status FROM privacy_exports \
@@ -231,8 +300,22 @@ pub async fn build_export(
     if status != ExportStatus::Pending.as_str() {
         return Ok(BuildOutcome::NotPending);
     }
-    let Some(document) = person_document(connection, workspace, person).await? else {
-        return Ok(BuildOutcome::NoSuchExport);
+    let document = match person_document(connection, workspace, person, max_bytes).await {
+        Ok(Some(document)) => document,
+        Ok(None) => return Ok(BuildOutcome::NoSuchExport),
+        Err(Abort::Store(error)) => return Err(error),
+        Err(Abort::TooLarge) => {
+            sqlx::query(
+                "UPDATE privacy_exports SET status = 'failed', content = NULL, size_bytes = NULL \
+                 WHERE workspace_id = $1 AND id = $2",
+            )
+            .bind(workspace.as_uuid())
+            .bind(export)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+            return Ok(BuildOutcome::TooLarge);
+        }
     };
     let compressed = gzip(&document)?;
     let size_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
@@ -314,13 +397,70 @@ fn gzip(document: &Value) -> Result<Vec<u8>, StoreError> {
         .map_err(|error| StoreError::query(sqlx::Error::Io(error)))
 }
 
+/// Why collecting a document stopped.
+#[derive(Debug)]
+enum Abort {
+    Store(StoreError),
+    /// The rows read so far passed the cap.
+    TooLarge,
+}
+
+impl From<StoreError> for Abort {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<serde_json::Error> for Abort {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Store(StoreError::query(sqlx::Error::Encode(error.into())))
+    }
+}
+
+/// Counts the JSON bytes of the rows a document takes, so collection stops at the cap.
+struct Budget {
+    max: u64,
+    used: u64,
+}
+
+impl Budget {
+    fn new(max: u64) -> Self {
+        Self { max, used: 0 }
+    }
+
+    fn take(&mut self, row: &Value) -> Result<(), Abort> {
+        let mut counter = Counter(0);
+        // Counting cannot fail.
+        let _ = serde_json::to_writer(&mut counter, row);
+        self.used = self.used.saturating_add(counter.0).saturating_add(1);
+        if self.used > self.max {
+            return Err(Abort::TooLarge);
+        }
+        Ok(())
+    }
+}
+
+struct Counter(u64);
+
+impl Write for Counter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The export document of the person's group (the survivor and the people merged into them),
 /// or none when the person is gone.
 async fn person_document(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     person: Uuid,
-) -> Result<Option<Value>, StoreError> {
+    max_bytes: u64,
+) -> Result<Option<Value>, Abort> {
     let Some(current) = current_person(&mut *connection, workspace, person).await? else {
         return Ok(None);
     };
@@ -335,10 +475,22 @@ async fn person_document(
     .map_err(StoreError::query)?;
     let merged: Vec<&Uuid> = people.iter().filter(|id| **id != current).collect();
 
+    let generated_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
+    let mut budget = Budget::new(max_bytes);
+    // The empty document carries every key, delimiter and the envelope; the rows and the merged
+    // ids are charged on top of it.
+    budget.take(&serde_json::to_value(ExportDocument::empty(
+        &generated_at,
+        current,
+    ))?)?;
+    budget.take(&json!(merged))?;
     let mut section = Section {
         connection,
         workspace,
         people: &people,
+        budget,
     };
     let profile = section
         .rows(
@@ -428,28 +580,190 @@ async fn person_document(
         )
         .await?;
 
-    let generated_at = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .map_err(|error| StoreError::query(sqlx::Error::Encode(error.into())))?;
-    Ok(Some(json!({
-        "format": EXPORT_FORMAT,
-        "generated_at": generated_at,
-        "person": {
-            "id": current,
-            "merged_ids": merged,
-            "profile": profile,
-            "identities": identities,
-            "source_records": source_records,
-            "events": events,
-            "consent": consent,
-            "consent_history": consent_history,
-            "lists": lists,
-            "segments": segments,
-            "list_history": list_history,
-            "merges": merges,
-            "identity_conflicts": identity_conflicts,
+    let enrollments = section
+        .rows(
+            "SELECT id, flow_id, flow_version, person_id, state, node, context, occurrence_id, \
+                    wake_at, exit_reason, failed_node, cause_kind, cause_id, trace_id, \
+                    created_at, updated_at, ended_at \
+             FROM enrollments WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY created_at, id",
+        )
+        .await?;
+    let step_executions = section
+        .rows(
+            "SELECT s.id, s.enrollment_id, s.node_id, s.outcome, s.attempts, s.started_at \
+             FROM step_executions s JOIN enrollments e ON e.id = s.enrollment_id \
+             WHERE e.workspace_id = $1 AND e.person_id = ANY($2) \
+             ORDER BY s.started_at, s.id",
+        )
+        .await?;
+    let enrollment_waits = section
+        .rows(
+            "SELECT enrollment_id, person_id, event_name, filters, wake_version, timeout_at \
+             FROM enrollment_waits WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY timeout_at, enrollment_id, event_name",
+        )
+        .await?;
+    let flow_entries = section
+        .rows(
+            "SELECT flow_id, person_id, entries, last_entered_at \
+             FROM flow_entries WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY last_entered_at, flow_id",
+        )
+        .await?;
+    let messages = section
+        .rows(
+            "SELECT m.id, m.person_id, m.enrollment_id, m.flow_id, m.flow_version, m.node_id, \
+                    m.template_id, m.template_version, m.destination_id, m.sender_identity_id, \
+                    m.category, m.channel, m.topic_id, t.key AS topic, m.dimensions, m.status, \
+                    m.reason, m.deciding_rule, m.gate_results, m.test, m.attempts, \
+                    m.created_at, m.completed_at \
+             FROM messages m LEFT JOIN topics t \
+                ON t.workspace_id = m.workspace_id AND t.id = m.topic_id \
+             WHERE m.workspace_id = $1 AND m.person_id = ANY($2) \
+             ORDER BY m.created_at, m.id",
+        )
+        .await?;
+    let message_links = section
+        .rows(
+            "SELECT l.message_id, l.link_index, l.url \
+             FROM message_links l JOIN messages m \
+                ON m.workspace_id = l.workspace_id AND m.id = l.message_id \
+             WHERE m.workspace_id = $1 AND m.person_id = ANY($2) \
+             ORDER BY m.created_at, l.message_id, l.link_index",
+        )
+        .await?;
+    let forwarding_outbox = section
+        .rows(
+            "SELECT id, destination_id, rule_id, event_id, person_id, idempotency_key, payload, \
+                    state, attempts, last_error, next_attempt_at, created_at, updated_at \
+             FROM forwarding_outbox WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY created_at, id",
+        )
+        .await?;
+    let erasure_handled_markers = section
+        .rows(
+            "SELECT person_id, destination_id, first_handled_at \
+             FROM erasure_handled_markers WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY first_handled_at, destination_id",
+        )
+        .await?;
+    let ingest_rejects = section
+        .rows(
+            "SELECT id, person_id, received_at, source, kind, name, reason, reasons, payload, \
+                    message_id, trace_id, replayed_at, replay_event_id \
+             FROM ingest_rejects WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY received_at, id",
+        )
+        .await?;
+    // Read through the partial person index of migration 0012.
+    let decision_records = section
+        .rows(
+            "SELECT id, trace_id, recorded_at, action, outcome, reason, cause_kind, cause_id, \
+                    subject_ids, job_id, attempt \
+             FROM decision_records WHERE workspace_id = $1 AND subject_ids ? 'person' \
+               AND subject_ids ->> 'person' = ANY($2::text[]) \
+             ORDER BY recorded_at, id",
+        )
+        .await?;
+    let template_preview_people = section
+        .rows(
+            "SELECT template_id, person_id, added_by, created_at \
+             FROM template_preview_people WHERE workspace_id = $1 AND person_id = ANY($2) \
+             ORDER BY created_at, template_id",
+        )
+        .await?;
+
+    let document = ExportDocument {
+        format: EXPORT_FORMAT,
+        generated_at: &generated_at,
+        person: ExportPerson {
+            id: current,
+            merged_ids: merged,
+            profile,
+            sections: Sections {
+                identities,
+                source_records,
+                events,
+                consent,
+                consent_history,
+                lists,
+                segments,
+                list_history,
+                merges,
+                identity_conflicts,
+                enrollments,
+                step_executions,
+                enrollment_waits,
+                flow_entries,
+                messages,
+                message_links,
+                forwarding_outbox,
+                erasure_handled_markers,
+                ingest_rejects,
+                decision_records,
+                template_preview_people,
+            },
+        },
+    };
+    Ok(Some(serde_json::to_value(document)?))
+}
+
+/// The shape of the document. The budget charges the empty one, so a key can never go uncounted.
+#[derive(Serialize)]
+struct ExportDocument<'a> {
+    format: &'static str,
+    generated_at: &'a str,
+    person: ExportPerson<'a>,
+}
+
+#[derive(Serialize)]
+struct ExportPerson<'a> {
+    id: Uuid,
+    merged_ids: Vec<&'a Uuid>,
+    profile: Value,
+    #[serde(flatten)]
+    sections: Sections,
+}
+
+#[derive(Default, Serialize)]
+struct Sections {
+    identities: Vec<Value>,
+    source_records: Vec<Value>,
+    events: Vec<Value>,
+    consent: Vec<Value>,
+    consent_history: Vec<Value>,
+    lists: Vec<Value>,
+    segments: Vec<Value>,
+    list_history: Vec<Value>,
+    merges: Vec<Value>,
+    identity_conflicts: Vec<Value>,
+    enrollments: Vec<Value>,
+    step_executions: Vec<Value>,
+    enrollment_waits: Vec<Value>,
+    flow_entries: Vec<Value>,
+    messages: Vec<Value>,
+    message_links: Vec<Value>,
+    forwarding_outbox: Vec<Value>,
+    erasure_handled_markers: Vec<Value>,
+    ingest_rejects: Vec<Value>,
+    decision_records: Vec<Value>,
+    template_preview_people: Vec<Value>,
+}
+
+impl<'a> ExportDocument<'a> {
+    fn empty(generated_at: &'a str, person: Uuid) -> Self {
+        Self {
+            format: EXPORT_FORMAT,
+            generated_at,
+            person: ExportPerson {
+                id: person,
+                merged_ids: Vec::new(),
+                profile: Value::Null,
+                sections: Sections::default(),
+            },
         }
-    })))
+    }
 }
 
 /// Reads sections of one person's group.
@@ -457,28 +771,34 @@ struct Section<'a> {
     connection: &'a mut PgConnection,
     workspace: WorkspaceId,
     people: &'a [Uuid],
+    budget: Budget,
 }
 
 impl Section<'_> {
-    /// Each row of `select` (which binds `$1` the workspace and `$2` the people) as JSON.
-    async fn rows(&mut self, select: &str) -> Result<Vec<Value>, StoreError> {
+    /// Each row of `select` (which binds `$1` the workspace and `$2` the people) as JSON. Rows
+    /// are counted as they arrive, so a section past the cap stops being read.
+    async fn rows(&mut self, select: &str) -> Result<Vec<Value>, Abort> {
         // The statements are constants of this module, never built from input.
-        sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT to_jsonb(t) FROM ({select}) t"
-        )))
-        .bind(self.workspace.as_uuid())
-        .bind(self.people)
-        .fetch_all(&mut *self.connection)
-        .await
-        .map_err(StoreError::query)
+        let sql = format!("SELECT to_jsonb(t) FROM ({select}) t");
+        let mut stream = sqlx::query_scalar::<_, Value>(sqlx::AssertSqlSafe(sql))
+            .bind(self.workspace.as_uuid())
+            .bind(self.people)
+            .fetch(&mut *self.connection);
+        let mut rows = Vec::new();
+        while let Some(row) = stream.try_next().await.map_err(StoreError::query)? {
+            self.budget.take(&row)?;
+            rows.push(row);
+        }
+        Ok(rows)
     }
 
-    /// Every event of every partition, oldest first, read in batches.
-    async fn events(&mut self) -> Result<Vec<Value>, StoreError> {
+    /// Every event of every partition, oldest first, read in keyset batches. Each row is charged
+    /// as it arrives, so a person past the cap is never read in full.
+    async fn events(&mut self) -> Result<Vec<Value>, Abort> {
         let mut events = Vec::new();
         let mut after: Option<(OffsetDateTime, Uuid)> = None;
         loop {
-            let batch: Vec<(OffsetDateTime, Uuid, Value)> = sqlx::query_as(
+            let mut stream = sqlx::query_as::<_, EventRow>(
                 "SELECT occurred_at, id, to_jsonb(t) FROM ( \
                     SELECT id, name, schema_version, occurred_at, received_at, properties, \
                            source, message_id, trace_id, validation_state, validation_reasons, \
@@ -493,20 +813,37 @@ impl Section<'_> {
             .bind(after.map(|(at, _)| at))
             .bind(after.map(|(_, id)| id))
             .bind(EVENT_BATCH)
-            .fetch_all(&mut *self.connection)
-            .await
-            .map_err(StoreError::query)?;
-            let Some((at, id, _)) = batch.last() else {
-                return Ok(events);
-            };
-            after = Some((*at, *id));
-            let last_batch = batch.len() < EVENT_BATCH as usize;
-            events.extend(batch.into_iter().map(|(_, _, event)| event));
-            if last_batch {
+            .fetch(&mut *self.connection);
+            let in_batch =
+                consume_events(&mut stream, &mut self.budget, &mut events, &mut after).await?;
+            if in_batch < EVENT_BATCH {
                 return Ok(events);
             }
         }
     }
+}
+
+type EventRow = (OffsetDateTime, Uuid, Value);
+
+/// Charges and collects events from `stream` until it ends or the budget is spent. Stops polling
+/// at the first row past the cap. Returns how many events it took.
+async fn consume_events<S>(
+    stream: &mut S,
+    budget: &mut Budget,
+    events: &mut Vec<Value>,
+    after: &mut Option<(OffsetDateTime, Uuid)>,
+) -> Result<i64, Abort>
+where
+    S: Stream<Item = Result<EventRow, sqlx::Error>> + Unpin,
+{
+    let mut taken = 0;
+    while let Some((at, id, event)) = stream.try_next().await.map_err(StoreError::query)? {
+        budget.take(&event)?;
+        events.push(event);
+        *after = Some((at, id));
+        taken += 1;
+    }
+    Ok(taken)
 }
 
 #[cfg(test)]
@@ -515,8 +852,12 @@ mod tests {
 
     use flate2::read::GzDecoder;
 
+    use futures_util::StreamExt;
+
     use super::*;
-    use crate::privacy::testing::{BYSTANDER_EMAIL, EMAIL, Seeded, seed_everything, trace};
+    use crate::privacy::testing::{
+        BYSTANDER_EMAIL, EMAIL, Seeded, seed_everything, seed_export_extras, trace,
+    };
     use crate::{begin, commit};
 
     async fn requested(pool: &PgPool, ws: WorkspaceId, person: Uuid) -> PrivacyExport {
@@ -530,10 +871,51 @@ mod tests {
     }
 
     async fn built(pool: &PgPool, ws: WorkspaceId, export: Uuid) -> BuildOutcome {
+        built_with_cap(pool, ws, export, EXPORT_MAX_BYTES_DEFAULT).await
+    }
+
+    async fn built_with_cap(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        export: Uuid,
+        max_bytes: u64,
+    ) -> BuildOutcome {
         let mut tx = begin(pool).await.unwrap();
-        let outcome = build_export(&mut tx, ws, export).await.unwrap();
+        let outcome = build_export(&mut tx, ws, export, max_bytes).await.unwrap();
         commit(tx).await.unwrap();
         outcome
+    }
+
+    /// Fails, naming them, on a table with a person column that `sections` neither reads nor
+    /// the exclusions deliberately leave out. The export twin of the erasure scan's catalog, over
+    /// the same discovery.
+    async fn check_catalog(pool: &PgPool, sections: &[(&str, &[&str])]) -> Result<(), String> {
+        let mut tables: Vec<String> = crate::people::person_reference_places(pool)
+            .await
+            .into_iter()
+            .map(|(table, _)| table)
+            .collect();
+        tables.dedup();
+        let unclassified: Vec<String> = tables
+            .into_iter()
+            .filter(|table| {
+                let read = sections
+                    .iter()
+                    .any(|(_, read)| read.contains(&table.as_str()));
+                let left_out = EXPORT_EXCLUDED
+                    .iter()
+                    .any(|(left_out, _)| left_out == table);
+                !read && !left_out
+            })
+            .collect();
+        if unclassified.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "tables with a person column that the export neither reads nor excludes: {}",
+                unclassified.join(", ")
+            ))
+        }
     }
 
     fn unzip(bytes: &[u8]) -> Value {
@@ -568,9 +950,11 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_export_holds_every_section_of_the_person_and_the_merged_people(pool: PgPool) {
+        let seeded = seed_everything(&pool).await;
+        seed_export_extras(&pool, &seeded).await;
         let Seeded {
             ws, person, merged, ..
-        } = seed_everything(&pool).await;
+        } = seeded;
         let export = requested(&pool, ws, person).await;
         assert_eq!(export.status, ExportStatus::Pending);
 
@@ -602,6 +986,39 @@ mod tests {
         );
         assert_eq!(count("merges"), 1);
         assert_eq!(count("identity_conflicts"), 1);
+        assert_eq!(count("enrollments"), 2);
+        assert_eq!(count("step_executions"), 2);
+        assert_eq!(count("enrollment_waits"), 2);
+        assert_eq!(count("flow_entries"), 2);
+        assert_eq!(
+            count("messages"),
+            2,
+            "the survivor's and the merged person's"
+        );
+        assert_eq!(count("message_links"), 1);
+        assert_eq!(
+            count("forwarding_outbox"),
+            3,
+            "pending, dead and the merged one"
+        );
+        assert_eq!(count("erasure_handled_markers"), 1);
+        assert_eq!(count("template_preview_people"), 2);
+        for (section, _) in EXPORT_SECTIONS {
+            if *section != "profile" {
+                assert!(person_json[*section].is_array(), "{section} is missing");
+            }
+        }
+        assert!(person_json["profile"].is_object());
+        let in_section =
+            |section: &str, needle: &str| person_json[section].to_string().contains(needle);
+        assert!(in_section("ingest_rejects", "survivor-reject"));
+        assert!(in_section("decision_records", "survivor-decision"));
+        assert!(in_section("decision_records", "merged-decision"));
+        assert_eq!(person_json["messages"][0]["status"], "skipped");
+        assert_eq!(
+            person_json["message_links"][0]["url"],
+            "https://example.com/seeded-link"
+        );
         // The profile carries the traits, and events come oldest first.
         assert_eq!(person_json["profile"]["traits"]["plan"], "pro");
         let times: Vec<&str> = person_json["events"]
@@ -615,6 +1032,16 @@ mod tests {
         let text = document.to_string();
         assert!(text.contains(EMAIL));
         assert!(!text.contains(BYSTANDER_EMAIL));
+        // Nothing of the bystander's rows, and no recipient hash anywhere.
+        for needle in [
+            "bystander-reject",
+            "bystander-decision",
+            "bystander-node",
+            "address_hash",
+            "abababab",
+        ] {
+            assert!(!text.contains(needle), "{needle} is in the export");
+        }
         let stored = find_privacy_export(&pool, ws, export.id)
             .await
             .unwrap()
@@ -623,6 +1050,272 @@ mod tests {
         let window = stored.expires_at.unwrap() - stored.ready_at.unwrap();
         assert_eq!(window, time::Duration::hours(24));
         assert_eq!(stored.size_bytes, Some(i64::try_from(bytes.len()).unwrap()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn every_table_with_a_person_column_is_exported_or_excluded_with_a_reason(pool: PgPool) {
+        let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
+
+        assert_eq!(checked, Ok(()));
+        let known: Vec<String> = sqlx::query_scalar(
+            "SELECT table_name::text FROM information_schema.tables \
+             WHERE table_schema = current_schema()",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for (table, _) in EXPORT_EXCLUDED {
+            assert!(
+                known.contains(&(*table).to_owned()),
+                "{table} is not a table"
+            );
+        }
+        for (section, tables) in EXPORT_SECTIONS {
+            for table in *tables {
+                assert!(
+                    known.contains(&(*table).to_owned()),
+                    "{section} reads {table}, which is not a table"
+                );
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_table_with_a_person_column_that_is_not_classified_fails_the_catalog(pool: PgPool) {
+        sqlx::query("CREATE TABLE unclassified_scratch (id uuid, person_id uuid)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
+
+        let error = checked.unwrap_err();
+        assert!(error.contains("unclassified_scratch"), "{error}");
+        assert!(!error.contains("identities"), "{error}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_over_the_cap_fails_with_export_too_large_and_leaves_no_content(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let export = requested(&pool, ws, person).await;
+
+        let outcome = built_with_cap(&pool, ws, export.id, 200).await;
+
+        assert_eq!(outcome, BuildOutcome::TooLarge);
+        let stored = find_privacy_export(&pool, ws, export.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ExportStatus::Failed);
+        assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
+        assert_eq!(stored.size_bytes, None);
+        assert_eq!(stored.ready_at, None);
+        let content: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT content FROM privacy_exports WHERE id = $1")
+                .bind(export.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(content, None);
+        assert_eq!(
+            download_export(&pool, ws, export.id).await.unwrap(),
+            ExportDownload::NotReady
+        );
+        assert_eq!(built(&pool, ws, export.id).await, BuildOutcome::NotPending);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_catalog_reads_the_people_and_decision_tables_from_the_shared_discovery(
+        pool: PgPool,
+    ) {
+        let discovered = crate::people::person_reference_places(&pool).await;
+        let tables: Vec<&str> = discovered.iter().map(|(table, _)| table.as_str()).collect();
+        assert!(tables.contains(&"people"));
+        assert!(tables.contains(&"decision_records"));
+
+        let without_decisions: Vec<(&str, &[&str])> = EXPORT_SECTIONS
+            .iter()
+            .filter(|(section, _)| *section != "decision_records")
+            .copied()
+            .collect();
+        let error = check_catalog(&pool, &without_decisions).await.unwrap_err();
+
+        assert!(error.contains("decision_records"), "{error}");
+        assert!(!error.contains("people"), "{error}");
+        let without_profile: Vec<(&str, &[&str])> = EXPORT_SECTIONS
+            .iter()
+            .filter(|(section, _)| *section != "profile")
+            .copied()
+            .collect();
+        let error = check_catalog(&pool, &without_profile).await.unwrap_err();
+        assert!(error.contains("people"), "{error}");
+    }
+
+    async fn seed_many_events(pool: &PgPool, ws: WorkspaceId, person: Uuid, count: i64) {
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                                 properties, source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), $1, $2, 'bulk', \
+                    now() - interval '1 day' - n * interval '1 second', now(), \
+                    jsonb_build_object('n', n), 'web', gen_random_uuid(), 'valid' \
+             FROM generate_series(1, $3) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(count)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn events_past_the_cap_stop_polling_the_stream() {
+        let polled = std::cell::Cell::new(0_u32);
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let mut stream = futures_util::stream::iter(0..1000).map(|n| {
+            polled.set(polled.get() + 1);
+            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": n})))
+        });
+        // Each row charges 8 to 9 bytes, so a cap of 100 is passed by the 13th.
+        let mut budget = Budget::new(100);
+        let mut events = Vec::new();
+        let mut after = None;
+
+        let result = consume_events(&mut stream, &mut budget, &mut events, &mut after).await;
+
+        assert!(matches!(result, Err(Abort::TooLarge)));
+        assert_eq!(events.len(), 12);
+        assert_eq!(polled.get(), 13);
+    }
+
+    #[tokio::test]
+    async fn events_within_the_cap_are_all_taken_and_the_last_is_remembered() {
+        let at = OffsetDateTime::UNIX_EPOCH;
+        let last = Uuid::from_u128(7);
+        let mut stream = futures_util::stream::iter(vec![
+            Ok::<_, sqlx::Error>((at, Uuid::nil(), json!({"n": 1}))),
+            Ok((at, last, json!({"n": 2}))),
+        ]);
+        let mut budget = Budget::new(1000);
+        let mut events = Vec::new();
+        let mut after = None;
+
+        let taken = consume_events(&mut stream, &mut budget, &mut events, &mut after)
+            .await
+            .unwrap();
+
+        assert_eq!(taken, 2);
+        assert_eq!(after, Some((at, last)));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_document_over_the_cap_only_by_its_keys_fails_with_export_too_large(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let mut connection = pool.acquire().await.unwrap();
+        let document = person_document(&mut connection, ws, person, u64::MAX)
+            .await
+            .unwrap()
+            .unwrap();
+        let size = serde_json::to_vec(&document).unwrap().len() as u64;
+        // The rows alone charge well under the document: the keys and delimiters make the rest.
+        let under = person_document(&mut connection, ws, person, size - 1).await;
+
+        assert!(matches!(under, Err(Abort::TooLarge)));
+    }
+
+    #[test]
+    fn the_empty_document_names_every_section() {
+        let document =
+            serde_json::to_value(ExportDocument::empty("2026-01-01T00:00:00Z", Uuid::nil()))
+                .unwrap();
+
+        let person = document["person"].as_object().unwrap();
+        for (name, _) in EXPORT_SECTIONS {
+            assert!(person.contains_key(*name), "{name}");
+        }
+        assert!(person["profile"].is_null());
+        assert_eq!(person["events"], json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_whose_events_pass_the_cap_fails_with_export_too_large(pool: PgPool) {
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        seed_many_events(&pool, ws, person, 2500).await;
+        let export = requested(&pool, ws, person).await;
+
+        let outcome = built_with_cap(&pool, ws, export.id, 100_000).await;
+
+        assert_eq!(outcome, BuildOutcome::TooLarge);
+        let stored = find_privacy_export(&pool, ws, export.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn merged_ids_alone_past_the_cap_fail_with_export_too_large(pool: PgPool) {
+        let ws = crate::privacy::testing::workspace(&pool, "merged-cap").await;
+        let survivor = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(survivor)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let alone = requested(&pool, ws, survivor).await;
+        let fits = built_with_cap(&pool, ws, alone.id, 1500).await;
+        for _ in 0..30 {
+            sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
+                .bind(Uuid::now_v7())
+                .bind(ws.as_uuid())
+                .bind(survivor)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let with_merged = requested(&pool, ws, survivor).await;
+
+        let too_large = built_with_cap(&pool, ws, with_merged.id, 1500).await;
+
+        assert!(matches!(fits, BuildOutcome::Built { .. }), "{fits:?}");
+        assert_eq!(too_large, BuildOutcome::TooLarge);
+    }
+
+    #[test]
+    fn the_budget_stops_at_the_row_that_passes_the_cap() {
+        let mut budget = Budget::new(20);
+
+        let first = budget.take(&json!({"a": 1}));
+        let second = budget.take(&json!({"a": "a longer value than the cap allows"}));
+
+        assert!(first.is_ok());
+        assert!(matches!(second, Err(Abort::TooLarge)));
+    }
+
+    #[test]
+    fn the_sections_and_the_exclusions_name_distinct_tables() {
+        let mut names: Vec<&str> = EXPORT_SECTIONS.iter().map(|(name, _)| *name).collect();
+        names.sort_unstable();
+        names.dedup();
+
+        assert_eq!(names.len(), EXPORT_SECTIONS.len());
+        for (table, reason) in EXPORT_EXCLUDED {
+            assert!(!reason.is_empty(), "{table}");
+            assert!(
+                EXPORT_SECTIONS
+                    .iter()
+                    .all(|(_, read)| !read.contains(table)),
+                "{table}"
+            );
+        }
     }
 
     #[sqlx::test]

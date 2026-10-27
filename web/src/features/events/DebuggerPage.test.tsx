@@ -25,11 +25,11 @@ function item(seq: number, overrides: Record<string, unknown> = {}) {
   };
 }
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
-function signedInAs(user: typeof OWNER, role: "admin" | "member") {
+function signedInAs(user: typeof OWNER, role: "admin" | "editor") {
   mockApi({
     "GET /api/v1/session": () => json(session(user)),
     "GET /api/v1/workspaces/ws1/members": () => json(members(role, user.id)),
@@ -183,7 +183,7 @@ describe("event debugger", () => {
   });
 
   it("offers no reveal to a member who is not an admin", async () => {
-    signedInAs(MEMBER, "member");
+    signedInAs(MEMBER, "editor");
     open();
     await connected();
     await screen.findByRole("button", { name: "Apply filters" });

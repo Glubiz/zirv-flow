@@ -1195,15 +1195,18 @@ mod tests {
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
 
-        fx.send("/api/v1/ingest/identify", json!({"userId": "u"}))
-            .await;
+        fx.send(
+            "/api/v1/ingest/identify",
+            json!({"userId": "u", "traits": {"email": "pat@example.com", "name": "Pat Seeded"}}),
+        )
+        .await;
         fx.send("/api/v1/ingest/track", json!({"userId": "u"}))
             .await;
         fx.send(
             "/api/v1/ingest/batch",
             json!({"batch": [
-                {"type": "track", "userId": "u", "event": "e"},
-                {"type": "track", "userId": "u", "event": "e"},
+                {"type": "track", "userId": "u", "event": "seeded-event"},
+                {"type": "track", "userId": "u", "event": "seeded-event"},
             ]}),
         )
         .await;
@@ -1218,5 +1221,9 @@ mod tests {
         ] {
             assert!(output.contains(expected), "{expected} in {output}");
         }
+        crate::test_support::labels_hold_no(
+            &output,
+            &["pat@example.com", "Pat Seeded", "seeded-event"],
+        );
     }
 }

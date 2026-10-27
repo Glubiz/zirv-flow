@@ -27,7 +27,7 @@ beforeEach(() => {
 const SAVE = { timeout: 3000 };
 const FLOW = `${WS}/flows/${FLOW_ID}`;
 
-function routes(extra: Record<string, Handler> = {}, role: "writer" | "member" | "reader" = "writer"): Record<string, Handler> {
+function routes(extra: Record<string, Handler> = {}, role: "writer" | "editor" | "reader" = "writer"): Record<string, Handler> {
   return { ...flowRoutes({ role, flow: { graph: sendGraph() } }), ...deliveryRoutes(), ...extra };
 }
 
@@ -141,7 +141,7 @@ describe("the send and sync steps in the editor", () => {
   });
 
   it("shows the chosen destination's id to a reader who cannot read the options", async () => {
-    mockApi(routes({ [`GET ${WS}/destinations/options`]: () => problem(403, "Forbidden", "Needs the write role.") }, "member"));
+    mockApi(routes({ [`GET ${WS}/destinations/options`]: () => problem(403, "Forbidden", "Needs the write role.") }, "editor"));
     const user = userEvent.setup();
     mount();
 
