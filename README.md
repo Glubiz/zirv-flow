@@ -1198,7 +1198,25 @@ identifier value. Operator duties:
   the database, a snapshot that also covers erasures made before the key was set. It prints counts
   and writes no audit entry.
 - The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
-  person id nor a ledger hash is out of its reach (#373).
+  person id nor a ledger hash is out of its reach: transcripts, rejects that never named a
+  person, imported files and refused rows, and idempotency keys are found by value, so the live
+  erase is the control and their retention windows (30 days, 7 days, 24 hours) bound the rest.
+- **What the live erase finds by value, and its limits.** The person's ids and identifier values
+  are matched ignoring case. Assistant transcripts keep substring matching. Everything else
+  matches an identifier only as a whole field: a CSV cell (bounded by the start or end of the
+  text, a newline, a quote, or one of `,` `;` tab `|`) in the stored import files and the refused
+  rows' cells, a JSON scalar value, the message id or the sample cell in rejects with no person,
+  and the whole contact idempotency key. An email also matches as a substring anywhere in those,
+  because it is distinctive and is the common value embedded in a notes column. So an external id
+  `42` deletes a `42` cell and never `1427`; a non-email identifier embedded in free text is not
+  found, and a value spelled differently is missed. A value split across two chunks is found, and
+  the whole file is deleted; every such import that has not ended is set `failed` with the code
+  `erased` in the same transaction, so a running worker cannot commit a batch afterwards. Cost:
+  the erase reads the workspace's import files of the last 7 days once, each chunk tested against
+  all identifiers in one pass. Each delete is bounded by the workspace. The content scan also reads
+  the surviving tables (suppressions, the ledger, the audit log): their rows stay, plaintext may
+  not. The erasure ledger file (`privacy.ledger_dir`) is outside the database, so the scan does
+  not cover it.
 
 **Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one

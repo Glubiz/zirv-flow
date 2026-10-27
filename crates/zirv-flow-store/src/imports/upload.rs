@@ -115,9 +115,13 @@ impl ImportUpload {
         if self.pending.is_empty() {
             return Ok(());
         }
-        sqlx::query(
+        // The insert share-locks the import row, so an erase that fences the import (an exclusive
+        // row lock) either waits for this chunk, which it then deletes, or is seen here, and no
+        // chunk is written.
+        let written = sqlx::query(
             "INSERT INTO import_chunks (import_id, seq, workspace_id, data) \
-             VALUES ($1, $2, $3, $4)",
+             SELECT id, $2, workspace_id, $4 FROM imports \
+             WHERE workspace_id = $3 AND id = $1 AND status = 'uploading' FOR SHARE",
         )
         .bind(self.id)
         .bind(self.seq)
@@ -125,7 +129,12 @@ impl ImportUpload {
         .bind(&self.pending)
         .execute(&self.pool)
         .await
-        .map_err(StoreError::query)?;
+        .map_err(StoreError::query)?
+        .rows_affected();
+        if written != 1 {
+            self.pending.clear();
+            return Err(StoreError::erased());
+        }
         self.seq += 1;
         self.pending.clear();
         Ok(())
@@ -288,6 +297,114 @@ mod tests {
 
         assert_eq!(one_piece, [CHUNK_BYTES, CHUNK_BYTES, 5]);
         assert_eq!(many, one_piece);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_flush_after_the_erase_fenced_the_upload_is_refused_and_leaves_no_chunk(
+        pool: PgPool,
+    ) {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = UploadStart {
+            name: "n",
+            source: "csv",
+            stream: "n",
+            file_name: "n.csv",
+            created_by: None,
+            trace: &trace,
+        };
+        let mut upload = ImportUpload::begin(&pool, ws, &start).await.unwrap();
+        let mut first = b"id\n42\n".to_vec();
+        first.resize(CHUNK_BYTES, b'z');
+        upload.write(&first).await.unwrap();
+        let count = |pool: PgPool, id: Uuid| async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM import_chunks WHERE import_id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        assert_eq!(count(pool.clone(), upload.id()).await, 1);
+
+        let mut tx = begin(&pool).await.unwrap();
+        let erased = crate::erase_import_values(&mut tx, ws, &["42".into()])
+            .await
+            .unwrap();
+        crate::commit(tx).await.unwrap();
+        let refused = upload.write(&first).await.unwrap_err();
+
+        assert_eq!(erased.chunks, 1);
+        assert!(refused.is_erased());
+        assert_eq!(count(pool.clone(), upload.id()).await, 0);
+        let state: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_code FROM imports WHERE id = $1")
+                .bind(upload.id())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, ("failed".to_owned(), Some("erased".to_owned())));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_chunk_committed_while_the_fence_waits_is_deleted_with_the_rest(pool: PgPool) {
+        let name = WorkspaceName::parse("one").unwrap();
+        let slug = Slug::parse("one").unwrap();
+        let ws = create_workspace(&pool, &name, &slug).await.unwrap().id;
+        let trace = TraceContext::root(Cause::api("t"));
+        let start = UploadStart {
+            name: "n",
+            source: "csv",
+            stream: "n",
+            file_name: "n.csv",
+            created_by: None,
+            trace: &trace,
+        };
+        let mut upload = ImportUpload::begin(&pool, ws, &start).await.unwrap();
+        let mut first = b"id\n42\n".to_vec();
+        first.resize(CHUNK_BYTES, b'z');
+        upload.write(&first).await.unwrap();
+        // A second connection holds the import row, as an upload's flush does while it writes.
+        let mut holder = begin(&pool).await.unwrap();
+        sqlx::query("SELECT 1 FROM imports WHERE id = $1 FOR SHARE")
+            .bind(upload.id())
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let erase = tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut tx = begin(&pool).await.unwrap();
+                crate::erase_import_values(&mut tx, ws, &["42".into()])
+                    .await
+                    .unwrap();
+                crate::commit(tx).await.unwrap();
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // The chunk lands while the fence waits for the share lock.
+        sqlx::query(
+            "INSERT INTO import_chunks (import_id, seq, workspace_id, data) VALUES ($1, 1, $2, $3)",
+        )
+        .bind(upload.id())
+        .bind(ws.as_uuid())
+        .bind(b"late".as_slice())
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+        crate::commit(holder).await.unwrap();
+        erase.await.unwrap();
+
+        let left: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM import_chunks WHERE import_id = $1")
+                .bind(upload.id())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[sqlx::test]

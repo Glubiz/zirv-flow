@@ -466,6 +466,34 @@ pub async fn expire_contact_idempotency(pool: &PgPool) -> Result<u64, StoreError
     Ok(done.rows_affected())
 }
 
+/// Deletes the workspace's idempotency keys that equal any of `needles` as a whole, ignoring
+/// case (the key is chosen by the client, so it can be an address or an id), or that contain one
+/// that is an email ([`crate::by_value`]). A key that merely contains a short id stays. Bounded
+/// by the primary key's workspace prefix, and the keys' own 24 hour expiry keeps that range
+/// short. Returns how many keys were deleted.
+pub async fn erase_contact_idempotency(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    needles: &[String],
+) -> Result<u64, StoreError> {
+    if needles.is_empty() {
+        return Ok(0);
+    }
+    let done = sqlx::query(
+        r"DELETE FROM contact_idempotency k WHERE k.workspace_id = $1 AND EXISTS (
+            SELECT 1 FROM unnest($2::text[]) AS needle
+            WHERE needle ~ ('[^,;|' || chr(34) || '[:space:]]') AND (lower(k.key) = lower(needle)
+                OR (position('@' IN needle) > 0
+                    AND position(lower(needle) IN lower(k.key)) > 0)))",
+    )
+    .bind(workspace.as_uuid())
+    .bind(needles)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(done.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
