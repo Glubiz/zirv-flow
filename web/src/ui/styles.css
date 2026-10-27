@@ -4754,7 +4754,13 @@ main:focus {
   }
 
   .retention-table thead {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .retention-table tr {
@@ -4785,6 +4791,12 @@ main:focus {
 
   .retention-table .retention-change {
     display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .retention-table .retention-change > a {
+    display: inline-flex;
     align-items: center;
     min-height: 44px;
   }
