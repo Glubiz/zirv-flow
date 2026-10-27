@@ -45,6 +45,8 @@ pub struct WorkerConfig {
     pub backoff_cap: Duration,
     /// What the `events.retention` job keeps and for how long.
     pub event_retention: EventRetention,
+    /// The most uncompressed bytes a person export may hold (`privacy.export_max_bytes`).
+    pub export_max_bytes: u64,
     /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
@@ -87,6 +89,7 @@ impl WorkerConfig {
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(3600),
             event_retention: EventRetention::default(),
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             redaction_key: None,
             identifier_key: None,
             keyring: None,
@@ -402,6 +405,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let result = {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
+            .with_export_max_bytes(shared.config.export_max_bytes)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_clock(shared.config.clock.clone())
             .with_rate_gates(Arc::clone(&shared.config.rate_gates))
@@ -660,6 +664,7 @@ mod tests {
             backoff_base: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(5),
             event_retention: EventRetention::default(),
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             redaction_key: None,
             identifier_key: None,
             keyring: None,

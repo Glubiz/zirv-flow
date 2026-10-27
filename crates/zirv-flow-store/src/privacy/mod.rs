@@ -23,9 +23,10 @@ pub use erasure_calls::{
     list_erasure_calls, lock_person_call_shared,
 };
 pub use export::{
-    BuildOutcome, EXPORT_FORMAT, EXPORT_JOB_KIND, ExportCursor, ExportDownload, ExportStatus,
-    PrivacyExport, build_export, download_export, expire_exports, find_privacy_export,
-    list_privacy_exports, request_export,
+    BuildOutcome, EXPORT_EXCLUDED, EXPORT_FORMAT, EXPORT_JOB_KIND, EXPORT_MAX_BYTES_DEFAULT,
+    EXPORT_MAX_BYTES_MAX, EXPORT_MAX_BYTES_MIN, EXPORT_SECTIONS, EXPORT_TOO_LARGE, ExportCursor,
+    ExportDownload, ExportStatus, PrivacyExport, build_export, download_export, expire_exports,
+    find_privacy_export, list_privacy_exports, request_export,
 };
 
 pub(crate) use handled_markers::{delete_and_mark, event_columns, mark_partition};
