@@ -4,7 +4,7 @@
 //! these endpoints may be a password, so the detail here is fixed text.
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, OptionalFromRequest, Request};
 use axum::http::StatusCode;
 use serde::de::DeserializeOwned;
 
@@ -20,8 +20,25 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::Json::<T>::from_request(request, state).await {
+        match <axum::Json<T> as FromRequest<S>>::from_request(request, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(reject(&rejection)),
+        }
+    }
+}
+
+/// A body that may be left out: a request without a content type is `None`, one with a body is
+/// read like [`ApiJson`].
+impl<T, S> OptionalFromRequest<S> for ApiJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Option<Self>, Self::Rejection> {
+        match <axum::Json<T> as OptionalFromRequest<S>>::from_request(request, state).await {
+            Ok(value) => Ok(value.map(|axum::Json(value)| Self(value))),
             Err(rejection) => Err(reject(&rejection)),
         }
     }
@@ -61,7 +78,7 @@ mod tests {
             request = request.header(header::CONTENT_TYPE, content_type);
         }
         let request = request.body(Body::from(body.to_owned())).unwrap();
-        ApiJson::<Named>::from_request(request, &())
+        <ApiJson<Named> as FromRequest<()>>::from_request(request, &())
             .await
             .map(|ApiJson(body)| body.name)
     }
@@ -71,6 +88,30 @@ mod tests {
         let name = extract(Some("application/json"), r#"{"name":"x"}"#).await;
 
         assert_eq!(name.unwrap(), "x");
+    }
+
+    #[tokio::test]
+    async fn an_optional_body_may_be_left_out_but_not_be_malformed() {
+        let read = |content_type: Option<&'static str>, body: &'static str| async move {
+            let mut request = Request::post("/");
+            if let Some(content_type) = content_type {
+                request = request.header(header::CONTENT_TYPE, content_type);
+            }
+            let request = request.body(Body::from(body)).unwrap();
+            <ApiJson<Named> as OptionalFromRequest<()>>::from_request(request, &()).await
+        };
+
+        assert!(read(None, "").await.unwrap().is_none());
+        let some = read(Some("application/json"), r#"{"name":"x"}"#).await;
+        assert_eq!(
+            some.unwrap().map(|ApiJson(body)| body.name).as_deref(),
+            Some("x")
+        );
+        let bad = read(Some("application/json"), "{not json")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

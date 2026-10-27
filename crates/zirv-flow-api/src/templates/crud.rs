@@ -456,7 +456,9 @@ pub(crate) async fn save_draft(
         .revision
         .is_some_and(|revision| revision != locked.draft().revision)
     {
-        return Err(ApiError::template_draft_revision_mismatch());
+        return Err(ApiError::template_draft_revision_mismatch(
+            locked.draft().revision,
+        ));
     }
     let document = check_draft(locked.template(), &request.document)?;
     let draft = zirv_flow_store::save_template_draft(&mut tx, workspace, id, &document, updated_by)
@@ -476,6 +478,14 @@ pub(crate) async fn save_draft(
     Ok((template, draft))
 }
 
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ConvertTemplateDraftRequest {
+    /// The draft revision the caller read. When given and the draft has been saved since, the
+    /// conversion is a 409 `template_draft_revision_mismatch` and writes nothing. Absent converts
+    /// unconditionally.
+    revision: Option<i32>,
+}
+
 /// Replaces a block-mode draft with an MJML code-mode draft holding the converted source, and
 /// audits it as `template.draft_converted`. One way: nothing turns MJML back into blocks. Only
 /// the draft changes; published versions stay as they were.
@@ -485,11 +495,17 @@ pub(crate) async fn convert_draft_to_mjml(
     workspace: WorkspaceId,
     id: Uuid,
     updated_by: Option<UserId>,
+    revision: Option<i32>,
 ) -> Result<(Template, TemplateDraft), ApiError> {
     let mut tx = zirv_flow_store::begin(pool).await?;
     let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
         .await
         .map_err(template_error)?;
+    if revision.is_some_and(|revision| revision != locked.draft().revision) {
+        return Err(ApiError::template_draft_revision_mismatch(
+            locked.draft().revision,
+        ));
+    }
     let current = zirv_flow_store::find_template_draft(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::internal)?;
@@ -927,12 +943,13 @@ pub(crate) async fn put_draft(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Template id")
     ),
+    request_body(content = Option<ConvertTemplateDraftRequest>, description = "Optional: the draft revision the caller read"),
     responses(
         (status = 200, description = "The template with its converted draft", body = TemplateDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The template is archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`, with `current_revision`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft is not in blocks mode (`template_malformed`), or the block document has blocking issues (`template_invalid`, with the issues)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -941,6 +958,7 @@ pub(crate) async fn convert_draft(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
+    body: Option<ApiJson<ConvertTemplateDraftRequest>>,
 ) -> Result<Json<TemplateDetailBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
     let (template, draft) = convert_draft_to_mjml(
@@ -949,6 +967,7 @@ pub(crate) async fn convert_draft(
         workspace.id,
         path_id(&id)?,
         principal.user_id(),
+        body.and_then(|ApiJson(body)| body.revision),
     )
     .await?;
     record_checks(&state, workspace.id, &draft).await;
