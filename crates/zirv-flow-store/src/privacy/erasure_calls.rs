@@ -1256,6 +1256,35 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_person_whose_messages_were_purged_still_gets_the_erase_call(pool: PgPool) {
+        let seeded = seed_everything(&pool).await;
+        let (ws, person) = (seeded.ws, seeded.person);
+        let messaged = destination(&pool, ws, "messaged").await;
+        let other = destination(&pool, ws, "other").await;
+        message(&pool, ws, messaged, person).await;
+        let later = OffsetDateTime::now_utc() + time::Duration::days(4000);
+        crate::apply_message_retention(&pool, &crate::MessageRetention::default(), later)
+            .await
+            .unwrap();
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM messages WHERE person_id = $1 AND destination_id = $2",
+        )
+        .bind(person)
+        .bind(messaged)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(left, 0, "the evidence is gone");
+        let request = request_for(&pool, ws, person).await;
+
+        erase_for(&pool, ws, request, &[messaged, other]).await;
+
+        assert_eq!(called(&pool, ws, request).await, [messaged]);
+        assert_eq!(jobs(&pool).await.len(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_outbox_purge_writes_the_markers_of_the_rows_it_removes_and_the_call_follows(
         pool: PgPool,
     ) {
