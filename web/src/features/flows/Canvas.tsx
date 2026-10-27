@@ -23,7 +23,7 @@ import { wordsFor, triggerWords, type Names } from "./describe";
 import { FlowIcon, type IconName } from "./icons";
 import { issueText, type PlacedIssues } from "./issues";
 import { layout } from "./layout";
-import { TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
+import { countsHeight, TRIGGER_EDGE, type NodeMark, type NodeTally, type Overlay } from "./overlay";
 import {
   connectionWire,
   entryOf,
@@ -383,7 +383,12 @@ function Surface(props: CanvasProps) {
   const [flash, setFlash] = useState<string | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(flashTimer.current), []);
-  const plan = useMemo(() => layout(graph), [graph]);
+  const counts = overlay?.counts;
+  const plan = useMemo(() => {
+    const extra = new Map<string, number>();
+    for (const [id, tally] of counts ?? []) extra.set(id, countsHeight(tally));
+    return layout(graph, extra);
+  }, [graph, counts]);
 
   const nodes = useMemo(() => {
     const byId = new Map(graph.nodes.map((node) => [node.id, node]));

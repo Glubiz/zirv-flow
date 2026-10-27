@@ -19,6 +19,9 @@ import {
 import { lastGraph, mountEditor as mount, openSheetOf } from "../../test/flowsEditor";
 import { json, mockApi, problem, type Handler } from "../../test/mockApi";
 import { stubReactFlow } from "../../test/reactFlowStubs";
+import { layout } from "./layout";
+import type { Graph } from "./model";
+import { countsHeight } from "./overlay";
 
 beforeEach(() => {
   stubReactFlow();
@@ -321,6 +324,19 @@ describe("delivery counts on the canvas", () => {
     expect(within(send).getByText("2 skipped: The address is suppressed")).toBeInTheDocument();
     expect(within(send).getByText("3 send failed")).toHaveClass("fl-count-bad");
     expect(send).toHaveAccessibleName(/20 sent, 5 skipped, There is no consent to send this message/);
+  });
+
+  it("makes the card tall enough for its badge row, so the badges sit below the text", async () => {
+    mockApi(countsRoutes());
+    const user = userEvent.setup();
+    mount();
+    await openCounts(user);
+
+    const wait = await screen.findByRole("group", { name: /^Wait: 1 day.*30 entered/ });
+    const plain = layout(JSON.parse(JSON.stringify(sendGraph())) as Graph).placed.get("n1")!;
+    const height = Number.parseFloat((wait.closest(".react-flow__node") as HTMLElement).style.height);
+    expect(height).toBe(plain.height + countsHeight({ entered: 30, waiting: 0, failed: 0 }));
+    expect(height).toBeGreaterThanOrEqual(plain.height + 22);
   });
 
   it("shows no delivery counts on a step that sends nothing", async () => {
