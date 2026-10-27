@@ -2,10 +2,9 @@
 //! of the rows it removes (architecture section 16.3). An instance-level job that a daily
 //! schedule enqueues; it needs no workspace and no master key.
 
-use hashbrown::HashMap;
 use serde_json::Value;
 use tracing::info;
-use zirv_flow_store::apply_message_retention_for;
+use zirv_flow_store::{apply_message_retention_for, record_retention_run, workspace_windows};
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
@@ -23,9 +22,11 @@ impl JobKind for MessagesRetention {
         let settings = *ctx.message_retention();
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
-        // Workspaces with a shorter window of their own arrive here with the per-workspace
-        // setting; none have one yet.
-        let report = apply_message_retention_for(&pool, &settings, &HashMap::new(), now).await?;
+        // A workspace with a shorter window of its own is deleted at that window, and only it.
+        let windows =
+            workspace_windows(&pool, settings.days, ctx.decision_retention().days).await?;
+        let report = apply_message_retention_for(&pool, &settings, &windows.messages, now).await?;
+        record_retention_run(&pool, "messages", now, report.messages_deleted).await?;
         metrics::record_retention(
             "messages",
             report.messages_deleted,
@@ -134,6 +135,84 @@ mod tests {
             output.contains("zirv_flow_retention_deleted_total{table=\"messages\"} 1"),
             "{output}"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_window_deletes_that_workspaces_messages_only(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let now = OffsetDateTime::now_utc();
+        let mut workspaces = Vec::new();
+        for slug in ["short", "long"] {
+            let ws = zirv_flow_store::create_workspace(
+                &pool,
+                &zirv_flow_core::WorkspaceName::parse(slug).unwrap(),
+                &zirv_flow_core::Slug::parse(slug).unwrap(),
+            )
+            .await
+            .unwrap()
+            .id;
+            let person = uuid::Uuid::now_v7();
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(person)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                    template_id, destination_id, status, created_at, completed_at) \
+                 VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), 'aged', gen_random_uuid(), \
+                    gen_random_uuid(), 'sent', $3, $3)",
+            )
+            .bind(ws.as_uuid())
+            .bind(person)
+            .bind(now - time::Duration::days(100))
+            .execute(&pool)
+            .await
+            .unwrap();
+            workspaces.push(ws);
+        }
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::set_workspace_retention(&mut tx, workspaces[0], Some(60), None, None)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
+        leader.tick_at(now + time::Duration::days(2)).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[MessagesRetention::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_clock(Clock::Manual(ManualClock::new(now)))
+            .with_message_retention(MessageRetention::default());
+
+        MessagesRetention
+            .run(&mut ctx, claimed.payload.clone())
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+
+        let left: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT workspace_id FROM messages")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, [workspaces[1].as_uuid()]);
+        assert_eq!(super::super::recorded_run(&pool, "messages").await, Some(1));
     }
 
     #[sqlx::test]

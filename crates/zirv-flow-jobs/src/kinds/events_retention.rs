@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 use tracing::{info, warn};
-use zirv_flow_store::{apply_event_retention, database_now};
+use zirv_flow_store::{apply_event_retention, database_now, record_retention_run};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -20,7 +20,10 @@ impl JobKind for EventsRetention {
         };
         let settings = *ctx.event_retention();
         let now = database_now(pool).await?;
-        let report = apply_event_retention(pool, &settings, now).await?;
+        let windows = *ctx.retention_settings();
+        let report = apply_event_retention(pool, &settings, &windows, now).await?;
+        record_retention_run(pool, "events", now, report.events_deleted).await?;
+        record_retention_run(pool, "ingest_rejects", now, report.rejects_deleted).await?;
         for partition in &report.skipped_partitions {
             warn!(partition = %partition, "event partition drop skipped: the table is locked");
         }
@@ -120,6 +123,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ages, [1]);
+        assert_eq!(super::super::recorded_run(&pool, "events").await, Some(1));
+        assert_eq!(
+            super::super::recorded_run(&pool, "ingest_rejects").await,
+            Some(0)
+        );
     }
 
     #[sqlx::test]
