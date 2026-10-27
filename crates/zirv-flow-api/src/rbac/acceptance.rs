@@ -58,6 +58,7 @@ mod tests {
         KeyRead,
         KeyWrite,
         KeyWriteAndPii,
+        KeyReadAndPii,
         KeyPublish,
         KeyAdmin,
         KeyPii,
@@ -65,7 +66,7 @@ mod tests {
         Anonymous,
     }
 
-    const EVERYONE: [Who; 18] = [
+    const EVERYONE: [Who; 19] = [
         Who::Owner,
         Who::Admin,
         Who::Publisher,
@@ -79,6 +80,7 @@ mod tests {
         Who::KeyRead,
         Who::KeyWrite,
         Who::KeyWriteAndPii,
+        Who::KeyReadAndPii,
         Who::KeyPublish,
         Who::KeyAdmin,
         Who::KeyPii,
@@ -117,6 +119,7 @@ mod tests {
                 Who::KeyRead => Kind::Key(&[Scope::Read]),
                 Who::KeyWrite => Kind::Key(&[Scope::Write]),
                 Who::KeyWriteAndPii => Kind::Key(&[Scope::Write, Scope::Pii]),
+                Who::KeyReadAndPii => Kind::Key(&[Scope::Read, Scope::Pii]),
                 Who::KeyPublish => Kind::Key(&[Scope::Publish]),
                 Who::KeyAdmin => Kind::Key(&[Scope::Admin]),
                 Who::KeyPii => Kind::Key(&[Scope::Pii]),
@@ -1129,5 +1132,712 @@ mod tests {
         let patched: Value =
             serde_json::from_slice(&patched(bytes, &Some(json!({"name": "y"})))).unwrap();
         assert_eq!(patched["name"], "y");
+    }
+
+    // ---- the seeded-personal-data walk ----
+
+    const EMAIL: &str = "zq.ada.7731@seed-pii.test";
+    const PHONE_DIGITS: &str = "70123499";
+    const NAME: &str = "Zqfirstname";
+    const PROPERTY: &str = "ZQ-PROP-31337";
+    const EXTERNAL: &str = "ZQ-EXT-9912";
+    const EVIDENCE: &str = "ZQ-EVIDENCE-8814";
+    const PAYLOAD: &str = "ZQ-PAYLOAD-5521";
+    const REJECTED_CELL: &str = "zq.reject.4410@seed-pii.test";
+    const UNPLANNED: &str = "ZQ-UNPLANNED-6603";
+    /// A list name is workspace configuration, not a person's data: every reader sees it. It is
+    /// seeded to show the walk reads real data.
+    const LIST_NAME: &str = "ZQ-List-8842";
+
+    /// The seeded personal values, by what they are.
+    const PERSONAL: [(&str, &str); 8] = [
+        ("an email", EMAIL),
+        ("a phone number", PHONE_DIGITS),
+        ("a name trait", NAME),
+        ("an event property", PROPERTY),
+        ("an external id", EXTERNAL),
+        ("consent evidence", EVIDENCE),
+        ("a rejected import cell", REJECTED_CELL),
+        ("an unplanned event property", UNPLANNED),
+    ];
+
+    /// Surfaces that must show a seeded value to a reader with the grant, and none without it.
+    /// A `{}` stands for any one id.
+    const REVEALS: [&str; 6] = [
+        "/people/{id}",
+        "/people/{id}/timeline",
+        "/lists/{id}/members",
+        "/events/explore/list",
+        "/imports/{id}/rejects.csv",
+        "/people/{id}/consent/history",
+    ];
+
+    /// Surfaces that keep a seeded value out of their response even for an admin, who sees values
+    /// elsewhere: a response field the table behind it fills with personal data. `(path end, what, value, a marker
+    /// the row's own fields put in the response)`.
+    const HIDDEN_ON: [(&str, &str, &str, &str); 6] = [
+        (
+            "/flows/{id}/enrollments/{enrollment_id}",
+            "an email",
+            EMAIL,
+            "send_failed",
+        ),
+        (
+            "/flows/{id}/enrollments/{enrollment_id}",
+            "a name trait",
+            NAME,
+            "send_failed",
+        ),
+        ("/flows/{id}/enrollments", "an email", EMAIL, "send_failed"),
+        ("/forwarding/dead-letters", "a payload", PAYLOAD, "http_4xx"),
+        ("/forwarding/dead-letters", "an email", EMAIL, "http_4xx"),
+        (
+            "/imports/{id}/rejects",
+            "a rejected cell",
+            REJECTED_CELL,
+            "invalid_identifier",
+        ),
+    ];
+
+    /// Surfaces that hold personal data in a column the response must leave out; a leak is an
+    /// entry here and the issue it waits on. Empty: the walk found none that was not fixed.
+    /// The one personal value no response ever shows: an unplanned event is rejected and the list
+    /// keeps its name, not its properties.
+    const NEVER_SHOWN: &str = "an unplanned event property";
+
+    const PENDING: [(&str, &str); 0] = [];
+
+    /// The smallest valid body of each read-style `POST`, by the end of its path.
+    fn read_post_body(path: &str) -> Option<Value> {
+        let range = || {
+            let now = time::OffsetDateTime::now_utc();
+            let format = time::format_description::well_known::Rfc3339;
+            json!({
+                "from": (now - time::Duration::days(3)).format(&format).unwrap(),
+                "to": (now + time::Duration::hours(1)).format(&format).unwrap(),
+            })
+        };
+        let explorer = |extra: Value| {
+            let mut body = range();
+            body["name"] = json!("order");
+            if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+                body.extend(extra.clone());
+            }
+            Some(body)
+        };
+        match path {
+            p if p.ends_with("/events/explore/count") => explorer(json!({"bucket": "day"})),
+            p if p.ends_with("/events/explore/breakdown") => explorer(json!({"by": "plan"})),
+            p if p.ends_with("/events/explore/list") || p.ends_with("/events/explore/export") => {
+                explorer(json!({}))
+            }
+            p if p.ends_with("/segments/preview") => {
+                Some(json!({"definition": {"v": 1, "trait": "plan", "op": "eq", "value": "pro"}}))
+            }
+            p if p.ends_with("/people/search") => Some(json!({"query": "zq"})),
+            _ => None,
+        }
+    }
+
+    /// Whether the walk reads this row: any `GET`, and a `POST` that searches, previews, explains,
+    /// tests or explores.
+    fn reads(row: &Route) -> bool {
+        match row.method {
+            Method::Get => true,
+            Method::Post => {
+                [
+                    "/search",
+                    "/preview",
+                    "/explain",
+                    "/check",
+                    "/evaluate",
+                    "/events/explore/",
+                ]
+                .iter()
+                .any(|part| row.path.contains(part))
+                    || row.path.ends_with("/flows/{id}/test")
+            }
+            _ => false,
+        }
+    }
+
+    /// The ids of the seeded rows, by the kind of path they stand in.
+    struct Seeded {
+        person: Uuid,
+        conflict: Uuid,
+        list: Uuid,
+        segment: Uuid,
+        flow: Uuid,
+        enrollment: Uuid,
+        import: Uuid,
+        rule: Uuid,
+    }
+
+    impl Seeded {
+        /// `path` with the seeded row for each placeholder, a ghost for the rest.
+        fn path(&self, path: &str, workspace: WorkspaceId) -> String {
+            let mut out = String::new();
+            let mut rest = path;
+            while let Some(start) = rest.find('{') {
+                out.push_str(&rest[..start]);
+                let end = rest[start..].find('}').unwrap() + start;
+                let name = &rest[start + 1..end];
+                let before = out.rsplit('/').nth(1).unwrap_or_default().to_owned();
+                out.push_str(&match (name, before.as_str()) {
+                    ("ws", _) => workspace.as_uuid().to_string(),
+                    ("id", "people") => self.person.to_string(),
+                    ("id", "lists") => self.list.to_string(),
+                    ("id", "segments") => self.segment.to_string(),
+                    ("id", "flows") => self.flow.to_string(),
+                    ("id", "imports") => self.import.to_string(),
+                    ("id", "identity-conflicts") => self.conflict.to_string(),
+                    ("id", "rules") => self.rule.to_string(),
+                    ("enrollment_id", _) => self.enrollment.to_string(),
+                    ("trace_id", _) => self.enrollment.simple().to_string(),
+                    ("n", _) => "1".to_owned(),
+                    ("name", "event-schemas") => "order".to_owned(),
+                    ("key", "traits") => "first_name".to_owned(),
+                    ("id" | "user_id" | "run_id" | "person_id", _) => Uuid::now_v7().to_string(),
+                    _ => GHOST.to_owned(),
+                });
+                rest = &rest[end + 1..];
+            }
+            out.push_str(rest);
+            out
+        }
+    }
+
+    async fn api(world: &World, method: &str, tail: &str, body: Option<Value>, who: Who) -> Reply {
+        let body = body.map(|body| ("application/json".to_owned(), body.to_string().into_bytes()));
+        send(
+            &world.router,
+            method,
+            &world.url(tail),
+            body,
+            world.auth(who),
+        )
+        .await
+    }
+
+    async fn created(world: &World, tail: &str, body: Value) -> Value {
+        let reply = api(world, "POST", tail, Some(body), Who::Owner).await;
+        assert!(
+            reply.status == 201 || reply.status == 200,
+            "{tail}: {}",
+            reply.text
+        );
+        reply.body
+    }
+
+    fn profile(
+        key: &str,
+        identifiers: &[(&str, &str)],
+        traits: Value,
+    ) -> zirv_flow_store::ProfileRecord {
+        zirv_flow_store::ProfileRecord {
+            source: "crm".into(),
+            stream: "contacts".into(),
+            record_key: key.into(),
+            identifiers: identifiers
+                .iter()
+                .map(|(kind, value)| ((*kind).into(), (*value).into()))
+                .collect(),
+            traits: traits.as_object().cloned().unwrap_or_default(),
+            observed_at: datetime!(2026-01-01 00:00 UTC),
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
+        }
+    }
+
+    /// Fills the workspace with the seeded values on every surface that could echo one.
+    async fn seed(world: &World) -> Seeded {
+        let pool = &world.pool;
+        let ws = world.ws;
+        for (key, pii) in [("first_name", true), ("plan", false)] {
+            zirv_flow_store::create_trait_definition(
+                pool,
+                ws,
+                &zirv_flow_store::NewTraitDefinition {
+                    key: key.into(),
+                    trait_type: zirv_flow_core::people::TraitType::String,
+                    precedence: zirv_flow_core::people::Precedence::Latest,
+                    source_order: Vec::new(),
+                    pii,
+                    channel_address: false,
+                    inferred: false,
+                    description: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // Ada, and a second record that collides with her email: an identity conflict.
+        let outcomes = zirv_flow_store::apply_profile_batch(
+            pool,
+            ws,
+            &[
+                profile(
+                    "1",
+                    &[
+                        ("email", EMAIL),
+                        ("phone", &format!("+45{PHONE_DIGITS}")),
+                        ("external:crm", EXTERNAL),
+                    ],
+                    json!({"first_name": NAME, "plan": "pro"}),
+                ),
+                profile("2", &[("external:crm", "bob-ext")], json!({})),
+                profile(
+                    "3",
+                    &[("external:crm", "bob-ext"), ("email", EMAIL)],
+                    json!({}),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        let person = match &outcomes[0] {
+            zirv_flow_store::ProfileOutcome::Applied { person_id, .. } => *person_id,
+            other => panic!("not applied: {other:?}"),
+        };
+        let conflict: Uuid = sqlx::query_scalar(
+            "SELECT id FROM identity_conflicts WHERE workspace_id = $1 AND resolved_at IS NULL",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        // Events: a planned one with a personal property, and an unplanned one that is rejected.
+        created(
+            world,
+            "/event-schemas",
+            json!({"name": "order", "mode": "warn", "properties": [
+                {"name": "total", "type": "number", "required": true},
+                {"name": "coupon", "type": "string", "pii": true},
+                {"name": "plan", "type": "string"}
+            ]}),
+        )
+        .await;
+        created(world, "/event-schemas/order/versions", json!({})).await;
+        let policy = api(
+            world,
+            "PUT",
+            "/event-policy",
+            Some(json!({"unplanned": "reject", "future_skew_seconds": 300,
+                        "lateness_seconds": 86400, "redaction": {}})),
+            Who::Owner,
+        )
+        .await;
+        assert_eq!(policy.status, 200, "{}", policy.text);
+        let now = time::OffsetDateTime::now_utc();
+        let event = |name: &str, properties: Value| zirv_flow_store::EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), EMAIL.into())],
+            name: name.into(),
+            properties: properties.as_object().cloned().unwrap(),
+            timestamp: Some(now - time::Duration::minutes(5)),
+            received_at: now,
+            message_id: None,
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
+        };
+        let redaction = HmacRoot::bootstrap_from(&MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        zirv_flow_store::apply_event_batch(
+            pool,
+            ws,
+            &redaction,
+            &[
+                event(
+                    "order",
+                    json!({"total": 10, "plan": "pro", "coupon": PROPERTY}),
+                ),
+                event("unplanned_thing", json!({"card": UNPLANNED})),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // A list, a segment, consent with evidence.
+        let list = created(world, "/lists", json!({"name": LIST_NAME})).await["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        let added = api(
+            world,
+            "POST",
+            &format!("/lists/{list}/members"),
+            Some(json!({"person_ids": [person]})),
+            Who::Owner,
+        )
+        .await;
+        assert!(added.status < 300, "{}", added.text);
+        let segment = created(
+            world,
+            "/segments",
+            json!({"name": "Pros", "definition": {"v": 1, "trait": "plan", "op": "eq", "value": "pro"}}),
+        )
+        .await["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        created(
+            world,
+            "/topics",
+            json!({"key": "newsletter", "name": "Newsletter", "channel": "email", "policy": "opt_out"}),
+        )
+        .await;
+        let consent = api(
+            world,
+            "PUT",
+            &format!("/people/{person}/consent"),
+            Some(
+                json!({"channel": "email", "topic_key": "newsletter", "status": "unsubscribed",
+                        "evidence": {"text": EVIDENCE}}),
+            ),
+            Who::Owner,
+        )
+        .await;
+        assert!(consent.status < 300, "{}", consent.text);
+
+        // A flow with an enrollment of Ada, a step and a resume input holding her values.
+        let flow = created(
+            world,
+            "/flows",
+            json!({"name": "Welcome",
+                   "graph": {"v": 1, "nodes": [
+                       {"id": "wait", "type": "wait.duration", "seconds": 60},
+                       {"id": "end", "type": "exit"}
+                   ], "edges": [{"id": "e1", "from": "wait", "port": "next", "to": "end"}]},
+                   "settings": {"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}}),
+        )
+        .await["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        created(world, &format!("/flows/{flow}/publish"), json!({})).await;
+        let enrollment = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO enrollments \
+                (id, workspace_id, flow_id, flow_version, person_id, state, node, occurrence_id, \
+                 trace_id, cause_kind, cause_id, error, failed_node, failure_placed, resume_input) \
+             VALUES ($1, $2, $3, 1, $4, 'failed', 'wait', $1, $1, 'api', 't', 'send_failed', \
+                     'wait', true, $5)",
+        )
+        .bind(enrollment)
+        .bind(ws.as_uuid())
+        .bind(flow)
+        .bind(person)
+        .bind(json!({"input": "start", "email": EMAIL, "name": NAME}))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO step_executions (id, workspace_id, enrollment_id, node_id, outcome, error) \
+             VALUES ($1, $2, $3, 'wait', 'failed', 'send_failed')",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(enrollment)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // A forwarding rule and a dead letter whose payload carries her values.
+        let destination = zirv_flow_store::create_destination(
+            pool,
+            ws,
+            &zirv_flow_store::NewDestination {
+                id: Uuid::now_v7(),
+                kind: "fake",
+                name: "Mail",
+                config: &json!({"mode": "ok"}),
+                credential_id: None,
+                rate: 100,
+                burst: 100,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        let rule = created(
+            world,
+            "/forwarding/rules",
+            json!({"destination_id": destination, "name": "Orders", "event_name": "order",
+                   "mapping": {"id": {"from": "event.id"}}}),
+        )
+        .await["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO forwarding_outbox (id, workspace_id, destination_id, rule_id, event_id, \
+                person_id, idempotency_key, payload, state, attempts, last_error, updated_at) \
+             VALUES ($1, $2, $3, $4, gen_random_uuid(), $5, 'k', $6, 'dead', 3, 'http_4xx', now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(destination)
+        .bind(rule)
+        .bind(person)
+        .bind(json!({"email": EMAIL, "secret": PAYLOAD}))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // An import with its sample rows and rejected cells, and a test-send log row.
+        let upload = send(
+            &world.router,
+            "POST",
+            &world.url(&format!("/imports?name=Customers&file_name=c.csv")),
+            Some((
+                "text/csv".into(),
+                format!("Email,Plan\n{EMAIL},pro\nnot-an-email,free\n").into_bytes(),
+            )),
+            world.auth(Who::Owner),
+        )
+        .await;
+        assert_eq!(upload.status, 201, "{}", upload.text);
+        let import = upload.body["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+        let mapping = api(
+            world,
+            "PUT",
+            &format!("/imports/{import}/mapping"),
+            Some(json!({"columns": [
+                {"column": "Email", "target": {"type": "identifier", "kind": "email"},
+                 "transforms": [{"op": "trim"}, {"op": "lower"}]}
+            ]})),
+            Who::Owner,
+        )
+        .await;
+        assert_eq!(mapping.status, 200, "{}", mapping.text);
+        let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+        zirv_flow_store::start_import_run(&mut tx, ws, import)
+            .await
+            .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let rejected = [zirv_flow_store::RejectedRow {
+            row_number: 3,
+            reasons: vec![zirv_flow_store::RejectReason {
+                column: "Email".into(),
+                reason: "invalid_identifier",
+            }],
+            raw: vec![REJECTED_CELL.into(), "free".into()],
+        }];
+        zirv_flow_store::commit_import_batch(
+            pool,
+            &zirv_flow_store::ImportBatch {
+                import_id: import,
+                workspace: ws,
+                expected_done: 0,
+                records: &[],
+                details: &[],
+                rejected: &rejected,
+                trace: &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO test_sends (id, workspace_id, template_id, destination_id, \
+                sender_identity_id, recipient_hash, render_context, outcome, reason, completed_at) \
+             VALUES ($1, $2, gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), \
+                     decode(repeat('ab', 32), 'hex'), 'person', 'failed', 'destination_error', now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+
+        Seeded {
+            person: person,
+            conflict,
+            list,
+            segment,
+            flow,
+            enrollment,
+            import,
+            rule,
+        }
+    }
+
+    /// The needles of `PERSONAL` that `text` holds, whatever the case.
+    fn found(text: &str) -> Vec<&'static str> {
+        let text = text.to_lowercase();
+        PERSONAL
+            .iter()
+            .filter(|(_, needle)| text.contains(&needle.to_lowercase()))
+            .map(|(what, _)| *what)
+            .collect()
+    }
+
+    /// One read of a seeded workspace: the row, who read it and what came back.
+    struct Read {
+        row: Route,
+        path: String,
+        who: Who,
+        status: u16,
+        text: String,
+    }
+
+    /// Calls every reading row as `who`, with the seeded rows in the paths.
+    async fn read_all(world: &World, seeded: &Seeded, who: Who) -> Vec<Read> {
+        let operations = Operations::new();
+        let mut done = Vec::new();
+        for row in ROUTES
+            .iter()
+            .filter(|row| row.path.contains("{ws}") && reads(row))
+        {
+            let (sample, query) = operations.request(row);
+            let path = seeded.path(row.path, world.ws);
+            let uri = format!("{path}{query}");
+            let method = format!("{:?}", row.method).to_uppercase();
+            let body = match row.method {
+                Method::Get => None,
+                _ => Some(match read_post_body(row.path) {
+                    Some(body) => ("application/json".to_owned(), body.to_string().into_bytes()),
+                    None => sample
+                        .clone()
+                        .unwrap_or_else(|| ("application/json".into(), b"{}".to_vec())),
+                }),
+            };
+            let reply = send(&world.router, &method, &uri, body, world.auth(who)).await;
+            done.push(Read {
+                row: *row,
+                path: uri,
+                who,
+                status: reply.status,
+                text: reply.text,
+            });
+        }
+        done
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn no_seeded_personal_value_reaches_a_reader_without_the_grant(pool: PgPool) {
+        let world = world(&pool).await;
+        let seeded = seed(&world).await;
+        let started = Instant::now();
+
+        let mut leaks = Vec::new();
+        let mut visited = 0;
+        for who in [Who::Viewer, Who::KeyRead] {
+            let reads = read_all(&world, &seeded, who).await;
+            visited += reads.len();
+            for read in &reads {
+                for what in found(&read.text) {
+                    let pending = PENDING.iter().any(|(row, _)| *row == row_name(&read.row));
+                    if !pending {
+                        leaks.push(format!("{} as {:?} shows {what}", read.path, read.who));
+                    }
+                }
+            }
+            // The walk reads real data: the list name, which is no secret, is there.
+            for suffix in REVEALS {
+                let read = reads
+                    .iter()
+                    .find(|read| read.row.path.ends_with(suffix))
+                    .unwrap();
+                assert_eq!(read.status, 200, "{who:?} {}: {}", read.path, read.text);
+            }
+            let lists = reads
+                .iter()
+                .find(|read| read.row.path == "/api/v1/workspaces/{ws}/lists")
+                .unwrap();
+            assert!(lists.text.contains(LIST_NAME), "{who:?}: {}", lists.text);
+            assert_eq!(lists.status, 200);
+            // Nothing the walk hit was a server error, and the data surfaces answered.
+            let broken: Vec<String> = reads
+                .iter()
+                .filter(|read| read.status >= 500 && !read.text.contains("render_unavailable"))
+                .map(|read| format!("{} {}", read.path, read.status))
+                .collect();
+            assert!(broken.is_empty(), "{who:?}: {broken:?}");
+        }
+        eprintln!(
+            "pii walk (withheld): {visited} reads in {:?}",
+            started.elapsed()
+        );
+
+        assert!(
+            leaks.is_empty(),
+            "{} leaks:\n{}",
+            leaks.len(),
+            leaks.join("\n")
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_seeded_values_appear_for_a_reader_with_the_grant(pool: PgPool) {
+        let world = world(&pool).await;
+        let seeded = seed(&world).await;
+        let started = Instant::now();
+
+        let mut seen: Vec<&'static str> = Vec::new();
+        let mut rejects_listed = false;
+        for who in [Who::ViewerWithPii, Who::KeyReadAndPii, Who::Admin] {
+            let reads = read_all(&world, &seeded, who).await;
+            for suffix in REVEALS {
+                let read = reads
+                    .iter()
+                    .find(|read| read.row.path.ends_with(suffix))
+                    .unwrap_or_else(|| panic!("no row ends with {suffix}"));
+                assert_eq!(read.status, 200, "{who:?} {}: {}", read.path, read.text);
+                assert!(
+                    !found(&read.text).is_empty(),
+                    "{who:?} sees no seeded value on {}: {}",
+                    read.path,
+                    read.text
+                );
+            }
+            for read in &reads {
+                seen.extend(found(&read.text));
+            }
+            if who == Who::Admin {
+                for (suffix, what, needle, marker) in HIDDEN_ON {
+                    let read = reads
+                        .iter()
+                        .find(|read| read.row.path.ends_with(suffix))
+                        .unwrap();
+                    assert_eq!(read.status, 200, "{}: {}", read.path, read.text);
+                    assert!(
+                        read.text.contains(marker),
+                        "{} holds no seeded row",
+                        read.path
+                    );
+                    assert!(
+                        !read.text.to_lowercase().contains(&needle.to_lowercase()),
+                        "{} shows {what}",
+                        read.path
+                    );
+                }
+            }
+            rejects_listed |= reads.iter().any(|read| {
+                read.row.path.ends_with("/ingest-rejects") && read.text.contains("unplanned_thing")
+            });
+        }
+        eprintln!("pii walk (granted): in {:?}", started.elapsed());
+
+        // The rejects list never shows an event's properties, to anyone: its value stays hidden
+        // even from the owner, which the walk records as a value that must never appear.
+        for (what, _) in PERSONAL {
+            assert_eq!(
+                seen.contains(&what),
+                what != NEVER_SHOWN,
+                "{what} with the grant"
+            );
+        }
+        assert!(
+            rejects_listed,
+            "the rejected event is not on the rejects list"
+        );
     }
 }
