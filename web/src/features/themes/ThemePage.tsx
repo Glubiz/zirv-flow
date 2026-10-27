@@ -21,6 +21,7 @@ export function ThemePage() {
           initial={data}
           canWrite={access.canWrite}
           canAdmin={access.canAdmin}
+          canPublish={access.canPublish}
           onReload={detail.reload}
         />
       )}

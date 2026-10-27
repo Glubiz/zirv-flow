@@ -7265,7 +7265,7 @@
         "tags": [
           "destinations"
         ],
-        "summary": "Checks the destination's settings and stored credential without delivering anything. A failed\ncheck is a 200 with `ok` false and the reason. Workspace admins only. Audited as\n`destination.checked`.",
+        "summary": "Checks the destination's settings and stored credential without delivering anything. A failed\ncheck is a 200 with `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as\n`destination.checked`.",
         "operationId": "check_destination",
         "parameters": [
           {
@@ -7332,6 +7332,16 @@
           },
           "409": {
             "description": "The destination is archived (`code` is `destination_archived`), or its type is not in this build (`destination_kind_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The egress policy refused the destination (`egress_denied`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -11268,7 +11278,7 @@
             }
           },
           "422": {
-            "description": "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events",
+            "description": "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events; `egress_denied` when its address is refused",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21490,7 +21500,7 @@
         "tags": [
           "sources"
         ],
-        "summary": "Tests the connection to the source with its stored credential. A failed test is a 200 with\n`ok` false and the reason. Workspace admins only. Audited as `source.tested`.",
+        "summary": "Tests the connection to the source with its stored credential. A failed test is a 200 with\n`ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as `source.tested`.",
         "operationId": "test_source",
         "parameters": [
           {
@@ -21557,6 +21567,16 @@
           },
           "409": {
             "description": "The source type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The egress policy refused the source (`egress_denied`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -28407,14 +28427,25 @@
           "scopes": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ApiKeyScope"
             },
-            "description": "Any of `ingest`, `read`, `write`, `publish`, `admin`.",
             "example": [
               "read"
             ]
           }
         }
+      },
+      "ApiKeyScope": {
+        "type": "string",
+        "description": "What a key may do. The schema twin of `zirv_flow_core::Scope`, so the generated client knows\nthe closed set.",
+        "enum": [
+          "ingest",
+          "read",
+          "write",
+          "publish",
+          "admin",
+          "pii"
+        ]
       },
       "AssetBody": {
         "type": "object",
@@ -29653,7 +29684,7 @@
             "items": {
               "type": "string"
             },
-            "description": "At least one of `ingest`, `read`, `write`, `publish`, `admin`.",
+            "description": "At least one of `ingest`, `read`, `write`, `publish`, `admin`, `pii`.",
             "example": [
               "read"
             ]
@@ -35918,6 +35949,13 @@
           },
           "email": {
             "type": "string"
+          },
+          "owner": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether this member is the instance owner, who has every right in every workspace.\nPresent for workspace admins and the owner only; left out for everyone else."
           },
           "role": {
             "type": "string",

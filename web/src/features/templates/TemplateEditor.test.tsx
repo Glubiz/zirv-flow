@@ -155,6 +155,26 @@ describe("editing a code template", () => {
     expect(screen.queryByRole("button", { name: "Save draft" })).not.toBeInTheDocument();
   });
 
+  it("hides Publish from an editor, shows it to a publisher, and shows a viewer no write control", async () => {
+    mockApi(templateRoutes({ role: "editor" }));
+    const editor = mount();
+    await screen.findByRole("button", { name: "Save draft" });
+    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+    editor.unmount();
+
+    mockApi(templateRoutes({ role: "publisher" }));
+    const publisher = mount();
+    expect(await screen.findByRole("button", { name: "Publish…" })).toBeInTheDocument();
+    publisher.unmount();
+
+    mockApi(templateRoutes({ role: "reader" }));
+    mount();
+    await sourceField();
+    for (const name of ["Save draft", "Publish…", "Send a test"]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+  });
+
   it("says so, with a retry, when the draft cannot be saved", async () => {
     const routes = templateRoutes();
     let fail = true;

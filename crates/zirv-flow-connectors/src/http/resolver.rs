@@ -12,6 +12,26 @@ use zirv_flow_core::egress::{AddressClass, Decision, EgressPolicy};
 
 use super::error::Denied;
 
+/// Normalize URL-style numeric hosts as well as bare IPv6 before consulting DNS. A host is
+/// never a URL, userinfo, or a scoped address; do not put rejected input in errors or logs.
+pub(crate) fn parse_host(host: &str) -> Result<url::Host<String>, Denied> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(match ip {
+            IpAddr::V4(ip) => url::Host::Ipv4(ip),
+            IpAddr::V6(ip) => url::Host::Ipv6(ip),
+        });
+    }
+    url::Host::parse(host).map_err(|_| invalid_host())
+}
+
+pub(crate) fn invalid_host() -> Denied {
+    record_denial("<invalid host>", AddressClass::Reserved);
+    Denied {
+        host: "<invalid host>".to_owned(),
+        class: AddressClass::Reserved,
+    }
+}
+
 /// Resolves a host name to addresses. Production uses the system resolver; tests inject their own
 /// to make a name resolve to chosen addresses without touching DNS.
 pub trait Lookup: Send + Sync {
@@ -121,6 +141,23 @@ mod tests {
                 Ok(denied) => Err(format!("{}:{}", denied.host, denied.class)),
                 Err(other) => Err(other.to_string()),
             },
+        }
+    }
+
+    #[tokio::test]
+    async fn public_then_private_dns_answers_are_each_checked_once() {
+        use crate::http::testing::Rebinding;
+
+        for later in ["10.0.0.5", "169.254.169.254"] {
+            let lookup = Arc::new(Rebinding::new("8.8.8.8", later));
+            let resolver = GuardedResolver::new(Arc::default(), lookup.clone());
+            assert_eq!(
+                resolve(&resolver).await.unwrap(),
+                vec!["8.8.8.8:0".parse::<SocketAddr>().unwrap()]
+            );
+            assert_eq!(lookup.calls(), 1);
+            assert!(resolve(&resolver).await.is_err());
+            assert_eq!(lookup.calls(), 2);
         }
     }
 

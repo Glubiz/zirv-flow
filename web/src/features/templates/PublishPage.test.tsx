@@ -244,13 +244,12 @@ describe("the Review and publish page", () => {
     expect(screen.queryByText("Sends a day could not be loaded")).not.toBeInTheDocument();
   });
 
-  it("offers a member who is not an admin the sample person only, and no way to publish", async () => {
+  it("shows an editor no review and no way to publish", async () => {
     const calls = mockApi({ ...templateRoutes({ role: "editor", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
     mount();
 
-    expect(await screen.findByText("Only workspace admins can publish.")).toBeInTheDocument();
-    await screen.findByTitle("Version 1 draft");
-    expect(publishButtons().every((button) => button.hasAttribute("disabled"))).toBe(true);
+    expect(await screen.findByText("Publishers review and publish a template.")).toBeInTheDocument();
+    expect(screen.queryAllByRole("button", { name: /^Publish version/ })).toHaveLength(0);
     expect(calls.some((call) => call.path.endsWith("/preview-people"))).toBe(false);
   });
 });

@@ -17,7 +17,7 @@ export function RequireAdmin({ workspaceId, children }: { workspaceId: string; c
   if (access.status === "error") {
     return <ErrorState {...describeError(access.error)} onRetry={access.reload} />;
   }
-  if (!access.data.canManage) {
+  if (!access.data.canAdmin) {
     return <Navigate to={`/w/${workspaceId}/members`} replace />;
   }
   return <>{children}</>;

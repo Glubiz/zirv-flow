@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { useParams } from "react-router";
 
-import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, formatDate, InlineError, PageHeader, Panel, Pill, ResourceView, TextField } from "../../ui";
 import { useSignedInUser } from "../session";
 import { useWorkspaces } from "../workspaces";
@@ -13,14 +13,36 @@ export function MembersPage() {
 }
 
 const ROLE_OPTIONS = [
-  { value: "admin", label: "Admin" },
-  { value: "publisher", label: "Publisher" },
-  { value: "editor", label: "Editor" },
-  { value: "viewer", label: "Viewer" },
+  { value: "admin", label: "Admin", help: "Access, credentials, settings" },
+  { value: "publisher", label: "Publisher", help: "Publishes flows and templates" },
+  { value: "editor", label: "Editor", help: "Edits drafts, runs tests" },
+  { value: "viewer", label: "Viewer", help: "Reads only" },
 ];
+
+const LAST_ADMIN = "A workspace needs an admin";
 
 function roleLabel(role: string): string {
   return ROLE_OPTIONS.find((option) => option.value === role)?.label ?? role;
+}
+
+function roleFrom(value: string): MemberRole {
+  return value === "admin" || value === "publisher" || value === "viewer" ? value : "editor";
+}
+
+function RolesDisclosure() {
+  return (
+    <details className="disclosure">
+      <summary>Roles</summary>
+      <dl className="facts">
+        {ROLE_OPTIONS.map((option) => (
+          <div className="fact" key={option.value}>
+            <dt>{option.label}</dt>
+            <dd>{option.help}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
 }
 
 function WorkspaceMembers({ ws }: { ws: string }) {
@@ -29,26 +51,43 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const members = useMembers(ws);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Member | null>(null);
+  const [demoting, setDemoting] = useState<{ member: Member; role: string } | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
   const name = workspaces.status === "ready" ? workspaces.data.find((item) => item.id === ws)?.name : undefined;
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
-  const canManage = access?.canManage ?? false;
+  const canAdmin = access?.canAdmin ?? false;
+  const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
+  const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1;
 
-  async function changeRole(member: Member, role: string) {
+  function changeRole(member: Member, role: string) {
+    // An admin who steps down loses this page, unless they are the owner, who keeps every right.
+    if (member.user_id === user.id && !user.is_owner && member.role === "admin" && role !== "admin") {
+      setDemoting({ member, role });
+      return;
+    }
+    void save(member, { role });
+  }
+  const reasonId = (member: Member) => `last-admin-${member.user_id}`;
+
+  async function save(member: Member, body: { role: string; view_pii?: boolean }) {
     setBusyUser(member.user_id);
     setFailure(null);
     try {
       await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/members/{user_id}", {
           params: { path: { ws, user_id: member.user_id } },
-          body: { role },
+          body,
         }),
       );
       members.reload();
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "last_admin") {
+        members.reload();
+      } else {
+        setFailure(describeError(error));
+      }
     } finally {
       setBusyUser(null);
     }
@@ -60,16 +99,14 @@ function WorkspaceMembers({ ws }: { ws: string }) {
         title="Members"
         lede={name ? `People who can work in ${name}.` : "People who can work in this workspace."}
         actions={
-          canManage ? (
+          canAdmin ? (
             <Button variant="primary" onClick={() => setAdding(true)}>
               Add member
             </Button>
           ) : null
         }
       />
-      {access && !canManage ? (
-        <p className="muted">Only workspace admins and the instance owner can add people, change roles or remove people.</p>
-      ) : null}
+      <RolesDisclosure />
       {failure ? <InlineError {...failure} /> : null}
       <Panel flush>
         <ResourceView
@@ -78,20 +115,23 @@ function WorkspaceMembers({ ws }: { ws: string }) {
           isEmpty={(data) => data.length === 0}
           empty={
             <EmptyState title="No members yet">
-              {canManage ? "Add the first person to this workspace." : "Nobody has been added to this workspace."}
+              {canAdmin ? "Add the first person to this workspace." : "Nobody has been added to this workspace."}
             </EmptyState>
           }
         >
           {(data) => (
             <div className="table-scroll">
-              <table className="table">
+              <table className="table members-table">
                 <caption>Members of this workspace</caption>
                 <thead>
                   <tr>
                     <th scope="col">Email</th>
                     <th scope="col">Role</th>
-                    <th scope="col">Added</th>
-                    {canManage ? (
+                    {canAdmin ? <th scope="col">Personal data</th> : null}
+                    <th scope="col" className="members-added">
+                      Added
+                    </th>
+                    {canAdmin ? (
                       <th scope="col">
                         <span className="visually-hidden">Actions</span>
                       </th>
@@ -101,35 +141,70 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                 <tbody>
                   {data.map((member) => (
                     <tr key={member.user_id}>
-                      <td className="strong">
+                      <td className="strong members-email">
                         {member.email}
                         {member.user_id === user.id ? <span className="faint"> (you)</span> : null}
                       </td>
-                      <td>
-                        {canManage ? (
-                          <select
-                            className="select"
-                            aria-label={`Role for ${member.email}`}
-                            value={member.role}
-                            disabled={busyUser === member.user_id}
-                            onChange={(event) => void changeRole(member, event.target.value)}
-                          >
-                            {ROLE_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
+                      <td className="members-role">
+                        {member.owner ? (
+                          <Pill>Owner</Pill>
+                        ) : canAdmin ? (
+                          <div className="stack-tight">
+                            <select
+                              className="select"
+                              aria-label={`Role for ${member.email}`}
+                              aria-describedby={lastAdmin(member) ? reasonId(member) : undefined}
+                              value={member.role}
+                              disabled={busyUser === member.user_id || lastAdmin(member)}
+                              onChange={(event) => changeRole(member, event.target.value)}
+                            >
+                              {ROLE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            {lastAdmin(member) ? (
+                              <span id={reasonId(member)} className="faint">
+                                {LAST_ADMIN}
+                              </span>
+                            ) : null}
+                          </div>
                         ) : (
                           <Pill>{roleLabel(member.role)}</Pill>
                         )}
                       </td>
-                      <td>{formatDate(member.added_at)}</td>
-                      {canManage ? (
-                        <td className="num">
-                          <Button onClick={() => setRemoving(member)} aria-label={`Remove ${member.email}`}>
-                            Remove
-                          </Button>
+                      {canAdmin ? (
+                        <td className="members-pii">
+                          <label className="switch-label">
+                            <input
+                              type="checkbox"
+                              role="switch"
+                              className="switch"
+                              aria-label={`Personal data for ${member.email}`}
+                              checked={member.owner === true || member.role === "admin" || member.view_pii}
+                              disabled={member.owner === true || member.role === "admin" || busyUser === member.user_id}
+                              onChange={(event) => void save(member, { role: member.role, view_pii: event.target.checked })}
+                            />
+                            <span className="switch-text" aria-hidden="true">
+                              Personal data
+                            </span>
+                          </label>
+                        </td>
+                      ) : null}
+                      <td className="members-added">{formatDate(member.added_at)}</td>
+                      {canAdmin ? (
+                        <td className="num members-actions">
+                          {member.owner ? null : (
+                            <Button
+                              onClick={() => setRemoving(member)}
+                              aria-label={`Remove ${member.email}`}
+                              aria-describedby={lastAdmin(member) ? reasonId(member) : undefined}
+                              disabled={lastAdmin(member)}
+                            >
+                              Remove
+                            </Button>
+                          )}
                         </td>
                       ) : null}
                     </tr>
@@ -152,11 +227,33 @@ function WorkspaceMembers({ ws }: { ws: string }) {
           }}
         />
       ) : null}
+      {demoting ? (
+        <Dialog title="Change your own role?" onClose={() => setDemoting(null)}>
+          <p className="muted">You will lose access to this page.</p>
+          <div className="dialog-actions">
+            <Button onClick={() => setDemoting(null)}>Keep my role</Button>
+            <Button
+              variant="primary"
+              onClick={() => {
+                const next = demoting;
+                setDemoting(null);
+                void save(next.member, { role: next.role });
+              }}
+            >
+              Change my role
+            </Button>
+          </div>
+        </Dialog>
+      ) : null}
       {removing ? (
         <RemoveMemberDialog
           workspaceId={ws}
           member={removing}
           onClose={() => setRemoving(null)}
+          onRefused={() => {
+            members.reload();
+            setRemoving(null);
+          }}
           onRemoved={() => {
             setRemoving(null);
             members.reload();
@@ -252,14 +349,12 @@ function AddMemberDialog({ workspaceId, existing, isOwner, onClose, onAdded }: A
           <label className="field-label" htmlFor="add-member-role">
             Role
           </label>
-          <select
-            id="add-member-role"
-            className="select"
-            value={role}
-            onChange={(event) => setRole(event.target.value === "admin" ? "admin" : "editor")}
-          >
-            <option value="editor">Member</option>
-            <option value="admin">Admin</option>
+          <select id="add-member-role" className="select" value={role} onChange={(event) => setRole(roleFrom(event.target.value))}>
+            {ROLE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
         {failure ? <InlineError {...failure} /> : null}
@@ -278,10 +373,11 @@ interface RemoveMemberDialogProps {
   workspaceId: string;
   member: Member;
   onClose: () => void;
+  onRefused: () => void;
   onRemoved: () => void;
 }
 
-function RemoveMemberDialog({ workspaceId, member, onClose, onRemoved }: RemoveMemberDialogProps) {
+function RemoveMemberDialog({ workspaceId, member, onClose, onRefused, onRemoved }: RemoveMemberDialogProps) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
@@ -296,6 +392,10 @@ function RemoveMemberDialog({ workspaceId, member, onClose, onRemoved }: RemoveM
       );
       onRemoved();
     } catch (error) {
+      if (error instanceof ApiError && error.code === "last_admin") {
+        onRefused();
+        return;
+      }
       setFailure(describeError(error));
       setBusy(false);
     }

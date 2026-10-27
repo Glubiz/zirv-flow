@@ -22,7 +22,7 @@ import { MODES, modeLabel, type EventSchemaDetail } from "./labels";
 export function EventSchemaPage() {
   const { ws = "", name = "" } = useParams();
   const access = useWorkspaceAccess(ws);
-  const canManage = access.status === "ready" && access.data.canManage;
+  const canManage = access.status === "ready" && access.data.canAdmin;
 
   return (
     <div className="page">

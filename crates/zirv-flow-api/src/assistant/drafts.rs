@@ -529,7 +529,7 @@ pub(crate) fn expected_call<'r>(response: &'r ChatResponse, want: &str) -> Optio
 /// A segment draft gets the literals it was shown as placeholders back the same way, and a
 /// placeholder that is not in the node it was sent in is feedback. A flow draft does the same for
 /// every condition, event filter and trait value it holds.
-async fn validate_turn(
+pub(super) async fn validate_turn(
     context: &ToolContext,
     kind: DraftKind,
     restore: &Restore,
@@ -779,13 +779,14 @@ pub(crate) async fn create(
 ) -> Result<(StatusCode, Json<DraftBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, draft_need(&principal)).await?;
     let user = session_user(&principal)?;
-    check_request(&request)?;
     let kind = request.kind.store();
     // A mapping or manifest draft reads a source and sends a sample of it, which is the
-    // admin's to see; the other kinds draft the editor's own work.
+    // admin's to see; the other kinds draft the editor's own work. The request is judged only
+    // once the caller is.
     if matches!(kind, DraftKind::Mapping | DraftKind::Manifest) {
         authorize(&state, &principal, workspace.id, Need::Admin).await?;
     }
+    check_request(&request)?;
     // The assistant being off is the first answer, before anything is read.
     let dispatcher = Dispatcher::open(&state, Some(user), workspace.id, kind.as_str())
         .await
@@ -1446,6 +1447,23 @@ async fn recheck_template(
     content: &Value,
 ) -> Result<(), ApiError> {
     let doc = stored_document(content)?;
+    let sender = doc
+        .email
+        .as_ref()
+        .and_then(|email| email.sender.as_deref())
+        .or_else(|| {
+            doc.blocks
+                .as_ref()
+                .and_then(|blocks| blocks.sender.as_deref())
+        });
+    if let Some(sender) = sender {
+        let unknown =
+            || ApiError::sender_unverified("the sender is not a sender identity of this workspace");
+        let id = sender.trim().parse::<Uuid>().map_err(|_| unknown())?;
+        zirv_flow_store::find_sender_identity(&state.pool, draft.workspace_id, id)
+            .await?
+            .ok_or_else(unknown)?;
+    }
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;

@@ -12,10 +12,12 @@ interface Props {
   themeId: string;
   /** Changes whenever a version is published, to reload the list. */
   reloadKey: number;
+  /** The theme preview route needs Edit; without it a version shows its tokens only. */
+  canPreview: boolean;
 }
 
 /** The published versions, and a read-only look at one. */
-export function ThemeVersions({ workspaceId, themeId, reloadKey }: Props) {
+export function ThemeVersions({ workspaceId, themeId, reloadKey, canPreview }: Props) {
   const [open, setOpen] = useState<number | null>(null);
   const versions = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/themes/{id}/versions", { params: { path: { ws: workspaceId, id: themeId } } })),
@@ -23,7 +25,7 @@ export function ThemeVersions({ workspaceId, themeId, reloadKey }: Props) {
   );
 
   if (open !== null) {
-    return <VersionDetail workspaceId={workspaceId} themeId={themeId} number={open} onBack={() => setOpen(null)} />;
+    return <VersionDetail workspaceId={workspaceId} themeId={themeId} number={open} canPreview={canPreview} onBack={() => setOpen(null)} />;
   }
   return (
     <ResourceView
@@ -67,7 +69,7 @@ export function ThemeVersions({ workspaceId, themeId, reloadKey }: Props) {
   );
 }
 
-function VersionDetail({ workspaceId, themeId, number, onBack }: { workspaceId: string; themeId: string; number: number; onBack: () => void }) {
+function VersionDetail({ workspaceId, themeId, number, canPreview, onBack }: { workspaceId: string; themeId: string; number: number; canPreview: boolean; onBack: () => void }) {
   const version = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/themes/{id}/versions/{n}", { params: { path: { ws: workspaceId, id: themeId, n: number } } })),
     [workspaceId, themeId, number],
@@ -76,6 +78,7 @@ function VersionDetail({ workspaceId, themeId, number, onBack }: { workspaceId: 
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    if (!canPreview) return;
     let current = true;
     unwrap(
       client.POST("/api/v1/workspaces/{ws}/themes/{id}/preview", { params: { path: { ws: workspaceId, id: themeId } }, body: { version: number } }),
@@ -86,7 +89,7 @@ function VersionDetail({ workspaceId, themeId, number, onBack }: { workspaceId: 
     return () => {
       current = false;
     };
-  }, [workspaceId, themeId, number, attempt]);
+  }, [workspaceId, themeId, number, attempt, canPreview]);
 
   return (
     <section className="stack" aria-label={`Version ${number}`}>
@@ -104,15 +107,17 @@ function VersionDetail({ workspaceId, themeId, number, onBack }: { workspaceId: 
               <TokenList tokens={readTokens(version.data.tokens)} />
               <IssueList issues={version.data.warnings} checked />
             </div>
-            <ThemePreviewPane
-              state={preview}
-              refreshing={false}
-              onRetry={() => {
-                setPreview({ status: "loading" });
-                setAttempt((n) => n + 1);
-              }}
-              frameTitle={`Preview of version ${number}`}
-            />
+            {canPreview ? (
+              <ThemePreviewPane
+                state={preview}
+                refreshing={false}
+                onRetry={() => {
+                  setPreview({ status: "loading" });
+                  setAttempt((n) => n + 1);
+                }}
+                frameTitle={`Preview of version ${number}`}
+              />
+            ) : null}
           </div>
         </>
       ) : null}

@@ -25,7 +25,7 @@ export function PublishPage() {
   );
   return (
     <ResourceView resource={access.ready && !(detail.status === "ready" && detail.refreshing) ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the template">
-      {(data) => <Gate key={`${ws}:${id}`} workspaceId={ws} template={data} canWrite={access.canWrite} canAdmin={access.canAdmin} onReload={detail.reload} />}
+      {(data) => <Gate key={`${ws}:${id}`} workspaceId={ws} template={data} canWrite={access.canWrite} canAdmin={access.canAdmin} canPublish={access.canPublish} onReload={detail.reload} />}
     </ResourceView>
   );
 }
@@ -35,14 +35,15 @@ interface GateProps {
   template: TemplateDetail;
   canWrite: boolean;
   canAdmin: boolean;
+  canPublish: boolean;
   /** Reads the template again, which starts the review over on the draft as it is now. */
   onReload: () => void;
 }
 
 function Gate(props: GateProps) {
-  const { workspaceId, template, canWrite } = props;
+  const { workspaceId, template, canPublish } = props;
   const archived = template.archived_at !== null && template.archived_at !== undefined;
-  const reason = !canWrite ? "Members of the workspace can review a template." : archived ? "This template is archived, so it cannot be published." : null;
+  const reason = !canPublish ? "Publishers review and publish a template." : archived ? "This template is archived, so it cannot be published." : null;
   if (reason !== null) {
     return (
       <div className="tp-page">
@@ -72,7 +73,7 @@ function WithLive(props: GateProps) {
   );
 }
 
-function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps & { live: TemplateVersion | null }) {
+function Review({ workspaceId, template, canAdmin, canPublish, live, onReload }: GateProps & { live: TemplateVersion | null }) {
   const liveNumber = live?.version ?? null;
   const next = (liveNumber ?? 0) + 1;
   const saved = useResource(
@@ -152,7 +153,7 @@ function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps &
   }
 
   const heading = published ? `Version ${published.version.version} is live` : `Review and publish version ${next}`;
-  const why = !canAdmin ? "Only workspace admins can publish." : peopleError !== null ? "The saved people could not be loaded." : subjects === null || !summary.done ? "Waiting for the checks." : summary.failed > 0 ? "A check could not run." : summary.blocking.length > 0 ? "Fix the blocking issues first." : null;
+  const why = !canPublish ? "Only publishers can publish." : peopleError !== null ? "The saved people could not be loaded." : subjects === null || !summary.done ? "Waiting for the checks." : summary.failed > 0 ? "A check could not run." : summary.blocking.length > 0 ? "Fix the blocking issues first." : null;
   const draftCheck = checks[subject.key];
 
   return (
@@ -166,7 +167,7 @@ function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps &
         {!published ? (
           <>
             {liveNumber !== null ? <span className="faint">{`v${liveNumber} stays live until you publish`}</span> : null}
-            <Button variant="primary" onClick={() => void publish()} disabled={busy || !ready || !canAdmin} aria-describedby={why ? "pb-why" : undefined}>
+            <Button variant="primary" onClick={() => void publish()} disabled={busy || !ready || !canPublish} aria-describedby={why ? "pb-why" : undefined}>
               {busy ? "Publishing" : `Publish version ${next}`}
             </Button>
           </>
@@ -202,7 +203,7 @@ function Review({ workspaceId, template, canAdmin, live, onReload }: GateProps &
                 </div>
               ) : null}
               <div className="row">
-                <Button variant="primary" onClick={() => void publish()} disabled={busy || !ready || !canAdmin}>
+                <Button variant="primary" onClick={() => void publish()} disabled={busy || !ready || !canPublish}>
                   {busy ? "Publishing" : `Publish version ${next}`}
                 </Button>
                 <Link className="btn" to={`/w/${workspaceId}/templates/${template.id}`}>

@@ -34,7 +34,7 @@ const NO_FILTERS: Filters = { source: "", name: "", outcome: "" };
 export function DebuggerPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
-  const canReveal = access.status === "ready" && access.data.canManage;
+  const canReveal = access.status === "ready" && access.data.canViewPii;
 
   return (
     <div className="page">

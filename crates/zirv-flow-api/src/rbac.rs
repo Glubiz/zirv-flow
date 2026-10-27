@@ -753,3 +753,6 @@ mod tests {
         assert!(unlisted_mounts("    // .merge(other_routes())").is_empty());
     }
 }
+
+#[cfg(test)]
+mod acceptance;

@@ -8,7 +8,7 @@ import { stepFor, ImportPage } from "./ImportPage";
 import type { CsvImport } from "./labels";
 import { anImport, LISTS, SAMPLES, TRAITS } from "./testData";
 
-const members = (role: "admin" | "editor", userId: string) => [
+const members = (role: "admin" | "publisher" | "editor" | "viewer", userId: string) => [
   { user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" },
 ];
 
@@ -33,7 +33,7 @@ interface Server {
 }
 
 /** A small stand-in for the API: the import it serves changes as the page acts on it. */
-function server(start: Partial<CsvImport>, options: { masked?: boolean; role?: "admin" | "editor"; user?: typeof OWNER; memberId?: string } = {}): Server {
+function server(start: Partial<CsvImport>, options: { masked?: boolean; role?: "admin" | "publisher" | "editor" | "viewer"; user?: typeof OWNER; memberId?: string } = {}): Server {
   const user = options.user ?? OWNER;
   const state: Server = { current: anImport(start), masked: options.masked ?? false, routes: {} };
   const base = "/api/v1/workspaces/ws1/imports/imp-1";
@@ -324,6 +324,25 @@ describe("the dry run step", () => {
     expect(await screen.findByText(/Importing row 0 of 3/)).toBeInTheDocument();
     expect(calls.some((call) => call.method === "POST" && call.path.endsWith("/run"))).toBe(true);
     expect(screen.getByRole("button", { name: "Cancel the import" })).toBeInTheDocument();
+  });
+
+  it("hides the run from an editor, shows it to a publisher, and gives a viewer no buttons", async () => {
+    const done = { status: "dry_run_done" as const, rows_total: 3, rows_done: 3, rows_applied: 3 };
+    mockApi(server(done, { role: "editor", user: MEMBER }).routes);
+    const editor = mount();
+    expect(await screen.findByRole("button", { name: "Run the dry run again" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start the import" })).not.toBeInTheDocument();
+    editor.unmount();
+
+    mockApi(server(done, { role: "publisher", user: MEMBER }).routes);
+    const publisher = mount();
+    expect(await screen.findByRole("button", { name: "Start the import" })).toBeInTheDocument();
+    publisher.unmount();
+
+    mockApi(server(done, { role: "viewer", user: MEMBER }).routes);
+    mount();
+    await screen.findByText(/would be imported/);
+    expect(screen.queryByRole("button", { name: /import|dry run|mapping/i })).not.toBeInTheDocument();
   });
 
   it("goes back to the mapping", async () => {

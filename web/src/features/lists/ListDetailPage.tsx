@@ -206,7 +206,7 @@ function ListDetail({ workspaceId, listId }: { workspaceId: string; listId: stri
           </Panel>
           {!canWrite ? <p className="muted">You can look at this list but not change it.</p> : null}
           {!canSeeValues ? (
-            <p className="muted">Only workspace admins and the instance owner see identifier values; they are hidden from you.</p>
+            <p className="muted">Identifier values are hidden without the personal data permission.</p>
           ) : null}
         </>
       )}
