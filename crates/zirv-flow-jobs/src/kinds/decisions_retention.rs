@@ -279,9 +279,15 @@ mod tests {
             .unwrap();
         }
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        zirv_flow_store::set_workspace_retention(&mut tx, workspaces[0], None, Some(60), None)
-            .await
-            .unwrap();
+        zirv_flow_store::set_workspace_retention(
+            &mut tx,
+            workspaces[0],
+            None,
+            Some(Some(60)),
+            None,
+        )
+        .await
+        .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
         let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
         leader.tick_at(now + time::Duration::days(2)).await.unwrap();

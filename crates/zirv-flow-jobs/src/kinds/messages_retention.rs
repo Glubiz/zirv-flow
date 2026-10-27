@@ -4,7 +4,10 @@
 
 use serde_json::Value;
 use tracing::info;
-use zirv_flow_store::{apply_message_retention_for, record_retention_run, workspace_windows};
+use zirv_flow_store::{
+    MessageRetentionReport, apply_message_retention_progress, record_retention_run,
+    workspace_windows,
+};
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
@@ -25,13 +28,19 @@ impl JobKind for MessagesRetention {
         // A workspace with a shorter window of its own is deleted at that window, and only it.
         let windows =
             workspace_windows(&pool, settings.days, ctx.decision_retention().days).await?;
-        let report = apply_message_retention_for(&pool, &settings, &windows.messages, now).await?;
+        // What committed before a failure still counts, so the run and the counter are recorded
+        // either way.
+        let mut report = MessageRetentionReport::default();
+        let outcome =
+            apply_message_retention_progress(&pool, &settings, &windows.messages, now, &mut report)
+                .await;
         record_retention_run(&pool, "messages", now, report.messages_deleted).await?;
         metrics::record_retention(
             "messages",
             report.messages_deleted,
             now.unix_timestamp() as f64,
         );
+        outcome?;
         info!(
             messages_deleted = report.messages_deleted,
             "message retention ran"
@@ -174,9 +183,15 @@ mod tests {
             workspaces.push(ws);
         }
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        zirv_flow_store::set_workspace_retention(&mut tx, workspaces[0], Some(60), None, None)
-            .await
-            .unwrap();
+        zirv_flow_store::set_workspace_retention(
+            &mut tx,
+            workspaces[0],
+            Some(Some(60)),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
         let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
         leader.tick_at(now + time::Duration::days(2)).await.unwrap();
@@ -213,6 +228,102 @@ mod tests {
             .unwrap();
         assert_eq!(left, [workspaces[1].as_uuid()]);
         assert_eq!(super::super::recorded_run(&pool, "messages").await, Some(1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_after_a_committed_batch_still_counts_that_batch(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &zirv_flow_core::WorkspaceName::parse("ours").unwrap(),
+            &zirv_flow_core::Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let person = uuid::Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let now = OffsetDateTime::now_utc();
+        // One full batch of old messages, then a newest one that a trigger refuses to delete.
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, node_id, \
+                template_id, destination_id, status, created_at, completed_at) \
+             SELECT gen_random_uuid(), $1, $2, gen_random_uuid(), \
+                CASE WHEN n = 5001 THEN 'last' ELSE 'old' END, gen_random_uuid(), \
+                gen_random_uuid(), 'sent', \
+                $3 - make_interval(days => 500) + make_interval(secs => n), \
+                $3 - make_interval(days => 500) + make_interval(secs => n) \
+             FROM generate_series(1, 5001) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE FUNCTION refuse_last() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN IF OLD.node_id = 'last' THEN RAISE EXCEPTION 'refused'; END IF; \
+             RETURN OLD; END $$",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TRIGGER refuse_last BEFORE DELETE ON messages \
+             FOR EACH ROW EXECUTE FUNCTION refuse_last()",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
+        leader.tick_at(now + time::Duration::days(2)).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[MessagesRetention::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_clock(Clock::Manual(ManualClock::new(now)))
+            .with_message_retention(MessageRetention::default());
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let guard = ::metrics::set_default_local_recorder(&recorder);
+        let result = MessagesRetention
+            .run(&mut ctx, claimed.payload.clone())
+            .await;
+        drop(guard);
+        tx.rollback().await.unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            super::super::recorded_run(&pool, "messages").await,
+            Some(5000)
+        );
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_retention_deleted_total{table=\"messages\"} 5000"),
+            "{output}"
+        );
     }
 
     #[sqlx::test]

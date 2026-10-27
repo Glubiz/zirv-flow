@@ -64,7 +64,7 @@ pub struct RetentionReport {
     pub skipped_partitions: Vec<String>,
     pub rejects_deleted: u64,
     pub dedupe_deleted: u64,
-    /// Test-send log rows past their 13 months (architecture 16.3).
+    /// Test-send log rows past the configured window (`retention.test_send_months`, default 13; architecture 16.3).
     pub test_sends_deleted: u64,
 }
 
@@ -76,7 +76,21 @@ pub async fn apply_event_retention(
     windows: &crate::RetentionSettings,
     now: OffsetDateTime,
 ) -> Result<RetentionReport, StoreError> {
-    apply_event_retention_in_batches(pool, settings, windows, now, RETENTION_BATCH).await
+    let mut report = RetentionReport::default();
+    apply_event_retention_progress(pool, settings, windows, now, &mut report).await?;
+    Ok(report)
+}
+
+/// Like [`apply_event_retention`], but adds what it removed to `report` as it goes, so a caller
+/// keeps the count of the batches that committed before a later step failed.
+pub async fn apply_event_retention_progress(
+    pool: &PgPool,
+    settings: &EventRetention,
+    windows: &crate::RetentionSettings,
+    now: OffsetDateTime,
+    report: &mut RetentionReport,
+) -> Result<(), StoreError> {
+    apply_event_retention_in_batches(pool, settings, windows, now, RETENTION_BATCH, report).await
 }
 
 async fn apply_event_retention_in_batches(
@@ -85,28 +99,34 @@ async fn apply_event_retention_in_batches(
     windows: &crate::RetentionSettings,
     now: OffsetDateTime,
     batch_size: i64,
-) -> Result<RetentionReport, StoreError> {
+    report: &mut RetentionReport,
+) -> Result<(), StoreError> {
     let default_days = i32::try_from(settings.default_days).unwrap_or(i32::MAX);
-    let mut report = RetentionReport::default();
 
-    report.events_deleted +=
-        delete_events_in_batches(pool, &overridden_delete(), batch_size, |query| {
-            query.bind(now).bind(batch_size)
-        })
-        .await?;
+    delete_events_in_batches(
+        pool,
+        &overridden_delete(),
+        batch_size,
+        &mut report.events_deleted,
+        |query| query.bind(now).bind(batch_size),
+    )
+    .await?;
 
     let default_cutoff = now - Duration::days(i64::from(settings.default_days));
-    report.events_deleted +=
-        delete_events_in_batches(pool, &default_delete(), batch_size, |query| {
-            query.bind(default_cutoff).bind(batch_size)
-        })
-        .await?;
-
-    report.rejects_deleted = delete_in_batches(
+    delete_events_in_batches(
         pool,
-        "DELETE FROM ingest_rejects WHERE id IN ( \
-            SELECT id FROM ingest_rejects WHERE received_at < $1 LIMIT $2)",
+        &default_delete(),
         batch_size,
+        &mut report.events_deleted,
+        |query| query.bind(default_cutoff).bind(batch_size),
+    )
+    .await?;
+
+    delete_in_batches(
+        pool,
+        "DELETE FROM ingest_rejects WHERE id IN (             SELECT id FROM ingest_rejects WHERE received_at < $1 LIMIT $2)",
+        batch_size,
+        &mut report.rejects_deleted,
         |query| {
             query
                 .bind(now - Duration::days(i64::from(settings.reject_days)))
@@ -117,13 +137,11 @@ async fn apply_event_retention_in_batches(
 
     let longest_cutoff = longest_cutoff(pool, default_days, now).await?;
 
-    report.dedupe_deleted = delete_in_batches(
+    delete_in_batches(
         pool,
-        "DELETE FROM event_dedupe d USING ( \
-            SELECT workspace_id, message_id FROM event_dedupe \
-            WHERE event_occurred_at < $1 LIMIT $2) old \
-         WHERE d.workspace_id = old.workspace_id AND d.message_id = old.message_id",
+        "DELETE FROM event_dedupe d USING (             SELECT workspace_id, message_id FROM event_dedupe             WHERE event_occurred_at < $1 LIMIT $2) old          WHERE d.workspace_id = old.workspace_id AND d.message_id = old.message_id",
         batch_size,
+        &mut report.dedupe_deleted,
         |query| query.bind(longest_cutoff).bind(batch_size),
     )
     .await?;
@@ -131,21 +149,21 @@ async fn apply_event_retention_in_batches(
     report.test_sends_deleted =
         crate::delete_test_sends_before(pool, now, windows.test_send_months).await?;
 
-    drop_old_partitions(pool, default_days, now, &mut report).await?;
-    Ok(report)
+    drop_old_partitions(pool, default_days, now, report).await
 }
 
 /// [`delete_in_batches`] for a statement built at run time that returns the number of rows it
-/// deleted as one `bigint` (the event deletes, which write markers).
+/// deleted as one `bigint` (the event deletes, which write markers). Each batch is added to
+/// `total` once it commits.
 async fn delete_events_in_batches<'q>(
     pool: &PgPool,
     statement: &str,
     batch_size: i64,
+    total: &mut u64,
     bind: impl Fn(
         sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
     ) -> sqlx::query::QueryScalar<'q, sqlx::Postgres, i64, sqlx::postgres::PgArguments>,
-) -> Result<u64, StoreError> {
-    let mut total = 0;
+) -> Result<(), StoreError> {
     loop {
         let deleted: i64 = bind(sqlx::query_scalar(sqlx::AssertSqlSafe(
             statement.to_owned(),
@@ -153,9 +171,9 @@ async fn delete_events_in_batches<'q>(
         .fetch_one(pool)
         .await
         .map_err(StoreError::query)?;
-        total += u64::try_from(deleted).unwrap_or(0);
+        *total += u64::try_from(deleted).unwrap_or(0);
         if deleted < batch_size {
-            return Ok(total);
+            return Ok(());
         }
     }
 }
@@ -164,20 +182,20 @@ async fn delete_in_batches<'q>(
     pool: &PgPool,
     statement: &'static str,
     batch_size: i64,
+    total: &mut u64,
     bind: impl Fn(
         sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-) -> Result<u64, StoreError> {
-    let mut total = 0;
+) -> Result<(), StoreError> {
     loop {
         let deleted = bind(sqlx::query(statement))
             .execute(pool)
             .await
             .map_err(StoreError::query)?
             .rows_affected();
-        total += deleted;
+        *total += deleted;
         if i64::try_from(deleted).unwrap_or(i64::MAX) < batch_size {
-            return Ok(total);
+            return Ok(());
         }
     }
 }
@@ -387,7 +405,17 @@ mod tests {
     }
 
     async fn run_small_batches(pool: &PgPool) -> Result<RetentionReport, StoreError> {
-        apply_event_retention_in_batches(pool, &settings(), &Default::default(), NOW, 1).await
+        let mut report = RetentionReport::default();
+        apply_event_retention_in_batches(
+            pool,
+            &settings(),
+            &Default::default(),
+            NOW,
+            1,
+            &mut report,
+        )
+        .await?;
+        Ok(report)
     }
 
     #[sqlx::test]

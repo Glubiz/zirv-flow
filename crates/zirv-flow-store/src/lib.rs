@@ -124,14 +124,14 @@ pub use events::{
     MAX_REPLAY, NewEventSchema, PublishOutcome, REPLAY_JOB_KIND, RETENTION_BATCH, RejectCursor,
     RejectFilter, ReplayPrediction, ReplaySelection, ReplayTotals, RetentionReport, RowCursor,
     RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
-    create_event_schema, debugger_epoch, debugger_epoch_peek, debugger_feed_head,
-    debugger_feed_missing, debugger_feed_position, debugger_feed_start, enqueue_replay,
-    ensure_event_partitions, erase_unattributed_rejects, explore_breakdown, explore_count,
-    explore_rows, explore_total, find_event_schema, get_event_policy, list_event_schemas,
-    list_ingest_rejects, list_schema_versions, listen_for_debugger, preview_replay,
-    prune_debugger_feed, publish_schema_draft, read_debugger_batch, read_debugger_feed,
-    read_debugger_feed_at, replay_rejects, save_schema_draft, select_rejects, set_event_policy,
-    touch_debugger_watch, update_event_schema,
+    apply_event_retention_progress, create_event_schema, debugger_epoch, debugger_epoch_peek,
+    debugger_feed_head, debugger_feed_missing, debugger_feed_position, debugger_feed_start,
+    enqueue_replay, ensure_event_partitions, erase_unattributed_rejects, explore_breakdown,
+    explore_count, explore_rows, explore_total, find_event_schema, get_event_policy,
+    list_event_schemas, list_ingest_rejects, list_schema_versions, listen_for_debugger,
+    preview_replay, prune_debugger_feed, publish_schema_draft, read_debugger_batch,
+    read_debugger_feed, read_debugger_feed_at, replay_rejects, save_schema_draft, select_rejects,
+    set_event_policy, touch_debugger_watch, update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -205,10 +205,10 @@ pub use lists::{
 pub use messages::{
     GateRecord, LoggedMessage, Message, MessageLogCursor, MessageLogFilter, MessageLogPage,
     MessageRetention, MessageRetentionReport, MessageStatus, NewMessage, WaitFilter, WaitReason,
-    apply_message_retention, apply_message_retention_for, clear_message_in_flight, find_message,
-    insert_message, list_person_messages, load_person_message_log, mark_message_sending,
-    mark_message_unconfirmed, message_address_hash, message_in_flight, message_status,
-    message_unconfirmed, read_send_address,
+    apply_message_retention, apply_message_retention_for, apply_message_retention_progress,
+    clear_message_in_flight, find_message, insert_message, list_person_messages,
+    load_person_message_log, mark_message_sending, mark_message_unconfirmed, message_address_hash,
+    message_in_flight, message_status, message_unconfirmed, read_send_address,
 };
 pub use migrations::{SchemaState, migrate, schema_state};
 pub use people::{
