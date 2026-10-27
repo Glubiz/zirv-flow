@@ -78,6 +78,21 @@ describe("the snippet list", () => {
     expect(within(list).getByText("Theme")).toBeInTheDocument();
   });
 
+  it("offers a viewer neither New snippet nor Archive, and an admin both", async () => {
+    mockApi(snippetRoutes({ role: "reader" }));
+    const viewer = mount();
+
+    await screen.findByRole("link", { name: "Shipping promise" });
+    expect(screen.queryByRole("button", { name: "New snippet" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Archive Shipping promise" })).not.toBeInTheDocument();
+    viewer.unmount();
+
+    mockApi(snippetRoutes());
+    mount();
+    expect(await screen.findByRole("button", { name: "Archive Shipping promise" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New snippet" })).toBeInTheDocument();
+  });
+
   it("offers archive only to an admin", async () => {
     mockApi(snippetRoutes({ role: "editor" }));
     mount();

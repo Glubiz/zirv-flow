@@ -18,7 +18,7 @@ export function AiSettingsPage() {
       />
       <ResourceView resource={access} loadingLabel="Checking your access">
         {(data) =>
-          data.canManage ? (
+          data.canAdmin ? (
             <Settings key={ws} workspaceId={ws} />
           ) : (
             <Panel flush>

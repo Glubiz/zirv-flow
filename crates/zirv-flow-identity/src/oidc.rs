@@ -300,6 +300,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_values_cannot_replace_the_configured_identity_provider() {
+        let (mock, provider) = provider().await;
+        let trap = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let supplied = format!(
+            "http://{}/token?issuer=http://169.254.169.254",
+            trap.local_addr().unwrap()
+        );
+        mock.set_token(Token::valid(&supplied));
+
+        let authorization = provider.begin().await.unwrap();
+        assert_eq!(
+            url::Url::parse(&authorization.url).unwrap().origin(),
+            url::Url::parse(mock.issuer()).unwrap().origin()
+        );
+        let identity = provider
+            .finish(&supplied, &supplied, &supplied)
+            .await
+            .unwrap();
+
+        assert_eq!(identity.issuer, mock.issuer());
+        assert_eq!(mock.discoveries(), 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), trap.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn a_valid_token_yields_the_verified_identity() {
         let (mock, provider) = provider().await;
 

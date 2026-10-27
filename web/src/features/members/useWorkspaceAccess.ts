@@ -2,7 +2,7 @@ import { client, unwrap, useResource, type components, type Resource } from "../
 import { useSignedInUser } from "../session";
 
 export type Member = components["schemas"]["MemberBody"];
-export type MemberRole = "admin" | "publisher" | "editor";
+export type MemberRole = "admin" | "publisher" | "editor" | "viewer";
 
 export function useMembers(workspaceId: string): Resource<Member[]> {
   return useResource(
@@ -13,14 +13,29 @@ export function useMembers(workspaceId: string): Resource<Member[]> {
 
 export interface WorkspaceAccess {
   role: MemberRole | null;
-  canManage: boolean;
+  isOwner: boolean;
+  /** Edit drafts and run tests: editor and above. */
+  canEdit: boolean;
+  /** Publish, pause, resume, archive, retry and start: publisher and above. */
+  canPublish: boolean;
+  /** Members, keys, credentials and settings: admin and the owner. */
+  canAdmin: boolean;
+  /** See personal values unmasked. */
+  canViewPii: boolean;
 }
 
 export function accessFor(members: Member[], userId: string, isOwner: boolean): WorkspaceAccess {
-  const mine = members.find((member) => member.user_id === userId)?.role;
-  // A viewer reads only, so it has no write role here; the role UI comes with #368.
-  const role = mine === "admin" || mine === "publisher" || mine === "editor" ? mine : null;
-  return { role, canManage: isOwner || role === "admin" };
+  const mine = members.find((member) => member.user_id === userId);
+  // An unknown role string is treated as the least privileged role, never as no membership.
+  const role: MemberRole | null = mine
+    ? mine.role === "admin" || mine.role === "publisher" || mine.role === "editor"
+      ? mine.role
+      : "viewer"
+    : null;
+  const canAdmin = isOwner || role === "admin";
+  const canPublish = canAdmin || role === "publisher";
+  const canEdit = canPublish || role === "editor";
+  return { role, isOwner, canEdit, canPublish, canAdmin, canViewPii: canAdmin || mine?.view_pii === true };
 }
 
 export function useWorkspaceAccess(workspaceId: string): Resource<WorkspaceAccess> {

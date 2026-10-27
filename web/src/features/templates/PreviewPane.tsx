@@ -23,7 +23,10 @@ interface Props {
   state: PreviewState;
   refreshing: boolean;
   onRetry: () => void;
+  /** Whether the saved-people list and its save and remove actions are available (admin routes). */
   canAdmin: boolean;
+  /** Preview as a real person: Edit plus the personal data grant. */
+  canRealPerson: boolean;
   person: PersonChoice | null;
   onPerson: (person: PersonChoice | null) => void;
   /** Selects a hidden block or section in the editor. Absent where the editor has no blocks. */
@@ -31,15 +34,15 @@ interface Props {
 }
 
 /** The server-rendered preview. The HTML goes into an iframe with every sandbox permission off; the SPA never renders it. */
-export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetry, canAdmin, person, onPerson, onGoToBlock }: Props) {
+export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetry, canAdmin, canRealPerson, person, onPerson, onGoToBlock }: Props) {
   const [width, setWidth] = useState<Width>("desktop");
   const [view, setView] = useState<View>("html");
 
   return (
     <section className="tp-preview" aria-label="Preview" aria-busy={refreshing || undefined}>
       <div className="row">
-        {canAdmin ? (
-          <AdminPreviewAs workspaceId={workspaceId} templateId={templateId} person={person} onPerson={onPerson} />
+        {canRealPerson ? (
+          <AdminPreviewAs workspaceId={workspaceId} templateId={templateId} canAdmin={canAdmin} person={person} onPerson={onPerson} />
         ) : (
           <SelectField label="Preview as" value="sample" onChange={() => onPerson(null)}>
             <option value="sample">Sample person</option>
@@ -53,7 +56,7 @@ export function PreviewPane({ workspaceId, templateId, state, refreshing, onRetr
           ))}
         </div>
       </div>
-      {!canAdmin ? <p className="faint">Only admins can preview as a real person.</p> : null}
+      {!canRealPerson ? <p className="faint">Previewing a real person needs the personal data permission.</p> : null}
       {refreshing ? (
         <p className="faint" role="status">
           Updating the preview
@@ -77,14 +80,14 @@ export function labelOf(id: string, display: { value?: string | null } | null | 
 }
 
 /** The admin's "Preview as" select: the sample person, the people saved on the template, and anyone else through the picker. */
-function AdminPreviewAs({ workspaceId, templateId, person, onPerson }: { workspaceId: string; templateId: string; person: PersonChoice | null; onPerson: (person: PersonChoice | null) => void }) {
+function AdminPreviewAs({ workspaceId, templateId, canAdmin, person, onPerson }: { workspaceId: string; templateId: string; canAdmin: boolean; person: PersonChoice | null; onPerson: (person: PersonChoice | null) => void }) {
   const [asking, setAsking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const path = { ws: workspaceId, id: templateId };
   const saved = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/preview-people", { params: { path } })),
-    [workspaceId, templateId],
+    async () => (canAdmin ? unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/preview-people", { params: { path } })) : []),
+    [workspaceId, templateId, canAdmin],
   );
   const people: PersonChoice[] = saved.status === "ready" ? saved.data.map((entry) => ({ id: entry.person_id, label: labelOf(entry.person_id, entry.display) })) : [];
   const isSaved = person !== null && people.some((entry) => entry.id === person.id);
@@ -137,7 +140,7 @@ function AdminPreviewAs({ workspaceId, templateId, person, onPerson }: { workspa
         ))}
         <option value={OTHER}>Pick another person…</option>
       </SelectField>
-      {person && !asking ? (
+      {canAdmin && person && !asking ? (
         <Button aria-disabled={busy || undefined} onClick={() => void (isSaved ? remove() : save())}>
           {isSaved ? "Remove" : "Save"}
         </Button>
@@ -251,7 +254,7 @@ function HiddenBlocks({ hidden, who, onGoToBlock }: { hidden: readonly { id: str
   );
 }
 
-function PersonPicker({ workspaceId, chosen, onChoose }: { workspaceId: string; chosen: PersonChoice | null; onChoose: (person: PersonChoice) => void }) {
+export function PersonPicker({ workspaceId, chosen, onChoose }: { workspaceId: string; chosen: PersonChoice | null; onChoose: (person: PersonChoice) => void }) {
   const [value, setValue] = useState("");
   const [searching, setSearching] = useState(false);
   const [found, setFound] = useState<PersonChoice[] | null>(null);

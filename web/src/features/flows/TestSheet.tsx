@@ -30,7 +30,7 @@ interface PersonChoice {
 interface Props {
   workspaceId: string;
   flowId: string;
-  /** A real person's values need the right to see them, which is a workspace admin's. */
+  /** A real person's values need the right to see them, which the personal data permission grants. */
   canSeePeople: boolean;
   /** A step in words, such as "Branch: Opened onboarding?". */
   describeStep: (id: string) => string;
@@ -192,7 +192,7 @@ export function TestSheet(props: Props) {
                 <span>A real person</span>
               </label>
               {!props.canSeePeople ? (
-                <p className="faint">Walking a real person shows their values, which needs a workspace admin.</p>
+                <p className="faint">Walking a real person needs the personal data permission.</p>
               ) : null}
               <label className="fl-radio">
                 <input type="radio" name="test-who" checked={who === "snapshot"} onChange={() => setWho("snapshot")} />

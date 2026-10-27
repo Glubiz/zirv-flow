@@ -437,6 +437,57 @@ mod tests {
         messages: std::cell::Cell<u32>,
     }
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_private_webhook_is_dead_lettered_with_a_fixed_code(pool: PgPool) {
+        use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
+
+        let env = Env::with(
+            pool,
+            "private-webhook",
+            "webhook",
+            json!({"url": "http://169.254.169.254/secret-path?token=secret-query"}),
+            100,
+            100,
+        )
+        .await;
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        let secret = SecretId::new();
+        let purpose = SecretPurpose::ConnectorCredential;
+        let sealed = seal(
+            &keys,
+            br#"{"signing_secret":"secret"}"#,
+            &secret_aad(env.ws, secret, purpose),
+        );
+        zirv_flow_store::secrets::insert_unchecked(&env.pool, env.ws, purpose, secret, &sealed)
+            .await
+            .unwrap();
+        let credential = zirv_flow_store::import_secret_as_credential(
+            &env.pool,
+            env.ws,
+            "Signing",
+            secret,
+            &["signing_secret"],
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE destinations SET credential_id = $2 WHERE id = $1")
+            .bind(env.destination)
+            .bind(credential.id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        env.order().await;
+        env.execute_with_keys(env.claim().await.unwrap(), Some(keys))
+            .await
+            .unwrap();
+        assert_eq!(
+            env.rows().await,
+            [("dead".to_owned(), 1, Some("egress_denied".to_owned()))]
+        );
+        assert!(env.claim().await.is_none(), "the refusal is terminal");
+    }
+
     impl Env {
         async fn new(pool: PgPool, name: &str, mode: &str) -> Self {
             Self::with(pool, name, "fake", json!({"mode": mode}), 100, 100).await
@@ -555,6 +606,14 @@ mod tests {
 
         /// Runs one claimed job as a worker does: its work commits with its completion.
         async fn execute(&self, claimed: ClaimedJob) -> Result<(), JobError> {
+            self.execute_with_keys(claimed, None).await
+        }
+
+        async fn execute_with_keys(
+            &self,
+            claimed: ClaimedJob,
+            keys: Option<Arc<zirv_flow_core::Keyring>>,
+        ) -> Result<(), JobError> {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let result = {
                 let mut ctx = JobContext::new(&mut tx, &claimed)
@@ -566,7 +625,7 @@ mod tests {
                     })
                     .with_rate_gates(Arc::clone(&self.gates))
                     .with_outbound(
-                        None,
+                        keys,
                         Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap()),
                         Arc::default(),
                     );

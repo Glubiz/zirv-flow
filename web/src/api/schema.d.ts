@@ -1241,7 +1241,7 @@ export interface paths {
         put?: never;
         /**
          * Checks the destination's settings and stored credential without delivering anything. A failed
-         *     check is a 200 with `ok` false and the reason. Workspace admins only. Audited as
+         *     check is a 200 with `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as
          *     `destination.checked`.
          */
         post: operations["check_destination"];
@@ -3475,7 +3475,7 @@ export interface paths {
         put?: never;
         /**
          * Tests the connection to the source with its stored credential. A failed test is a 200 with
-         *     `ok` false and the reason. Workspace admins only. Audited as `source.tested`.
+         *     `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as `source.tested`.
          */
         post: operations["test_source"];
         delete?: never;
@@ -4738,13 +4738,18 @@ export interface components {
             /** Format: date-time */
             revoked_at?: string | null;
             /**
-             * @description Any of `ingest`, `read`, `write`, `publish`, `admin`.
              * @example [
              *       "read"
              *     ]
              */
-            scopes: string[];
+            scopes: components["schemas"]["ApiKeyScope"][];
         };
+        /**
+         * @description What a key may do. The schema twin of `zirv_flow_core::Scope`, so the generated client knows
+         *     the closed set.
+         * @enum {string}
+         */
+        ApiKeyScope: "ingest" | "read" | "write" | "publish" | "admin" | "pii";
         /** @description An image asset. */
         AssetBody: {
             /** @example image/png */
@@ -5272,7 +5277,7 @@ export interface components {
              */
             name: string;
             /**
-             * @description At least one of `ingest`, `read`, `write`, `publish`, `admin`.
+             * @description At least one of `ingest`, `read`, `write`, `publish`, `admin`, `pii`.
              * @example [
              *       "read"
              *     ]
@@ -7803,6 +7808,11 @@ export interface components {
             /** Format: date-time */
             added_at: string;
             email: string;
+            /**
+             * @description Whether this member is the instance owner, who has every right in every workspace.
+             *     Present for workspace admins and the owner only; left out for everyone else.
+             */
+            owner?: boolean | null;
             /**
              * @description `admin`, `publisher`, `editor` or `viewer`.
              * @example editor
@@ -16128,6 +16138,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The egress policy refused the destination (`egress_denied`) */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description The server has no master key to open the credential */
             503: {
                 headers: {
@@ -18747,7 +18766,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events */
+            /** @description An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events; `egress_denied` when its address is refused */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -25445,6 +25464,15 @@ export interface operations {
             };
             /** @description The source type is not in this build */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The egress policy refused the source (`egress_denied`) */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

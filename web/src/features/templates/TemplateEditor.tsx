@@ -41,11 +41,13 @@ interface Props {
   initial: TemplateDetail;
   canWrite: boolean;
   canAdmin: boolean;
+  canPublish: boolean;
+  canRealPerson: boolean;
 }
 
 const isDraftConflict = (error: unknown) => error instanceof ApiError && error.code === "template_draft_revision_mismatch";
 
-export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Props) {
+export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin, canPublish: mayPublish, canRealPerson }: Props) {
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
   const [query] = useSearchParams();
@@ -364,13 +366,13 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
         {editable && template.channel === "email" ? (
           <Button onClick={() => void openPage("test")}>Send a test</Button>
         ) : null}
-        {editable && canAdmin ? (
+        {editable && mayPublish ? (
           <Button variant="primary" disabled={!canPublish} onClick={() => void openPage("publish")} aria-describedby="tp-publish-why">
             Publish…
           </Button>
         ) : null}
       </div>
-      {publishWhy && editable && canAdmin ? (
+      {publishWhy && editable && mayPublish ? (
         <p id="tp-publish-why" className="faint tp-why">
           {publishWhy}
         </p>
@@ -423,6 +425,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               refreshing={refreshing}
               onRetry={saveNow}
               canAdmin={canAdmin}
+              canRealPerson={canRealPerson}
               person={person}
               onPerson={setPerson}
               onGoToBlock={doc.kind === "blocks" ? (id) => setGoTo((last) => ({ id, n: (last?.n ?? 0) + 1 })) : undefined}

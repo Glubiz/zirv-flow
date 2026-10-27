@@ -119,6 +119,7 @@ pub(crate) async fn test_source(
     )
     .await
     .map_err(|_| timed_out())?;
+    let denied = result.as_ref().err().is_some_and(egress_denied);
     let body = TestBody {
         ok: result.is_ok(),
         error: result.err().map(|error| error.to_string()),
@@ -134,6 +135,13 @@ pub(crate) async fn test_source(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
+    if denied {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the source's address is not allowed by the egress policy",
+        )
+        .with_code("egress_denied"));
+    }
     Ok(body)
 }
 
@@ -339,13 +347,27 @@ pub(crate) async fn read_stream_records(
         .0)
 }
 
+fn egress_denied(error: &SourceError) -> bool {
+    matches!(
+        error,
+        SourceError::Egress(zirv_flow_connectors::http::HttpError::EgressDenied { .. })
+    )
+}
+
 /// A failed call to the source, shown as the source's own failure.
 pub(super) fn upstream(error: SourceError) -> ApiError {
+    if egress_denied(&error) {
+        return ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "the source's address is not allowed by the egress policy",
+        )
+        .with_code("egress_denied");
+    }
     ApiError::new(StatusCode::BAD_GATEWAY, error.to_string())
 }
 
 /// Tests the connection to the source with its stored credential. A failed test is a 200 with
-/// `ok` false and the reason. Workspace admins only. Audited as `source.tested`.
+/// `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as `source.tested`.
 #[utoipa::path(
     post,
     operation_id = "test_source",
@@ -357,6 +379,7 @@ pub(super) fn upstream(error: SourceError) -> ApiError {
     ),
     responses(
         (status = 200, description = "The outcome of the test", body = TestBody),
+        (status = 422, description = "The egress policy refused the source (`egress_denied`)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or source, or no access", body = Problem, content_type = "application/problem+json"),

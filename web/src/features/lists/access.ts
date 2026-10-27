@@ -13,8 +13,8 @@ export function useListAccess(workspaceId: string): ListAccess {
     return { canWrite: false, canSeeValues: false };
   }
   return {
-    canWrite: access.data.canManage || access.data.role !== null,
-    canSeeValues: access.data.canManage,
+    canWrite: access.data.canEdit,
+    canSeeValues: access.data.canViewPii,
   };
 }
 

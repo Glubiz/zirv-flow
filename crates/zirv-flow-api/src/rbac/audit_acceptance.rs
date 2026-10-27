@@ -22,7 +22,7 @@ mod tests {
     use zirv_flow_render::{ChildCommand, PoolConfig, RenderPool};
 
     use crate::rbac::acceptance::tests::{
-        Auth, Operations, PASSWORD, PERSONAL, Seeded, Who, World, found, seed, sign_in, world_with,
+        Auth, Operations, PASSWORD, PERSONAL, Seeded, Who, World, build_world, found, seed, sign_in,
     };
     use crate::rbac::{Audit, ROUTES};
 
@@ -406,7 +406,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_audited_route_leaves_one_row_and_every_not_audited_route_none(pool: PgPool) {
-        let world = world_with(&pool, Some(start_pool().await)).await;
+        let world = build_world(&pool, Some(start_pool().await)).await;
         let seeded = seed(&world).await;
         let mut walk = Walk::new(&world);
 
@@ -1155,10 +1155,10 @@ mod tests {
             "/events/explore/breakdown",
             "/events/explore/list",
         ] {
-            let body = crate::rbac::acceptance::tests::read_post_body(&format!("{WS}{tail}"));
+            let body = crate::rbac::acceptance::tests::read_post_body(&format!("{WS}{tail}"), s);
             w.s("POST", tail, &[], body.map(Payload::Json)).await;
         }
-        let body = crate::rbac::acceptance::tests::read_post_body("/events/explore/export");
+        let body = crate::rbac::acceptance::tests::read_post_body("/events/explore/export", s);
         w.a(
             "POST",
             "/events/explore/export",

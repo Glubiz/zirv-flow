@@ -405,18 +405,47 @@ pub(in crate::rbac) mod tests {
         location: String,
     }
 
+    /// The rows that call the render host, and so answer `503 render_unavailable` after their
+    /// checks when the process runs without one. No other row may answer a server error.
+    const RENDER_ROUTES: [(Method, &str); 6] = [
+        (
+            Method::Post,
+            "/api/v1/workspaces/{ws}/templates/{id}/preview",
+        ),
+        (
+            Method::Post,
+            "/api/v1/workspaces/{ws}/templates/{id}/publish",
+        ),
+        (
+            Method::Post,
+            "/api/v1/workspaces/{ws}/snippets/{id}/preview",
+        ),
+        (
+            Method::Post,
+            "/api/v1/workspaces/{ws}/snippets/{id}/publish",
+        ),
+        (Method::Post, "/api/v1/workspaces/{ws}/themes/{id}/preview"),
+        (Method::Post, "/api/v1/workspaces/{ws}/themes/{id}/publish"),
+    ];
+
+    /// Whether `seen` is the answer of a row that needs the render host and has none.
+    fn render_unavailable(row: &Route, seen: &Seen) -> bool {
+        RENDER_ROUTES.contains(&(row.method, row.path))
+            && seen.status == 503
+            && seen.code == "render_unavailable"
+    }
+
     /// Why `seen` is not what `expect` asks for.
-    fn mismatch(expect: &Expect, seen: &Seen) -> Option<String> {
+    fn mismatch(row: &Route, expect: &Expect, seen: &Seen) -> Option<String> {
         let ok = match expect {
             Expect::Unauthenticated => seen.status == 401 && seen.detail == UNAUTHENTICATED,
             Expect::Forbidden(detail) => seen.status == 403 && &seen.detail == detail,
             Expect::Refused(code) => seen.status == 403 && seen.code == *code,
             Expect::NotFound => seen.status == 404 && seen.detail == NOT_FOUND,
             Expect::Redirect => seen.status == 303 && seen.location.contains("oauth=failed"),
-            // No render host runs under test, which the handlers say after their checks.
             Expect::Through => {
                 !matches!(seen.status, 401 | 403)
-                    && (seen.status < 500 || seen.code == "render_unavailable")
+                    && (seen.status < 500 || render_unavailable(row, seen))
             }
         };
         (!ok).then(|| {
@@ -459,7 +488,9 @@ pub(in crate::rbac) mod tests {
         EVERYONE
             .into_iter()
             .filter(|who| row.class != Class::Public || *who == Who::Anonymous)
-            .filter_map(|who| mismatch(&expected(row, rule, who), &seen(who)).map(|why| (who, why)))
+            .filter_map(|who| {
+                mismatch(row, &expected(row, rule, who), &seen(who)).map(|why| (who, why))
+            })
             .collect()
     }
 
@@ -797,11 +828,36 @@ pub(in crate::rbac) mod tests {
     }
 
     pub(in crate::rbac) async fn world(pool: &PgPool) -> World {
-        world_with(pool, None).await
+        build_world(pool, None).await
     }
 
-    /// [`world`] with the render pool the preview and publish routes need.
-    pub(in crate::rbac) async fn world_with(
+    /// A world whose process runs a render host, so a render reaches the data.
+    async fn rendering_world(pool: &PgPool) -> World {
+        let command = zirv_flow_render::ChildCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "templates::acceptance::tests::render_host_child",
+                "--nocapture",
+            ])
+            .args(["--test-threads", "1", "-q"])
+            .env("ZIRV_FLOW_TEST_TEMPLATE_HOST", "serve")
+            .skip_stdout_until(
+                "running 1 test
+",
+            );
+        let render = zirv_flow_render::RenderPool::start(
+            command,
+            zirv_flow_render::PoolConfig {
+                size: 1,
+                deadline: std::time::Duration::from_secs(20),
+            },
+        )
+        .await
+        .unwrap();
+        build_world(pool, Some(render)).await
+    }
+
+    pub(in crate::rbac) async fn build_world(
         pool: &PgPool,
         render: Option<zirv_flow_render::RenderPool>,
     ) -> World {
@@ -815,16 +871,15 @@ pub(in crate::rbac) mod tests {
         )
         .await
         .unwrap();
-        let state = AppState::new(pool.clone(), Arc::new(String::new))
+        let mut state = AppState::new(pool.clone(), Arc::new(String::new))
             .with_hmac_root(&root)
             .with_keyring(keyring)
             .with_clock(Clock::Manual(ManualClock::new(
                 datetime!(2031-05-06 07:00 UTC),
             )));
-        let state = match render {
-            Some(render) => state.with_render_pool(render),
-            None => state,
-        };
+        if let Some(render) = render {
+            state = state.with_render_pool(render);
+        }
         let router = router(state);
         let ws = workspace(pool, "ours").await;
         let other = workspace(pool, "theirs").await;
@@ -997,8 +1052,12 @@ pub(in crate::rbac) mod tests {
         let wrong: Vec<String> = calls
             .iter()
             .filter_map(|call| {
-                mismatch(&expected(&call.row, call.rule, call.who), &call.seen)
-                    .map(|why| format!("{} as {:?}: {why}", row_name(&call.row), call.who))
+                mismatch(
+                    &call.row,
+                    &expected(&call.row, call.rule, call.who),
+                    &call.seen,
+                )
+                .map(|why| format!("{} as {:?}: {why}", row_name(&call.row), call.who))
             })
             .collect();
         assert!(
@@ -1161,6 +1220,7 @@ pub(in crate::rbac) mod tests {
     /// A list name is workspace configuration, not a person's data: every reader sees it. It is
     /// seeded to show the walk reads real data.
     const LIST_NAME: &str = "ZQ-List-8842";
+    const CONTACT_KEY: &str = "zq-contact";
 
     /// The seeded personal values, by what they are.
     pub(in crate::rbac) const PERSONAL: [(&str, &str); 8] = [
@@ -1185,10 +1245,96 @@ pub(in crate::rbac) mod tests {
         "/people/{id}/consent/history",
     ];
 
+    /// What each seeded surface that reveals a personal value must show to every reader with the
+    /// grant (a viewer with `view_pii`, a `read` key with `pii`, an admin): `(method, path after
+    /// /workspaces/{ws}, the values by their `PERSONAL` name)`. A surface that masks one of these
+    /// for a granted reader fails on its own row, whatever other rows show.
+    const SHOWS: &[(Method, &str, &[&str])] = &[
+        (
+            Method::Get,
+            "/people/{id}",
+            &[
+                "an email",
+                "a phone number",
+                "a name trait",
+                "an external id",
+            ],
+        ),
+        (Method::Get, "/people/{id}/timeline", &["an event property"]),
+        (
+            Method::Get,
+            "/people/{id}/consent/history",
+            &["consent evidence"],
+        ),
+        (
+            Method::Get,
+            "/identity-conflicts/{id}",
+            &["an email", "a phone number", "an external id"],
+        ),
+        (Method::Get, "/lists/{id}/members", &["an external id"]),
+        (Method::Get, "/segments/{id}/members", &["an external id"]),
+        (Method::Get, "/segments/{id}/history", &["an external id"]),
+        (Method::Post, "/people/search", &["an external id"]),
+        (Method::Post, "/segments/preview", &["an external id"]),
+        (Method::Post, "/events/explore/list", &["an event property"]),
+        (
+            Method::Post,
+            "/events/explore/export",
+            &["an event property"],
+        ),
+        (
+            Method::Get,
+            "/imports/{id}/rejects.csv",
+            &["a rejected import cell"],
+        ),
+        (Method::Get, "/contacts", &["a name trait"]),
+        (Method::Get, "/contacts/{key}", &["a name trait"]),
+    ];
+
+    /// The same, for the surfaces only a workspace admin may open.
+    const SHOWS_TO_ADMIN: &[(Method, &str, &[&str])] = &[
+        (Method::Get, "/privacy/exports/{id}/download", &["an email"]),
+        (
+            Method::Get,
+            "/templates/{id}/preview-people",
+            &["an external id"],
+        ),
+    ];
+
+    /// The values `shows` names that `read` does not hold, or why the row was not read.
+    fn missing_values(reads: &[Read], shows: &[(Method, &str, &[&str])]) -> Vec<String> {
+        let mut missing = Vec::new();
+        for (method, tail, whats) in shows {
+            let path = format!("/api/v1/workspaces/{{ws}}{tail}");
+            let Some(read) = reads
+                .iter()
+                .find(|read| read.row.method == *method && read.row.path == path)
+            else {
+                missing.push(format!("{method:?} {tail} was not read"));
+                continue;
+            };
+            if read.status != 200 {
+                missing.push(format!("{method:?} {tail} answered {}", read.status));
+                continue;
+            }
+            for what in *whats {
+                let needle = PERSONAL
+                    .iter()
+                    .find(|(name, _)| name == what)
+                    .map(|(_, needle)| *needle)
+                    .unwrap_or_else(|| panic!("{what} is not a seeded value"));
+                if !holds(&read.text, needle) {
+                    missing.push(format!("{method:?} {tail} hides {what}"));
+                }
+            }
+        }
+        missing
+    }
+
     /// Surfaces that keep a seeded value out of their response even for an admin, who sees values
-    /// elsewhere: a response field the table behind it fills with personal data. `(path end, what, value, a marker
-    /// the row's own fields put in the response)`.
-    const HIDDEN_ON: [(&str, &str, &str, &str); 6] = [
+    /// elsewhere: a response field the table behind it fills with personal data. `(path end, what,
+    /// value, a marker the row's own fields put in the response)`.
+    const HIDDEN_ON: &[(&str, &str, &str, &str)] = &[
         (
             "/flows/{id}/enrollments/{enrollment_id}",
             "an email",
@@ -1202,6 +1348,8 @@ pub(in crate::rbac) mod tests {
             "send_failed",
         ),
         ("/flows/{id}/enrollments", "an email", EMAIL, "send_failed"),
+        ("/traces/{trace_id}", "an email", EMAIL, "send_failed"),
+        ("/traces/{trace_id}", "a name trait", NAME, "send_failed"),
         ("/forwarding/dead-letters", "a payload", PAYLOAD, "http_4xx"),
         ("/forwarding/dead-letters", "an email", EMAIL, "http_4xx"),
         (
@@ -1210,7 +1358,94 @@ pub(in crate::rbac) mod tests {
             REJECTED_CELL,
             "invalid_identifier",
         ),
+        (
+            "/ingest-rejects",
+            "an unplanned event property",
+            UNPLANNED,
+            "unplanned_thing",
+        ),
+        ("/ingest-rejects", "an email", EMAIL, "unplanned_thing"),
+        ("/sources/{id}/runs", "an email", EMAIL, "reject_threshold"),
+        (
+            "/sources/{id}/runs/{run_id}",
+            "an email",
+            EMAIL,
+            "reject_threshold",
+        ),
+        (
+            "/sources/{id}/runs/{run_id}",
+            "a name trait",
+            NAME,
+            "reject_threshold",
+        ),
+        ("/test-sends", "an email", EMAIL, "destination_error"),
+        ("/credentials", "a payload", PAYLOAD, "Mail account"),
+        ("/credentials/{id}", "a payload", PAYLOAD, "Mail account"),
     ];
+
+    /// Reads the walk may make with a ghost id, because the response cannot hold a personal
+    /// value: `(path after /workspaces/{ws}, why)`. None: every row a reader can open by id is
+    /// seeded, and so is walked with a real id.
+    const GHOST_OK: &[(&str, &str)] = &[];
+
+    /// Why a read of the walk carried a ghost id when its row is not in `GHOST_OK`, and which
+    /// `GHOST_OK` entries no read used.
+    fn ghost_problems(reads: &[Read], allowed: &[(&str, &str)]) -> Vec<String> {
+        let tail = |read: &Read| {
+            read.row
+                .path
+                .strip_prefix("/api/v1/workspaces/{ws}")
+                .unwrap_or(read.row.path)
+                .to_owned()
+        };
+        let mut problems: Vec<String> = reads
+            .iter()
+            .filter(|read| read.ghost)
+            .filter(|read| {
+                !allowed
+                    .iter()
+                    .any(|(prefix, _)| tail(read).starts_with(prefix))
+            })
+            .map(|read| format!("{} was read with a ghost id and reaches no data", read.path))
+            .collect();
+        for (prefix, _) in allowed {
+            if !reads
+                .iter()
+                .any(|read| read.ghost && tail(read).starts_with(prefix))
+            {
+                problems.push(format!("allowed lists {prefix}, which no read uses"));
+            }
+        }
+        problems.sort();
+        problems.dedup();
+        problems
+    }
+
+    /// The one 404 a seeded id may answer: the seeded destination is not a provider, so it has no
+    /// domain status to give (and the response holds DNS names only).
+    const UNSUPPORTED_BY_DESIGN: &str = "domain_status_unsupported";
+
+    /// Reads with a seeded id that did not reach the data or broke: a 404 for a row that exists,
+    /// or a server error other than the render host's own answer when none runs.
+    fn broken_reads(reads: &[Read]) -> Vec<String> {
+        reads
+            .iter()
+            .filter(|read| {
+                let code = serde_json::from_str::<Value>(&read.text)
+                    .ok()
+                    .and_then(|body| body["code"].as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let seen = Seen {
+                    status: read.status,
+                    code,
+                    ..Seen::default()
+                };
+                (read.status == 404 && !read.ghost && seen.code != UNSUPPORTED_BY_DESIGN)
+                    || (read.status >= 500 && !render_unavailable(&read.row, &seen))
+            })
+            .map(|read| format!("{} {}", read.path, read.status))
+            .collect()
+    }
 
     /// Surfaces that hold personal data in a column the response must leave out; a leak is an
     /// entry here and the issue it waits on. Empty: the walk found none that was not fixed.
@@ -1221,7 +1456,7 @@ pub(in crate::rbac) mod tests {
     const PENDING: [(&str, &str); 0] = [];
 
     /// The smallest valid body of each read-style `POST`, by the end of its path.
-    pub(in crate::rbac) fn read_post_body(path: &str) -> Option<Value> {
+    pub(in crate::rbac) fn read_post_body(path: &str, seeded: &Seeded) -> Option<Value> {
         let range = || {
             let now = time::OffsetDateTime::now_utc();
             let format = time::format_description::well_known::Rfc3339;
@@ -1240,14 +1475,23 @@ pub(in crate::rbac) mod tests {
         };
         match path {
             p if p.ends_with("/events/explore/count") => explorer(json!({"bucket": "day"})),
-            p if p.ends_with("/events/explore/breakdown") => explorer(json!({"by": "plan"})),
+            p if p.ends_with("/events/explore/breakdown") => explorer(json!({"property": "plan"})),
             p if p.ends_with("/events/explore/list") || p.ends_with("/events/explore/export") => {
                 explorer(json!({}))
             }
             p if p.ends_with("/segments/preview") => {
                 Some(json!({"definition": {"v": 1, "trait": "plan", "op": "eq", "value": "pro"}}))
             }
-            p if p.ends_with("/people/search") => Some(json!({"query": "zq"})),
+            p if p.ends_with("/people/search") => {
+                Some(json!({"identifier": {"kind": "email", "value": EMAIL}}))
+            }
+            p if p.ends_with("/contacts/search") => Some(json!({"q": EMAIL})),
+            p if p.ends_with("/consent/policy/evaluate") => {
+                Some(json!({"person_id": seeded.person}))
+            }
+            p if p.ends_with("/suppressions/check") => {
+                Some(json!({"kind": "email", "value": EMAIL}))
+            }
             _ => None,
         }
     }
@@ -1258,7 +1502,7 @@ pub(in crate::rbac) mod tests {
         match row.method {
             Method::Get => true,
             Method::Post => {
-                [
+                let reading = [
                     "/search",
                     "/preview",
                     "/explain",
@@ -1267,7 +1511,9 @@ pub(in crate::rbac) mod tests {
                     "/events/explore/",
                 ]
                 .iter()
-                .any(|part| row.path.contains(part))
+                .any(|part| row.path.contains(part));
+                // Saving a preview person writes; the test of a flow reads.
+                (reading && !row.path.ends_with("/preview-people"))
                     || row.path.ends_with("/flows/{id}/test")
             }
             _ => false,
@@ -1284,39 +1530,89 @@ pub(in crate::rbac) mod tests {
         pub(in crate::rbac) enrollment: Uuid,
         pub(in crate::rbac) import: Uuid,
         pub(in crate::rbac) rule: Uuid,
+        pub(in crate::rbac) template: Uuid,
+        pub(in crate::rbac) source: Uuid,
+        pub(in crate::rbac) run: Uuid,
+        pub(in crate::rbac) destination: Uuid,
+        pub(in crate::rbac) sender: Uuid,
+        /// The account the test sends go to.
+        pub(in crate::rbac) recipient: Uuid,
+        pub(in crate::rbac) export: Uuid,
+        pub(in crate::rbac) webhook: Uuid,
+        pub(in crate::rbac) snippet: Uuid,
+        pub(in crate::rbac) theme: Uuid,
+        pub(in crate::rbac) credential: Uuid,
+        pub(in crate::rbac) domain: Uuid,
+        pub(in crate::rbac) asset: Uuid,
     }
 
     impl Seeded {
-        /// `path` with the seeded row for each placeholder, a ghost for the rest.
-        fn path(&self, path: &str, workspace: WorkspaceId) -> String {
+        /// `query` with the seeded row for each parameter that names one.
+        fn query(&self, query: &str) -> String {
+            let Some(rest) = query.strip_prefix('?') else {
+                return query.to_owned();
+            };
+            let pairs: Vec<String> = rest
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some(("segment", _)) => format!("segment={}", self.segment),
+                    Some(("domain_id", _)) => format!("domain_id={}", self.domain),
+                    _ => pair.to_owned(),
+                })
+                .collect();
+            format!("?{}", pairs.join("&"))
+        }
+
+        /// `path` with the seeded row for each placeholder, a ghost for the rest; and whether any
+        /// placeholder got a ghost, so the call cannot reach the data behind it.
+        fn path(&self, path: &str, workspace: WorkspaceId) -> (String, bool) {
             let mut out = String::new();
+            let mut ghosted = false;
             let mut rest = path;
             while let Some(start) = rest.find('{') {
                 out.push_str(&rest[..start]);
                 let end = rest[start..].find('}').unwrap() + start;
                 let name = &rest[start + 1..end];
                 let before = out.rsplit('/').nth(1).unwrap_or_default().to_owned();
-                out.push_str(&match (name, before.as_str()) {
-                    ("ws", _) => workspace.as_uuid().to_string(),
-                    ("id", "people") => self.person.to_string(),
-                    ("id", "lists") => self.list.to_string(),
-                    ("id", "segments") => self.segment.to_string(),
-                    ("id", "flows") => self.flow.to_string(),
-                    ("id", "imports") => self.import.to_string(),
-                    ("id", "identity-conflicts") => self.conflict.to_string(),
-                    ("id", "rules") => self.rule.to_string(),
-                    ("enrollment_id", _) => self.enrollment.to_string(),
-                    ("trace_id", _) => self.enrollment.simple().to_string(),
-                    ("n", _) => "1".to_owned(),
-                    ("name", "event-schemas") => "order".to_owned(),
-                    ("key", "traits") => "first_name".to_owned(),
-                    ("id" | "user_id" | "run_id" | "person_id", _) => Uuid::now_v7().to_string(),
+                let real = match (name, before.as_str()) {
+                    ("ws", _) => Some(workspace.as_uuid().to_string()),
+                    ("id", "people") => Some(self.person.to_string()),
+                    ("id", "lists") => Some(self.list.to_string()),
+                    ("id", "segments") => Some(self.segment.to_string()),
+                    ("id", "flows") => Some(self.flow.to_string()),
+                    ("id", "imports") => Some(self.import.to_string()),
+                    ("id", "identity-conflicts") => Some(self.conflict.to_string()),
+                    ("id", "rules") => Some(self.rule.to_string()),
+                    ("id", "templates") => Some(self.template.to_string()),
+                    ("id", "sources") => Some(self.source.to_string()),
+                    ("id", "exports") => Some(self.export.to_string()),
+                    ("id", "webhooks") => Some(self.webhook.to_string()),
+                    ("id", "snippets") => Some(self.snippet.to_string()),
+                    ("id", "themes") => Some(self.theme.to_string()),
+                    ("id", "credentials") => Some(self.credential.to_string()),
+                    ("id", "sending-domains") => Some(self.domain.to_string()),
+                    ("id", "assets") => Some(self.asset.to_string()),
+                    ("id", "destinations") => Some(self.destination.to_string()),
+                    ("id", "sender-identities") => Some(self.sender.to_string()),
+                    ("name", "streams") => Some("contacts".to_owned()),
+                    ("run_id", _) => Some(self.run.to_string()),
+                    ("enrollment_id", _) => Some(self.enrollment.to_string()),
+                    ("trace_id", _) => Some(self.enrollment.simple().to_string()),
+                    ("n", _) => Some("1".to_owned()),
+                    ("name", "event-schemas") => Some("order".to_owned()),
+                    ("key", "traits") => Some("first_name".to_owned()),
+                    ("key", "contacts") => Some(CONTACT_KEY.to_owned()),
+                    _ => None,
+                };
+                ghosted |= real.is_none();
+                out.push_str(&real.unwrap_or_else(|| match name {
+                    "id" | "user_id" | "run_id" | "person_id" => Uuid::now_v7().to_string(),
                     _ => GHOST.to_owned(),
-                });
+                }));
                 rest = &rest[end + 1..];
             }
             out.push_str(rest);
-            out
+            (out, ghosted)
         }
     }
 
@@ -1342,6 +1638,16 @@ pub(in crate::rbac) mod tests {
         reply.body
     }
 
+    /// Creates a row through its route as the owner and returns its id.    async fn made(world: &World, tail: &str, body: Value) -> Uuid {        created(world, tail, body).await["id"]            .as_str()            .unwrap()            .parse()            .unwrap()    }
+    /// Creates a row through its route as the owner and returns its id.
+    async fn made(world: &World, tail: &str, body: Value) -> Uuid {
+        created(world, tail, body).await["id"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
     fn profile(
         key: &str,
         identifiers: &[(&str, &str)],
@@ -1359,6 +1665,39 @@ pub(in crate::rbac) mod tests {
             observed_at: datetime!(2026-01-01 00:00 UTC),
             trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
         }
+    }
+
+    /// Decides a planned event with a personal property and an unplanned one, which the policy
+    /// rejects: each leaves a row in the debugger feed while some viewer watches the workspace.
+    async fn decide_events(pool: &PgPool, ws: WorkspaceId) {
+        let now = time::OffsetDateTime::now_utc();
+        let event = |name: &str, properties: Value| zirv_flow_store::EventRecord {
+            source_record_id: None,
+            source: "web".into(),
+            identifiers: vec![("email".into(), EMAIL.into())],
+            name: name.into(),
+            properties: properties.as_object().cloned().unwrap(),
+            timestamp: Some(now - time::Duration::minutes(5)),
+            received_at: now,
+            message_id: None,
+            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
+        };
+        let redaction = HmacRoot::bootstrap_from(&MasterKey::generate())
+            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
+        zirv_flow_store::apply_event_batch(
+            pool,
+            ws,
+            &redaction,
+            &[
+                event(
+                    "order",
+                    json!({"total": 10, "plan": "pro", "coupon": PROPERTY}),
+                ),
+                event("unplanned_thing", json!({"card": UNPLANNED})),
+            ],
+        )
+        .await
+        .unwrap();
     }
 
     /// Fills the workspace with the seeded values on every surface that could echo one.
@@ -1383,6 +1722,23 @@ pub(in crate::rbac) mod tests {
             .await
             .unwrap();
         }
+        // A contact whose field is a personal trait.
+        let defined = api(
+            world,
+            "PUT",
+            "/contact-definition",
+            Some(json!({"fields": [{"key": "first_name"}]})),
+            Who::Owner,
+        )
+        .await;
+        assert_eq!(defined.status, 200, "{}", defined.text);
+        created(
+            world,
+            "/contacts",
+            json!({"key": CONTACT_KEY, "fields": {"first_name": NAME}}),
+        )
+        .await;
+
         // Ada, and a second record that collides with her email: an identity conflict.
         let outcomes = zirv_flow_store::apply_profile_batch(
             pool,
@@ -1441,34 +1797,7 @@ pub(in crate::rbac) mod tests {
         )
         .await;
         assert_eq!(policy.status, 200, "{}", policy.text);
-        let now = time::OffsetDateTime::now_utc();
-        let event = |name: &str, properties: Value| zirv_flow_store::EventRecord {
-            source_record_id: None,
-            source: "web".into(),
-            identifiers: vec![("email".into(), EMAIL.into())],
-            name: name.into(),
-            properties: properties.as_object().cloned().unwrap(),
-            timestamp: Some(now - time::Duration::minutes(5)),
-            received_at: now,
-            message_id: None,
-            trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("seed")),
-        };
-        let redaction = HmacRoot::bootstrap_from(&MasterKey::generate())
-            .hmac_key(zirv_flow_core::HmacPurpose::Redaction);
-        zirv_flow_store::apply_event_batch(
-            pool,
-            ws,
-            &redaction,
-            &[
-                event(
-                    "order",
-                    json!({"total": 10, "plan": "pro", "coupon": PROPERTY}),
-                ),
-                event("unplanned_thing", json!({"card": UNPLANNED})),
-            ],
-        )
-        .await
-        .unwrap();
+        decide_events(pool, ws).await;
 
         // A list, a segment, consent with evidence.
         let list = created(world, "/lists", json!({"name": LIST_NAME})).await["id"]
@@ -1668,6 +1997,206 @@ pub(in crate::rbac) mod tests {
         .await
         .unwrap();
 
+        // A published-looking email template that names the person, and the sender it needs.
+        let sender =
+            zirv_flow_store::sending_fixtures::plant_verified_sender(pool, ws, "example.com")
+                .await
+                .unwrap();
+        let template = created(
+            world,
+            "/templates",
+            json!({"name": "Hello", "channel": "email", "document": {
+                "schema": 2, "channel": "email", "mode": "code", "email": {
+                    "subject": "Hi {{ person.first_name }}", "sender": sender, "lang": "en",
+                    "category": "marketing",
+                    "html": "<p>Dear {{ person.first_name }}</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+                    "text": "Dear {{ person.first_name }} {{ system.unsubscribe_url }}"
+                }}}),
+        )
+        .await["id"]
+            .as_str()
+            .unwrap()
+            .parse::<Uuid>()
+            .unwrap();
+        // Ada is in the segment, as a refresh would have left her.
+        sqlx::query(
+            "INSERT INTO segment_members (workspace_id, segment_id, person_id, version, entered_at, \
+                entered_trace_id, entered_cause) \
+             VALUES ($1, $2, $3, 1, now(), $4, 'manual')",
+        )
+        .bind(ws.as_uuid())
+        .bind(segment)
+        .bind(person)
+        .bind(enrollment)
+        .execute(pool)
+        .await
+        .unwrap();
+        created(world, &format!("/templates/{template}/publish"), json!({})).await;
+        // The configuration rows a reader can open by id: each is made through its own route.
+        let sampled = |tail: &str| {
+            let row = ROUTES
+                .iter()
+                .find(|row| {
+                    row.method == Method::Post
+                        && row.path == format!("/api/v1/workspaces/{{ws}}{tail}")
+                })
+                .unwrap();
+            let (body, _) = Operations::new().request(row);
+            serde_json::from_slice::<Value>(&body.unwrap().1).unwrap()
+        };
+        let webhook = made(world, "/webhooks", sampled("/webhooks")).await;
+        let snippet = made(
+            world,
+            "/snippets",
+            json!({"name": "Offer", "content": {"blocks": [
+                {"type": "heading", "id": "h", "level": 2, "text": "Offer"}]}}),
+        )
+        .await;
+        let theme = made(
+            world,
+            "/themes",
+            json!({"name": "Plain", "tokens": {"primary": "#112233"}}),
+        )
+        .await;
+        let credential = made(
+            world,
+            "/credentials",
+            json!({"kind": "custom", "name": "Mail account", "fields": {"region": "eu"},
+                   "schema": {"fields": [
+                       {"key": "token", "label": "Token", "type": "string", "required": true,
+                        "secret": true},
+                       {"key": "region", "label": "Region", "type": "string"}]},
+                   "secret": {"token": PAYLOAD}}),
+        )
+        .await;
+        let domain: Uuid =
+            sqlx::query_scalar("SELECT id FROM sending_domains WHERE workspace_id = $1")
+                .bind(ws.as_uuid())
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let upload = send(
+            &world.router,
+            "POST",
+            &world.url("/assets?name=logo.png"),
+            Some((
+                "image/png".into(),
+                vec![
+                    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49,
+                    0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+                    0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44,
+                    0x41, 0x54, 0x78, 0xda, 0x63, 0xfc, 0xcf, 0xc0, 0x50, 0x0f, 0x00, 0x04, 0x85,
+                    0x01, 0x80, 0x84, 0xa9, 0x8c, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e,
+                    0x44, 0xae, 0x42, 0x60, 0x82,
+                ],
+            )),
+            world.auth(Who::Owner),
+        )
+        .await;
+        assert_eq!(upload.status, 201, "{}", upload.text);
+        let asset = upload.body["id"].as_str().unwrap().parse::<Uuid>().unwrap();
+        for (kind, id) in [("snippets", snippet), ("themes", theme)] {
+            created(world, &format!("/{kind}/{id}/publish"), json!({})).await;
+        }
+        created(
+            world,
+            &format!("/templates/{template}/preview-people"),
+            json!({"person_id": person}),
+        )
+        .await;
+        // The flow's failure as the trace inspector shows it: ids and codes, never a value.
+        sqlx::query(
+            "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, reason, \
+                cause_kind, cause_id, subject_ids) \
+             VALUES ($1, $2, $3, 'enrollment.step', 'failed', 'send_failed', 'api', 't', $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(enrollment)
+        .bind(json!({"person": person, "flow": flow}))
+        .execute(pool)
+        .await
+        .unwrap();
+        let recipient: Uuid =
+            sqlx::query_scalar("SELECT id FROM users WHERE email = 'admin@example.com'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+
+        // A source whose last run failed, with a reject whose sample holds her values: the run
+        // detail masks a sample again against the trait registry as it is now.
+        let source = Uuid::now_v7();
+        let stream = Uuid::now_v7();
+        let run = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO sources (id, workspace_id, kind, name, config) \
+             VALUES ($1, $2, 'fake', 'Contacts feed', '{}')",
+        )
+        .bind(source)
+        .bind(ws.as_uuid())
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO streams (id, workspace_id, source_id, name, sync_mode, discovered) \
+             VALUES ($1, $2, $3, 'contacts', 'full_refresh', $4)",
+        )
+        .bind(stream)
+        .bind(ws.as_uuid())
+        .bind(source)
+        .bind(
+            json!({"name": "contacts", "fields": [], "sync_modes": ["full_refresh"],
+                     "default_cursor_field": null, "default_primary_key": []}),
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_runs (id, workspace_id, source_id, stream_id, state, trigger, \
+                sync_mode, records_read, records_rejected, error_code, trace_id, finished_at) \
+             VALUES ($1, $2, $3, $4, 'failed', 'manual', 'full_refresh', 1, 1, \
+                'reject_threshold', $1, now())",
+        )
+        .bind(run)
+        .bind(ws.as_uuid())
+        .bind(source)
+        .bind(stream)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ingest_rejects (id, workspace_id, received_at, source, kind, name, \
+                reason, reasons, sample, payload, trace_id, sync_run_id) \
+             VALUES ($1, $2, now(), 'crm', 'record', 'contacts', 'wrong_type', $3, $4, $5, \
+                $6, $6)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(ws.as_uuid())
+        .bind(json!([{"property": "first_name", "reason": "wrong_type"}]))
+        .bind(json!({"properties": {"first_name": null, "email": null},
+                     "masked": ["email", "first_name"]}))
+        .bind(json!({"first_name": NAME, "email": EMAIL}))
+        .bind(run)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        // A subject-access export that is ready: the one document that discloses a person whole,
+        // for a workspace admin only.
+        let export = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO privacy_exports (id, workspace_id, person_id, status, ready_at, \
+                expires_at, content, size_bytes, trace_id) \
+             VALUES ($1, $2, $3, 'ready', now(), now() + interval '1 hour', $4, 1, $1)",
+        )
+        .bind(export)
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(format!("{{\"email\":\"{EMAIL}\"}}").into_bytes())
+        .execute(pool)
+        .await
+        .unwrap();
+
         Seeded {
             person,
             conflict,
@@ -1677,15 +2206,65 @@ pub(in crate::rbac) mod tests {
             enrollment,
             import,
             rule,
+            template,
+            source,
+            run,
+            destination,
+            sender,
+            recipient,
+            export,
+            webhook,
+            snippet,
+            theme,
+            credential,
+            domain,
+            asset,
         }
     }
 
-    /// The needles of `PERSONAL` that `text` holds, whatever the case.
+    /// Every string in `value`, keys included, lowercased.
+    fn strings_of(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) => out.push(text.to_lowercase()),
+            Value::Array(items) => items.iter().for_each(|item| strings_of(item, out)),
+            Value::Object(map) => {
+                for (key, item) in map {
+                    out.push(key.to_lowercase());
+                    strings_of(item, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The text as a reader of its JSON sees it: every string value decoded, from the whole body
+    /// and from each line (a server-sent `data:` frame holds one document).
+    fn decoded(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let lines = text
+            .lines()
+            .map(|line| line.strip_prefix("data:").unwrap_or(line).trim());
+        for candidate in std::iter::once(text.trim()).chain(lines) {
+            if let Ok(value) = serde_json::from_str::<Value>(candidate) {
+                strings_of(&value, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Whether `text` holds `needle`, whatever the case, in its raw form or with its JSON strings
+    /// decoded (an escaped character hides a needle from the raw text).
+    fn holds(text: &str, needle: &str) -> bool {
+        let needle = needle.to_lowercase();
+        text.to_lowercase().contains(&needle)
+            || decoded(text).iter().any(|text| text.contains(&needle))
+    }
+
+    /// The needles of `PERSONAL` that `text` holds.
     pub(in crate::rbac) fn found(text: &str) -> Vec<&'static str> {
-        let text = text.to_lowercase();
         PERSONAL
             .iter()
-            .filter(|(_, needle)| text.contains(&needle.to_lowercase()))
+            .filter(|(_, needle)| holds(text, needle))
             .map(|(what, _)| *what)
             .collect()
     }
@@ -1694,6 +2273,8 @@ pub(in crate::rbac) mod tests {
     struct Read {
         row: Route,
         path: String,
+        /// A placeholder got a ghost id, so the call never reached the data behind it.
+        ghost: bool,
         who: Who,
         status: u16,
         text: String,
@@ -1708,12 +2289,13 @@ pub(in crate::rbac) mod tests {
             .filter(|row| row.path.contains("{ws}") && reads(row))
         {
             let (sample, query) = operations.request(row);
-            let path = seeded.path(row.path, world.ws);
+            let (path, ghost) = seeded.path(row.path, world.ws);
+            let query = seeded.query(&query);
             let uri = format!("{path}{query}");
             let method = format!("{:?}", row.method).to_uppercase();
             let body = match row.method {
                 Method::Get => None,
-                _ => Some(match read_post_body(row.path) {
+                _ => Some(match read_post_body(row.path, seeded) {
                     Some(body) => ("application/json".to_owned(), body.to_string().into_bytes()),
                     None => sample
                         .clone()
@@ -1724,6 +2306,7 @@ pub(in crate::rbac) mod tests {
             done.push(Read {
                 row: *row,
                 path: uri,
+                ghost,
                 who,
                 status: reply.status,
                 text: reply.text,
@@ -1731,15 +2314,243 @@ pub(in crate::rbac) mod tests {
         }
         done
     }
+    fn route(method: Method, path: &str) -> Route {
+        ROUTES
+            .iter()
+            .find(|row| row.method == method && row.path == path)
+            .copied()
+            .unwrap()
+    }
+
+    #[test]
+    fn only_a_render_row_may_answer_that_no_render_host_runs() {
+        let unavailable = Seen {
+            status: 503,
+            code: "render_unavailable".into(),
+            ..Seen::default()
+        };
+        let failed = Seen {
+            status: 500,
+            ..Seen::default()
+        };
+        for (method, path) in RENDER_ROUTES {
+            let row = route(method, path);
+            assert!(mismatch(&row, &Expect::Through, &unavailable).is_none());
+            assert!(mismatch(&row, &Expect::Through, &failed).is_some());
+        }
+        let flows = route(Method::Get, "/api/v1/workspaces/{ws}/flows");
+        assert!(mismatch(&flows, &Expect::Through, &unavailable).is_some());
+        let publish = route(Method::Post, "/api/v1/workspaces/{ws}/flows/{id}/publish");
+        assert!(mismatch(&publish, &Expect::Through, &unavailable).is_some());
+    }
+
+    #[test]
+    fn a_json_escaped_value_is_still_found() {
+        let escaped = EMAIL.replace('@', "\\u0040");
+        let body = format!("{{\"to\": \"{escaped}\"}}");
+        assert!(!body.to_lowercase().contains(&EMAIL.to_lowercase()));
+        assert_eq!(found(&body), ["an email"]);
+        // One server-sent frame, and a value that is a key, and one nested in a list.
+        let frame = format!("event: item\ndata: {body}\n\n");
+        assert_eq!(found(&frame), ["an email"]);
+        let keyed = format!("{{\"{escaped}\": 1}}");
+        assert_eq!(found(&keyed), ["an email"]);
+        let nested = format!("{{\"rows\": [[\"{}\"]]}}", NAME.to_uppercase());
+        assert_eq!(found(&nested), ["a name trait"]);
+        assert!(found("{\"to\": \"nobody\"}").is_empty());
+    }
+
+    #[test]
+    fn every_row_of_the_positive_table_is_a_read_of_the_walk() {
+        for (method, tail, whats) in SHOWS.iter().chain(SHOWS_TO_ADMIN) {
+            let row = route(*method, &format!("/api/v1/workspaces/{{ws}}{tail}"));
+            assert!(reads(&row), "{method:?} {tail}");
+            assert!(!whats.is_empty());
+            for what in *whats {
+                assert!(PERSONAL.iter().any(|(name, _)| name == what), "{what}");
+            }
+        }
+    }
+    #[test]
+    fn a_surface_that_masks_a_value_is_named_even_when_another_shows_it() {
+        let row = route(Method::Get, "/api/v1/workspaces/{ws}/people/{id}");
+        let other = route(Method::Get, "/api/v1/workspaces/{ws}/contacts");
+        let read = |row: Route, text: &str| Read {
+            text: text.to_owned(),
+            status: 200,
+            ..read_of(row, false)
+        };
+        let reads = [
+            read(row, &format!("{{\"email\": \"{EMAIL}\"}}")),
+            read(other, NAME),
+        ];
+        let missing = missing_values(&reads, SHOWS);
+        assert!(
+            missing.contains(&"Get /people/{id} hides a name trait".to_owned()),
+            "{missing:?}"
+        );
+        assert!(
+            !missing.iter().any(|m| m.contains("/contacts ")),
+            "{missing:?}"
+        );
+    }
+    fn seeded_ids() -> Seeded {
+        Seeded {
+            person: Uuid::now_v7(),
+            conflict: Uuid::now_v7(),
+            list: Uuid::now_v7(),
+            segment: Uuid::now_v7(),
+            flow: Uuid::now_v7(),
+            enrollment: Uuid::now_v7(),
+            import: Uuid::now_v7(),
+            rule: Uuid::now_v7(),
+            template: Uuid::now_v7(),
+            source: Uuid::now_v7(),
+            run: Uuid::now_v7(),
+            destination: Uuid::now_v7(),
+            sender: Uuid::now_v7(),
+            recipient: Uuid::now_v7(),
+            export: Uuid::now_v7(),
+            webhook: Uuid::now_v7(),
+            snippet: Uuid::now_v7(),
+            theme: Uuid::now_v7(),
+            credential: Uuid::now_v7(),
+            domain: Uuid::now_v7(),
+            asset: Uuid::now_v7(),
+        }
+    }
+
+    #[test]
+    fn a_path_names_the_seeded_rows_and_says_when_it_holds_a_ghost() {
+        let seeded = seeded_ids();
+        let ws = WorkspaceId::new();
+        let (path, ghost) = seeded.path("/api/v1/workspaces/{ws}/templates/{id}/versions/{n}", ws);
+        assert!(path.contains(&seeded.template.to_string()), "{path}");
+        assert!(!ghost);
+        let (path, ghost) = seeded.path("/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}", ws);
+        assert!(path.ends_with(&seeded.run.to_string()), "{path}");
+        assert!(!ghost);
+        let (_, ghost) = seeded.path("/api/v1/workspaces/{ws}/members/{user_id}", ws);
+        assert!(ghost);
+    }
+
+    fn read_of(row: Route, ghost: bool) -> Read {
+        Read {
+            row,
+            path: row.path.to_owned(),
+            ghost,
+            who: Who::Viewer,
+            status: 404,
+            text: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_ghost_read_of_a_route_that_can_hold_a_value_is_a_problem() {
+        let flow = route(Method::Get, "/api/v1/workspaces/{ws}/flows/{id}");
+        let theme = route(Method::Get, "/api/v1/workspaces/{ws}/themes/{id}");
+        let allowed = [("/themes/", "shared styling")];
+        let problems = ghost_problems(&[read_of(flow, true), read_of(theme, true)], &allowed);
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("/flows/{id} was read with a ghost id")),
+            "{problems:?}"
+        );
+        assert!(
+            !problems
+                .iter()
+                .any(|problem| problem.contains("/themes/") && problem.contains("reaches no data"))
+        );
+        // An entry no read uses is stale.
+        let stale = ghost_problems(
+            &[read_of(theme, true)],
+            &[("/themes/", "x"), ("/assets/", "y")],
+        );
+        assert_eq!(stale.len(), 1, "{stale:?}");
+        assert!(stale[0].contains("/assets/"));
+    }
+
+    #[test]
+    fn a_seeded_id_that_answers_not_found_or_fails_is_a_broken_read() {
+        let flow = route(Method::Get, "/api/v1/workspaces/{ws}/flows/{id}");
+        let preview = route(
+            Method::Post,
+            "/api/v1/workspaces/{ws}/templates/{id}/preview",
+        );
+        let missing = read_of(flow, false);
+        assert_eq!(broken_reads(&[missing]).len(), 1);
+        assert!(broken_reads(&[read_of(flow, true)]).is_empty());
+        let mut unavailable = read_of(preview, false);
+        unavailable.status = 503;
+        unavailable.text = json!({"code": "render_unavailable"}).to_string();
+        assert!(broken_reads(&[unavailable]).is_empty());
+        let mut failed = read_of(flow, false);
+        failed.status = 503;
+        failed.text = json!({"code": "render_unavailable"}).to_string();
+        assert_eq!(broken_reads(&[failed]).len(), 1);
+    }
+
+    /// Opens the debugger stream as `who`, decides two events once it watches the workspace, and
+    /// returns the frames read until both arrived or ten seconds passed.
+    async fn streamed(world: &World, who: Who, reveal: bool) -> String {
+        let query = if reveal { "?reveal=true" } else { "" };
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(world.url(&format!("/debugger/stream{query}")));
+        request = match world.auth(who) {
+            Auth::Anonymous => request,
+            Auth::Key(key) => request.header(header::AUTHORIZATION, format!("Bearer {key}")),
+            Auth::Session(login) => request
+                .header(header::COOKIE, &login.cookie)
+                .header("x-csrf-token", &login.csrf),
+        };
+        let response = world
+            .router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "the debugger stream as {who:?}");
+        let mut body = response.into_body();
+        decide_events(&world.pool, world.ws).await;
+        let mut text = String::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while text.matches("event: item").count() < 2 {
+            let Some(left) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+                break;
+            };
+            match tokio::time::timeout(left, body.frame()).await {
+                Ok(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        text.push_str(&String::from_utf8_lossy(&data));
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(
+            text.matches("event: item").count() >= 2,
+            "the debugger stream as {who:?} delivered no decisions: {text}"
+        );
+        text
+    }
+
+    /// A test send of the seeded template, naming the seeded person.
+    fn test_send_body(seeded: &Seeded) -> Value {
+        json!({"destination_id": seeded.destination, "sender_identity_id": seeded.sender,
+               "to": {"member": seeded.recipient}, "person_id": seeded.person})
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn no_seeded_personal_value_reaches_a_reader_without_the_grant(pool: PgPool) {
-        let world = world(&pool).await;
+        let world = rendering_world(&pool).await;
         let seeded = seed(&world).await;
         let started = Instant::now();
 
         let mut leaks = Vec::new();
+        let mut problems = Vec::new();
         let mut visited = 0;
         for who in [Who::Viewer, Who::KeyRead] {
             let reads = read_all(&world, &seeded, who).await;
@@ -1752,7 +2563,8 @@ pub(in crate::rbac) mod tests {
                     }
                 }
             }
-            // The walk reads real data: the list name, which is no secret, is there.
+            // The walk reads real data: each surface answers, and the list name, which is no
+            // secret, is there.
             for suffix in REVEALS {
                 let read = reads
                     .iter()
@@ -1760,25 +2572,79 @@ pub(in crate::rbac) mod tests {
                     .unwrap();
                 assert_eq!(read.status, 200, "{who:?} {}: {}", read.path, read.text);
             }
+            for (suffix, _, _, marker) in HIDDEN_ON {
+                let read = reads
+                    .iter()
+                    .find(|read| read.row.path.ends_with(suffix))
+                    .unwrap_or_else(|| panic!("no row ends with {suffix}"));
+                match read.row.class {
+                    Class::Need(need) if needed_rank(need) == Some(0) => {
+                        assert_eq!(read.status, 200, "{who:?} {}: {}", read.path, read.text);
+                        assert!(
+                            read.text.contains(marker),
+                            "{who:?} {} holds no seeded row",
+                            read.path
+                        );
+                    }
+                    _ => assert_eq!(read.status, 403, "{who:?} {}", read.path),
+                }
+            }
             let lists = reads
                 .iter()
                 .find(|read| read.row.path == "/api/v1/workspaces/{ws}/lists")
                 .unwrap();
             assert!(lists.text.contains(LIST_NAME), "{who:?}: {}", lists.text);
             assert_eq!(lists.status, 200);
-            // Nothing the walk hit was a server error, and the data surfaces answered.
-            let broken: Vec<String> = reads
-                .iter()
-                .filter(|read| read.status >= 500 && !read.text.contains("render_unavailable"))
-                .map(|read| format!("{} {}", read.path, read.status))
-                .collect();
-            assert!(broken.is_empty(), "{who:?}: {broken:?}");
+            problems.extend(ghost_problems(&reads, GHOST_OK));
+            problems.extend(broken_reads(&reads));
+
+            // The debugger masks its frames, even when the reader asks to reveal.
+            let frames = streamed(&world, who, true).await;
+            assert!(frames.contains("unplanned_thing"), "{frames}");
+            for what in found(&frames) {
+                leaks.push(format!("the debugger stream as {who:?} shows {what}"));
+            }
+        }
+
+        // Writers without the grant: a render of the sample person works, and one of a real
+        // person, by preview or by test send, is refused before it reads her.
+        for who in [Who::Editor, Who::KeyWrite] {
+            let preview = format!("/templates/{}/preview", seeded.template);
+            let sample = api(&world, "POST", &preview, Some(json!({})), who).await;
+            assert_eq!(sample.status, 200, "{who:?}: {}", sample.text);
+            assert_eq!(sample.body["rendered"], true, "{who:?}: {}", sample.text);
+            let real = api(
+                &world,
+                "POST",
+                &preview,
+                Some(json!({"person_id": seeded.person})),
+                who,
+            )
+            .await;
+            assert_eq!(real.status, 403, "{who:?}: {}", real.text);
+            assert_eq!(real.body["code"], "template_preview_values_forbidden");
+            let send = api(
+                &world,
+                "POST",
+                &format!("/templates/{}/test-send", seeded.template),
+                Some(test_send_body(&seeded)),
+                who,
+            )
+            .await;
+            assert_eq!(send.status, 403, "{who:?}: {}", send.text);
+            assert_eq!(send.body["code"], "template_preview_values_forbidden");
+            for reply in [&sample, &real, &send] {
+                for what in found(&reply.text) {
+                    leaks.push(format!("a render as {who:?} shows {what}"));
+                }
+            }
         }
         eprintln!(
             "pii walk (withheld): {visited} reads in {:?}",
             started.elapsed()
         );
 
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
         assert!(
             leaks.is_empty(),
             "{} leaks:\n{}",
@@ -1791,7 +2657,7 @@ pub(in crate::rbac) mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_seeded_values_appear_for_a_reader_with_the_grant(pool: PgPool) {
-        let world = world(&pool).await;
+        let world = rendering_world(&pool).await;
         let seeded = seed(&world).await;
         let started = Instant::now();
 
@@ -1812,6 +2678,19 @@ pub(in crate::rbac) mod tests {
                     read.text
                 );
             }
+            let mut missing = missing_values(&reads, SHOWS);
+            if who == Who::Admin {
+                missing.extend(missing_values(&reads, SHOWS_TO_ADMIN));
+            }
+            assert!(
+                missing.is_empty(),
+                "{who:?}:
+{}",
+                missing.join(
+                    "
+"
+                )
+            );
             for read in &reads {
                 seen.extend(found(&read.text));
             }
@@ -1827,18 +2706,66 @@ pub(in crate::rbac) mod tests {
                         "{} holds no seeded row",
                         read.path
                     );
-                    assert!(
-                        !read.text.to_lowercase().contains(&needle.to_lowercase()),
-                        "{} shows {what}",
-                        read.path
-                    );
+                    assert!(!holds(&read.text, needle), "{} shows {what}", read.path);
                 }
             }
             rejects_listed |= reads.iter().any(|read| {
                 read.row.path.ends_with("/ingest-rejects") && read.text.contains("unplanned_thing")
             });
+            let problems: Vec<String> = ghost_problems(&reads, GHOST_OK)
+                .into_iter()
+                .chain(broken_reads(&reads))
+                .collect();
+            assert!(problems.is_empty(), "{who:?}: {}", problems.join("\n"));
         }
         eprintln!("pii walk (granted): in {:?}", started.elapsed());
+
+        // The debugger shows a personal event property to a reader with the grant who asks to
+        // reveal, and to nobody who does not ask.
+        for who in [Who::ViewerWithPii, Who::KeyReadAndPii, Who::Admin] {
+            let frames = streamed(&world, who, true).await;
+            assert!(
+                found(&frames).contains(&"an event property"),
+                "the debugger stream as {who:?} hides the coupon: {frames}"
+            );
+            let masked = streamed(&world, who, false).await;
+            assert!(
+                !found(&masked).contains(&"an event property"),
+                "the debugger stream as {who:?} shows the coupon unasked: {masked}"
+            );
+        }
+
+        // A render of the seeded person shows her name to a writer with the grant, and the test
+        // send is accepted without carrying her into the response.
+        for who in [Who::EditorWithPii, Who::KeyWriteAndPii, Who::Admin] {
+            let preview = api(
+                &world,
+                "POST",
+                &format!("/templates/{}/preview", seeded.template),
+                Some(json!({"person_id": seeded.person})),
+                who,
+            )
+            .await;
+            assert_eq!(preview.status, 200, "{who:?}: {}", preview.text);
+            assert_eq!(preview.body["rendered"], true, "{who:?}: {}", preview.text);
+            assert!(
+                found(&preview.text).contains(&"a name trait"),
+                "{who:?} sees no name in the preview: {}",
+                preview.text
+            );
+            seen.extend(found(&preview.text));
+            let send = api(
+                &world,
+                "POST",
+                &format!("/templates/{}/test-send", seeded.template),
+                Some(test_send_body(&seeded)),
+                who,
+            )
+            .await;
+            assert_eq!(send.status, 202, "{who:?}: {}", send.text);
+            assert!(found(&send.text).is_empty(), "{who:?}: {}", send.text);
+        }
+        eprintln!("pii walk (granted, renders): in {:?}", started.elapsed());
 
         // The rejects list never shows an event's properties, to anyone: its value stays hidden
         // even from the owner, which the walk records as a value that must never appear.

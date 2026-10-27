@@ -53,6 +53,10 @@ pub struct WorkerConfig {
     pub message_retention: MessageRetention,
     /// What the `decisions.retention` job keeps and for how long.
     pub decision_retention: DecisionRetention,
+    /// How many days the `jobs.retention` job keeps dead jobs (`retention.job_history_days`).
+    pub job_history_days: u32,
+    /// How many days the `audit.retention` job keeps audit rows (`retention.audit_days`).
+    pub audit_days: u32,
     /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
@@ -100,6 +104,8 @@ impl WorkerConfig {
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
+            job_history_days: crate::context::DEFAULT_JOB_HISTORY_DAYS,
+            audit_days: crate::context::DEFAULT_AUDIT_DAYS,
             redaction_key: None,
             identifier_key: None,
             ledger_dir: None,
@@ -419,6 +425,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_export_max_bytes(shared.config.export_max_bytes)
             .with_message_retention(shared.config.message_retention)
             .with_decision_retention(shared.config.decision_retention)
+            .with_log_retention_days(shared.config.job_history_days, shared.config.audit_days)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_ledger_dir(shared.config.ledger_dir.clone())
             .with_clock(shared.config.clock.clone())
@@ -681,6 +688,8 @@ mod tests {
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
+            job_history_days: crate::context::DEFAULT_JOB_HISTORY_DAYS,
+            audit_days: crate::context::DEFAULT_AUDIT_DAYS,
             redaction_key: None,
             identifier_key: None,
             ledger_dir: None,

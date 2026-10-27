@@ -193,6 +193,13 @@ pub(crate) async fn create_rule(
     check_filter(&mut connection, workspace, &request.event_name, &filter).await?;
     drop(connection);
     check_destination(&state.pool, workspace, request.destination_id).await?;
+    crate::destinations::actions::check_destination(
+        state,
+        context,
+        workspace,
+        request.destination_id,
+    )
+    .await?;
 
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let written = zirv_flow_store::create_rule(
@@ -364,7 +371,7 @@ pub(crate) async fn list(
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "A rule with that name exists", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events; `egress_denied` when its address is refused", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]

@@ -149,8 +149,8 @@ function NewSource({ workspaceId }: { workspaceId: string }) {
       {kind && isPush(kind) ? null : <Stepper steps={STEPS} current={step} label="Source setup steps" />}
       <Panel>
         <ResourceView resource={access} loadingLabel="Checking your access">
-          {({ canManage }) =>
-            !canManage ? (
+          {({ canAdmin }) =>
+            !canAdmin ? (
               <p className="muted">
                 Only workspace admins can add sources. <Link to={`/w/${workspaceId}/sources`}>Back to sources</Link>
               </p>

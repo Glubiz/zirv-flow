@@ -1250,6 +1250,92 @@ mod tests {
         attempt_as(env, job, probe, None, false).await
     }
 
+    async fn refused_http_run(pool: PgPool, oauth: bool) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("http://{}", listener.local_addr().unwrap());
+        let env = setup(&pool, json!({"records": 1}), "full_refresh").await;
+        let mut manifest: Value = serde_json::from_str(include_str!(
+            "../../../zirv-flow-connectors/tests/fixtures/manifests/offset_api_key.json"
+        ))
+        .unwrap();
+        manifest["streams"][0]["name"] = json!("stream_1");
+        manifest["streams"][0]["fields"] = json!([
+            {"name": "id", "type": "number"}, {"name": "email", "type": "string"}, {"name": "name", "type": "string"}
+        ]);
+        manifest["base_url"] = json!(if oauth {
+            "https://public.example.test"
+        } else {
+            &target
+        });
+        manifest["auth"] = if oauth {
+            json!({"type": "oauth2_client_credentials", "token_url": format!("{target}/token")})
+        } else {
+            json!({"type": "none"})
+        };
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        let secret = SecretId::new();
+        let purpose = SecretPurpose::ConnectorCredential;
+        let sealed = seal(
+            &keys,
+            br#"{"client_id":"client","client_secret":"secret"}"#,
+            &secret_aad(env.ws, secret, purpose),
+        );
+        zirv_flow_store::secrets::insert_unchecked(&pool, env.ws, purpose, secret, &sealed)
+            .await
+            .unwrap();
+        let credential = zirv_flow_store::import_secret_as_credential(
+            &pool,
+            env.ws,
+            "OAuth",
+            secret,
+            &["client_id", "client_secret"],
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE sources SET kind = 'http', config = $2, credential_id = $3 WHERE id = $1",
+        )
+        .bind(env.source)
+        .bind(json!({"manifest": manifest}))
+        .bind(credential.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (run, job) = env.queue().await;
+        let last = ClaimedJob {
+            attempts: job.max_attempts,
+            ..job
+        };
+        let result = attempt_as(&env, &last, &Probe::default(), Some(keys), false).await;
+        assert_eq!(
+            result.unwrap_err().message(),
+            "the source could not be read"
+        );
+        let failed = env.run(run.id).await;
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_private_http_manifest_records_a_fixed_run_error_without_connecting(pool: PgPool) {
+        refused_http_run(pool, false).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_private_oauth_token_endpoint_records_a_fixed_run_error_without_connecting(
+        pool: PgPool,
+    ) {
+        refused_http_run(pool, true).await;
+    }
+
     fn hook<F>(f: F) -> Probe
     where
         F: Fn(usize) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
