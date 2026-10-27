@@ -12,15 +12,17 @@ export function useSnippets(workspaceId: string, archived = false): Resource<Sni
 export interface SnippetOption {
   id: string;
   name: string;
+  /** The published version a snippet block would show. */
+  version: number;
 }
 
 /** The live snippets that have a published version, for a snippet block or a theme footer to choose from. */
 export function usePublishedSnippets(workspaceId: string): Resource<SnippetOption[]> {
   return useResource(async () => {
     const all = await unwrap(client.GET("/api/v1/workspaces/{ws}/snippets", { params: { path: { ws: workspaceId } } }));
-    return all
-      .filter((snippet) => snippet.current_version !== null && snippet.current_version !== undefined)
-      .map((snippet) => ({ id: snippet.id, name: snippet.name }));
+    return all.flatMap((snippet) =>
+      snippet.current_version === null || snippet.current_version === undefined ? [] : [{ id: snippet.id, name: snippet.name, version: snippet.current_version }],
+    );
   }, [workspaceId]);
 }
 

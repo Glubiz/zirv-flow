@@ -1577,7 +1577,7 @@
         "tags": [
           "ai"
         ],
-        "summary": "Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or\n`flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few\nsynthetic people) with the assistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
+        "summary": "Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,\n`segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a\n`simulation` of a few synthetic people; a template draft names its template in `template_id`\nand its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns\n`renders`, the template's draft and the result rendered for the sample person) with the\nassistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
         "operationId": "create_ai_draft",
         "parameters": [
           {
@@ -1653,7 +1653,7 @@
             }
           },
           "409": {
-            "description": "The assistant is off (`ai_disabled`), or the source does not use a manifest",
+            "description": "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1673,7 +1673,7 @@
             }
           },
           "422": {
-            "description": "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`",
+            "description": "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1693,7 +1693,7 @@
             }
           },
           "502": {
-            "description": "The model provider failed (`ai_provider_error`), or the source did",
+            "description": "The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1703,7 +1703,7 @@
             }
           },
           "503": {
-            "description": "The server has no master key to open the provider key",
+            "description": "The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1794,7 +1794,7 @@
             }
           },
           "409": {
-            "description": "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`)",
+            "description": "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1804,7 +1804,7 @@
             }
           },
           "422": {
-            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues)",
+            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21344,7 +21344,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "The workspace's live templates by name; archived ones with `archived=true`.",
+        "summary": "The workspace's templates for the library, newest edit first; archived ones with\n`archived=true` or `status=archived`.",
         "operationId": "list_templates",
         "parameters": [
           {
@@ -21365,6 +21365,51 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "A case-insensitive substring of the name, the draft's subject or a merge field the draft uses",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "`email` or `webhook`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "theme",
+            "in": "query",
+            "description": "A theme id, `default` or `none`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "`edited` (the default), `name` or `most_used` (non-test messages in the last 30 days)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -21375,14 +21420,14 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/TemplateBody"
+                    "$ref": "#/components/schemas/TemplateListItemBody"
                   }
                 }
               }
             }
           },
           "400": {
-            "description": "archived is not true or false",
+            "description": "archived is not true or false, or another parameter has an unknown value",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21790,7 +21835,7 @@
             }
           },
           "409": {
-            "description": "The template is already archived (`code` is `template_archived`)",
+            "description": "The template is already archived (`code` is `template_archived`), or an active flow still sends it (`code` is `template_in_use`, with the flows in `flows`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21815,7 +21860,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. Audited as `template.draft_saved`.",
+        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. After the save commits the draft is validated once and its\nissue counts stored (`checks` in the template list); a validation that cannot run leaves them\nempty and never fails the save. Audited as `template.draft_saved`.",
         "operationId": "save_template_draft",
         "parameters": [
           {
@@ -26652,6 +26697,24 @@
               "string",
               "null"
             ]
+          },
+          "template": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateDetailBody",
+                "description": "For a template: the template and its draft after the document was copied into the draft,\nwith `lang` and the revision as they are now. Nothing was published or sent."
+              }
+            ]
+          },
+          "template_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -30282,7 +30345,8 @@
           "status",
           "attempts",
           "issues",
-          "changes"
+          "changes",
+          "subject_variants"
         ],
         "properties": {
           "attempts": {
@@ -30329,6 +30393,17 @@
           "kind": {
             "$ref": "#/components/schemas/DraftKindBody"
           },
+          "renders": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateRendersBody",
+                "description": "For a template: the draft and the result rendered for the sample person with inert\ntracking, so the client can show them at desktop and mobile widths. Absent for the other\nkinds and for an invalid draft."
+              }
+            ]
+          },
           "simulation": {
             "oneOf": [
               {
@@ -30343,6 +30418,13 @@
           "status": {
             "type": "string",
             "description": "`valid`, or `invalid` when no attempt passed validation: then there is no `content` and\nthe draft cannot be accepted."
+          },
+          "subject_variants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For the template task `subject_variants`: the subjects offered, the first of which is in\nthe document. Empty for every other draft."
           }
         }
       },
@@ -30373,7 +30455,8 @@
           "mapping",
           "manifest",
           "segment",
-          "flow"
+          "flow",
+          "template"
         ]
       },
       "DraftRequest": {
@@ -30442,6 +30525,25 @@
               "null"
             ],
             "description": "The stream whose mapping is drafted. Required for a mapping, refused for a manifest."
+          },
+          "task": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateTask",
+                "description": "For a template: what to do. Required for a template, refused for the others."
+              }
+            ]
+          },
+          "template_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a template: the template whose draft is changed. Required for a template, refused for\nthe others."
           }
         },
         "additionalProperties": false
@@ -32695,6 +32797,23 @@
           }
         ],
         "description": "Whether a person may enter again."
+      },
+      "FlowRefProblem": {
+        "type": "object",
+        "description": "A flow named in a problem.",
+        "required": [
+          "flow_id",
+          "flow_name"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          }
+        }
       },
       "FlowScheduleTrigger": {
         "type": "object",
@@ -35694,6 +35813,16 @@
             },
             "description": "What is wrong with a flow (`flow_invalid`): a fixed code and the node, edge and pointer it\nconcerns, never a value from the flow."
           },
+          "flows": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/FlowRefProblem"
+            },
+            "description": "The active flows whose running version sends a template (`template_in_use`)."
+          },
           "issues": {
             "type": [
               "array",
@@ -36443,6 +36572,30 @@
               "format": "uuid"
             },
             "description": "At most 1000."
+          }
+        }
+      },
+      "RenderedEmailBody": {
+        "type": "object",
+        "description": "One rendered email: the parts of a preview.",
+        "properties": {
+          "html": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -40143,6 +40296,24 @@
           "webhook"
         ]
       },
+      "TemplateChecksBody": {
+        "type": "object",
+        "description": "The counts of the issues the draft's last validation found.",
+        "required": [
+          "blocking",
+          "warnings"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "TemplateDetailBody": {
         "allOf": [
           {
@@ -40250,6 +40421,76 @@
           "severity": {
             "type": "string",
             "description": "`blocking` or `warning`."
+          }
+        }
+      },
+      "TemplateListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TemplateBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "draft_changed",
+              "active_flows",
+              "theme",
+              "edited_at"
+            ],
+            "properties": {
+              "active_flows": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many active flows send the template."
+              },
+              "checks": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TemplateChecksBody",
+                    "description": "The draft's last validation; null when it has not been checked."
+                  }
+                ]
+              },
+              "draft_changed": {
+                "type": "boolean",
+                "description": "The draft differs from the current version; false before the first publish."
+              },
+              "edited_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "edited_by_email": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The email of the member who saved the draft last; null for an API key or a removed member."
+              },
+              "theme": {
+                "$ref": "#/components/schemas/TemplateThemeBody"
+              }
+            }
+          }
+        ],
+        "description": "A template in the library list: the template and the facts the library shows."
+      },
+      "TemplateNamedTheme": {
+        "type": "object",
+        "description": "A theme a block email names.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -40387,6 +40628,63 @@
             "$ref": "#/components/schemas/TemplateVersionBody"
           }
         }
+      },
+      "TemplateRendersBody": {
+        "type": "object",
+        "description": "A template draft before and after the change, both rendered for the sample person.",
+        "properties": {
+          "after": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedEmailBody",
+                "description": "The drafted document."
+              }
+            ]
+          },
+          "before": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedEmailBody",
+                "description": "The template's draft as it is now; absent when it has blocking issues and does not render."
+              }
+            ]
+          }
+        }
+      },
+      "TemplateTask": {
+        "type": "string",
+        "description": "What the marketer asks the assistant to do to a template.",
+        "enum": [
+          "copy",
+          "subject_variants",
+          "block_layout",
+          "translation"
+        ]
+      },
+      "TemplateThemeBody": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TemplateThemeChoice"
+          },
+          {
+            "$ref": "#/components/schemas/TemplateNamedTheme"
+          }
+        ],
+        "description": "The theme the draft follows: `default`, `none`, or the theme it names."
+      },
+      "TemplateThemeChoice": {
+        "type": "string",
+        "description": "A theme choice that names no theme row.",
+        "enum": [
+          "default",
+          "none"
+        ]
       },
       "TemplateUseBody": {
         "type": "object",

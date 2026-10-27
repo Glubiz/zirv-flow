@@ -1,5 +1,5 @@
 //! The assistant's tools (architecture 5.3, 13.2): the only things a model can ask the product to
-//! do. There are eight, and the registry below is the only list of them:
+//! do. There are nine, and the registry below is the only list of them:
 //!
 //! - `read_source` (read): what the model may know about a source's stream or manifest;
 //! - `draft_mapping` (draft): checks a mapping with the validator a stream save uses;
@@ -8,7 +8,9 @@
 //! - `explain_segment` (read): checks an explanation of a saved segment against its definition;
 //! - `draft_flow` (draft): checks a flow graph and its settings with the publish validation;
 //! - `explain_flow` (read): checks an explanation of a flow against its nodes;
-//! - `explain_trace` (read): checks an explanation of a trace against its decision records.
+//! - `explain_trace` (read): checks an explanation of a trace against its decision records;
+//! - `draft_template` (draft): checks a change to a template's document with the publish
+//!   validation, through the render pool.
 //!
 //! A tool never writes. It is told who is asking and in which workspace, and it authorizes that
 //! user again on every call; the model cannot name a target, only fill in the artifact. A new
@@ -18,6 +20,7 @@ pub(crate) mod draft_flow;
 pub(crate) mod draft_manifest;
 pub(crate) mod draft_mapping;
 pub(crate) mod draft_segment;
+pub(crate) mod draft_template;
 pub(crate) mod explain_flow;
 pub(crate) mod explain_segment;
 pub(crate) mod explain_trace;
@@ -27,6 +30,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_ai::{AiTool, JsonSchema, Privacy, ToolError};
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_store::Template;
 
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize};
@@ -54,6 +58,13 @@ pub(crate) enum DraftTarget {
     },
     /// The decision records of a trace the model was shown, in the order of their labels.
     ExplainTrace { record_ids: Vec<Uuid> },
+    /// A template's draft document, which the task changes. The template is the one being
+    /// edited, read when the run began; `base` is its draft document then.
+    Template {
+        template: Box<Template>,
+        task: draft_template::TemplateTask,
+        base: Value,
+    },
 }
 
 /// The caller of a tool: the signed-in user and the workspace, taken from the authorized request.
@@ -81,6 +92,7 @@ pub(crate) fn registry() -> Vec<Tool> {
         Box::new(draft_flow::DraftFlow),
         Box::new(explain_flow::ExplainFlow),
         Box::new(explain_trace::ExplainTrace),
+        Box::new(draft_template::DraftTemplate),
     ]
 }
 
@@ -145,7 +157,8 @@ mod tests {
                 "explain_segment",
                 "draft_flow",
                 "explain_flow",
-                "explain_trace"
+                "explain_trace",
+                "draft_template"
             ]
         );
         assert_eq!(names.iter().collect::<HashSet<_>>().len(), names.len());
@@ -218,6 +231,7 @@ mod tests {
             include_str!("draft_flow.rs"),
             include_str!("explain_flow.rs"),
             include_str!("explain_trace.rs"),
+            include_str!("draft_template.rs"),
         ];
         for source in sources {
             // The tests of a module may name what it must not do.

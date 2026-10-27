@@ -12,13 +12,15 @@ use uuid::Uuid;
 use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    AssetOwnerKind, AssetReferenceError, SenderError, Template, TemplateUse, TemplateVersion,
-    TemplateVersionSummary, require_verified_sender,
+    AssetOwnerKind, AssetReferenceError, PgConnection, SenderError, Template, TemplateUse,
+    TemplateVersion, TemplateVersionSummary, require_verified_sender,
 };
-use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
+use zirv_flow_templates::{
+    FieldCatalog, Issue, TemplateDocument, code, content_type_of, extras_needs, migrate_to_current,
+};
 
 use super::crud::TemplateBody;
-use super::inputs::{Subject, resolve};
+use super::inputs::{Inputs, Subject, resolve};
 use super::where_used::TemplateUseBody;
 use super::{field_catalog, issue_problems, stored_document, template_error};
 use crate::AppState;
@@ -113,6 +115,50 @@ pub(crate) struct TemplatePublishedBody {
     used_by: Vec<TemplateUseBody>,
 }
 
+/// What a publish validates a document against: the workspace's field catalog and the render inputs
+/// (theme, snippets, assets, conditions) the publish would resolve. The stored draft checks read the
+/// same, so a draft that publishes cleanly never shows blocking checks.
+pub(crate) async fn publish_inputs(
+    state: &AppState,
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    doc: &TemplateDocument,
+) -> Result<(FieldCatalog, Inputs), ApiError> {
+    let catalog =
+        field_catalog(zirv_flow_store::read_template_field_catalog(connection, workspace).await?);
+    let now = state.clock.now(connection).await?;
+    let inputs = resolve(
+        connection,
+        workspace,
+        doc,
+        Subject::Nobody,
+        state.public_url(),
+        now,
+    )
+    .await?;
+    Ok((catalog, inputs))
+}
+
+/// The issues a publish finds in `doc`: the sample render's checks, run in the render host, and the
+/// resolver's own. The one check a publish, the stored draft checks and the assistant's template
+/// drafts all make.
+pub(crate) async fn publish_issues(
+    render: &RenderPool,
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+    inputs: &Inputs,
+) -> Result<Vec<Issue>, ApiError> {
+    content_type_of(doc).map_err(|_| ApiError::template_content_unsupported())?;
+    // A template's sample render allocates like any render, so it runs in the render host, never
+    // in this process.
+    let mut issues = render
+        .validate_with(doc, catalog, &inputs.extras)
+        .await
+        .map_err(|failure| ApiError::render_failed(&failure))?;
+    issues.extend(inputs.issues.iter().cloned());
+    Ok(issues)
+}
+
 /// Validates the draft and publishes it as the next version, or changes nothing. Audited as
 /// `template.published`; records a `template.publish` decision caused by a definition change.
 ///
@@ -143,31 +189,12 @@ pub(crate) async fn publish_template(
         let draft = zirv_flow_store::find_template_draft(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::internal)?;
-        let catalog = field_catalog(
-            zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
-        );
         let doc = stored_document(&draft.document)?;
-        let now = state.clock.now(&mut connection).await?;
-        let inputs = resolve(
-            &mut connection,
-            workspace,
-            &doc,
-            Subject::Nobody,
-            state.public_url(),
-            now,
-        )
-        .await?;
+        let (catalog, inputs) = publish_inputs(state, &mut connection, workspace, &doc).await?;
         (draft, catalog, inputs)
     };
     let doc = stored_document(&draft.document)?;
-    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
-    // A template's sample render allocates like any render, so it runs in the render host, never
-    // in this process.
-    let mut issues: Vec<Issue> = render
-        .validate_with(&doc, &catalog, &inputs.extras)
-        .await
-        .map_err(|failure| ApiError::render_failed(&failure))?;
-    issues.extend(inputs.issues.iter().cloned());
+    let issues = publish_issues(render, &doc, &catalog, &inputs).await?;
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::template_invalid(issue_problems(&issues)));
     }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
@@ -47,12 +47,14 @@ interface Props {
 export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Props) {
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
-  const [tab, setTab] = useState<Tab>("editor");
+  const [query] = useSearchParams();
+  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "used" ? "used" : "editor"));
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
+  const [goTo, setGoTo] = useState<{ id: string; n: number } | undefined>(undefined);
   const [publishing, setPublishing] = useState(false);
   const [toTest, setToTest] = useState(false);
   const navigate = useNavigate();
@@ -270,7 +272,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
           {canWrite ? (
             <PreviewPane
               templateId={template.id}
@@ -281,6 +283,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               canAdmin={canAdmin}
               person={person}
               onPerson={setPerson}
+              onGoToBlock={doc.kind === "blocks" ? (id) => setGoTo((last) => ({ id, n: (last?.n ?? 0) + 1 })) : undefined}
             />
           ) : (
             <p className="muted">Members of the workspace can preview a template.</p>

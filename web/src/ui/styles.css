@@ -3461,6 +3461,64 @@ main:focus {
   text-align: right;
 }
 
+.be-snippet {
+  border-style: dashed;
+  background: transparent;
+}
+
+.be-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.be-footer {
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.be-footer-off {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.be-lock {
+  display: inline-flex;
+  padding: 0 6px;
+  color: var(--ink-2);
+}
+
+.be-more {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.be-more > summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.be-more[open] > summary {
+  margin-bottom: 8px;
+}
+
+.tp-hidden {
+  margin: 0;
+}
+
+.tp-hidden .link-button {
+  margin-left: 8px;
+}
+
 /* Template library tabs */
 .library-nav {
   align-self: flex-start;
@@ -3948,4 +4006,191 @@ main:focus {
 
 .th-token dd {
   margin: 0;
+}
+
+/* Template library: the toolbar, the cards and the new template dialog */
+.tl-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.tl-search {
+  flex: 1 1 240px;
+  max-width: 340px;
+}
+
+.tl-select {
+  width: auto;
+}
+
+.tl-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.tl-count {
+  margin-left: 6px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.tl-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(256px, 1fr));
+  gap: 16px;
+}
+
+.tl-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tl-thumb {
+  height: 160px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  padding-top: 16px;
+  overflow: hidden;
+  background: var(--paper-3);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+}
+
+.tl-thumb-paper {
+  width: 64%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 12px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 4px 4px 0 0;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+}
+
+.tl-thumb-hook {
+  background: var(--paper-3);
+}
+
+.tl-thumb-code {
+  width: 76%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 14px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 6px 6px 0 0;
+  background: var(--night);
+}
+
+.tl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  padding: 12px 8px 14px 14px;
+}
+
+.tl-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.tl-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.tl-name {
+  font-weight: 700;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.tl-name:hover {
+  text-decoration: underline;
+}
+
+.tl-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tl-foot {
+  margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.tl-chans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 8px;
+}
+
+.tl-chan {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-height: 64px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tl-chan[aria-pressed="true"] {
+  border-color: var(--night);
+  box-shadow: 0 0 0 1px var(--night);
+}
+
+.tl-chan:disabled {
+  cursor: not-allowed;
+  color: var(--ink-3);
+  background: var(--paper);
+}
+
+.tl-chan:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tl-start {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tl-picks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }

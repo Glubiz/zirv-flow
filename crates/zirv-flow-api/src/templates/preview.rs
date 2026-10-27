@@ -85,10 +85,10 @@ pub(crate) struct HiddenBlockBody {
 }
 
 /// The rendered parts of a preview.
-struct Rendered {
-    subject: Option<String>,
-    html: Option<String>,
-    text: Option<String>,
+pub(crate) struct Rendered {
+    pub(crate) subject: Option<String>,
+    pub(crate) html: Option<String>,
+    pub(crate) text: Option<String>,
     headers: Vec<TemplateHeaderBody>,
     body: Option<String>,
     hidden: Vec<String>,
@@ -102,7 +102,7 @@ fn headers_of(headers: Vec<(String, String)>) -> Vec<TemplateHeaderBody> {
 }
 
 /// Renders `doc` through the pool, by the render call its content type uses.
-async fn render(
+pub(crate) async fn render(
     pool: &RenderPool,
     kind: RenderKind,
     doc: &TemplateDocument,

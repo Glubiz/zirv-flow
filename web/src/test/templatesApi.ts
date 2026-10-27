@@ -1,4 +1,5 @@
 import { json, MEMBER, OWNER, problem, session, type Call, type Handler } from "./mockApi";
+import { listBody } from "./assetsApi";
 import { catalogRoutes, members, WS } from "./segmentsApi";
 
 /** Fixtures and routes shared by the template tests. */
@@ -39,6 +40,20 @@ export function templateBody(overrides: Doc = {}) {
   };
 }
 
+/** An item of the library list: the template and the facts the library shows. */
+export function listItem(overrides: Doc = {}) {
+  return {
+    ...templateBody(),
+    draft_changed: false,
+    checks: null,
+    active_flows: 0,
+    theme: "none",
+    edited_by_email: null,
+    edited_at: "2026-10-10T09:00:00Z",
+    ...overrides,
+  };
+}
+
 export function templateDetail(overrides: Doc = {}, document: Doc = emailDocument()) {
   return {
     ...templateBody(overrides),
@@ -67,6 +82,7 @@ export function previewBody(overrides: Doc = {}) {
     headers: [],
     body: null,
     issues: [],
+    hidden_blocks: [],
     ...overrides,
   };
 }
@@ -95,10 +111,12 @@ interface Options {
   versions?: unknown[];
   /** The people saved on the template, as the preview-people list answers them. */
   saved?: unknown[];
+  /** Routes added to, or replacing, the defaults: the workspace's themes, snippets and images answer empty lists. */
+  extra?: Record<string, Handler>;
 }
 
 /** The session, the catalog, the template and its draft, preview, publish, versions and where-used endpoints. */
-export function templateRoutes({ role = "admin", detail, preview, uses = [], versions = [], saved = [] }: Options = {}): Record<string, Handler> {
+export function templateRoutes({ role = "admin", detail, preview, uses = [], versions = [], saved = [], extra = {} }: Options = {}): Record<string, Handler> {
   let current: Record<string, unknown> = detail ?? templateDetail();
   let asked = 0;
   const base = `${WS}/templates/${TEMPLATE_ID}`;
@@ -115,7 +133,7 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
   return {
     ...actorRoutes,
     ...catalogRoutes(),
-    [`GET ${WS}/templates`]: () => json([current]),
+    [`GET ${WS}/templates`]: () => json([listItem({ id: current["id"], name: current["name"], current_version: current["current_version"], archived_at: current["archived_at"] })]),
     [`GET ${base}`]: () => json(current),
     [`PUT ${base}`]: async (request) => {
       const body = (await request.json()) as Doc;
@@ -149,6 +167,10 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     [`GET ${WS}/test-send-allowlist/options`]: () => json([{ id: "a1", name: "q***@example.com" }]),
     [`GET ${WS}/test-sends`]: () => json({ test_sends: [], next_before: null }),
     [`GET ${WS}/test-sends/quota`]: () => json(QUOTA),
+    [`GET ${WS}/themes`]: () => json([]),
+    [`GET ${WS}/snippets`]: () => json([]),
+    [`GET ${WS}/assets`]: () => json(listBody([])),
+    ...extra,
   };
 }
 
