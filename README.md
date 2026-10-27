@@ -100,6 +100,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `events.min_retention_days` | u32 | 30 | at least 1; the shortest per-name override a workspace may set |
 | `events.max_retention_days` | u32 | 1095 | at least 1; the longest per-name override; not below the minimum |
 | `events.reject_retention_days` | u32 | 30 | at least 1; how long ingest rejects are kept |
+| `retention.messages_days` | u32 | 395 | at least 1; how long ended messages are kept (about 13 months); within the two bounds below; the purge writes the erasure handled markers |
+| `retention.messages_min_days` | u32 | 30 | at least 1; the shortest per-workspace message window |
+| `retention.messages_max_days` | u32 | 1095 | at least 1; the longest per-workspace message window; not below the minimum |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |

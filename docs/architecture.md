@@ -2864,6 +2864,19 @@ batches. A failed run keeps completed batches; the next run continues, counting 
 run removes. The delivered outbox purge uses the pool too, releasing its locks before delivery
 calls.
 
+`messages.retention` (#376, migration 0071) is the same for the message log: a daily instance-level
+schedule (03:41 UTC) runs `apply_message_retention` with `retention.messages_days` (default 395,
+bounded by `retention.messages_min_days` 30 and `retention.messages_max_days` 1095). It deletes
+messages in a terminal status (`sent`, `skipped`, `failed`) older than the window, oldest first by
+`(created_at, id)` on the index `messages_created_idx`, in batches of `RETENTION_BATCH`; `pending`
+and `sending` rows belong to a live job and stay, and `message_links` follow by cascade. Each batch
+is one committed statement built with `privacy::delete_and_mark`, so it writes the handled marker
+of every purged row (earliest `created_at` per person and destination) and a failure rolls the
+batch back whole while earlier batches stay. The purge takes an optional map of workspace to days
+(empty until the per-workspace window exists). The run adds the count to
+`zirv_flow_retention_deleted_total{table="messages"}`, sets
+`zirv_flow_retention_last_run_timestamp_seconds{table="messages"}` and logs the count only.
+
 As built (M2): the ledger is `erasure_requests` (person id, identifier HMACs with their kinds,
 status, requester, trace); the M8 erasure scan applies the ledger and audit exceptions above.
 `POST /privacy/erasures` records the request and enqueues `privacy.erase` in one transaction;
@@ -2953,8 +2966,8 @@ the result per destination.
   and per-name override) for `sync.succeeded` and `sync.failed` events that name a destination, the
   safety net before a partition drop, and `purge_delivered` for delivered outbox rows. A row that
   names no destination writes none, and neither does a destination that no longer exists. Messages
-  are not purged by retention (the 13-month message retention is not built), so they write none;
-  when it is built it writes markers too. Nothing on a hot path (message insert, outbox insert, sync
+  are purged by `messages.retention` (#376; below), which writes the marker of every row it removes,
+  whatever its status. Nothing on a hot path (message insert, outbox insert, sync
   outcome) writes a marker. The marker insert joins `people`, so a purge writes nothing for a person
   already gone, and the table's `person_id` key (`ON DELETE CASCADE`) means a
   marker never outlives its person: a purge that raced an erasure fails as a whole statement and
