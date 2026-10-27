@@ -34,7 +34,11 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 60] = [
+/// The inclusive bounds of `retention.job_history_days` and `retention.audit_days`.
+const JOB_HISTORY_DAYS_BOUNDS: (u32, u32) = (1, 90);
+const AUDIT_DAYS_BOUNDS: (u32, u32) = (90, 3650);
+
+const CONFIG_KEYS: [&str; 62] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -65,6 +69,8 @@ const CONFIG_KEYS: [&str; 60] = [
     "retention.decision_days",
     "retention.decision_min_days",
     "retention.decision_max_days",
+    "retention.job_history_days",
+    "retention.audit_days",
     "ingest.max_request_bytes",
     "ingest.max_batch_items",
     "ingest.rate_per_key",
@@ -386,6 +392,10 @@ struct RetentionConfig {
     /// The shortest and the longest per-workspace window.
     decision_min_days: u32,
     decision_max_days: u32,
+    /// How long dead jobs are kept (1 to 90).
+    job_history_days: u32,
+    /// How long audit rows are kept (90 to 3650).
+    audit_days: u32,
 }
 
 /// What the ingestion API accepts and how fast the drain applies it.
@@ -604,6 +614,8 @@ impl Config {
             .merge(Serialized::default("retention.decision_days", 395_u32))
             .merge(Serialized::default("retention.decision_min_days", 30_u32))
             .merge(Serialized::default("retention.decision_max_days", 760_u32))
+            .merge(Serialized::default("retention.job_history_days", 14_u32))
+            .merge(Serialized::default("retention.audit_days", 730_u32))
             .merge(Serialized::default(
                 "ingest.max_request_bytes",
                 1_048_576_u64,
@@ -994,6 +1006,22 @@ impl Config {
                 ));
             }
         }
+        for (key, value, (low, high)) in [
+            (
+                "retention.job_history_days",
+                retention.job_history_days,
+                JOB_HISTORY_DAYS_BOUNDS,
+            ),
+            (
+                "retention.audit_days",
+                retention.audit_days,
+                AUDIT_DAYS_BOUNDS,
+            ),
+        ] {
+            if !(low..=high).contains(&value) {
+                return Err(fail(key, &format!("must be between {low} and {high}")));
+            }
+        }
         Ok(())
     }
 
@@ -1215,6 +1243,16 @@ impl Config {
             min_days: self.retention.decision_min_days,
             max_days: self.retention.decision_max_days,
         }
+    }
+
+    /// How many days dead jobs are kept.
+    pub(crate) fn job_history_days(&self) -> u32 {
+        self.retention.job_history_days
+    }
+
+    /// How many days audit rows are kept.
+    pub(crate) fn audit_days(&self) -> u32 {
+        self.retention.audit_days
     }
 
     /// What the ingestion API accepts and how fast a key may send.
@@ -1948,6 +1986,50 @@ cookie_secure = false
             let error = Config::load(None, env).unwrap_err().to_string();
 
             assert!(error.contains(expected), "{key}: {error}");
+        }
+    }
+
+    #[test]
+    fn the_job_history_and_audit_windows_default_to_14_and_730_days() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!((config.job_history_days(), config.audit_days()), (14, 730));
+        let shown = toml::to_string(&config).unwrap();
+        assert!(shown.contains("job_history_days = 14") && shown.contains("audit_days = 730"));
+    }
+
+    #[test]
+    fn the_job_history_and_audit_windows_can_be_set_from_the_environment() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_RETENTION__JOB_HISTORY_DAYS".into(), "30".into()));
+        env.push(("ZIRV_FLOW_RETENTION__AUDIT_DAYS".into(), "365".into()));
+
+        let config = Config::load(None, env).unwrap();
+
+        assert_eq!((config.job_history_days(), config.audit_days()), (30, 365));
+    }
+
+    #[test]
+    fn the_job_history_and_audit_windows_are_refused_outside_their_bounds() {
+        for (key, value, ok) in [
+            ("ZIRV_FLOW_RETENTION__JOB_HISTORY_DAYS", "0", false),
+            ("ZIRV_FLOW_RETENTION__JOB_HISTORY_DAYS", "1", true),
+            ("ZIRV_FLOW_RETENTION__JOB_HISTORY_DAYS", "90", true),
+            ("ZIRV_FLOW_RETENTION__JOB_HISTORY_DAYS", "91", false),
+            ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "89", false),
+            ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "90", true),
+            ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "3650", true),
+            ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "3651", false),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((key.into(), value.into()));
+
+            let loaded = Config::load(None, env);
+
+            assert_eq!(loaded.is_ok(), ok, "{key}={value}");
+            if let Err(error) = loaded {
+                assert!(error.to_string().contains("must be between"), "{error}");
+            }
         }
     }
 

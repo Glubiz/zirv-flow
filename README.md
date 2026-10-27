@@ -109,6 +109,8 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `retention.decision_days` | u32 | 395 | at least 1; how long decision-log records are kept (about 13 months); within the two bounds below |
 | `retention.decision_min_days` | u32 | 30 | at least 1; the shortest per-workspace decision-log window |
 | `retention.decision_max_days` | u32 | 760 | at least 1; the longest per-workspace decision-log window (25 months); not below the minimum |
+| `retention.job_history_days` | u32 | 14 | 1 to 90; how long dead jobs are kept; `jobs.retention` deletes older ones daily |
+| `retention.audit_days` | u32 | 730 | 90 to 3650; how long audit rows are kept (2 years); `audit.retention` purges older ones daily and records an `audit.purged` row |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
@@ -327,7 +329,7 @@ table.
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
 | `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
 | `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
-| `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages` or `decision_records` |
+| `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages`, `decision_records`, `jobs` or `audit_log` |
 | `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
 | `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
 | `zirv_flow_ingest_requests_total` | counter | `endpoint`, `status` | Ingestion requests |
@@ -788,6 +790,15 @@ event that is about 39 GB (ingest), 63 GB (flow) or 69 GB (send) a day, so the 1
 default holds about 15 TB (ingest), 25 TB (flow) or 27 TB (send) per record-per-event stream at that rate; scale it by the real
 records per event and rate. Reproduce the table with
 `ZIRV_FLOW_BENCH_DECISION_SIZE=200000 cargo nextest run -p zirv-flow-store --run-ignored all --no-capture bytes_per_record`.
+**Job-history and audit-log retention.** Two daily jobs run at 04:07 UTC (`jobs.retention`) and
+04:19 UTC (`audit.retention`). The first deletes dead jobs whose `dead_at` is older than
+`retention.job_history_days`; `ready` and `running` jobs are never touched. The second deletes audit
+rows older than `retention.audit_days` through the database's `audit_purge` function, the only
+delete the append-only guard allows, and appends one `audit.purged` row (system actor, summary
+`count` and `cutoff` only) when it deleted anything. Both delete in batches of 5,000 that commit
+separately, so a failed run keeps its completed batches and the next run continues; the deletes are
+counted in `zirv_flow_retention_deleted_total{table="jobs"}` and `{table="audit_log"}`.
+
 ## Event debugger and explorer
 
 Under **Events** in the web UI, **Debugger**, **Explorer** and **Rejects** show what the event
