@@ -390,7 +390,8 @@ impl<'a> JobContext<'a> {
 
     /// Appends `credential.used` for a workspace credential this job run opened: the credential id
     /// and the use (`send`, `sync`, `forward` or `erase`) and nothing else. `once_per` collapses a use
-    /// that repeats per message into one row per window.
+    /// that repeats per message into one row per window, written in its own short transaction on the
+    /// worker's pool so the check is exact and no lock outlives the write.
     pub async fn audit_credential_used(
         &mut self,
         workspace: WorkspaceId,
@@ -408,12 +409,11 @@ impl<'a> JobContext<'a> {
             trace_id: Some(self.job.trace.trace_id.as_uuid()),
             summary: serde_json::json!({"use": usage}),
         };
-        match once_per {
-            Some(window) => {
-                zirv_flow_store::append_audit_once_in(&mut *self.connection, &entry, window)
-                    .await?;
+        match (once_per, self.pool()) {
+            (Some(window), Some(pool)) => {
+                zirv_flow_store::append_audit_once_in(pool, &entry, window).await?;
             }
-            None => zirv_flow_store::append_audit(&mut *self.connection, &entry).await?,
+            _ => zirv_flow_store::append_audit(&mut *self.connection, &entry).await?,
         }
         Ok(())
     }

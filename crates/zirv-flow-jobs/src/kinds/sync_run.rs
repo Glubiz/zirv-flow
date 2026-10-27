@@ -446,6 +446,7 @@ pub(super) async fn open_credential(
     pool: &PgPool,
     workspace: WorkspaceId,
     credential: Option<Uuid>,
+    once_per: Option<Duration>,
 ) -> Result<Credential, Failure> {
     let Some(credential) = credential else {
         return Ok(Credential::new());
@@ -464,21 +465,23 @@ pub(super) async fn open_credential(
     let credential_value = Credential::from_parts(&opened.secret, &opened.fields)
         .map_err(|_| Failure::job(JobError::new("the source credential could not be read")))?;
     // The sync works on its own transactions, so the row is written on the pool: one per attempt
-    // that opens the credential.
-    zirv_flow_store::append_audit(
-        pool,
-        &zirv_flow_store::NewAuditEntry {
-            workspace_id: Some(workspace),
-            actor: zirv_flow_store::Actor::system(),
-            action: "credential.used",
-            object_kind: Some("credential"),
-            object_id: Some(credential),
-            request_id: None,
-            trace_id: Some(ctx.trace().trace_id.as_uuid()),
-            summary: json!({"use": "sync"}),
-        },
-    )
-    .await?;
+    // that opens the credential, or one per window for a consumer that opens it every slice.
+    let entry = zirv_flow_store::NewAuditEntry {
+        workspace_id: Some(workspace),
+        actor: zirv_flow_store::Actor::system(),
+        action: "credential.used",
+        object_kind: Some("credential"),
+        object_id: Some(credential),
+        request_id: None,
+        trace_id: Some(ctx.trace().trace_id.as_uuid()),
+        summary: json!({"use": "sync"}),
+    };
+    match once_per {
+        Some(window) => {
+            zirv_flow_store::append_audit_once_in(pool, &entry, window).await?;
+        }
+        None => zirv_flow_store::append_audit(pool, &entry).await?,
+    }
     Ok(credential_value)
 }
 
@@ -895,7 +898,8 @@ async fn run_pass(
     };
 
     // The credential is opened right before the read and dropped with it.
-    let mut credential = open_credential(ctx, pool, ids.workspace, source.credential_id).await?;
+    let mut credential =
+        open_credential(ctx, pool, ids.workspace, source.credential_id, None).await?;
     // An account connected by consent: its tokens seed the context, and refreshes are stored.
     let source_context = super::sync_tokens::prepare(
         pool,
@@ -2057,7 +2061,7 @@ mod tests {
                 Arc::default(),
                 Arc::default(),
             );
-            let credential = open_credential(&ctx, &env.pool, env.ws, found.credential_id)
+            let credential = open_credential(&ctx, &env.pool, env.ws, found.credential_id, None)
                 .await
                 .unwrap_or_else(|_| panic!("the credential did not open"));
             assert_eq!(credential.get("region").unwrap().expose(), "eu");
@@ -2103,6 +2107,29 @@ mod tests {
             assert_eq!(object, Some(credential.id));
             assert_eq!(summary, json!({"use": "sync"}));
         }
+
+        // A consumer opens the credential every slice: with a window, the rows above already
+        // cover the hour, so further opens write none.
+        let count = "SELECT count(*) FROM audit_log WHERE action = 'credential.used'";
+        let before: i64 = sqlx::query_scalar(count).fetch_one(&pool).await.unwrap();
+        let hour = Some(Duration::from_secs(3600));
+        for _ in 0..2 {
+            let found = zirv_flow_store::find_source(&pool, env.ws, env.source)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            let ctx = JobContext::new(&mut connection, &job).with_outbound(
+                Some(keys.clone()),
+                Arc::default(),
+                Arc::default(),
+            );
+            open_credential(&ctx, &pool, env.ws, found.credential_id, hour)
+                .await
+                .unwrap_or_else(|_| panic!("the credential did not open"));
+        }
+        let after: i64 = sqlx::query_scalar(count).fetch_one(&pool).await.unwrap();
+        assert_eq!(after, before);
     }
 
     #[sqlx::test]
