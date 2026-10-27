@@ -208,6 +208,7 @@ pub(crate) async fn audit(
             object_kind: object.map(|(kind, _)| kind),
             object_id: object.map(|(_, id)| id),
             request_id: context.request_id.clone(),
+            trace_id: crate::trace::current().map(|trace| trace.trace_id.as_uuid()),
             summary,
         },
     )
