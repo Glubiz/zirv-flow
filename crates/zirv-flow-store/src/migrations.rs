@@ -356,4 +356,60 @@ mod tests {
             "the backfill defaults must be dropped"
         );
     }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_roles_migration_turns_members_into_editors_and_keeps_admins(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../migrations/0001_accounts.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            concat!(
+                "INSERT INTO workspaces (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000a1', 'Acme', 'acme'); ",
+                "INSERT INTO users (id, email, password_hash) VALUES ",
+                "('00000000-0000-0000-0000-0000000000b1', 'admin@example.com', 'x'), ",
+                "('00000000-0000-0000-0000-0000000000b2', 'member@example.com', 'x'); ",
+                "INSERT INTO memberships (workspace_id, user_id, role) VALUES ",
+                "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b1', 'admin'), ",
+                "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b2', 'member')"
+            ),
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0073_membership_roles.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let roles: Vec<(String, String)> = sqlx::query_as(
+            "SELECT u.email, m.role FROM memberships m JOIN users u ON u.id = m.user_id              ORDER BY u.email",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            roles,
+            vec![
+                ("admin@example.com".to_owned(), "admin".to_owned()),
+                ("member@example.com".to_owned(), "editor".to_owned()),
+            ]
+        );
+        for role in ["publisher", "viewer"] {
+            let allowed = sqlx::query("UPDATE memberships SET role = $1")
+                .bind(role)
+                .execute(&pool)
+                .await;
+            assert!(allowed.is_ok(), "{role}");
+        }
+        for role in ["member", "owner"] {
+            let refused = sqlx::query("UPDATE memberships SET role = $1")
+                .bind(role)
+                .execute(&pool)
+                .await;
+            assert!(refused.is_err(), "{role}");
+        }
+    }
 }

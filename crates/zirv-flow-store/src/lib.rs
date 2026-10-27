@@ -364,9 +364,9 @@ pub use workspace_credentials::{
 };
 pub use workspaces::{
     Member, Membership, UtmSettings, Workspace, create_workspace, find_workspace,
-    find_workspace_by_slug, list_members, list_workspaces_for_user, membership_role, orphan_policy,
-    remove_membership, set_membership, set_orphan_policy, set_workspace_timezone,
-    set_workspace_utm,
+    find_workspace_by_slug, list_members, list_workspaces_for_user, lock_memberships,
+    membership_role, orphan_policy, remove_membership, set_membership, set_orphan_policy,
+    set_workspace_timezone, set_workspace_utm,
 };
 /// The operator master key, its derived keys and the sealing of secrets, and the workspace and role
 /// types the test server seeds with, re-exported so the
