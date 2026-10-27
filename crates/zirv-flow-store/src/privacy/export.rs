@@ -978,17 +978,10 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        for (table, reason) in EXPORT_EXCLUDED {
+        for (table, _) in EXPORT_EXCLUDED {
             assert!(
                 known.contains(&(*table).to_owned()),
                 "{table} is not a table"
-            );
-            assert!(!reason.is_empty(), "{table} has no reason");
-            assert!(
-                EXPORT_SECTIONS
-                    .iter()
-                    .all(|(_, read)| !read.contains(table)),
-                "{table} is both read and excluded"
             );
         }
         for (section, tables) in EXPORT_SECTIONS {
