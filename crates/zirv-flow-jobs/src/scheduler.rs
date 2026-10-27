@@ -10,19 +10,20 @@ use tracing::{info, warn};
 use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
-    JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule, StoreError,
-    abandon_orphaned_test_sends, advance_schedule, begin, database_now, delete_expired_import_data,
-    destination_report, dirty_backlog, dirty_heads, disable_schedule, due_schedules,
-    due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify, enqueue_drain,
-    enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions, ensure_forward_job,
-    expire_contact_idempotency, expire_exports, fail_orphaned_runs, forwarding_report, inbox_heads,
-    prune_debugger_feed, queue_depths, reap_expired, reconcile_flow_schedules,
-    reconcile_segment_schedules, stream_freshness, try_lead,
+    EnrollmentSample, JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule,
+    StoreError, abandon_orphaned_test_sends, advance_schedule, begin, database_now,
+    delete_expired_import_data, destination_report, dirty_backlog, dirty_heads, disable_schedule,
+    due_schedules, due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify,
+    enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
+    ensure_forward_job, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
+    forwarding_report, inbox_heads, prune_debugger_feed, queue_depths, reap_expired,
+    reconcile_flow_schedules, reconcile_segment_schedules, sample_enrollments, stream_freshness,
+    try_lead,
 };
 
 use crate::metrics::{
     DestinationGauges, FreshnessGauges, QueueGauges, RunOutcome, record_sync_run, set_dirty_age,
-    set_dirty_backlog, set_inbox_age,
+    set_dirty_backlog, set_enrollments, set_inbox_age,
 };
 
 /// Schedules handled per tick; more than this carry over to the next tick.
@@ -43,6 +44,8 @@ const SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
 const FRESHNESS_INTERVAL: Duration = Duration::from_secs(30);
 /// How often the destination gauges and counters are refreshed.
 const DESTINATION_INTERVAL: Duration = Duration::from_secs(15);
+/// How often the enrollment and timer gauges are sampled.
+const ENROLLMENT_INTERVAL: Duration = Duration::from_secs(15);
 /// How often the leader looks for sending domains that are due a DNS check.
 const SENDING_DOMAIN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// Domains queued per scan; more than this carry over to the next one.
@@ -127,6 +130,8 @@ pub struct Scheduler {
     destinations: DestinationGauges,
     /// When the destination gauges were last refreshed; none until this instance leads.
     destinations_checked: Option<Instant>,
+    /// When the enrollment gauges were last sampled; none until this instance leads.
+    enrollments_checked: Option<Instant>,
     /// When the sending domains were last scanned for due checks; none until this instance leads.
     domains_scanned: Option<Instant>,
 }
@@ -147,6 +152,7 @@ impl Scheduler {
             freshness_checked: None,
             destinations: DestinationGauges::default(),
             destinations_checked: None,
+            enrollments_checked: None,
             domains_scanned: None,
         }
     }
@@ -176,6 +182,7 @@ impl Scheduler {
             .zero_all();
         self.freshness.zero_all();
         self.destinations.zero_all();
+        set_enrollments(&EnrollmentSample::default());
     }
 
     /// One pass: take or keep the lock, and if this instance leads, do the leader's work
@@ -192,6 +199,7 @@ impl Scheduler {
         self.keep_messages(now).await;
         self.keep_freshness(now).await;
         self.keep_destinations().await;
+        self.keep_enrollments().await;
         self.keep_sending_domains().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
@@ -210,6 +218,7 @@ impl Scheduler {
         self.keep_messages(now).await;
         self.keep_freshness(now).await;
         self.keep_destinations().await;
+        self.keep_enrollments().await;
         self.keep_sending_domains().await;
         Ok(Tick::Led(self.work_at(now).await?))
     }
@@ -400,6 +409,23 @@ impl Scheduler {
         self.keep_forwarding().await;
     }
 
+    /// Samples the enrollment and timer gauges: on gaining leadership, then at most every
+    /// [`ENROLLMENT_INTERVAL`]. The store's query runs under a statement timeout; a failure is
+    /// logged and retried at the next check.
+    async fn keep_enrollments(&mut self) {
+        let due = self
+            .enrollments_checked
+            .is_none_or(|checked| checked.elapsed() >= ENROLLMENT_INTERVAL);
+        if !due {
+            return;
+        }
+        self.enrollments_checked = Some(Instant::now());
+        match sample_enrollments(&self.pool).await {
+            Ok(sample) => set_enrollments(&sample),
+            Err(error) => warn!("could not sample the enrollment gauges: {error}"),
+        }
+    }
+
     /// Publishes the forwarding queue gauges and gives every destination whose outbox has rows
     /// but no ready or running `event.forward` job a job again: a job that died on a database
     /// outage must not strand its rows. A failure is logged and retried at the next check.
@@ -489,8 +515,10 @@ impl Scheduler {
             self.freshness_checked = None;
             self.freshness.zero_all();
             self.destinations_checked = None;
+            self.enrollments_checked = None;
             self.domains_scanned = None;
             self.destinations.zero_all();
+            set_enrollments(&EnrollmentSample::default());
             self.gauges
                 .get_mut()
                 .expect("the gauge lock is never held across a panic")
