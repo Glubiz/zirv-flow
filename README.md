@@ -753,7 +753,9 @@ admin sets within `events.min_retention_days` and `events.max_retention_days`; r
 `events.reject_retention_days`. A daily job (03:17 UTC) deletes what is past its limit in
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
 records of events that no longer exist. Each batch and each partition drop commits separately,
-with its handled markers, so a failed run keeps completed work and the next run continues.
+with its handled markers, so a failed run keeps completed work and the next run continues. A
+partition drop waits at most 2 seconds for the table lock and is skipped (logged, retried by the
+next daily run) rather than stalling ingest.
 The scheduler leader creates the partitions for this and next month.
 
 **Decision-log retention.** A daily job (03:53 UTC, `decisions.retention`) drops each monthly
