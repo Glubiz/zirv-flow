@@ -1,0 +1,6 @@
+# Contract policy (#406): clients must tolerate new response enum values.
+# Both default to ERR in v1.34.0:
+# https://github.com/oasdiff/oasdiff/blob/v1.34.0/checker/rules.go#L570
+# https://github.com/oasdiff/oasdiff/blob/v1.34.0/checker/rules.go#L649
+response-property-enum-value-added info
+response-mediatype-enum-value-added info

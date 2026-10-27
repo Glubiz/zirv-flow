@@ -836,6 +836,81 @@ mod tests {
         );
     }
 
+    fn check_version_and_paths(document: &serde_json::Value) -> Result<(), String> {
+        if document["info"]["version"].as_str() != Some("1") {
+            return Err("OpenAPI info.version must stay 1".into());
+        }
+        const UNVERSIONED: &[&str] = &[
+            "/hooks/{id}", // Public inbound webhook: HMAC contract and WebhookPanel types.
+            "/healthz",    // Unversioned liveness probe.
+            "/readyz",     // Unversioned readiness probe.
+        ];
+        let paths = document["paths"].as_object().unwrap();
+        for path in UNVERSIONED {
+            if !paths.contains_key(*path) {
+                return Err(format!(
+                    "OpenAPI allowlist path {path} is no longer documented"
+                ));
+            }
+        }
+        for path in paths.keys() {
+            if !path.starts_with("/api/v1/") && !UNVERSIONED.contains(&path.as_str()) {
+                return Err(format!("OpenAPI path {path} must start with /api/v1/"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn openapi_version_and_paths_stay_on_v1() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        check_version_and_paths(&document).unwrap();
+        // /t and /u are public tracking/unsubscribe, /a serves assets, and
+        // /__test is test-only: these are not part of the generated API client.
+        for prefix in ["/t", "/u", "/a", "/__test"] {
+            for path in document["paths"].as_object().unwrap().keys() {
+                assert!(
+                    path != prefix && !path.starts_with(&format!("{prefix}/")),
+                    "OpenAPI must not document {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openapi_version_and_paths_reject_an_incompatible_document() {
+        let document = serde_json::to_value(openapi()).unwrap();
+        let mut wrong_version = document.clone();
+        wrong_version["info"]["version"] = serde_json::json!("2");
+        assert_eq!(
+            check_version_and_paths(&wrong_version),
+            Err("OpenAPI info.version must stay 1".into())
+        );
+        let mut stale_allowlist = document.clone();
+        stale_allowlist["paths"]
+            .as_object_mut()
+            .unwrap()
+            .remove("/readyz");
+        assert_eq!(
+            check_version_and_paths(&stale_allowlist),
+            Err("OpenAPI allowlist path /readyz is no longer documented".into())
+        );
+        for path in [
+            "/v2/people",
+            "/t/open",
+            "/u/optout",
+            "/a/file",
+            "/__test/reset",
+        ] {
+            let mut wrong_path = document.clone();
+            wrong_path["paths"][path] = serde_json::json!({});
+            assert_eq!(
+                check_version_and_paths(&wrong_path),
+                Err(format!("OpenAPI path {path} must start with /api/v1/"))
+            );
+        }
+    }
+
     #[test]
     fn no_two_registered_schemas_share_a_name() {
         let source = include_str!("openapi.rs");

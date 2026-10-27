@@ -8,6 +8,7 @@ name: CI Pipeline
 on:
   pull_request:
     branches: [ main, 'release/**' ]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
   workflow_dispatch:
 
 jobs:
@@ -133,6 +134,73 @@ jobs:
         env:
           ZIRV_FLOW_BENCH_BUILD: "1"
         run: cargo clippy -p zirv-flow-store --features bench-no-decisions -- -D warnings
+
+  openapi-breaking:
+    name: OpenAPI Breaking Changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned oasdiff
+        env:
+          # https://github.com/oasdiff/oasdiff/releases/tag/v1.34.0
+          # https://github.com/oasdiff/oasdiff/releases/download/v1.34.0/checksums.txt
+          OASDIFF_VERSION: 1.34.0
+          OASDIFF_SHA256: 7c88e09fd500b231af2819eb21f6fdfc7bcdfe2741d2c1937c59e7b72c8a575a
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          asset="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          url="https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}"
+          curl -fsSL --retry 3 "$url/$asset" -o "$dir/$asset"
+          curl -fsSL --retry 3 "$url/checksums.txt" -o "$dir/checksums.txt"
+          # Check both the reviewable pin and the release's published checksum.
+          grep -Fx "$OASDIFF_SHA256  $asset" "$dir/checksums.txt"
+          (cd "$dir" && printf '%s  %s\n' "$OASDIFF_SHA256" "$asset" | sha256sum -c -)
+          tar -xzf "$dir/$asset" -C "$dir" oasdiff
+          echo "$dir" >> "$GITHUB_PATH"
+
+      - name: OpenAPI gate self-test
+        run: bash scripts/openapi-gate/self-test.sh
+
+      - name: Compare the branch and frozen API contracts
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          document=crates/zirv-flow-api/openapi.json
+          dir=$(mktemp -d)
+          git show "origin/$BASE_REF:$document" > "$dir/base.json"
+          baselines=()
+          # rc1 starts the freeze; keep that baseline through the rc series.
+          # After 1.0, always compare the immutable v1.0.0 contract too.
+          for tag in v1.0.0-rc.1 v1.0.0; do
+            if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+              git show "refs/tags/$tag:$document" > "$dir/$tag.json"
+              baselines+=("$dir/$tag.json")
+            fi
+          done
+          bash scripts/openapi-gate/check.sh "$dir/base.json" "$document" "${baselines[@]}"
+
+  release-scripts:
+    name: Release Script Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4.4.0
+      - name: SemVer precedence self-test
+        run: bash scripts/semver-compare.sh --self-test
+      - name: Changelog self-test
+        run: bash scripts/generate-changelog.sh --self-test
+      - name: Release flags self-test
+        run: bash scripts/release-flags.sh --self-test
 
   web:
     name: Web UI
@@ -457,7 +525,8 @@ jobs:
           # what this PR branched from with no local Cargo.toml edit at all;
           # skipping this check on a docs-only diff would let that
           # regressed, inherited version slip through unnoticed.
-          if [ "$(printf '%s\n%s\n' "$BASE_VERSION" "$HEAD" | sort -V | tail -1)" != "$HEAD" ]; then
+          ORDER=$(bash scripts/semver-compare.sh "$HEAD" "$BASE_VERSION")
+          if [ "$ORDER" = "-1" ]; then
             echo "::error file=Cargo.toml::Version ($HEAD) is lower than ${{ github.base_ref }}'s ($BASE_VERSION)."
             exit 1
           fi
@@ -470,7 +539,7 @@ jobs:
             echo "::notice::no shipped-code paths changed since ${{ github.base_ref }} (src/, crates/, Cargo.toml, Cargo.lock, build.rs) -- version bump not required"
             exit 0
           fi
-          if [ "$BASE_VERSION" = "$HEAD" ]; then
+          if [ "$ORDER" = "0" ]; then
             echo "::error file=Cargo.toml::Version ($HEAD) is unchanged from ${{ github.base_ref }} but shipped code changed. Bump it -- a version bump is what makes CD actually publish the change."
             exit 1
           fi

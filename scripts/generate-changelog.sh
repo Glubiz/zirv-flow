@@ -17,7 +17,7 @@
 #
 # Usage:
 #   generate-changelog.sh --print-header
-#   generate-changelog.sh --section --to <rev> [--from <rev>] [--header <text>]
+#   generate-changelog.sh --section --to <rev> [--from <rev>] [--header <text>] [--version <version>]
 #   generate-changelog.sh --full [--to <rev>]
 #   generate-changelog.sh --suggest-bump --to <rev> [--from <rev>]
 #   generate-changelog.sh --self-test
@@ -27,9 +27,11 @@
 #   `{ generate-changelog.sh --print-header; generate-changelog.sh --full; }
 #   > CHANGELOG.md`.
 # --section prints ONE Markdown section for commits in (from, to], newest
-#   first within each type group. --from defaults to the nearest tag
-#   reachable from --to (excluding --to itself); with no tag at all, it
-#   covers the full history up to --to. --header overrides the generated
+#   first within each type group. --from defaults to the previous SemVer tag
+#   reachable from --to; stable releases skip prereleases to fold their changes
+#   into the final section. With no earlier tag it covers the full history.
+#   --version supplies the target version before its tag exists (CD).
+#   --header overrides the generated
 #   "## <to>" line (CD passes the real tag and date).
 # --full walks every tag in version order (oldest first is wrong for a
 #   changelog -- newest first, matching Keep a Changelog convention) and
@@ -44,15 +46,17 @@
 set -euo pipefail
 
 script_path=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+source "$(dirname "$script_path")/semver-compare.sh"
 
 mode=""
 from_rev=""
 to_rev="HEAD"
 header=""
+target_version=""
 
 usage() {
   echo "usage: $0 --print-header" >&2
-  echo "       $0 --section --to <rev> [--from <rev>] [--header <text>]" >&2
+  echo "       $0 --section --to <rev> [--from <rev>] [--header <text>] [--version <version>]" >&2
   echo "       $0 --full [--to <rev>]" >&2
   echo "       $0 --suggest-bump --to <rev> [--from <rev>]" >&2
   echo "       $0 --self-test" >&2
@@ -71,6 +75,9 @@ while [ $# -gt 0 ]; do
     --to)
       if [ $# -lt 2 ]; then usage; exit 2; fi
       to_rev="$2"; shift 2 ;;
+    --version)
+      if [ $# -lt 2 ]; then usage; exit 2; fi
+      target_version="$2"; shift 2 ;;
     --header)
       if [ $# -lt 2 ]; then usage; exit 2; fi
       header="$2"; shift 2 ;;
@@ -85,13 +92,51 @@ if [ -z "$mode" ]; then
 fi
 
 # ---------------------------------------------------------------------
-# nearest_tag <rev>: the closest tag strictly before <rev> (exclusive of
-# <rev> itself, so `--section --to <new-tag>` does not resolve --from back
-# to <new-tag> when the tag already exists at the time this runs). Empty
-# output means no earlier tag exists -- the caller then covers full history.
+# Only reachable v<SemVer> tags participate; unrelated tags are not releases.
+# Sort by SemVer rather than Git's version sort (which puts final before rc).
+release_tags() {
+  local rev="$1" tag i result
+  local -a ordered=()
+  while IFS= read -r tag; do
+    [[ "$tag" == v* ]] && semver_valid "${tag#v}" || continue
+    i=${#ordered[@]}
+    while (( i > 0 )); do
+      result=$(semver_compare "${ordered[$((i - 1))]#v}" "${tag#v}")
+      [[ "$result" == 1 ]] || break
+      ordered[$i]=${ordered[$((i - 1))]}
+      i=$((i - 1))
+    done
+    ordered[$i]=$tag
+  done < <(git tag --merged "$rev")
+  if (( ${#ordered[@]} > 0 )); then printf '%s\n' "${ordered[@]}"; fi
+}
+
+# CD supplies --version before tagging. Tagged rebuilds derive it from --to;
+# untagged advisory runs choose the greatest reachable tag as their base.
 nearest_tag() {
-  local rev="$1"
-  git describe --tags --abbrev=0 "${rev}^" 2>/dev/null || true
+  local rev="$1" version="${2:-}" tag previous="" result
+  local tags
+  tags=$(release_tags "$rev")
+  if [[ -z "$version" ]]; then
+    while IFS= read -r tag; do
+      [[ -n "$tag" ]] || continue
+      if [[ "$(git rev-parse "$tag^{commit}")" == "$(git rev-parse "$rev^{commit}")" ]]; then
+        version=${tag#v}
+      fi
+    done <<< "$tags"
+  fi
+  [[ -z "$version" ]] || semver_valid "$version" || { echo 'invalid target SemVer' >&2; return 2; }
+  while IFS= read -r tag; do
+    [[ -n "$tag" ]] || continue
+    if [[ -n "$version" ]]; then
+      result=$(semver_compare "${tag#v}" "$version")
+      [[ "$result" == -1 ]] || continue
+      # Final releases include all rc commits since the previous stable tag.
+      if [[ "${version%%+*}" != *-* && "${tag%%+*}" == *-* ]]; then continue; fi
+    fi
+    previous=$tag
+  done <<< "$tags"
+  printf '%s\n' "$previous"
 }
 
 # ---------------------------------------------------------------------
@@ -211,7 +256,7 @@ HEADER
   section)
     from="$from_rev"
     if [ -z "$from" ]; then
-      from=$(nearest_tag "$to_rev")
+      from=$(nearest_tag "$to_rev" "$target_version")
     fi
     hdr="$header"
     if [ -z "$hdr" ]; then
@@ -221,22 +266,18 @@ HEADER
     ;;
 
   full)
-    tags=$(git tag --sort=v:refname)
+    tags=$(release_tags "$to_rev")
     if [ -z "$tags" ]; then
       echo "no tags found" >&2
       exit 1
     fi
-    # Newest first, each paired with the tag immediately before it.
+    # Newest first; stable sections fold the preceding rc sections.
     prev=""
     ordered=()
     while IFS= read -r t; do ordered+=("$t"); done <<< "$tags"
     for ((i = ${#ordered[@]} - 1; i >= 0; i--)); do
       t="${ordered[$i]}"
-      if [ "$i" -gt 0 ]; then
-        prev="${ordered[$((i - 1))]}"
-      else
-        prev=""
-      fi
+      prev=$(nearest_tag "$t" "${t#v}")
       date=$(git log -1 --format=%as "$t")
       emit_section "$prev" "$t" "## ${t} (${date})" || true
     done
@@ -245,7 +286,7 @@ HEADER
   suggest-bump)
     from="$from_rev"
     if [ -z "$from" ]; then
-      from=$(nearest_tag "$to_rev")
+      from=$(nearest_tag "$to_rev" "$target_version")
     fi
     range="$to_rev"
     [ -n "$from" ] && range="${from}..${to_rev}"
@@ -315,6 +356,42 @@ HEADER
       echo "self-test FAIL: expected bump suggestion 'minor', got '$bump_minor'" >&2
       fail=1
     fi
+
+    (
+      cd "$workdir"
+      git commit -q --allow-empty -m "chore: previous stable"
+      git tag v0.9.0
+      git commit -q --allow-empty -m "feat: first rc feature"
+      git tag v1.0.0-rc.1
+      git commit -q --allow-empty -m "fix: second rc fix"
+      git tag v1.0.0-rc.2
+      git commit -q --allow-empty -m "fix: final polish"
+      git tag v1.0.0
+      # Neither an unrelated tag nor an unmerged release participates.
+      git tag not-a-release
+      git checkout -q -b unmerged v0.9.0
+      git commit -q --allow-empty -m "feat: unmerged"
+      git tag v9.0.0
+      git checkout -q main
+    )
+    rc1=$(cd "$workdir" && "$script_path" --section --to v1.0.0-rc.1)
+    rc2=$(cd "$workdir" && "$script_path" --section --to v1.0.0-rc.2)
+    final=$(cd "$workdir" && "$script_path" --section --to v1.0.0)
+    [[ "$rc1" == *'first rc feature'* && "$rc1" != *'previous stable'* ]]
+    [[ "$rc2" == *'second rc fix'* && "$rc2" != *'first rc feature'* ]]
+    [[ "$final" == *'first rc feature'* && "$final" == *'second rc fix'* && "$final" == *'final polish'* && "$final" != *'previous stable'* ]]
+    # Before CD creates the final tag it must select the same stable base.
+    (cd "$workdir" && git tag -d v1.0.0 >/dev/null)
+    untagged=$(cd "$workdir" && "$script_path" --section --to HEAD --version 1.0.0 --header '## v1.0.0')
+    [[ "$untagged" == "$final" ]]
+    (cd "$workdir" && git tag v1.0.0)
+    bump_rc=$(cd "$workdir" && "$script_path" --suggest-bump --from v1.0.0-rc.1 --to v1.0.0-rc.2 2>/dev/null)
+    [[ "$bump_rc" == patch ]]
+    full=$(cd "$workdir" && "$script_path" --full)
+    headings=$(grep '^## v' <<< "$full" | cut -d ' ' -f 2)
+    [[ "$headings" == $'v1.0.0\nv1.0.0-rc.2\nv1.0.0-rc.1\nv0.9.0\nv0.2.0\nv0.1.1\nv0.1.0' ]]
+    final_full=$(sed -n '1,/^## v1.0.0-rc.2/{ /^## v1.0.0-rc.2/d; p; }' <<< "$full")
+    [[ "$final_full" == *'first rc feature'* && "$final_full" == *'second rc fix'* && "$final_full" != *'previous stable'* ]]
 
     if [ "$fail" = "1" ]; then
       exit 1
