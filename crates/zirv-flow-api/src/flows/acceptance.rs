@@ -723,6 +723,7 @@ mod tests {
                     &locked,
                     &json!([]),
                     None,
+                    None,
                     &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
                 )
                 .await
@@ -821,6 +822,7 @@ mod tests {
                     f.ws,
                     &locked,
                     &json!([]),
+                    None,
                     None,
                     &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
                 )
@@ -2455,6 +2457,7 @@ mod tests {
             f.ws,
             &locked,
             &json!([]),
+            None,
             None,
             &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
         )

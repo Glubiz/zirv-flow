@@ -32,11 +32,16 @@ pub struct TemplateVersion {
     pub published_by: Option<Uuid>,
     /// The trace of the request that published the version.
     pub trace_id: Uuid,
+    /// The marketer's note for the version history, at most [`NOTE_MAX_CHARS`] characters.
+    pub note: Option<String>,
 }
+
+/// The longest version note the database accepts.
+pub const NOTE_MAX_CHARS: usize = 500;
 
 macro_rules! version_columns {
     () => {
-        "template_id, version, document, validation, published_at, published_by, trace_id"
+        "template_id, version, document, validation, published_at, published_by, trace_id, note"
     };
 }
 
@@ -76,22 +81,23 @@ pub async fn lock_template(
 
 /// Publishes the locked template's draft as version n + 1 and makes it current, in the caller's
 /// transaction, and records a `template.publish` decision under `trace`. `validation` is the
-/// issues the caller found, stored with the version.
+/// issues the caller found, stored with the version, and `note` is the optional version note.
 pub async fn publish_template(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     locked: &LockedTemplate,
     validation: &Value,
     published_by: Option<UserId>,
+    note: Option<&str>,
     trace: &TraceContext,
 ) -> Result<(Template, TemplateVersion), TemplateError> {
     let template = &locked.template;
     let number = template.current_version.unwrap_or(0) + 1;
     let version: TemplateVersion = sqlx::query_as(concat!(
         "INSERT INTO template_versions (workspace_id, template_id, version, document, validation, \
-            published_by, trace_id, sender_identity_id) \
+            published_by, trace_id, sender_identity_id, note) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, \
-            (SELECT id FROM sender_identities WHERE workspace_id = $1 AND id = $8)) RETURNING ",
+            (SELECT id FROM sender_identities WHERE workspace_id = $1 AND id = $8), $9) RETURNING ",
         version_columns!()
     ))
     .bind(workspace.as_uuid())
@@ -102,6 +108,7 @@ pub async fn publish_template(
     .bind(published_by.map(|user| user.as_uuid()))
     .bind(trace.trace_id.as_uuid())
     .bind(super::document_sender(&locked.draft.document))
+    .bind(note)
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -144,6 +151,8 @@ pub struct TemplateVersionSummary {
     pub blocking: i64,
     /// The warnings stored with the version.
     pub warnings: i64,
+    /// The marketer's note, if the version has one.
+    pub note: Option<String>,
 }
 
 /// The versions of a template of the workspace, newest first, without their documents.
@@ -159,7 +168,7 @@ pub async fn list_template_versions<'e>(
                 WHERE i ->> 'severity' = 'blocking') AS blocking, \
             (SELECT count(*) FROM jsonb_array_elements(CASE \
                 WHEN jsonb_typeof(validation) = 'array' THEN validation ELSE '[]'::jsonb END) i \
-                WHERE i ->> 'severity' = 'warning') AS warnings \
+                WHERE i ->> 'severity' = 'warning') AS warnings, note \
          FROM template_versions WHERE workspace_id = $1 AND template_id = $2 \
          ORDER BY version DESC",
     )
@@ -207,7 +216,8 @@ mod tests {
     ) -> Result<(Template, TemplateVersion), TemplateError> {
         let mut tx = begin(pool).await?;
         let locked = lock_template(&mut tx, ws, id).await?;
-        let published = publish_template(&mut tx, ws, &locked, &json!([]), None, &trace()).await?;
+        let published =
+            publish_template(&mut tx, ws, &locked, &json!([]), None, None, &trace()).await?;
         commit(tx).await?;
         Ok(published)
     }
@@ -262,7 +272,7 @@ mod tests {
         for validation in [json!([]), warnings] {
             let mut tx = begin(&pool).await.unwrap();
             let locked = lock_template(&mut tx, ws, template.id).await.unwrap();
-            publish_template(&mut tx, ws, &locked, &validation, None, &trace())
+            publish_template(&mut tx, ws, &locked, &validation, None, None, &trace())
                 .await
                 .unwrap();
             commit(tx).await.unwrap();
@@ -321,7 +331,7 @@ mod tests {
         // And a publish whose transaction is dropped before the commit leaves no trace either.
         let mut tx = begin(&pool).await.unwrap();
         let locked = lock_template(&mut tx, ws, template.id).await.unwrap();
-        publish_template(&mut tx, ws, &locked, &json!([]), None, &trace())
+        publish_template(&mut tx, ws, &locked, &json!([]), None, None, &trace())
             .await
             .unwrap();
         drop(tx);
@@ -353,7 +363,7 @@ mod tests {
         let mut tx = begin(&pool).await.unwrap();
         let locked = lock_template(&mut tx, ws, template.id).await.unwrap();
 
-        let (_, version) = publish_template(&mut tx, ws, &locked, &warnings, None, &trace())
+        let (_, version) = publish_template(&mut tx, ws, &locked, &warnings, None, None, &trace())
             .await
             .unwrap();
         commit(tx).await.unwrap();
@@ -375,6 +385,50 @@ mod tests {
             )
         );
         assert_eq!(decisions(&pool, ws).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_note_is_stored_and_listed_and_501_characters_are_refused(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let template = create(&pool, ws, "Welcome").await;
+        let mut tx = begin(&pool).await.unwrap();
+        let locked = lock_template(&mut tx, ws, template.id).await.unwrap();
+        let (_, version) = publish_template(
+            &mut tx,
+            ws,
+            &locked,
+            &json!([]),
+            None,
+            Some("Fixed the footer"),
+            &trace(),
+        )
+        .await
+        .unwrap();
+        commit(tx).await.unwrap();
+        edit(&pool, ws, template.id, "second").await;
+        let mut tx = begin(&pool).await.unwrap();
+        let locked = lock_template(&mut tx, ws, template.id).await.unwrap();
+        let too_long = "x".repeat(NOTE_MAX_CHARS + 1);
+        let refused = publish_template(
+            &mut tx,
+            ws,
+            &locked,
+            &json!([]),
+            None,
+            Some(&too_long),
+            &trace(),
+        )
+        .await;
+        drop(tx);
+
+        assert_eq!(version.note.as_deref(), Some("Fixed the footer"));
+        let list = list_template_versions(&pool, ws, template.id)
+            .await
+            .unwrap();
+        assert_eq!(list[0].note.as_deref(), Some("Fixed the footer"));
+        assert!(refused.is_err());
+        assert_eq!(list.len(), 1);
     }
 
     #[sqlx::test]

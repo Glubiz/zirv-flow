@@ -320,7 +320,7 @@ mod tests {
     async fn publish(pool: &PgPool, ws: WorkspaceId, id: Uuid) {
         let mut tx = begin(pool).await.unwrap();
         let locked = lock_template(&mut tx, ws, id).await.unwrap();
-        publish_template(&mut tx, ws, &locked, &json!([]), None, &trace())
+        publish_template(&mut tx, ws, &locked, &json!([]), None, None, &trace())
             .await
             .unwrap();
         commit(tx).await.unwrap();

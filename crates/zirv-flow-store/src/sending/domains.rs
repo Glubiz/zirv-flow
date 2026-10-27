@@ -495,9 +495,17 @@ mod tests {
         let locked = crate::lock_template(&mut tx, ws, template).await.unwrap();
         let trace =
             zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::definition_change(template));
-        crate::publish_template(&mut tx, ws, &locked, &serde_json::json!([]), None, &trace)
-            .await
-            .unwrap();
+        crate::publish_template(
+            &mut tx,
+            ws,
+            &locked,
+            &serde_json::json!([]),
+            None,
+            None,
+            &trace,
+        )
+        .await
+        .unwrap();
         crate::commit(tx).await.unwrap();
     }
 

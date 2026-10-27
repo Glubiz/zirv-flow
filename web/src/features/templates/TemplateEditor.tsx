@@ -6,7 +6,6 @@ import { Button, Dialog, InlineError, Pill } from "../../ui";
 import { useLeaveGuard } from "../segments";
 import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
-import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
 import { SenderOptionsProvider } from "./senderOptions";
@@ -48,19 +47,17 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
   const [query] = useSearchParams();
-  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "used" ? "used" : "editor"));
+  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "versions" ? "versions" : query.get("tab") === "used" ? "used" : "editor"));
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
+  const [leaveFor, setLeaveFor] = useState<"test" | "publish" | null>(null);
   const [goTo, setGoTo] = useState<{ id: string; n: number } | undefined>(undefined);
-  const [publishing, setPublishing] = useState(false);
-  const [toTest, setToTest] = useState(false);
   const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
-  const [versionsKey, setVersionsKey] = useState(0);
 
   const archived = template.archived_at !== null && template.archived_at !== undefined;
   const editable = canWrite && !archived;
@@ -193,15 +190,15 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     void refresh();
   }
 
-  /** Saves the draft first, so the test page sends what the editor shows. */
-  async function openTestPage() {
-    if (await flush()) setToTest(true);
+  /** Saves the draft first, so the page it opens works on what the editor shows. */
+  async function openPage(page: "test" | "publish") {
+    if (await flush()) setLeaveFor(page);
   }
 
   const guard = useLeaveGuard(editable && save !== "saved");
   useEffect(() => {
-    if (toTest && save === "saved") void navigate(`/w/${workspaceId}/templates/${template.id}/test`);
-  }, [toTest, save, navigate, workspaceId, template.id]);
+    if (leaveFor !== null && save === "saved") void navigate(`/w/${workspaceId}/templates/${template.id}/${leaveFor}`);
+  }, [leaveFor, save, navigate, workspaceId, template.id]);
 
   const issues: readonly TemplateIssue[] = preview.status === "ready" ? preview.data.issues : [];
   const blocking = blockingCount(issues);
@@ -245,10 +242,10 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           </Button>
         ) : null}
         {editable && template.channel === "email" ? (
-          <Button onClick={() => void openTestPage()}>Send a test</Button>
+          <Button onClick={() => void openPage("test")}>Send a test</Button>
         ) : null}
         {editable && canAdmin ? (
-          <Button variant="primary" disabled={!canPublish} onClick={() => setPublishing(true)} aria-describedby="tp-publish-why">
+          <Button variant="primary" disabled={!canPublish} onClick={() => void openPage("publish")} aria-describedby="tp-publish-why">
             Publish…
           </Button>
         ) : null}
@@ -290,23 +287,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           )}
         </div>
       ) : null}
-      {tab === "versions" ? <VersionsView workspaceId={workspaceId} templateId={template.id} reloadKey={versionsKey} /> : null}
-      {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={versionsKey} /> : null}
-
-      {publishing ? (
-        <PublishDialog
-          workspaceId={workspaceId}
-          template={template}
-          flush={flush}
-          onClose={() => setPublishing(false)}
-          onPublished={(next, version) => {
-            setTemplate(next);
-            setPublishing(false);
-            setVersionsKey((key) => key + 1);
-            setPublished(`Published version ${version.version}. Flows that send this template use it from their next send.`);
-          }}
-        />
-      ) : null}
+      {tab === "versions" ? <VersionsView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
+      {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {converting ? (
         <ConvertDialog workspaceId={workspaceId} templateId={template.id} flush={flush} onClose={() => setConverting(false)} onConverted={converted} />
       ) : null}

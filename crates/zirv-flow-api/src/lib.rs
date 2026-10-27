@@ -407,6 +407,10 @@ fn routes() -> Router<AppState> {
             get(templates::where_used::where_used),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/send-volume",
+            get(templates::where_used::send_volume),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/templates/{id}/preview",
             post(templates::preview::preview),
         )

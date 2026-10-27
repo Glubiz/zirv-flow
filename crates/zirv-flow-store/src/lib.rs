@@ -312,16 +312,17 @@ pub use sync_runs::{
 };
 pub use templates::{
     Candidate, ExtrasRequest, LiveTemplate, LoadedInputs, LoadedSnippet, LockedTemplate,
-    MAX_PREVIEW_PEOPLE, NewTemplate, PreviewPerson, PreviewPersonError, Template, TemplateDraft,
-    TemplateError, TemplateFieldCatalog, TemplateFlowUse, TemplateListQuery, TemplatePatch,
-    TemplateSort, TemplateStatus, TemplateSummary, TemplateTheme, TemplateThemeFilter, TemplateUse,
+    MAX_PREVIEW_PEOPLE, NOTE_MAX_CHARS as TEMPLATE_NOTE_MAX_CHARS, NewTemplate, PreviewPerson,
+    PreviewPersonError, Template, TemplateDraft, TemplateError, TemplateFieldCatalog,
+    TemplateFlowUse, TemplateListQuery, TemplatePatch, TemplateSendVolume, TemplateSort,
+    TemplateStatus, TemplateSummary, TemplateTheme, TemplateThemeFilter, TemplateUse,
     TemplateVersion, TemplateVersionSummary, ThemeRequest, active_flows_using,
     active_published_flows, add_preview_person, archive_template, create_template, document_sender,
     find_template, find_template_draft, find_template_version, list_preview_people,
     list_template_versions, list_templates, load_render_inputs, load_render_inputs_with,
     lock_template, lock_templates_shared, publish_template, read_template_field_catalog,
     remove_preview_person, save_template_draft, set_template_draft_checks,
-    template_active_flow_counts, template_where_used, update_template,
+    template_active_flow_counts, template_send_volume, template_where_used, update_template,
 };
 pub use test_sends::{
     ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, ListedTestSend, MEMBER_HOURLY_LIMIT,

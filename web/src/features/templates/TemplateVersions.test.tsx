@@ -20,56 +20,14 @@ async function ready() {
 }
 
 describe("publishing", () => {
-  it("lists the active flows that use the template before it publishes", async () => {
-    const calls = mockApi(
-      templateRoutes({
-        uses: [useBody(), useBody({ flow_id: "f2", flow_name: "Old flow", active: false, flow_state: "archived" })],
-      }),
-    );
-    const user = userEvent.setup();
-    mount();
-
-    await user.click(await ready());
-
-    const dialog = await screen.findByRole("dialog", { name: "Publish version 1" });
-    expect(await within(dialog).findByRole("link", { name: "Welcome series" })).toBeInTheDocument();
-    expect(within(dialog).queryByText("Old flow")).not.toBeInTheDocument();
-    expect(within(dialog).getByText("Active")).toBeInTheDocument();
-
-    await user.click(within(dialog).getByRole("button", { name: "Publish version 1" }));
-
-    expect(await screen.findByText(/Published version 1/)).toBeInTheDocument();
-    expect(calls.some((call) => call.method === "POST" && call.path.endsWith("/publish"))).toBe(true);
-    expect(screen.getByText("Published v1")).toBeInTheDocument();
-  });
-
-  it("says no flow uses the template when none does", async () => {
+  it("opens the Review and publish page once the draft is saved", async () => {
     mockApi(templateRoutes());
     const user = userEvent.setup();
-    mount();
+    const { router } = mount();
 
     await user.click(await ready());
 
-    expect(await screen.findByText("No active flow uses this template yet.")).toBeInTheDocument();
-  });
-
-  it("shows the refusal of a publish in the dialog", async () => {
-    mockApi({
-      ...templateRoutes(),
-      [`POST ${WS}/templates/${TEMPLATE_ID}/publish`]: () =>
-        new Response(JSON.stringify({ title: "Unprocessable", detail: "The draft has blocking issues.", status: 422, code: "template_invalid" }), {
-          status: 422,
-          headers: { "content-type": "application/problem+json" },
-        }),
-    });
-    const user = userEvent.setup();
-    mount();
-
-    await user.click(await ready());
-    const dialog = await screen.findByRole("dialog");
-    await user.click(await within(dialog).findByRole("button", { name: "Publish version 1" }));
-
-    expect(await within(dialog).findByText("The draft has blocking issues.")).toBeInTheDocument();
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}/publish`), WAIT);
   });
 
   it("hides publishing from a member who is not an admin, and offers the test send", async () => {
