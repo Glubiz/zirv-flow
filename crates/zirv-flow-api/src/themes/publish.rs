@@ -12,7 +12,8 @@ use uuid::Uuid;
 use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    AssetOwnerKind, AssetReferenceError, PgPool, Theme, ThemeUse, ThemeVersion, ThemeVersionSummary,
+    AssetOwnerKind, AssetReferenceError, Candidate, Theme, ThemeUse, ThemeVersion,
+    ThemeVersionSummary,
 };
 use zirv_flow_templates::{Issue, code, severity_of};
 
@@ -24,6 +25,7 @@ use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem, TemplateIssueProblem};
 use crate::snippets::publish::stored_warnings;
+use crate::templates::dependents::broken_by;
 use crate::templates::issue_problems;
 use crate::trace::request_trace;
 
@@ -94,15 +96,20 @@ pub(crate) struct ThemePublishedBody {
 /// lock the theme, and it publishes only if the draft is still the revision that was checked: a
 /// draft saved in the meantime is a 409 `theme_draft_changed`, and nothing is written. The logo
 /// and the footer are checked under the lock.
+///
+/// Between the two, the live templates that render with the theme are validated with the draft in
+/// place of the published version (see `templates::dependents`); one that would stop sending is a
+/// 422 `theme_breaks_templates`.
 pub(crate) async fn publish_theme(
-    pool: &PgPool,
+    state: &AppState,
     render: &RenderPool,
     context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
 ) -> Result<(Theme, ThemeVersion, ThemeUse), ApiError> {
-    let (draft, tokens) = {
+    let pool = &state.pool;
+    let (draft, tokens, early) = {
         let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
         let theme = zirv_flow_store::find_theme(&mut *connection, workspace, id)
             .await?
@@ -114,12 +121,31 @@ pub(crate) async fn publish_theme(
             .await?
             .ok_or_else(ApiError::internal)?;
         let tokens = parse_tokens(&draft.tokens)?;
-        (draft, tokens)
+        let early = check_references(&mut connection, workspace, &tokens).await?;
+        (draft, tokens, early)
     };
     let mut issues: Vec<Issue> = render
         .validate_theme(&tokens)
         .await
         .map_err(|failure| ApiError::render_failed(&failure))?;
+    // The references are checked again under the lock; here they only keep a theme with a broken
+    // logo or footer from being reported as breaking templates.
+    let seen: Vec<Issue> = issues.iter().chain(&early.issues).cloned().collect();
+    if seen.iter().any(Issue::is_blocking) {
+        return Err(ApiError::theme_invalid(issue_problems(&seen)));
+    }
+    let live = {
+        let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
+        zirv_flow_store::theme_live_templates(&mut connection, workspace, id).await?
+    };
+    let candidate = Candidate::Theme {
+        id,
+        tokens: draft.tokens.clone(),
+    };
+    let broken = broken_by(state, render, workspace, live, &candidate).await?;
+    if !broken.is_empty() {
+        return Err(ApiError::theme_breaks_templates(broken));
+    }
     let trace = TraceContext {
         trace_id: request_trace().trace_id,
         cause: Cause::definition_change(id),
@@ -192,7 +218,12 @@ pub(crate) async fn publish_theme(
 /// blocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the
 /// footer a snippet of the workspace that is not archived and has a published version
 /// (`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue
-/// and writes nothing. The logo's asset reference is written with the version. The response lists
+/// and writes nothing. The live templates that name the theme, or follow it while it is the
+/// default, are validated with the draft in place of the published version, at most 200 in
+/// template id order; past 200 the publish goes ahead on the result for the first 200. A blocking
+/// issue in one of them, such as a removed footer in a marketing template, is a 422
+/// `theme_breaks_templates` that lists up to 20 of them with their issue codes and the total, and
+/// writes nothing. Warnings do not refuse. The logo's asset reference is written with the version. The response lists
 /// the templates and active flows that use the theme. Audited as `theme.published`.
 #[utoipa::path(
     post,
@@ -209,7 +240,7 @@ pub(crate) async fn publish_theme(
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or theme, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The theme is archived (`theme_archived`), or its draft was saved while it was being validated (`theme_draft_changed`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The draft has blocking issues (`theme_invalid`, with `template_issues`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The draft has blocking issues (`theme_invalid`, with `template_issues`), or would stop live templates from sending (`theme_breaks_templates`, with `templates` and `total`)", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "Rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -224,7 +255,7 @@ pub(crate) async fn publish(
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
     let (theme, version, used) = publish_theme(
-        &state.pool,
+        &state,
         render,
         &principal.context(),
         workspace.id,

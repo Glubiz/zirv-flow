@@ -231,6 +231,18 @@ export function statusOf(template: Template): { label: string; tone: "neutral" |
   return { label: `Published v${template.current_version}`, tone: "neutral" };
 }
 
+/** The values of the theme in effect that a template may read. */
+export const MERGE_THEME_VALUES: readonly { label: string; expression: string }[] = [
+  { label: "Primary colour", expression: "theme.primary" },
+  { label: "Text colour", expression: "theme.text" },
+  { label: "Background colour", expression: "theme.background" },
+  { label: "Link colour", expression: "theme.link" },
+  { label: "Button colour", expression: "theme.button" },
+  { label: "Button text colour", expression: "theme.button_text" },
+  { label: "Logo address", expression: "theme.logo_url" },
+  { label: "Theme name", expression: "theme.name" },
+];
+
 export const MERGE_SYSTEM_VALUES: readonly { label: string; expression: string }[] = [
   { label: "Unsubscribe link", expression: "system.unsubscribe_url" },
   { label: "Email preferences link", expression: "system.preferences_url" },

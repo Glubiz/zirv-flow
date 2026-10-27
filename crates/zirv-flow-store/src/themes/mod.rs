@@ -16,15 +16,17 @@ mod where_used;
 
 pub use crud::{
     NewTheme, Theme, ThemeDraft, ThemeError, ThemePatch, archive_theme, create_theme, find_theme,
-    find_theme_draft, list_themes, save_theme_draft, update_theme,
+    find_theme_draft, list_theme_tokens, list_themes, save_theme_draft, update_theme,
 };
 pub use default::{EffectiveTheme, ThemeChoice, effective_theme, set_default_theme};
 pub use publish::{
     LockedTheme, ThemeVersion, ThemeVersionSummary, find_theme_version, footer_snippet_usable,
     list_theme_versions, lock_theme, publish_theme,
 };
-pub use where_used::{ThemeTemplate, ThemeUse, theme_where_used};
-pub(crate) use where_used::{default_following_templates, is_default_theme};
+pub use where_used::{
+    ThemeTemplate, ThemeUse, theme_live_templates, theme_template_counts, theme_where_used,
+};
+pub(crate) use where_used::{default_following_templates, follows_default, is_default_theme};
 
 /// Fixtures for the tests of this module.
 #[cfg(test)]

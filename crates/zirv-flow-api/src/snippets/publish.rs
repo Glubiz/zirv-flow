@@ -12,7 +12,7 @@ use uuid::Uuid;
 use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    AssetOwnerKind, AssetReferenceError, PgPool, Snippet, SnippetUse, SnippetVersion,
+    AssetOwnerKind, AssetReferenceError, Candidate, Snippet, SnippetUse, SnippetVersion,
     SnippetVersionSummary,
 };
 use zirv_flow_templates::{Issue, code, severity_of};
@@ -24,6 +24,7 @@ use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem, TemplateIssueProblem};
+use crate::templates::dependents::broken_by;
 use crate::templates::{field_catalog, issue_problems};
 use crate::trace::request_trace;
 
@@ -113,14 +114,19 @@ pub(crate) struct SnippetPublishedBody {
 /// on the render host for as long as its deadline. Only then does the publish lock the snippet,
 /// and it publishes only if the draft is still the revision that was validated: a draft saved in
 /// the meantime is a 409 `snippet_draft_changed`, and nothing is written.
+///
+/// Before that, the live templates that render with the snippet are validated with the draft in
+/// place of the published version (see `templates::dependents`); one that would stop sending is a
+/// 422 `snippet_breaks_templates`.
 pub(crate) async fn publish_snippet(
-    pool: &PgPool,
+    state: &AppState,
     render: &RenderPool,
     context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
 ) -> Result<(Snippet, SnippetVersion, SnippetUse), ApiError> {
+    let pool = &state.pool;
     let (draft, catalog, content, checked) = {
         let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
         let snippet = zirv_flow_store::find_snippet(&mut *connection, workspace, id)
@@ -146,6 +152,18 @@ pub(crate) async fn publish_snippet(
     issues.extend(checked.issues.iter().cloned());
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::snippet_invalid(issue_problems(&issues)));
+    }
+    let live = {
+        let mut connection = pool.acquire().await.map_err(|_| ApiError::internal())?;
+        zirv_flow_store::snippet_live_templates(&mut connection, workspace, id).await?
+    };
+    let candidate = Candidate::Snippet {
+        id,
+        content: draft.content.clone(),
+    };
+    let broken = broken_by(state, render, workspace, live, &candidate).await?;
+    if !broken.is_empty() {
+        return Err(ApiError::snippet_breaks_templates(broken));
     }
     let validation = serde_json::to_value(&issues).map_err(|_| ApiError::internal())?;
     let trace = TraceContext {
@@ -213,7 +231,13 @@ pub(crate) async fn publish_snippet(
 /// blocks), and each asset image must name a live asset of the workspace; a snippet with no block
 /// is refused as `missing_content`. A theme logo image is accepted: the template or theme that
 /// holds the snippet checks it. A blocking issue is a 422
-/// `snippet_invalid` that lists every issue and writes nothing. The response lists the templates,
+/// `snippet_invalid` that lists every issue and writes nothing. The live templates whose current
+/// version renders with the snippet (a snippet block, or a theme footer) are validated with the
+/// draft in place of the published version, at most 200 in template id order; past 200 the publish
+/// goes ahead on the result for the first 200. A blocking issue in one of them, such as a footer
+/// without an unsubscribe link in a marketing template, is a 422 `snippet_breaks_templates` that
+/// lists up to 20 of them with their issue codes and the total, and writes nothing. Warnings do
+/// not refuse. The response lists the templates,
 /// themes and active flows that use the snippet. Audited as `snippet.published`.
 #[utoipa::path(
     post,
@@ -230,7 +254,7 @@ pub(crate) async fn publish_snippet(
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or snippet, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The snippet is archived (`snippet_archived`), or its draft was saved while it was being validated (`snippet_draft_changed`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The draft has blocking issues (`snippet_invalid`, with `template_issues`)", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "The draft has blocking issues (`snippet_invalid`, with `template_issues`), or would stop live templates from sending (`snippet_breaks_templates`, with `templates` and `total`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -244,7 +268,7 @@ pub(crate) async fn publish(
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
     let (snippet, version, used) = publish_snippet(
-        &state.pool,
+        &state,
         render,
         &principal.context(),
         workspace.id,

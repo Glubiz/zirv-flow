@@ -54,6 +54,19 @@ pub async fn template_where_used<'e>(
     .map_err(StoreError::query)
 }
 
+/// The flows that send the template now: the `published` flows whose running version names it, by
+/// the rule of [`template_where_used`]. A draft, paused or archived flow is not listed; the
+/// archive of a template is refused while there is one.
+pub async fn active_published_flows<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    template: Uuid,
+) -> Result<Vec<TemplateUse>, StoreError> {
+    let mut used = template_where_used(executor, workspace, template).await?;
+    used.retain(|used| used.active && used.flow_state == "published");
+    Ok(used)
+}
+
 /// An active flow that sends one of a set of templates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TemplateFlowUse {
@@ -374,5 +387,34 @@ mod tests {
                 .any(|line| line.contains("messages_template_idx")),
             "{plan:?}"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_a_published_flow_running_the_template_counts_as_active(pool: PgPool) {
+        use crate::FlowAction;
+        use crate::templates::template_active_flow_counts;
+
+        let ws = flows::workspace(&pool, "one").await;
+        let template = Uuid::now_v7();
+        let running = publish_flow_naming(&pool, ws, "Running", Some(template)).await;
+        let also = publish_flow_naming(&pool, ws, "Also", Some(template)).await;
+        let paused = publish_flow_naming(&pool, ws, "Paused", Some(template)).await;
+        flows::lifecycle(&pool, ws, paused, FlowAction::Pause)
+            .await
+            .unwrap();
+        let moved_on = publish_flow_naming(&pool, ws, "Moved on", Some(template)).await;
+        flows::edit(&pool, ws, moved_on, "other").await;
+        flows::publish(&pool, ws, moved_on).await.unwrap();
+        flows::create(&pool, ws, "Draft").await;
+
+        let blocking = active_published_flows(&pool, ws, template).await.unwrap();
+        let counts = template_active_flow_counts(&pool, ws).await.unwrap();
+
+        let ids: Vec<Uuid> = blocking.iter().map(|used| used.flow_id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&running) && ids.contains(&also));
+        assert_eq!(counts.get(&template), Some(&2));
+        assert_eq!(counts.len(), 1);
     }
 }

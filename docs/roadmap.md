@@ -345,7 +345,7 @@ pages and forms; blocks beyond the v1 set plus the snippet block.
 - [ ] A document saved under schema v1 opens and renders byte-identically after migration to the current schema (golden test).
 - [ ] A raw HTML block containing a script runs no script in the app preview, and an SVG or type-mismatched upload is rejected (tests).
 - [ ] The fake provider drafts copy, subject variants, a layout and a translation; invalid merge fields are repaired or returned as errors, the render diff is reviewable, and acceptance changes only the template draft.
-- [ ] Render benchmark attached against the section 19 target (p95 < 50 ms for a typical block email).
+- [x] Render benchmark attached against the section 19 target (p95 < 50 ms for a typical block email): [`m7-render.md`](benchmarks/m7-render.md), p95 1.57 ms at the production pool size, met.
 
 **Dependencies.** M6 (renderer, block editor, send pipeline, destinations), and through it M5.
 

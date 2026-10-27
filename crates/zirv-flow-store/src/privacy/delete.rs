@@ -1580,6 +1580,73 @@ mod tests {
         );
     }
 
+    /// The mark lands while `fail_job` already waits on the row: its snapshot saw the flag false,
+    /// so the mark committed afterwards must still decide the outcome.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_mark_committed_while_fail_job_waits_purges_the_job(pool: PgPool) {
+        use crate::privacy::testing::wait_until_blocked_by;
+        let Seeded { ws, person, .. } = seed_everything(&pool).await;
+        let claimed = lease_alone(
+            &pool,
+            ws,
+            "webhook.call",
+            serde_json::json!({ "person_id": person.to_string() }),
+            "running:mark",
+            3,
+            LEASE,
+        )
+        .await;
+        let mut marker = begin(&pool).await.unwrap();
+        let marker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *marker)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE jobs SET purge_on_release = true WHERE id = $1")
+            .bind(claimed.id)
+            .execute(&mut *marker)
+            .await
+            .unwrap();
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let failing = {
+            let pool = pool.clone();
+            let (id, lease_token) = (claimed.id, claimed.lease_token);
+            tokio::spawn(async move {
+                let mut connection = pool.acquire().await.unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+                sender.send(pid).unwrap();
+                crate::fail_job(
+                    &mut *connection,
+                    id,
+                    lease_token,
+                    std::time::Duration::ZERO,
+                    "boom",
+                )
+                .await
+                .unwrap()
+            })
+        };
+        let failing_pid = receiver.await.unwrap();
+        wait_until_blocked_by(&pool, failing_pid, marker_pid).await;
+        commit(marker).await.unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), failing)
+            .await
+            .expect("fail_job did not finish")
+            .unwrap();
+        assert_eq!(outcome, Some(crate::FailOutcome::Purged));
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE id = $1")
+            .bind(claimed.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
     async fn insert_webhook_job(
         pool: &PgPool,
         ws: WorkspaceId,

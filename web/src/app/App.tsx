@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useLocation, useParams } from "react-router";
+import { Navigate, Route, Routes, useLocation } from "react-router";
 
 import { AiSettingsPage } from "../features/assistant";
 import { ApiKeysPage } from "../features/api-keys";
@@ -21,12 +21,13 @@ import { SendingSettingsPage } from "../features/sending-settings";
 import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/people";
 import { PrivacyPage } from "../features/privacy";
 import { SnippetPage, SnippetsPage } from "../features/snippets";
+import { ThemePage, ThemesPage } from "../features/themes";
 import { PublishPage, TemplatePage, TemplatesPage, TestSendPage } from "../features/templates";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
 import { WorkspacesPage, WorkspacesProvider } from "../features/workspaces";
-import { EmptyState, ErrorState, LibraryNav, LoadingState, SkipLink } from "../ui";
+import { EmptyState, ErrorState, LoadingState, SkipLink } from "../ui";
 import { describeError } from "../api";
 import { Shell } from "./Shell";
 
@@ -112,19 +113,6 @@ function NotFound() {
   );
 }
 
-/** Stands in for a library tab whose page is not built yet. */
-function LibraryPlaceholder({ title }: { title: string }) {
-  const { ws = "" } = useParams();
-  return (
-    <div className="page">
-      <LibraryNav workspaceId={ws} />
-      <div className="panel panel-flush">
-        <EmptyState title={`${title} are not here yet`}>This page is coming soon.</EmptyState>
-      </div>
-    </div>
-  );
-}
-
 export function AppRoutes() {
   return (
     <SessionProvider>
@@ -151,7 +139,8 @@ export function AppRoutes() {
           <Route path="w/:ws/templates/:id/test" element={<TestSendPage />} />
           <Route path="w/:ws/templates/:id/publish" element={<PublishPage />} />
           <Route path="w/:ws/images" element={<AssetLibraryPage />} />
-          <Route path="w/:ws/themes" element={<LibraryPlaceholder title="Themes" />} />
+          <Route path="w/:ws/themes" element={<ThemesPage />} />
+          <Route path="w/:ws/themes/:id" element={<ThemePage />} />
           <Route path="w/:ws/snippets" element={<SnippetsPage />} />
           <Route path="w/:ws/snippets/:id" element={<SnippetPage />} />
           <Route path="w/:ws/contacts" element={<ContactsPage />} />
