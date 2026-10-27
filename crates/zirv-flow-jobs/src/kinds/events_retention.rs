@@ -5,7 +5,9 @@
 
 use serde_json::Value;
 use tracing::{info, warn};
-use zirv_flow_store::{apply_event_retention, database_now};
+use zirv_flow_store::{
+    RetentionReport, apply_event_retention_progress, database_now, record_retention_run,
+};
 
 use crate::{JobContext, JobError, JobKind};
 
@@ -22,11 +24,18 @@ impl JobKind for EventsRetention {
         };
         let settings = *ctx.event_retention();
         let now = database_now(pool).await?;
-        let report = apply_event_retention(pool, &settings, now).await?;
+        let windows = *ctx.retention_settings();
         let cutoff = now - time::Duration::days(i64::from(settings.default_days));
+        // What committed before a failure still counts, so the runs are recorded either way.
+        let mut report = RetentionReport::default();
+        let outcome =
+            apply_event_retention_progress(pool, &settings, &windows, now, &mut report).await;
+        record_retention_run(pool, "events", now, report.events_deleted).await?;
+        record_retention_run(pool, "ingest_rejects", now, report.rejects_deleted).await?;
         for partition in &report.skipped_partitions {
             warn!(partition = %partition, "event partition drop skipped: the table is locked");
         }
+        outcome?;
         info!(
             events_deleted = report.events_deleted,
             partitions_dropped = report.partitions_dropped,
@@ -136,6 +145,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ages, [1]);
+        assert_eq!(super::super::recorded_run(&pool, "events").await, Some(1));
+        assert_eq!(
+            super::super::recorded_run(&pool, "ingest_rejects").await,
+            Some(0)
+        );
 
         let rows = zirv_flow_store::list_audit(&pool, 10).await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -145,6 +159,81 @@ mod tests {
         assert_eq!(rows[0].summary["job"], "events.retention");
         assert_eq!(rows[0].summary["counts"]["events_deleted"], 1);
         assert_eq!(rows[0].summary["counts"]["test_sends_deleted"], 0);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_after_a_committed_batch_still_records_that_batch(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("ours").unwrap(),
+            &Slug::parse("ours").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        // One full batch of old rejects, then a second delete statement that a trigger refuses.
+        sqlx::query(
+            "INSERT INTO ingest_rejects (id, workspace_id, received_at, source, kind, reason, \
+                trace_id) \
+             SELECT gen_random_uuid(), $1, now() - make_interval(days => 400), 'web', 'event', \
+                'bad', gen_random_uuid() \
+             FROM generate_series(1, 5001)",
+        )
+        .bind(ws.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "CREATE SEQUENCE reject_deletes; \
+             CREATE FUNCTION refuse_second() RETURNS trigger LANGUAGE plpgsql AS \
+             $$ BEGIN IF nextval('reject_deletes') > 1 THEN RAISE EXCEPTION 'refused'; END IF; \
+             RETURN NULL; END $$; \
+             CREATE TRIGGER refuse_second BEFORE DELETE ON ingest_rejects \
+             FOR EACH STATEMENT EXECUTE FUNCTION refuse_second();",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut new = NewJob::new(EventsRetention::KIND, TraceContext::root(Cause::api("req")));
+        new.payload = json!({});
+        zirv_flow_store::enqueue(&pool, &new).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[EventsRetention::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_event_retention(EventRetention::default());
+
+        let result = EventsRetention.run(&mut ctx, claimed.payload.clone()).await;
+        tx.rollback().await.unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(
+            super::super::recorded_run(&pool, "ingest_rejects").await,
+            Some(5000)
+        );
+        assert!(
+            zirv_flow_store::list_audit(&pool, 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a failed run writes no audit row"
+        );
     }
 
     #[sqlx::test]

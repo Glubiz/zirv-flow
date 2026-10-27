@@ -7,7 +7,7 @@ use serde_json::Value;
 use tracing::info;
 use zirv_flow_store::{
     DRAFT_PURGE_BATCH, TRANSCRIPT_PURGE_BATCH, database_now, purge_expired_ai_drafts,
-    purge_expired_ai_transcripts,
+    purge_expired_ai_transcripts, record_retention_run,
 };
 
 use crate::{JobContext, JobError, JobKind};
@@ -39,6 +39,7 @@ impl JobKind for AiTranscripts {
                 break;
             }
         }
+        record_retention_run(&mut *ctx.conn(), "assistant_transcripts", now, deleted).await?;
         info!(deleted, drafts, "AI transcript and draft retention ran");
         Ok(())
     }
@@ -130,6 +131,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, [json!({"n": 2})]);
+        assert!(
+            super::super::recorded_run(&pool, "assistant_transcripts")
+                .await
+                .is_some()
+        );
     }
 
     #[sqlx::test]

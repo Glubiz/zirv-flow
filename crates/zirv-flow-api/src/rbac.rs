@@ -437,6 +437,9 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/privacy/exports/{id}/download" => ADMIN @ audited("privacy.export_downloaded");
     Get    "/api/v1/workspaces/{ws}/privacy/settings" => READ;
     Put    "/api/v1/workspaces/{ws}/privacy/settings" => ADMIN @ audited("workspace.privacy_settings_updated");
+    // retention
+    Get    "/api/v1/workspaces/{ws}/retention" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/retention" => ADMIN @ audited("retention.updated");
     // assets
     Get    "/api/v1/workspaces/{ws}/assets" => READ;
     Post   "/api/v1/workspaces/{ws}/assets" => EDIT @ audited("asset.uploaded");

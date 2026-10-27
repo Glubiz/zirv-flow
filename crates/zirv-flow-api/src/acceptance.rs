@@ -7500,6 +7500,7 @@ email,b@example.com,
             ws.parse().unwrap(),
             export.parse().unwrap(),
             zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+            zirv_flow_store::RetentionSettings::default().export_hours,
         )
         .await
         .unwrap();

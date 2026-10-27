@@ -24,4 +24,5 @@ pub use person_log::{
 };
 pub use retention::{
     MessageRetention, MessageRetentionReport, apply_message_retention, apply_message_retention_for,
+    apply_message_retention_progress,
 };

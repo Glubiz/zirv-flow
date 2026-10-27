@@ -34,11 +34,12 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-/// The inclusive bounds of `retention.job_history_days` and `retention.audit_days`.
-const JOB_HISTORY_DAYS_BOUNDS: (u32, u32) = (1, 90);
-const AUDIT_DAYS_BOUNDS: (u32, u32) = (90, 3650);
+use zirv_flow_store::{
+    AUDIT_DAYS_BOUNDS, EXPORT_HOURS_BOUNDS, IMPORT_FILE_DAYS_BOUNDS, IMPORT_REJECT_DAYS_BOUNDS,
+    JOB_HISTORY_DAYS_BOUNDS, TEST_SEND_MONTHS_BOUNDS,
+};
 
-const CONFIG_KEYS: [&str; 62] = [
+const CONFIG_KEYS: [&str; 66] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -71,6 +72,10 @@ const CONFIG_KEYS: [&str; 62] = [
     "retention.decision_max_days",
     "retention.job_history_days",
     "retention.audit_days",
+    "retention.import_file_days",
+    "retention.import_reject_days",
+    "retention.export_hours",
+    "retention.test_send_months",
     "ingest.max_request_bytes",
     "ingest.max_batch_items",
     "ingest.rate_per_key",
@@ -396,6 +401,14 @@ struct RetentionConfig {
     job_history_days: u32,
     /// How long audit rows are kept (90 to 3650).
     audit_days: u32,
+    /// How long the uploaded file of an import is kept after it ended (1 to 90).
+    import_file_days: u32,
+    /// How long the refused rows of an import are kept (1 to 365).
+    import_reject_days: u32,
+    /// How long a person export stays downloadable, in hours (1 to 168).
+    export_hours: u32,
+    /// How long the test-send log is kept, in months (1 to 36).
+    test_send_months: u32,
 }
 
 /// What the ingestion API accepts and how fast the drain applies it.
@@ -616,6 +629,10 @@ impl Config {
             .merge(Serialized::default("retention.decision_max_days", 760_u32))
             .merge(Serialized::default("retention.job_history_days", 14_u32))
             .merge(Serialized::default("retention.audit_days", 730_u32))
+            .merge(Serialized::default("retention.import_file_days", 7_u32))
+            .merge(Serialized::default("retention.import_reject_days", 30_u32))
+            .merge(Serialized::default("retention.export_hours", 24_u32))
+            .merge(Serialized::default("retention.test_send_months", 13_u32))
             .merge(Serialized::default(
                 "ingest.max_request_bytes",
                 1_048_576_u64,
@@ -1017,6 +1034,26 @@ impl Config {
                 retention.audit_days,
                 AUDIT_DAYS_BOUNDS,
             ),
+            (
+                "retention.import_file_days",
+                retention.import_file_days,
+                IMPORT_FILE_DAYS_BOUNDS,
+            ),
+            (
+                "retention.import_reject_days",
+                retention.import_reject_days,
+                IMPORT_REJECT_DAYS_BOUNDS,
+            ),
+            (
+                "retention.export_hours",
+                retention.export_hours,
+                EXPORT_HOURS_BOUNDS,
+            ),
+            (
+                "retention.test_send_months",
+                retention.test_send_months,
+                TEST_SEND_MONTHS_BOUNDS,
+            ),
         ] {
             if !(low..=high).contains(&value) {
                 return Err(fail(key, &format!("must be between {low} and {high}")));
@@ -1253,6 +1290,28 @@ impl Config {
     /// How many days audit rows are kept.
     pub(crate) fn audit_days(&self) -> u32 {
         self.retention.audit_days
+    }
+
+    /// The retention windows that used to be constants.
+    pub(crate) fn retention_settings(&self) -> zirv_flow_store::RetentionSettings {
+        zirv_flow_store::RetentionSettings {
+            import_file_days: self.retention.import_file_days,
+            import_reject_days: self.retention.import_reject_days,
+            export_hours: self.retention.export_hours,
+            test_send_months: self.retention.test_send_months,
+        }
+    }
+
+    /// Every deployment retention value, for the retention API.
+    pub(crate) fn deployment_retention(&self) -> zirv_flow_store::DeploymentRetention {
+        zirv_flow_store::DeploymentRetention {
+            events: self.events_retention(),
+            messages: self.messages_retention(),
+            decisions: self.decisions_retention(),
+            job_history_days: self.job_history_days(),
+            audit_days: self.audit_days(),
+            settings: self.retention_settings(),
+        }
     }
 
     /// What the ingestion API accepts and how fast a key may send.
@@ -2020,6 +2079,86 @@ cookie_secure = false
             ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "90", true),
             ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "3650", true),
             ("ZIRV_FLOW_RETENTION__AUDIT_DAYS", "3651", false),
+        ] {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((key.into(), value.into()));
+
+            let loaded = Config::load(None, env);
+
+            assert_eq!(loaded.is_ok(), ok, "{key}={value}");
+            if let Err(error) = loaded {
+                assert!(error.to_string().contains("must be between"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_former_constants_default_to_their_old_values() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        let settings = config.retention_settings();
+
+        assert_eq!(
+            (
+                settings.import_file_days,
+                settings.import_reject_days,
+                settings.export_hours,
+                settings.test_send_months
+            ),
+            (7, 30, 24, 13)
+        );
+        assert_eq!(settings, zirv_flow_store::RetentionSettings::default());
+        let shown = toml::to_string(&config).unwrap();
+        for line in [
+            "import_file_days = 7",
+            "import_reject_days = 30",
+            "export_hours = 24",
+            "test_send_months = 13",
+        ] {
+            assert!(shown.contains(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn the_former_constants_can_be_set_from_the_environment() {
+        let mut env = database_env("postgres://localhost/database");
+        env.push(("ZIRV_FLOW_RETENTION__IMPORT_FILE_DAYS".into(), "3".into()));
+        env.push((
+            "ZIRV_FLOW_RETENTION__IMPORT_REJECT_DAYS".into(),
+            "10".into(),
+        ));
+        env.push(("ZIRV_FLOW_RETENTION__EXPORT_HOURS".into(), "48".into()));
+        env.push(("ZIRV_FLOW_RETENTION__TEST_SEND_MONTHS".into(), "6".into()));
+
+        let settings = Config::load(None, env).unwrap().retention_settings();
+
+        assert_eq!(
+            (
+                settings.import_file_days,
+                settings.import_reject_days,
+                settings.export_hours,
+                settings.test_send_months
+            ),
+            (3, 10, 48, 6)
+        );
+    }
+
+    #[test]
+    fn the_former_constants_are_refused_outside_their_bounds() {
+        for (key, value, ok) in [
+            ("ZIRV_FLOW_RETENTION__IMPORT_FILE_DAYS", "0", false),
+            ("ZIRV_FLOW_RETENTION__IMPORT_FILE_DAYS", "1", true),
+            ("ZIRV_FLOW_RETENTION__IMPORT_FILE_DAYS", "90", true),
+            ("ZIRV_FLOW_RETENTION__IMPORT_FILE_DAYS", "91", false),
+            ("ZIRV_FLOW_RETENTION__IMPORT_REJECT_DAYS", "0", false),
+            ("ZIRV_FLOW_RETENTION__IMPORT_REJECT_DAYS", "365", true),
+            ("ZIRV_FLOW_RETENTION__IMPORT_REJECT_DAYS", "366", false),
+            ("ZIRV_FLOW_RETENTION__EXPORT_HOURS", "0", false),
+            ("ZIRV_FLOW_RETENTION__EXPORT_HOURS", "168", true),
+            ("ZIRV_FLOW_RETENTION__EXPORT_HOURS", "169", false),
+            ("ZIRV_FLOW_RETENTION__TEST_SEND_MONTHS", "0", false),
+            ("ZIRV_FLOW_RETENTION__TEST_SEND_MONTHS", "36", true),
+            ("ZIRV_FLOW_RETENTION__TEST_SEND_MONTHS", "37", false),
         ] {
             let mut env = database_env("postgres://localhost/database");
             env.push((key.into(), value.into()));

@@ -78,6 +78,7 @@ pub const ACTIONS: &[&str] = &[
     "privacy.export_downloaded",
     "privacy.export_requested",
     "retention.ran",
+    "retention.updated",
     "secret.created",
     "secret.deleted",
     "secret.replaced",

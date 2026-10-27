@@ -33,6 +33,15 @@ describe("sheet", () => {
     expect(sheet).toHaveFocus();
   });
 
+  it("stays non-modal by default: no backdrop and nothing made inert", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Harness />);
+    await user.click(screen.getByRole("button", { name: "Open sheet" }));
+
+    expect(document.querySelector(".sheet-backdrop")).toBeNull();
+    expect(container).not.toHaveAttribute("inert");
+  });
+
   it("does not trap focus: Tab leaves it for the page", async () => {
     const user = userEvent.setup();
     render(<Harness />);

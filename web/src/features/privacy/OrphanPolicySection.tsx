@@ -11,7 +11,7 @@ export function OrphanPolicySection({ workspaceId }: { workspaceId: string }) {
   );
 
   return (
-    <Panel title="People left with nothing">
+    <Panel>
       <ResourceView resource={settings} loadingLabel="Loading settings">
         {(data) => <PolicyForm key={data.orphan_policy} workspaceId={workspaceId} saved={data.orphan_policy} onSaved={settings.reload} />}
       </ResourceView>

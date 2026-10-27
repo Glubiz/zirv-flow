@@ -1734,6 +1734,14 @@ mod tests {
             None,
         )
         .await;
+        w.a(
+            "PUT",
+            "/retention",
+            &[],
+            j(json!({"messages_days": 90})),
+            None,
+        )
+        .await;
 
         let png = base64::Engine::decode(
             &base64::engine::general_purpose::STANDARD,

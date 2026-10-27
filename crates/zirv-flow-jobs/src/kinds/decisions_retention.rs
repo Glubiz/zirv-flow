@@ -3,11 +3,11 @@
 //! 16.3). An instance-level job that a daily schedule enqueues; it needs no workspace and no
 //! master key.
 
-use hashbrown::HashMap;
 use serde_json::Value;
 use tracing::{info, warn};
 use zirv_flow_store::{
     DecisionRetentionReport, apply_decision_retention_progress, decision_log_size,
+    record_retention_run, workspace_windows,
 };
 
 use crate::{JobContext, JobError, JobKind, metrics};
@@ -28,18 +28,23 @@ impl JobKind for DecisionsRetention {
         let settings = *ctx.decision_retention();
         let clock = ctx.clock().clone();
         let now = clock.now(ctx.conn()).await?;
-        // Workspaces with a shorter window of their own arrive here with the per-workspace
-        // setting; none have one yet.
+        let windows = workspace_windows(&pool, ctx.message_retention().days, settings.days).await?;
         // What committed before a failure still counts, so the counter is recorded either way.
         let mut report = DecisionRetentionReport::default();
-        let outcome =
-            apply_decision_retention_progress(&pool, &settings, &HashMap::new(), now, &mut report)
-                .await;
+        let outcome = apply_decision_retention_progress(
+            &pool,
+            &settings,
+            &windows.decisions,
+            now,
+            &mut report,
+        )
+        .await;
         metrics::record_retention(
             "decision_records",
             report.records_deleted,
             now.unix_timestamp() as f64,
         );
+        record_retention_run(&pool, "decision_log", now, report.records_deleted).await?;
         for partition in &report.skipped_partitions {
             warn!(partition = %partition, "decision partition drop skipped: the table is locked");
         }
@@ -154,6 +159,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, ["fresh"]);
+        assert_eq!(
+            super::super::recorded_run(&pool, "decision_log").await,
+            Some(1)
+        );
         let size = decision_log_size(&pool).await.unwrap();
         let output = handle.render();
         assert!(
@@ -252,6 +261,87 @@ mod tests {
         assert!(
             output.contains("zirv_flow_retention_deleted_total{table=\"decision_records\"} 5000"),
             "{output}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_workspace_window_deletes_that_workspaces_records_only(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let mut workspaces = Vec::new();
+        for slug in ["short", "long"] {
+            workspaces.push(
+                zirv_flow_store::create_workspace(
+                    &pool,
+                    &zirv_flow_core::WorkspaceName::parse(slug).unwrap(),
+                    &zirv_flow_core::Slug::parse(slug).unwrap(),
+                )
+                .await
+                .unwrap()
+                .id,
+            );
+        }
+        let now = OffsetDateTime::now_utc();
+        for ws in &workspaces {
+            sqlx::query(
+                "INSERT INTO decision_records \
+                 (id, workspace_id, trace_id, recorded_at, action, outcome, cause_kind, cause_id) \
+                 VALUES (gen_random_uuid(), $1, gen_random_uuid(), $2, 'aged', 'done', 'api', 'x')",
+            )
+            .bind(ws.as_uuid())
+            .bind(now - time::Duration::days(100))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        zirv_flow_store::set_workspace_retention(
+            &mut tx,
+            workspaces[0],
+            None,
+            Some(Some(60)),
+            None,
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let mut leader = crate::Scheduler::new(pool.clone(), crate::SchedulerConfig::default());
+        leader.tick_at(now + time::Duration::days(2)).await.unwrap();
+        let claimed = zirv_flow_store::claim_job(
+            &pool,
+            "w",
+            &[DecisionsRetention::KIND],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed)
+            .with_ingest(crate::context::IngestSettings {
+                pool: pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            })
+            .with_clock(Clock::Manual(ManualClock::new(now)))
+            .with_decision_retention(DecisionRetention::default());
+
+        DecisionsRetention
+            .run(&mut ctx, claimed.payload.clone())
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+
+        let left: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT workspace_id FROM decision_records")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, [workspaces[1].as_uuid()]);
+        assert_eq!(
+            super::super::recorded_run(&pool, "decision_log").await,
+            Some(1)
         );
     }
 

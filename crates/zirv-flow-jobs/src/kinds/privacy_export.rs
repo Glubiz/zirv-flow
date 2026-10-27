@@ -24,7 +24,8 @@ impl JobKind for PrivacyExport {
             ));
         }
         let max_bytes = ctx.export_max_bytes();
-        zirv_flow_store::build_export(ctx.conn(), workspace, export, max_bytes).await?;
+        let hours = ctx.retention_settings().export_hours;
+        zirv_flow_store::build_export(ctx.conn(), workspace, export, max_bytes, hours).await?;
         Ok(())
     }
 }
