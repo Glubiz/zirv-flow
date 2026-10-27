@@ -75,7 +75,7 @@ fn read_request(body: &Bytes) -> Result<AiExplainRequest, ApiError> {
 
 /// Checks one answer: exactly one call of `tool`, run through the registry as the signed-in user.
 /// Anything else is feedback, and a refusal ends the run.
-async fn explain_turn(
+pub(super) async fn explain_turn(
     context: &ToolContext,
     tool: &'static str,
     response: &ChatResponse,
