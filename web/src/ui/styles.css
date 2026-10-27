@@ -4678,3 +4678,247 @@ main:focus {
     min-height: 44px;
   }
 }
+
+/* Audit log */
+.audit-layout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.audit-main {
+  flex: 999 1 560px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sheet-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: flex;
+  justify-content: flex-end;
+  background: rgba(14, 20, 28, 0.35);
+}
+
+.sheet-modal {
+  width: min(420px, 100vw);
+  border-radius: 0;
+  border-width: 0 0 0 1px;
+}
+
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px 16px;
+  align-items: end;
+}
+
+.audit-filter-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.audit-filters-toggle {
+  display: none;
+}
+
+.audit-actor-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.audit-actor-row {
+  display: flex;
+  gap: 8px;
+}
+
+.audit-actor-row > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.audit-action-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.audit-more {
+  grid-column: 1 / -1;
+}
+
+.audit-more summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.audit-more-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px 16px;
+  margin-top: 12px;
+}
+
+.audit-user-icon {
+  vertical-align: -3px;
+  color: var(--ink-2);
+}
+
+.audit-filter-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.audit-note {
+  margin: 0;
+}
+
+.audit-scope {
+  gap: 8px;
+}
+
+.audit-scope-text {
+  font-weight: 600;
+}
+
+.audit-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.audit-open:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.audit-date,
+.audit-label,
+.audit-code {
+  display: block;
+}
+
+.audit-label {
+  font-weight: 600;
+}
+
+.audit-row-selected {
+  background: var(--ground);
+}
+
+.audit-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px 12px;
+  font-size: 14px;
+}
+
+.audit-facts dt {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.audit-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.audit-change {
+  display: contents;
+}
+
+.audit-changes-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.audit-sheet-foot {
+  display: flex;
+  margin-top: auto;
+}
+
+@media (max-width: 640px) {
+  .audit-filters-toggle {
+    display: inline-flex;
+    align-self: flex-start;
+  }
+
+  .audit-filters-folded {
+    display: none;
+  }
+
+  .audit-table,
+  .audit-table tbody,
+  .audit-table tr,
+  .audit-table td {
+    display: block;
+  }
+
+  .audit-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .audit-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .audit-table tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .audit-table td {
+    min-width: 0;
+    padding: 0;
+    border-top: 0;
+  }
+
+  .audit-cell-actor {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: right;
+  }
+
+  .audit-cell-action {
+    grid-column: 1 / -1;
+    overflow-wrap: break-word;
+  }
+
+  .audit-table .audit-cell-extra {
+    display: none;
+  }
+
+  .audit-date {
+    display: inline;
+    margin-left: 8px;
+  }
+
+  .sheet-modal {
+    width: 100vw;
+  }
+}
