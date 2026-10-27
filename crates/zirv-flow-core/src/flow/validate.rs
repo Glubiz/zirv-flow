@@ -610,6 +610,66 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
 
+    fn check_flow(value: &Value) {
+        let started = std::time::Instant::now();
+        let graph = serde_json::from_value::<FlowGraph>(value["graph"].clone());
+        let settings = serde_json::from_value::<FlowSettings>(value["settings"].clone());
+        if let Ok(graph) = &graph {
+            let encoded = serde_json::to_vec(graph).unwrap();
+            assert_eq!(
+                &serde_json::from_slice::<FlowGraph>(&encoded).unwrap(),
+                graph
+            );
+            assert!(validate_graph(graph).len() <= MAX_ISSUES);
+        }
+        if let Ok(settings) = &settings {
+            let encoded = serde_json::to_vec(settings).unwrap();
+            assert_eq!(
+                &serde_json::from_slice::<FlowSettings>(&encoded).unwrap(),
+                settings
+            );
+            assert!(validate_settings(settings).len() <= MAX_ISSUES);
+        }
+        if let (Ok(graph), Ok(settings)) = (graph, settings) {
+            assert!(validate(&graph, &settings).len() <= MAX_ISSUES);
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "flow sample exceeded five seconds"
+        );
+    }
+
+    fn fuzz_flows() -> BoxedStrategy<Value> {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/flows/segment_sync.json"))
+                .unwrap();
+        crate::fuzz::with_fixtures(vec![fixture["enter"].clone(), fixture["exit"].clone()])
+    }
+
+    proptest! {
+        #![proptest_config(crate::fuzz::config())]
+
+        #[test]
+        fn fuzz_flow_graph(value in fuzz_flows()) {
+            check_flow(&value);
+        }
+
+        #[test]
+        fn fuzz_flow_limits(extra in 0usize..=1) {
+            let mut value = json!({"graph": {"v": 1,
+                "nodes": vec![json!({"id": "end", "type": "exit"}); MAX_NODES + extra], "edges": []},
+                "settings": {"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}});
+            check_flow(&value);
+            let graph: FlowGraph = serde_json::from_value(value["graph"].clone()).unwrap();
+            prop_assert_eq!(validate_graph(&graph).iter().any(|issue| issue.code == code::TOO_MANY_NODES), extra == 1);
+            value["graph"]["nodes"] = json!([]);
+            value["graph"]["edges"] = json!(vec![json!({"id": "e", "from": "a", "to": "b", "port": "next"}); MAX_EDGES + extra]);
+            check_flow(&value);
+            let graph: FlowGraph = serde_json::from_value(value["graph"].clone()).unwrap();
+            prop_assert_eq!(validate_graph(&graph).iter().any(|issue| issue.code == code::TOO_MANY_EDGES), extra == 1);
+        }
+    }
+
     fn node(id: &str, kind: NodeKind) -> FlowNode {
         FlowNode {
             id: id.into(),

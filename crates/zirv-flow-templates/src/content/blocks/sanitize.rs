@@ -20,9 +20,10 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ammonia::{Builder, UrlRelative, UrlRelativeEvaluate};
-use htmlparser::{ElementEnd, Token, Tokenizer};
+use htmlparser::{ElementEnd, Token};
 
 use super::tags::{Protected, starts_with_tag};
+use crate::content::with_tokenizer;
 use crate::links::unescape;
 
 /// The elements rich text may hold.
@@ -55,8 +56,10 @@ fn builder(keep: impl Fn(&str) -> bool + Send + Sync + 'static) -> Builder<'stat
     let mut builder = Builder::empty();
     builder
         .add_tags(TAGS)
+        .generic_attributes(Default::default())
+        .tag_attributes(Default::default())
         .add_tag_attributes("a", ["href"])
-        .add_url_schemes(SCHEMES)
+        .url_schemes(SCHEMES.into_iter().collect())
         .add_clean_content_tags(["script", "style"])
         .link_rel(None)
         .url_relative(UrlRelative::Custom(Box::new(Keep(keep))));
@@ -68,19 +71,48 @@ fn builder(keep: impl Fn(&str) -> bool + Send + Sync + 'static) -> Builder<'stat
 pub(crate) fn sanitize_source(source: &str) -> Cleaned {
     let protected = Arc::new(Protected::new(source));
     let probe = Arc::clone(&protected);
-    let html = builder(move |url| probe.starts_with_placeholder(url))
-        .clean(&protected.text)
-        .to_string();
+    let html = strip_controls(
+        builder(move |url| probe.starts_with_placeholder(url))
+            .clean(&protected.text)
+            .to_string(),
+    );
     let text = html_to_text(&html);
     Cleaned {
-        html: protected.restore(&html),
-        text: protected.restore(&text),
+        html: strip_controls(protected.restore(&html)),
+        text: strip_controls(protected.restore(&text)),
     }
 }
 
 /// Clean text that has no merge tags: relative URLs go.
 pub(crate) fn clean_rendered(html: &str) -> String {
-    builder(|_| false).clean(html).to_string()
+    strip_controls(builder(|_| false).clean(html).to_string())
+}
+
+/// Ammonia preserves C0 controls in text; only tab, LF and CR belong in email output.
+fn strip_controls(mut text: String) -> String {
+    text.retain(|c| c >= '\u{20}' || matches!(c, '\t' | '\n' | '\r'));
+    text
+}
+
+/// Exercise both sanitizer entry points on a bounded source, including merge tags.
+#[cfg(any(test, feature = "test-support"))]
+pub fn check_sanitize_source(data: &[u8]) {
+    if data.len() > super::MAX_RICH_TEXT_BYTES + 1 {
+        return;
+    }
+    let started = std::time::Instant::now();
+    if let Ok(source) = std::str::from_utf8(data) {
+        let _cleaned = sanitize_source(source);
+        let rendered = clean_rendered(source);
+        assert!(
+            check(&rendered, |_| false).is_empty(),
+            "disallowed rendered output: {rendered:?}"
+        );
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "sanitizer sample exceeded five seconds"
+    );
 }
 
 /// What the allowlist would remove from `source`, as short descriptions (an element or attribute
@@ -123,9 +155,8 @@ fn url_allowed(url: &str, merge: &impl Fn(&str) -> bool) -> bool {
 fn with_tokens<R>(html: &str, read: impl FnOnce(&[Token<'_>]) -> R) -> Option<R> {
     const ROOT: &str = "zqroot";
     let wrapped = format!("<{ROOT}>{html}</{ROOT}>");
-    let tokens: Vec<Token<'_>> = Tokenizer::from(wrapped.as_str())
-        .collect::<Result<_, _>>()
-        .ok()?;
+    let tokens: Vec<Token<'_>> =
+        with_tokenizer(&wrapped, |tokens| tokens.collect::<Result<_, _>>())?.ok()?;
     match tokens.as_slice() {
         [
             Token::ElementStart { local: open, .. },
@@ -358,6 +389,8 @@ fn tidy(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn html(source: &str) -> String {
@@ -365,7 +398,50 @@ mod tests {
     }
 
     #[test]
+    fn rendered_control_characters_regression() {
+        check_sanitize_source(include_bytes!(
+            "../../../tests/fixtures/fuzz/sanitize_source-crash-49a04ec5.bin"
+        ));
+    }
+
+    #[test]
+    fn tokenizer_panics_count_as_unreadable_input() {
+        let document: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../tests/fixtures/fuzz/template_document-crash-861764cf.bin"
+        ))
+        .unwrap();
+        let content = document["blocks"]["sections"][0]["columns"][0][1]["content"]
+            .as_str()
+            .unwrap();
+        for source in [
+            content,
+            "<![if",
+            "<![if mso]x",
+            "<![endif",
+            "<![endif x]>",
+            "<!--[if mso",
+        ] {
+            assert_eq!(violations(source), ["<"], "{source}");
+            assert_eq!(html_to_text(source), "", "{source}");
+            assert_eq!(enforce(source), clean_rendered(source), "{source}");
+        }
+        for source in [
+            "<!--[if mso]><p>x</p><![endif]-->",
+            "<![if !IE]><p>x</p><![endif]>",
+        ] {
+            assert_eq!(violations(source), ["<!", "<!"], "{source}");
+            assert_eq!(html_to_text(source), "x", "{source}");
+            assert_eq!(enforce(source), clean_rendered(source), "{source}");
+        }
+    }
+
+    #[test]
     fn the_sanitizer_table_removes_what_is_not_allowed_and_keeps_what_is() {
+        let nested = format!(
+            "{}<a href=\"javascript:x\">x</a>{}",
+            "<div>".repeat(256),
+            "</div>".repeat(256)
+        );
         let table = [
             // Scripts and what runs.
             ("<script>alert(1)</script><p>ok</p>", "<p>ok</p>"),
@@ -376,11 +452,68 @@ mod tests {
             ("<img src=\"https://a/b.png\" onerror=\"x()\">", ""),
             ("<iframe src=\"https://a\"></iframe>", ""),
             ("<svg><script>x</script></svg>ok", "ok"),
+            (
+                "<noscript><img src=x onerror=alert(1)></noscript>",
+                "&lt;img src=x onerror=alert(1)&gt;",
+            ),
+            (
+                "<math><mi><script>x</script></mi></math><p>ok</p>",
+                "<p>ok</p>",
+            ),
+            (
+                "<template><img src=x onerror=alert(1)></template><p>ok</p>",
+                "<p>ok</p>",
+            ),
+            ("<a><svg><script>x</script></svg>ok</a>", "<a>ok</a>"),
+            (
+                "<a href=\"https://a.example\">a<a href=\"javascript:x\">b</a></a>",
+                "<a href=\"https://a.example\">a</a><a>b</a>",
+            ),
+            ("<p><b onclick=x>unclosed", "<p><b>unclosed</b></p>"),
+            (
+                "<P ONCLICK=x><A HREF=\"JAVASCRIPT:x\">x</A></P>",
+                "<p><a>x</a></p>",
+            ),
+            ("<a href=\"java\0script:x\">x</a>", "<a>x</a>"),
+            (nested.as_str(), "<a>x</a>"),
+            ("<img src=\"data:image/svg+xml,<svg onload=alert(1)>\">", ""),
+            (
+                "<p srcdoc=\"<script>x</script>\" formaction=\"javascript:x\">ok</p>",
+                "<p>ok</p>",
+            ),
+            (
+                "<iframe srcdoc=\"<script>x</script>\"></iframe><button formaction=\"javascript:x\">ok</button>",
+                "ok",
+            ),
+            (
+                "<p style=\"background:url(javascript:alert(1))\">ok</p>",
+                "<p>ok</p>",
+            ),
+            (
+                "<p title=\"x\" lang=\"en\">ok</p><ol start=\"2\"><li>x</li></ol>",
+                "<p>ok</p><ol><li>x</li></ol>",
+            ),
             ("<p>a<!-- c -->b</p>", "<p>ab</p>"),
+            // C0 controls are removed even when an entity decodes to one.
+            ("<p>a\u{7}\u{7}b</p>", "<p>ab</p>"),
+            ("<p>a\u{1}\u{8}\u{b}\u{c}\u{e}\u{1f}é</p>", "<p>aé</p>"),
+            ("<p>a&#7;&#x1f;b</p>", "<p>ab</p>"),
+            ("<p>a\t\nb</p>", "<p>a\t\nb</p>"),
             // Links.
             ("<a href=\"javascript:alert(1)\">x</a>", "<a>x</a>"),
             ("<a href=\"JaVaScRiPt:alert(1)\">x</a>", "<a>x</a>"),
             ("<a href=\"java\tscript:alert(1)\">x</a>", "<a>x</a>"),
+            ("<a href=\" javascript:alert(1)\">x</a>", "<a>x</a>"),
+            (
+                "<a href=\"\u{1}\t\r\njavascript:alert(1)\">x</a>",
+                "<a>x</a>",
+            ),
+            ("<a href=\"javascript&colon;alert(1)\">x</a>", "<a>x</a>"),
+            ("<a href=\"java&Tab;script:alert(1)\">x</a>", "<a>x</a>"),
+            (
+                "<a href=\"ftp://a.example\" hreflang=\"en\">x</a>",
+                "<a>x</a>",
+            ),
             ("<a href=\"data:text/html;base64,AAAA\">x</a>", "<a>x</a>"),
             ("<a href=\"vbscript:x\">x</a>", "<a>x</a>"),
             ("<a href=\"/relative\">x</a>", "<a>x</a>"),
@@ -417,6 +550,133 @@ mod tests {
         ];
         for (input, expected) in table {
             assert_eq!(html(input), expected, "{input}");
+            assert_eq!(html(expected), expected, "idempotence: {input}");
+            assert!(violations(expected).is_empty(), "re-parse: {input}");
+            if !input.contains("{{") {
+                assert_eq!(clean_rendered(input), expected, "rendered: {input}");
+            }
+        }
+    }
+
+    fn hostile_html() -> impl Strategy<Value = String> {
+        html_with_tags(vec![
+            "p", "b", "a", "br", "ul", "li", "div", "script", "style", "noscript", "math", "svg",
+            "template", "iframe", "img", "form", "button",
+        ])
+    }
+
+    fn idempotent_html() -> impl Strategy<Value = String> {
+        // Dropping parser scope boundaries can change nesting when the output is parsed again.
+        html_with_tags(vec![
+            "p", "b", "a", "br", "ul", "li", "div", "script", "style", "noscript", "math", "svg",
+            "img",
+        ])
+    }
+
+    fn html_with_tags(tags: Vec<&'static str>) -> impl Strategy<Value = String> {
+        let tag = prop::sample::select(tags);
+        let attribute = prop::sample::select(vec![
+            "href",
+            "src",
+            "srcdoc",
+            "formaction",
+            "style",
+            "onclick",
+            "onerror",
+            "title",
+            "lang",
+            "hreflang",
+            "start",
+        ]);
+        let value = prop_oneof![
+            prop::sample::select(vec![
+                "https://safe.example/a",
+                "http://safe.example",
+                "mailto:a@b.example",
+                "ftp://evil.example",
+                "javascript:alert(1)",
+                " javascript:x",
+                "\t\njavascript:x",
+                "java&Tab;script:x",
+                "javascript&colon;x",
+                "data:text/html,x",
+                "/relative",
+                "//evil.example",
+                "background:url(javascript:x)",
+            ])
+            .prop_map(str::to_owned),
+            "[a-zA-Z0-9 &;:/<>='\"\\t\\n]{0,40}",
+        ];
+        let element =
+            (tag, attribute, value, any::<bool>()).prop_map(|(tag, attribute, value, close)| {
+                format!(
+                    "<{tag} {attribute}=\"{value}\">x{}",
+                    if close {
+                        format!("</{tag}>")
+                    } else {
+                        String::new()
+                    }
+                )
+            });
+        prop::collection::vec(prop_oneof![element, "[a-zA-Z0-9 &;<>/\0]{0,40}"], 0..16)
+            .prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 128,
+            rng_seed: proptest::test_runner::RngSeed::Fixed(389),
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn sanitizing_is_idempotent(source in idempotent_html()) {
+            let once = sanitize_source(&source);
+            prop_assert_eq!(sanitize_source(&once.html), once);
+            let rendered = clean_rendered(&source);
+            prop_assert_eq!(clean_rendered(&rendered), rendered);
+        }
+
+        #[test]
+        fn sanitized_output_reparses_without_disallowed_tags_attributes_or_schemes(source in hostile_html()) {
+            for output in [html(&source), clean_rendered(&source)] {
+                prop_assert!(with_tokens(&output, |_| ()).is_some(), "cannot parse: {:?}", output);
+                prop_assert!(check(&output, |_| false).is_empty(), "disallowed output: {:?}", output);
+            }
+        }
+    }
+
+    fn fuzz_sources() -> BoxedStrategy<String> {
+        let fixtures = vec![
+            serde_json::Value::String(
+                include_str!("../../../tests/fixtures/blocks/text.html").to_owned(),
+            ),
+            serde_json::Value::String(
+                include_str!("../../../tests/fixtures/email_marketing.expected.html").to_owned(),
+            ),
+            serde_json::Value::String("<p>{{ person.name }}</p>".to_owned()),
+        ];
+        prop_oneof![
+            hostile_html(),
+            zirv_flow_core::fuzz::with_fixtures(fixtures).prop_map(|value| match value {
+                serde_json::Value::String(text) => text,
+                value => value.to_string(),
+            }),
+        ]
+        .boxed()
+    }
+
+    proptest! {
+        #![proptest_config(zirv_flow_core::fuzz::config())]
+
+        #[test]
+        fn fuzz_sanitize_source(source in fuzz_sources()) {
+            check_sanitize_source(source.as_bytes());
+        }
+
+        #[test]
+        fn fuzz_sanitizer_source_limit(extra in 0usize..=1) {
+            check_sanitize_source("x".repeat(super::super::MAX_RICH_TEXT_BYTES + extra).as_bytes());
         }
     }
 
@@ -427,6 +687,17 @@ mod tests {
         assert_eq!(html(source), source);
         let list = "<ul>{% for t in event.tags %}<li>{{ t }}</li>{% endfor %}</ul>";
         assert_eq!(html(list), list);
+    }
+
+    #[test]
+    fn controls_are_removed_before_plain_text_and_after_restoring_merge_tags() {
+        let cleaned = sanitize_source("<p>a\u{7}b {{ '\u{1}' }}</p>");
+        assert_eq!(cleaned.html, "<p>ab {{ '' }}</p>");
+        assert_eq!(cleaned.text, "ab {{ '' }}");
+        let source = "<p>a&#9;&#10;&#13;b</p>";
+        let expected = "<p>a\t\n\rb</p>";
+        assert_eq!(html(source), expected);
+        assert_eq!(clean_rendered(source), expected);
     }
 
     #[test]

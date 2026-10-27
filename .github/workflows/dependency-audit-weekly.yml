@@ -1,0 +1,56 @@
+name: Dependency Audit Weekly
+
+# New advisories must be visible even when main has not changed. The log is the report;
+# a failure does not create an issue. Manual runs also audit main.
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust advisories on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4.4.0
+        with:
+          ref: main
+
+      - name: Set Up Rust Toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2.87.20
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Audit Rust Advisories
+        run: cargo deny --locked check advisories
+
+  npm:
+    name: npm production advisories on main
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4.4.0
+        with:
+          ref: main
+
+      - name: Set Up Node
+        uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+
+      - name: Audit Production Dependencies
+        run: npm audit --omit=dev --audit-level=high

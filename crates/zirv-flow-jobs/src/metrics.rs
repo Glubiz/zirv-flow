@@ -441,11 +441,43 @@ fn destination_gauges(workspace: Uuid, destination: Uuid, depth: f64, oldest_sec
     .set(oldest_seconds);
 }
 
+/// Records a retention run of `table`: `zirv_flow_retention_deleted_total{table}` counts the rows
+/// removed and `zirv_flow_retention_last_run_timestamp_seconds{table}` is the unix time of the
+/// run.
+pub(crate) fn record_retention(table: &'static str, deleted: u64, ran_at_unix: f64) {
+    metrics::counter!("zirv_flow_retention_deleted_total", "table" => table).increment(deleted);
+    metrics::gauge!("zirv_flow_retention_last_run_timestamp_seconds", "table" => table)
+        .set(ran_at_unix);
+}
+
 #[cfg(test)]
 mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
+
+    #[test]
+    fn a_retention_run_counts_its_rows_and_stamps_its_time_by_table() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_retention("messages", 3, 1_700_000_000.0);
+            record_retention("messages", 2, 1_700_086_400.0);
+        });
+        let output = handle.render();
+
+        assert!(
+            output.contains("zirv_flow_retention_deleted_total{table=\"messages\"} 5"),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "zirv_flow_retention_last_run_timestamp_seconds{table=\"messages\"} 1700086400"
+            ),
+            "{output}"
+        );
+    }
 
     #[test]
     fn an_attempt_is_counted_by_kind_and_outcome_and_timed() {

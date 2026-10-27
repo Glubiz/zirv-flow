@@ -1,6 +1,7 @@
 //! The worker pool: claims jobs, runs them with a heartbeat, and completes each in the same
 //! transaction as the handler's own writes.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,9 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, PgPool, begin, claim_job,
-    complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
+    ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, MessageRetention, PgPool,
+    begin, claim_job, complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease,
+    observe_pool, sized_like,
 };
 
 use crate::context::{IngestSettings, JobContext};
@@ -45,10 +47,16 @@ pub struct WorkerConfig {
     pub backoff_cap: Duration,
     /// What the `events.retention` job keeps and for how long.
     pub event_retention: EventRetention,
+    /// The most uncompressed bytes a person export may hold (`privacy.export_max_bytes`).
+    pub export_max_bytes: u64,
+    /// What the `messages.retention` job keeps and for how long.
+    pub message_retention: MessageRetention,
     /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
     pub identifier_key: Option<Arc<HmacKey>>,
+    /// Where `privacy.erase` copies each completed ledger entry; none writes no file.
+    pub ledger_dir: Option<Arc<PathBuf>>,
     /// The master keys that open stored secrets; `sync.run` opens a source credential with them.
     pub keyring: Option<Arc<Keyring>>,
     /// Inbox rows `ingest.drain` applies per transaction.
@@ -87,8 +95,11 @@ impl WorkerConfig {
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(3600),
             event_retention: EventRetention::default(),
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+            message_retention: MessageRetention::default(),
             redaction_key: None,
             identifier_key: None,
+            ledger_dir: None,
             keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 8,
@@ -402,7 +413,10 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let result = {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
+            .with_export_max_bytes(shared.config.export_max_bytes)
+            .with_message_retention(shared.config.message_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
+            .with_ledger_dir(shared.config.ledger_dir.clone())
             .with_clock(shared.config.clock.clone())
             .with_rate_gates(Arc::clone(&shared.config.rate_gates))
             .with_render_pool(shared.config.render_pool.clone())
@@ -660,8 +674,11 @@ mod tests {
             backoff_base: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(5),
             event_retention: EventRetention::default(),
+            export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+            message_retention: MessageRetention::default(),
             redaction_key: None,
             identifier_key: None,
+            ledger_dir: None,
             keyring: None,
             ingest_drain_batch_size: 500,
             ingest_drain_shards: 4,

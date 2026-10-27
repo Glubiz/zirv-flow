@@ -19,6 +19,8 @@ mod context;
 mod document;
 mod error;
 mod extras;
+#[cfg(any(test, feature = "test-support"))]
+mod fuzz;
 mod issue;
 mod links;
 mod migrate;
@@ -30,6 +32,8 @@ mod utm;
 mod validate;
 mod wire;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use content::blocks::check_sanitize_source;
 pub use content::blocks::{
     Align, Block, BlocksContent, BlocksError, Button, ConvertError, Converted, Divider,
     FONT_STACKS, FooterRef, Heading, Image, ImageSrc, MAX_BLOCKS, MAX_COLUMNS, MAX_CONDITION_BYTES,
@@ -53,6 +57,8 @@ pub use document::{
 };
 pub use error::RenderError;
 pub use extras::{ExtrasNeeds, Loaded, ThemeNeed, extras_needs, render_extras};
+#[cfg(any(test, feature = "test-support"))]
+pub use fuzz::check_template_document;
 pub use issue::{FieldCatalog, Issue, Severity, code, severity_of};
 pub use links::{Hooks, INERT_TOKEN, Tracking, rewrite_links, unsubscribe_headers};
 pub use migrate::{migrate_to_current, v1_to_v2};

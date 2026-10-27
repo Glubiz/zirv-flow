@@ -7188,9 +7188,14 @@ email,b@example.com,
         assert_eq!(jobs, 1);
 
         let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-        zirv_flow_store::build_export(&mut tx, ws.parse().unwrap(), export.parse().unwrap())
-            .await
-            .unwrap();
+        zirv_flow_store::build_export(
+            &mut tx,
+            ws.parse().unwrap(),
+            export.parse().unwrap(),
+            zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
+        )
+        .await
+        .unwrap();
         zirv_flow_store::commit(tx).await.unwrap();
 
         let listed = call(&router, "GET", &uri, None, Auth::Session(&owner)).await;
@@ -7355,10 +7360,11 @@ email,b@example.com,
             &zirv_flow_core::MasterKey::parse(SUPPRESSION_KEY).unwrap(),
         );
 
-        let none = admin::replay_erasures(&pool, &Context::system(), Some("alpha"), &key)
+        let none = admin::replay_erasures(&pool, &Context::system(), Some("alpha"), &key, None)
             .await
             .unwrap();
-        let missing = admin::replay_erasures(&pool, &Context::system(), Some("nope"), &key).await;
+        let missing =
+            admin::replay_erasures(&pool, &Context::system(), Some("nope"), &key, None).await;
 
         assert_eq!(none, zirv_flow_store::ReplayReport::default());
         assert!(matches!(missing, Err(admin::AdminError::NotFound(_))));
@@ -7371,7 +7377,10 @@ email,b@example.com,
         assert_eq!(entry.workspace_id.map(|id| id.to_string()), Some(ws));
         assert_eq!(
             entry.summary,
-            json!({"requests": 0, "suppressions": 0, "people": 0, "inbox_rows": 0})
+            json!({
+                "requests": 0, "suppressions": 0, "people": 0, "inbox_rows": 0,
+                "merged": 0, "skipped_workspaces": 0
+            })
         );
     }
 
