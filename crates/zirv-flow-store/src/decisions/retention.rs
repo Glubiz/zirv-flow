@@ -4,8 +4,8 @@
 //! the same way. A decision record is not a source of handled markers, so nothing is marked.
 //! Every drop and every batch commits on its own and a rerun continues from what is committed.
 //!
-//! A drop takes ACCESS EXCLUSIVE on `decision_records`, so it waits [`DROP_LOCK_TIMEOUT`] at most
-//! and is then skipped until the next run; otherwise one long transaction would queue every
+//! A drop takes ACCESS EXCLUSIVE on `decision_records`, so it waits a short lock timeout at most
+//! (`drop_lock`) and is then skipped until the next run; otherwise one long transaction would queue every
 //! append behind the drop. The workspace delete walks `(recorded_at, id)`, the primary key order
 //! (no new index: each one adds bytes to every record), with a cursor carried between batches, so
 //! no batch rescans what an earlier one passed. The remaining cost is that it reads the rows of
@@ -20,17 +20,10 @@ use zirv_flow_core::WorkspaceId;
 
 use super::next_month;
 use crate::StoreError;
+use crate::drop_lock::{is_lock_timeout, set_drop_lock_timeout};
 use crate::events::RETENTION_BATCH;
 
 const PARTITION_PREFIX: &str = "decision_records_y";
-
-/// How long a partition drop waits for the lock on `decision_records` before it is skipped. The
-/// drop needs ACCESS EXCLUSIVE on the parent, and while it waits every append queues behind it;
-/// `DETACH ... CONCURRENTLY` is not available with a DEFAULT partition.
-const DROP_LOCK_TIMEOUT: &str = "2s";
-
-/// SQLSTATE `lock_not_available`: the lock timeout of a drop expired.
-const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 /// The operator's decision-log retention settings, in days.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,7 +186,7 @@ async fn delete_workspace_rows(
 /// partition, never a partition that is not named for a month, and never the current or the next
 /// month, whatever the window. Each drop is its own transaction and `DROP TABLE IF EXISTS`, so a
 /// concurrent run that dropped it first is not an error. A drop that cannot get its lock within
-/// [`DROP_LOCK_TIMEOUT`] is counted as skipped and left for the next run.
+/// the lock timeout of `drop_lock` is counted as skipped and left for the next run.
 async fn drop_old_partitions(
     pool: &PgPool,
     cutoff: OffsetDateTime,
@@ -226,11 +219,7 @@ async fn drop_old_partitions(
             u8::from(first.month())
         );
         let mut tx = crate::begin(pool).await?;
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(DROP_LOCK_TIMEOUT)
-            .execute(&mut *tx)
-            .await
-            .map_err(StoreError::query)?;
+        set_drop_lock_timeout(&mut tx).await?;
         match sqlx::query(sqlx::AssertSqlSafe(statement))
             .execute(&mut *tx)
             .await
@@ -246,13 +235,6 @@ async fn drop_old_partitions(
         }
     }
     Ok(())
-}
-
-fn is_lock_timeout(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .and_then(|error| error.code())
-        .is_some_and(|code| code == LOCK_NOT_AVAILABLE)
 }
 
 /// The first day of the month a partition named `decision_records_yYYYYmMM` covers.
