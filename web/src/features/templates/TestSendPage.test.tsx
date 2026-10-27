@@ -227,7 +227,7 @@ describe("the Send a test page", () => {
     const writerSelect = await screen.findByLabelText("Fill fields as");
 
     expect(within(writerSelect).getAllByRole("option").map((option) => option.textContent)).toEqual(["Sample person"]);
-    expect(screen.getByText("Real people's values: owners and admins only.")).toBeInTheDocument();
+    expect(screen.getByText("Real people need the personal data permission.")).toBeInTheDocument();
     expect(calls.map((call) => call.path)).not.toContain(`${WS}/templates/${TEMPLATE_ID}/preview-people`);
   });
 

@@ -117,7 +117,7 @@ describe("previewing as a person", () => {
     await screen.findByTitle("Preview of the message");
     const select = screen.getByLabelText("Preview as");
     expect(within(select).queryByRole("option", { name: "A real person" })).not.toBeInTheDocument();
-    expect(screen.getByText("Only admins can preview as a real person.")).toBeInTheDocument();
+    expect(screen.getByText("Previewing a real person needs the personal data permission.")).toBeInTheDocument();
   });
 
   it("lets an admin find a person and previews with their id", async () => {

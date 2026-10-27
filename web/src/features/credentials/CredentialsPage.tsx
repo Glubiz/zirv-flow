@@ -25,7 +25,7 @@ export function CredentialsPage() {
       />
       <ResourceView resource={access} loadingLabel="Checking your access">
         {(data) =>
-          data.canManage ? (
+          data.canAdmin ? (
             <CredentialList key={ws} workspaceId={ws} />
           ) : (
             <Panel flush>

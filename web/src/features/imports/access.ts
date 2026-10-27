@@ -1,16 +1,17 @@
 import { useWorkspaceAccess } from "../members";
 
 export interface ImportAccess {
-  /** Upload, map, run and cancel: any member, admin or the owner. */
+  /** Upload, map, dry-run and cancel: editor and above. */
   canWrite: boolean;
-  /** Not only the history but its figures are shown to everyone; sample values only to admins. */
+  /** Start the real run: publisher and above. */
+  canPublish: boolean;
   ready: boolean;
 }
 
 export function useImportAccess(workspaceId: string): ImportAccess {
   const access = useWorkspaceAccess(workspaceId);
   if (access.status !== "ready") {
-    return { canWrite: false, ready: false };
+    return { canWrite: false, canPublish: false, ready: false };
   }
-  return { canWrite: access.data.canManage || access.data.role !== null, ready: true };
+  return { canWrite: access.data.canEdit, canPublish: access.data.canPublish, ready: true };
 }

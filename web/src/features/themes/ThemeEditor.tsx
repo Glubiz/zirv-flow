@@ -31,11 +31,12 @@ interface Props {
   initial: ThemeDetail;
   canWrite: boolean;
   canAdmin: boolean;
+  canPublish: boolean;
   /** Reads the theme again, after someone else saved. */
   onReload: () => void;
 }
 
-export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload }: Props) {
+export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, canPublish: mayPublish, onReload }: Props) {
   const navigate = useNavigate();
   const [theme, setTheme] = useState<Theme>(initial);
   const [tokens, setTokens] = useState<ThemeTokens>(() => readTokens(initial.draft.tokens));
@@ -237,13 +238,13 @@ export function ThemeEditor({ workspaceId, initial, canWrite, canAdmin, onReload
             Save draft
           </Button>
         ) : null}
-        {editable && canAdmin ? (
+        {editable && mayPublish ? (
           <Button variant="primary" disabled={!canPublish} onClick={() => setPublishing(true)} aria-describedby="th-publish-why">
             Publish…
           </Button>
         ) : null}
       </div>
-      {publishWhy && editable && canAdmin ? (
+      {publishWhy && editable && mayPublish ? (
         <p id="th-publish-why" className="faint tp-why">
           {publishWhy}
         </p>

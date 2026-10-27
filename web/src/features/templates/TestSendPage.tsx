@@ -37,7 +37,7 @@ export function TestSendPage() {
   );
   return (
     <ResourceView resource={access.ready ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the template">
-      {(data) => <Gate key={`${ws}:${id}`} workspaceId={ws} template={data} canWrite={access.canWrite} canAdmin={access.canAdmin} />}
+      {(data) => <Gate key={`${ws}:${id}`} workspaceId={ws} template={data} canWrite={access.canWrite} canAdmin={access.canAdmin} canRealPerson={access.canRealPerson} />}
     </ResourceView>
   );
 }
@@ -47,6 +47,7 @@ interface GateProps {
   template: TemplateDetail;
   canWrite: boolean;
   canAdmin: boolean;
+  canRealPerson: boolean;
 }
 
 function Gate(props: GateProps) {
@@ -93,7 +94,7 @@ function initials(email: string): string {
   return email.slice(0, 2).toUpperCase();
 }
 
-function Page({ workspaceId, template, canAdmin, senders }: GateProps & { senders: SenderOptions }) {
+function Page({ workspaceId, template, canAdmin, canRealPerson, senders }: GateProps & { senders: SenderOptions }) {
   const destinations = useDestinationOptions(workspaceId);
   const members = useMembers(workspaceId);
   const allowlist = useAllowlistOptions(workspaceId);
@@ -274,10 +275,10 @@ function Page({ workspaceId, template, canAdmin, senders }: GateProps & { sender
                   ) : null}
                 </div>
               </div>
-              {canAdmin ? (
-                <FillAs workspaceId={workspaceId} template={template} value={person} onChange={setPerson} />
+              {canRealPerson ? (
+                <FillAs workspaceId={workspaceId} template={template} canAdmin={canAdmin} value={person} onChange={setPerson} />
               ) : (
-                <SelectField label="Fill fields as" value={SAMPLE} onChange={() => setPerson(SAMPLE)} hint="Real people's values: owners and admins only.">
+                <SelectField label="Fill fields as" value={SAMPLE} onChange={() => setPerson(SAMPLE)} hint="Real people need the personal data permission.">
                   <option value={SAMPLE}>Sample person</option>
                 </SelectField>
               )}
@@ -364,15 +365,15 @@ async function resetTime(workspaceId: string): Promise<string | null> {
 }
 
 /** The admin's "Fill fields as": the sample person and the people saved on the template. */
-function FillAs({ workspaceId, template, value, onChange }: { workspaceId: string; template: Template; value: string; onChange: (id: string) => void }) {
+function FillAs({ workspaceId, template, canAdmin, value, onChange }: { workspaceId: string; template: Template; canAdmin: boolean; value: string; onChange: (id: string) => void }) {
   const saved = useResource(
-    () => unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/preview-people", { params: { path: { ws: workspaceId, id: template.id } } })),
-    [workspaceId, template.id],
+    async () => (canAdmin ? unwrap(client.GET("/api/v1/workspaces/{ws}/templates/{id}/preview-people", { params: { path: { ws: workspaceId, id: template.id } } })) : []),
+    [workspaceId, template.id, canAdmin],
   );
   const failure: ErrorSummary | null = saved.status === "error" ? describeError(saved.error) : null;
   return (
     <>
-      <SelectField label="Fill fields as" value={value} onChange={(event) => onChange(event.target.value)} hint="Real people's values: owners and admins only.">
+      <SelectField label="Fill fields as" value={value} onChange={(event) => onChange(event.target.value)} hint="Real people need the personal data permission.">
         <option value={SAMPLE}>Sample person</option>
         {saved.status === "ready"
           ? saved.data.map((entry) => (
