@@ -3251,13 +3251,15 @@ mod tests {
             let record = |action, outcome, reason| zirv_flow_store::NewDecision {
                 workspace_id: ws,
                 trace: trace.clone(),
-                spec: Box::leak(Box::new(zirv_flow_core::decision_actions::DecisionSpec {
-                    action,
-                    outcome,
-                    reason: zirv_flow_core::decision_actions::Reason::Detail("test"),
-                    causes: &[zirv_flow_core::CauseKind::Api],
-                    subjects: &[],
-                })),
+                spec: Box::leak(Box::new(
+                    zirv_flow_core::decision_actions::DecisionSpec::for_test(
+                        action,
+                        outcome,
+                        zirv_flow_core::decision_actions::Reason::Detail("test"),
+                        &[zirv_flow_core::CauseKind::Api],
+                        &[],
+                    ),
+                )),
                 detail: reason,
                 subject_ids: subjects.clone(),
                 job: None,

@@ -598,10 +598,13 @@ mod tests {
             &NewDecision {
                 workspace_id: ws,
                 trace: trace(),
-                spec: Box::leak(Box::new(decision_actions::DecisionSpec {
-                    outcome: "bait",
-                    ..decision_actions::FLOW_STEP_DONE
-                })),
+                spec: Box::leak(Box::new(decision_actions::DecisionSpec::for_test(
+                    decision_actions::FLOW_STEP_DONE.action(),
+                    "bait",
+                    decision_actions::FLOW_STEP_DONE.reason(),
+                    decision_actions::FLOW_STEP_DONE.causes(),
+                    decision_actions::FLOW_STEP_DONE.subjects(),
+                ))),
                 detail: None,
                 subject_ids: vec![("person", person)],
                 job: None,

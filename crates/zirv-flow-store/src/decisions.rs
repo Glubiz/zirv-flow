@@ -63,7 +63,7 @@ impl NewDecision {
     /// The reason the record stores.
     pub fn reason(&self) -> Option<&'static str> {
         debug_assert!(
-            matches!(self.spec.reason, Reason::Detail(_)) || self.detail.is_none(),
+            matches!(self.spec.reason(), Reason::Detail(_)) || self.detail.is_none(),
             "a detail was given for a row without a detail reason"
         );
         self.spec.reason_text(self.detail)
@@ -204,8 +204,8 @@ pub async fn append_decision<'e>(
     .bind(Uuid::now_v7())
     .bind(decision.workspace_id.as_uuid())
     .bind(decision.trace.trace_id.as_uuid())
-    .bind(decision.spec.action)
-    .bind(decision.spec.outcome)
+    .bind(decision.spec.action())
+    .bind(decision.spec.outcome())
     .bind(decision.reason())
     .bind(decision.trace.cause.kind.as_str())
     .bind(&decision.trace.cause.id)
@@ -269,8 +269,8 @@ async fn write_chunks(
             row.push_bind(*id)
                 .push_bind(decision.workspace_id.as_uuid())
                 .push_bind(decision.trace.trace_id.as_uuid())
-                .push_bind(decision.spec.action)
-                .push_bind(decision.spec.outcome)
+                .push_bind(decision.spec.action())
+                .push_bind(decision.spec.outcome())
                 .push_bind(decision.reason())
                 .push_bind(decision.trace.cause.kind.as_str())
                 .push_bind(decision.trace.cause.id.clone())
@@ -442,16 +442,16 @@ mod tests {
         create_workspace(pool, &name, &slug).await.unwrap().id
     }
 
-    /// A row outside the registry, for tests that need an arbitrary action. Production code
-    /// cannot make one: it has no way to name a `DecisionSpec` of its own.
+    /// A row outside the registry, for tests that need an arbitrary action. Only the
+    /// `test-support` feature of the core crate, which dev-dependencies enable, can build one.
     fn test_spec(action: &'static str, outcome: &'static str) -> &'static DecisionSpec {
-        Box::leak(Box::new(DecisionSpec {
+        Box::leak(Box::new(DecisionSpec::for_test(
             action,
             outcome,
-            reason: Reason::Detail("test"),
-            causes: &[CauseKind::Api],
-            subjects: &[],
-        }))
+            Reason::Detail("test"),
+            &[CauseKind::Api],
+            &[],
+        )))
     }
 
     fn decision(

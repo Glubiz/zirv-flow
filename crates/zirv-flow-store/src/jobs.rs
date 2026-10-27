@@ -449,9 +449,9 @@ pub async fn fail_job<'e>(
     .bind(lease_token)
     .bind(retry_in.as_secs_f64())
     .bind(truncate_error(error))
-    .bind(decision_actions::JOB_ATTEMPT_FAILED.action)
-    .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome)
-    .bind(decision_actions::JOB_ATTEMPT_FAILED.outcome)
+    .bind(decision_actions::JOB_ATTEMPT_FAILED.action())
+    .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome())
+    .bind(decision_actions::JOB_ATTEMPT_FAILED.outcome())
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;
@@ -538,9 +538,9 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
-    .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.action)
-    .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome)
-    .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.outcome)
+    .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.action())
+    .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome())
+    .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.outcome())
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;

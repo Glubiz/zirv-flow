@@ -125,8 +125,8 @@ mod tests {
                     $2::timestamptz + g * interval '1 second', '{}', '{}', {}, 'event', \
                     gen_random_uuid()::text, {}, {}, {} \
              FROM generate_series(1, $3) g",
-            shape.spec.action,
-            shape.spec.outcome,
+            shape.spec.action(),
+            shape.spec.outcome(),
             shape.reason,
             shape.subjects,
             if shape.job {

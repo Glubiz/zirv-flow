@@ -382,7 +382,7 @@ pub(super) fn refresh_statement(members: &SqlQuery, scope: Scope, capture: bool)
     // The event and the decision of each change; `kind` is `entered` or `exited` and `from` the
     // CTE that lists the people.
     let recorded = |kind: &str, from: &str, spec: &DecisionSpec| {
-        let (action, outcome) = (spec.action, spec.outcome);
+        let (action, outcome) = (spec.action(), spec.outcome());
         format!(
             "{kind}_events AS ( \
                  INSERT INTO events (id, workspace_id, person_id, name, occurred_at, \

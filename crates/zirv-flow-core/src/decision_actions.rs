@@ -1,8 +1,9 @@
 //! The decision actions (architecture section 12.4): every (action, outcome, reason) the decision
 //! log can hold, as one table.
 //!
-//! A decision record is written from a [`DecisionSpec`], never from three loose strings, so a
-//! triple that is not in [`ALL`] does not compile. The audit catalogue ([`crate::audit`]) is a
+//! A decision record is written from a [`DecisionSpec`], never from three loose strings. A spec
+//! has private fields and is built only in this module, so outside this crate's tests a triple
+//! that is not in [`ALL`] does not compile. The audit catalogue ([`crate::audit`]) is a
 //! separate registry for a different log.
 //!
 //! The reason of a row is one of three things: none, a fixed code, or a detail (see [`Reason`]).
@@ -27,17 +28,59 @@ pub enum Reason {
 /// One row of the registry: a decision the system can write.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecisionSpec {
-    pub action: &'static str,
-    pub outcome: &'static str,
-    pub reason: Reason,
-    /// The kinds of cause the decision is written under.
-    pub causes: &'static [CauseKind],
-    /// The names of the durable ids its `subject_ids` may hold. A flow decision also carries the
-    /// graph point, which is not a subject.
-    pub subjects: &'static [&'static str],
+    action: &'static str,
+    outcome: &'static str,
+    reason: Reason,
+    causes: &'static [CauseKind],
+    subjects: &'static [&'static str],
 }
 
 impl DecisionSpec {
+    /// A row outside the registry, for tests of other crates that need an arbitrary action.
+    /// Behind the `test-support` feature, which only dev-dependencies enable.
+    #[cfg(feature = "test-support")]
+    pub const fn for_test(
+        action: &'static str,
+        outcome: &'static str,
+        reason: Reason,
+        causes: &'static [CauseKind],
+        subjects: &'static [&'static str],
+    ) -> Self {
+        Self {
+            action,
+            outcome,
+            reason,
+            causes,
+            subjects,
+        }
+    }
+
+    /// The action, such as `flow.step`.
+    pub const fn action(&self) -> &'static str {
+        self.action
+    }
+
+    /// The outcome of the action.
+    pub const fn outcome(&self) -> &'static str {
+        self.outcome
+    }
+
+    /// How the reason is set.
+    pub const fn reason(&self) -> Reason {
+        self.reason
+    }
+
+    /// The kinds of cause the decision is written under.
+    pub const fn causes(&self) -> &'static [CauseKind] {
+        self.causes
+    }
+
+    /// The names of the durable ids its `subject_ids` may hold. A flow decision also carries the
+    /// graph point, which is not a subject.
+    pub const fn subjects(&self) -> &'static [&'static str] {
+        self.subjects
+    }
+
     /// The reason a record of this row stores: the fixed code, else the detail the caller gave.
     /// A row without a detail reason ignores `detail`.
     pub const fn reason_text(&self, detail: Option<&'static str>) -> Option<&'static str> {
