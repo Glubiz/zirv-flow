@@ -234,9 +234,15 @@ test("the newsletter built in the browser is sent as the preview shows it", asyn
 
   expect(await savedBlockTypes(page)).toEqual(referenceTypes());
 
+  // The review page runs its checks first; Publish stays disabled until they are done.
   await page.getByRole("button", { name: "Publish…" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: /^Publish version 1$/ }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Review and publish version 1", level: 1 })).toBeVisible();
+  const publish = page.getByRole("button", { name: "Publish version 1" });
+  await expect(publish.first()).toBeEnabled();
+  await publish.first().click();
+  await expect(page.getByRole("heading", { name: "Version 1 is live", level: 1 })).toBeVisible();
+  await page.getByRole("link", { name: "Back to the library" }).click();
+  await page.getByRole("link", { name: "Spring newsletter" }).click();
 
   const preview = await previewOf(page);
   // Both sides lack a dropped snippet or image, so the equality below only proves them if the preview has them.
