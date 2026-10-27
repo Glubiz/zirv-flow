@@ -3,6 +3,7 @@
 
 use sqlx::PgConnection;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use crate::decisions::ID_SUBJECTS;
@@ -109,9 +110,8 @@ pub async fn delete_person(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "person.deleted",
-            outcome: "deleted",
-            reason: Some(reason.as_str()),
+            spec: &decision_actions::PERSON_DELETED,
+            detail: Some(reason.as_str()),
             subject_ids: Vec::new(),
             job: None,
         },
@@ -598,9 +598,11 @@ mod tests {
             &NewDecision {
                 workspace_id: ws,
                 trace: trace(),
-                action: "flow.step",
-                outcome: "bait",
-                reason: None,
+                spec: Box::leak(Box::new(decision_actions::DecisionSpec {
+                    outcome: "bait",
+                    ..decision_actions::FLOW_STEP_DONE
+                })),
+                detail: None,
                 subject_ids: vec![("person", person)],
                 job: None,
                 graph: Some(GraphPoint::at(1, &bystander.to_string())),

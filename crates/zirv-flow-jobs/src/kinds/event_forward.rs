@@ -34,6 +34,7 @@ use zirv_flow_connectors::destinations::{
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_store::{
     Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision, PgPool,
@@ -253,24 +254,29 @@ async fn forward_one(
     let planned = plan(&done.verdict, row.attempts, now, random_unit());
     let (how, error, decision) = match &planned {
         Plan::Delivered => (Settled::Delivered, None, None),
-        Plan::Retry { at, reason } => {
-            (Settled::Retry(*at), Some(*reason), Some(("retry", *reason)))
-        }
-        Plan::Dead { reason } => (Settled::Dead, Some(*reason), Some(("dead", *reason))),
+        Plan::Retry { at, reason } => (
+            Settled::Retry(*at),
+            Some(*reason),
+            Some((&decision_actions::EVENT_FORWARD_RETRY, *reason)),
+        ),
+        Plan::Dead { reason } => (
+            Settled::Dead,
+            Some(*reason),
+            Some((&decision_actions::EVENT_FORWARD_DEAD, *reason)),
+        ),
     };
     // The row and its decision commit together.
     let mut tx = zirv_flow_store::begin(pool).await?;
     let changed = settle_row(&mut tx, row.id, row.claim_token, how, error).await?;
-    if let (true, Some((outcome, reason))) = (changed, decision) {
+    if let (true, Some((spec, reason))) = (changed, decision) {
         append_decision(
             &mut *tx,
             &NewDecision {
                 graph: None,
                 workspace_id: workspace,
                 trace: ctx.trace().clone(),
-                action: "event.forward",
-                outcome,
-                reason: Some(reason),
+                spec,
+                detail: Some(reason),
                 subject_ids: vec![
                     ("destination", destination.id),
                     ("rule", row.rule_id),

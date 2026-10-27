@@ -24,6 +24,7 @@ use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::flow::{ExitCriterion, FlowSettings, Goal};
 use zirv_flow_engine::{EnrollmentState, Matched, Outcome, Status, WaitChange, settle};
 use zirv_flow_segments::{Catalog, TraitStorage};
@@ -198,8 +199,12 @@ impl Run {
             )
             .await?;
             if let Some(row) = rows.first().filter(|row| row.fresh) {
-                let mut decision =
-                    self.decision(&enrollment, "flow.goal", "converted", None, GOAL_NODE);
+                let mut decision = self.decision(
+                    &enrollment,
+                    &decision_actions::FLOW_GOAL_CONVERTED,
+                    None,
+                    GOAL_NODE,
+                );
                 decision.subject_ids.push(("step_execution", row.id));
                 decisions.push(decision);
             }
@@ -239,8 +244,7 @@ impl Run {
             clear_waits(&mut *conn, enrollment.id, None).await?;
             decisions.push(self.decision(
                 &enrollment,
-                "flow.enrollment",
-                "exited",
+                &decision_actions::FLOW_ENROLLMENT_EXITED,
                 Some(text),
                 &transition.state.node,
             ));
@@ -252,18 +256,16 @@ impl Run {
     fn decision(
         &self,
         enrollment: &Enrollment,
-        action: &'static str,
-        outcome: &'static str,
-        reason: Option<&'static str>,
+        spec: &'static DecisionSpec,
+        detail: Option<&'static str>,
         node: &str,
     ) -> NewDecision {
         NewDecision {
             graph: Some(GraphPoint::at(enrollment.flow_version, node)),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
-            action,
-            outcome,
-            reason,
+            spec,
+            detail,
             subject_ids: vec![
                 ("flow", enrollment.flow_id),
                 ("enrollment", enrollment.id),

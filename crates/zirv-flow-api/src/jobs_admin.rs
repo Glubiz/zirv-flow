@@ -10,6 +10,7 @@ use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{Cause, TraceContext, WorkspaceId};
 use zirv_flow_store::{DeadCursor, JobSummary, KindDepth, NewDecision};
 
@@ -217,9 +218,8 @@ pub(crate) async fn retry(
                     trace_id: job.trace_id,
                     cause: Cause::manual(owner),
                 },
-                action: "job.retry",
-                outcome: "requeued",
-                reason: None,
+                spec: &decision_actions::JOB_RETRY_REQUEUED,
+                detail: None,
                 subject_ids: Vec::new(),
                 job: Some((job.id, job.attempts)),
             },

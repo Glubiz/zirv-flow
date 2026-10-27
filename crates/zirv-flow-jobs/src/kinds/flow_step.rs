@@ -21,6 +21,7 @@ use sqlx::{Connection, PgConnection};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::flow::{FlowGraph, MAX_CONDITIONS, NodeKind};
 use zirv_flow_core::{Freshness, WorkspaceId};
 use zirv_flow_engine::{
@@ -186,9 +187,8 @@ async fn release(
         graph: Some(GraphPoint::at(enrollment.flow_version, &enrollment.node)),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
-        action: "flow.enrollment",
-        outcome: "resumed",
-        reason: Some("flow_resumed"),
+        spec: &decision_actions::FLOW_ENROLLMENT_RESUMED,
+        detail: None,
         subject_ids: vec![
             ("flow", enrollment.flow_id),
             ("enrollment", enrollment.id),
@@ -229,9 +229,8 @@ async fn hold(
             graph: Some(GraphPoint::at(enrollment.flow_version, &enrollment.node)),
             workspace_id: job.workspace,
             trace: enrollment.trace.clone(),
-            action: "flow.enrollment",
-            outcome: "held",
-            reason: Some("flow_paused"),
+            spec: &decision_actions::FLOW_ENROLLMENT_HELD,
+            detail: None,
             subject_ids: vec![
                 ("flow", enrollment.flow_id),
                 ("enrollment", enrollment.id),
@@ -318,9 +317,8 @@ struct Walk<'a> {
 impl Walk<'_> {
     fn decision(
         &self,
-        action: &'static str,
-        outcome: &'static str,
-        reason: Option<&'static str>,
+        spec: &'static DecisionSpec,
+        detail: Option<&'static str>,
         step: Option<Uuid>,
         node: Option<&str>,
     ) -> NewDecision {
@@ -338,9 +336,8 @@ impl Walk<'_> {
             }),
             workspace_id: self.workspace,
             trace: enrollment.trace.clone(),
-            action,
-            outcome,
-            reason,
+            spec,
+            detail,
             subject_ids,
             job: Some(self.job),
         }
@@ -554,13 +551,15 @@ async fn wake(
             }
             return Ok(());
         }
-        (StepJobInput::Event { .. }, _) => "event",
-        (StepJobInput::Wake, Some(NodeKind::WaitUntilEvent { .. })) => "timeout",
-        (StepJobInput::Wake, _) => "timer",
+        (StepJobInput::Event { .. }, _) => &decision_actions::FLOW_WAKE_EVENT,
+        (StepJobInput::Wake, Some(NodeKind::WaitUntilEvent { .. })) => {
+            &decision_actions::FLOW_WAKE_TIMEOUT
+        }
+        (StepJobInput::Wake, _) => &decision_actions::FLOW_WAKE_TIMER,
     };
     let node = walk.enrollment.node.clone();
     let step = settle_wait_step(&mut *conn, walk.enrollment.id, &node).await?;
-    let decision = walk.decision("flow.wake", outcome, None, step, Some(&node));
+    let decision = walk.decision(outcome, None, step, Some(&node));
     append_decisions(conn, &[decision]).await?;
     Ok(())
 }
@@ -631,26 +630,22 @@ async fn apply(
         }
         let kind = node_of(walk, &visit.node).map_or("node", NodeKind::type_name);
         let ends_here = visit.node == transition.state.node;
-        let (outcome, reason) = match (enqueued.get(&visit.node), &transition.outcome) {
-            (Some(label), _) => ("enqueued", Some(*label)),
-            (None, Outcome::Failed { .. }) if ends_here => ("failed", failure_text),
+        let (spec, reason) = match (enqueued.get(&visit.node), &transition.outcome) {
+            (Some(label), _) => (&decision_actions::FLOW_STEP_ENQUEUED, Some(*label)),
+            (None, Outcome::Failed { .. }) if ends_here => {
+                (&decision_actions::FLOW_STEP_FAILED, failure_text)
+            }
             (None, Outcome::Waiting) if ends_here => (
-                "waiting",
+                &decision_actions::FLOW_STEP_WAITING,
                 Some(if transition.zone_fallback.is_some() {
                     "timezone_fallback"
                 } else {
                     kind
                 }),
             ),
-            (None, _) => ("done", Some(kind)),
+            (None, _) => (&decision_actions::FLOW_STEP_DONE, Some(kind)),
         };
-        decisions.push(walk.decision(
-            "flow.step",
-            outcome,
-            reason,
-            Some(record.id),
-            Some(&visit.node),
-        ));
+        decisions.push(walk.decision(spec, reason, Some(record.id), Some(&visit.node)));
     }
     append_decisions(&mut *conn, &decisions).await?;
 
@@ -738,7 +733,12 @@ async fn apply_effect(
             Ok(None)
         }
         EffectKind::GoalConversion => {
-            decisions.push(walk.decision("flow.goal", "converted", None, step, Some(&effect.node)));
+            decisions.push(walk.decision(
+                &decision_actions::FLOW_GOAL_CONVERTED,
+                None,
+                step,
+                Some(&effect.node),
+            ));
             Ok(None)
         }
         EffectKind::Send {
@@ -956,18 +956,24 @@ async fn branch(
     let results = evaluate_conditions(&mut *conn, workspace, person, &compiled)
         .await
         .map_err(|error| StepFailure::at(node, error))?;
-    let taken = results
-        .iter()
-        .position(|matched| *matched)
-        .map_or("else", |index| {
-            CASES.get(index).copied().unwrap_or("case_more")
-        });
+    let taken = results.iter().position(|matched| *matched).map_or(
+        &decision_actions::FLOW_BRANCH_ELSE,
+        |index| {
+            decision_actions::BRANCH_CASES
+                .get(index)
+                .copied()
+                .unwrap_or(&decision_actions::FLOW_BRANCH_CASE_MORE)
+        },
+    );
     let step = walk.step_of(node);
-    let mut decisions = vec![walk.decision("flow.branch", taken, None, step, Some(node))];
+    let mut decisions = vec![walk.decision(taken, None, step, Some(node))];
     for (index, matched) in results.iter().enumerate() {
         decisions.push(walk.decision(
-            "flow.branch.condition",
-            if *matched { "matched" } else { "unmatched" },
+            if *matched {
+                &decision_actions::FLOW_BRANCH_CONDITION_MATCHED
+            } else {
+                &decision_actions::FLOW_BRANCH_CONDITION_UNMATCHED
+            },
             Some(CASES.get(index).copied().unwrap_or("case_more")),
             step,
             Some(node),
@@ -1030,34 +1036,31 @@ async fn finish(
     let step = walk.step_of(&state.node);
     let decision = match &transition.outcome {
         Outcome::Waiting => {
-            let reason = match node_of(walk, &state.node) {
-                Some(NodeKind::WaitUntilEvent { .. }) => "until_event",
-                Some(NodeKind::WaitUntilTime { .. }) => "until_time",
-                _ => "duration",
+            let spec = match node_of(walk, &state.node) {
+                Some(NodeKind::WaitUntilEvent { .. }) => &decision_actions::FLOW_WAIT_UNTIL_EVENT,
+                Some(NodeKind::WaitUntilTime { .. }) => &decision_actions::FLOW_WAIT_UNTIL_TIME,
+                _ => &decision_actions::FLOW_WAIT_DURATION,
             };
-            walk.decision(
-                "flow.wait",
-                "waiting",
-                Some(reason),
-                step,
-                Some(&state.node),
-            )
+            walk.decision(spec, None, step, Some(&state.node))
         }
         Outcome::Completed => walk.decision(
-            "flow.enrollment",
-            "completed",
+            &decision_actions::FLOW_ENROLLMENT_COMPLETED,
             None,
             step,
             Some(&state.node),
         ),
         Outcome::Exited { .. } => walk.decision(
-            "flow.enrollment",
-            "exited",
+            &decision_actions::FLOW_ENROLLMENT_EXITED,
             exit_reason,
             step,
             Some(&state.node),
         ),
-        _ => walk.decision("flow.enrollment", "failed", error, step, Some(&state.node)),
+        _ => walk.decision(
+            &decision_actions::FLOW_ENROLLMENT_FAILED,
+            error,
+            step,
+            Some(&state.node),
+        ),
     };
     append_decisions(&mut *conn, &[decision]).await?;
     Ok(())
@@ -1108,9 +1111,8 @@ async fn fail_enrollment(
         graph: Some(GraphPoint::at(enrollment.flow_version, failed_node)),
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
-        action: "flow.enrollment",
-        outcome: "failed",
-        reason: Some(message),
+        spec: &decision_actions::FLOW_ENROLLMENT_FAILED,
+        detail: Some(message),
         subject_ids: vec![
             ("flow", enrollment.flow_id),
             ("enrollment", enrollment.id),
@@ -2811,8 +2813,8 @@ pub(super) mod tests {
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "bump", "next", "end")]});
         let flow = env.flow("Failing", graph).await;
-        // The segment change that triggers the enrollment: its cause is the membership change.
-        let change = Cause::trait_change(Uuid::now_v7());
+        // The segment change that triggers the enrollment: its cause is the upstream event.
+        let change = Cause::event(Uuid::now_v7());
         let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
         let enrolled = zirv_flow_store::enroll(
             &mut tx,

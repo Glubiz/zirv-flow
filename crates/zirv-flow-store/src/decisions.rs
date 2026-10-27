@@ -11,6 +11,7 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor, PgPool, Postgres, QueryBuilder};
 use time::{Date, OffsetDateTime};
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{DecisionSpec, Reason};
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::StoreError;
@@ -45,15 +46,28 @@ const _: () = assert!(
 pub struct NewDecision {
     pub workspace_id: WorkspaceId,
     pub trace: TraceContext,
-    pub action: &'static str,
-    pub outcome: &'static str,
-    pub reason: Option<&'static str>,
+    /// The registry row: the action, the outcome and the reason. A triple outside the registry
+    /// does not compile.
+    pub spec: &'static DecisionSpec,
+    /// The reason of a row with a detail reason; ignored by any other row.
+    pub detail: Option<&'static str>,
     /// Durable domain ids by name.
     pub subject_ids: Vec<(&'static str, Uuid)>,
     /// The job and attempt number that made the decision, when a job did.
     pub job: Option<(Uuid, i32)>,
     /// Where in a flow's graph the decision was made, for the flow decisions the UI links from.
     pub graph: Option<GraphPoint>,
+}
+
+impl NewDecision {
+    /// The reason the record stores.
+    pub fn reason(&self) -> Option<&'static str> {
+        debug_assert!(
+            matches!(self.spec.reason, Reason::Detail(_)) || self.detail.is_none(),
+            "a detail was given for a row without a detail reason"
+        );
+        self.spec.reason_text(self.detail)
+    }
 }
 
 /// A point in a flow's published graph: the version an enrollment is pinned to and, when the
@@ -190,9 +204,9 @@ pub async fn append_decision<'e>(
     .bind(Uuid::now_v7())
     .bind(decision.workspace_id.as_uuid())
     .bind(decision.trace.trace_id.as_uuid())
-    .bind(decision.action)
-    .bind(decision.outcome)
-    .bind(decision.reason)
+    .bind(decision.spec.action)
+    .bind(decision.spec.outcome)
+    .bind(decision.reason())
     .bind(decision.trace.cause.kind.as_str())
     .bind(&decision.trace.cause.id)
     .bind(subjects_of(decision))
@@ -255,9 +269,9 @@ async fn write_chunks(
             row.push_bind(*id)
                 .push_bind(decision.workspace_id.as_uuid())
                 .push_bind(decision.trace.trace_id.as_uuid())
-                .push_bind(decision.action)
-                .push_bind(decision.outcome)
-                .push_bind(decision.reason)
+                .push_bind(decision.spec.action)
+                .push_bind(decision.spec.outcome)
+                .push_bind(decision.reason())
                 .push_bind(decision.trace.cause.kind.as_str())
                 .push_bind(decision.trace.cause.id.clone())
                 .push_bind(subjects_of(decision))
@@ -416,6 +430,7 @@ pub(crate) async fn list_enrollment_decisions(
 #[cfg(test)]
 mod tests {
     use time::macros::date;
+    use zirv_flow_core::decision_actions;
     use zirv_flow_core::{Slug, WorkspaceName};
 
     use super::*;
@@ -427,6 +442,18 @@ mod tests {
         create_workspace(pool, &name, &slug).await.unwrap().id
     }
 
+    /// A row outside the registry, for tests that need an arbitrary action. Production code
+    /// cannot make one: it has no way to name a `DecisionSpec` of its own.
+    fn test_spec(action: &'static str, outcome: &'static str) -> &'static DecisionSpec {
+        Box::leak(Box::new(DecisionSpec {
+            action,
+            outcome,
+            reason: Reason::Detail("test"),
+            causes: &[CauseKind::Api],
+            subjects: &[],
+        }))
+    }
+
     fn decision(
         workspace_id: WorkspaceId,
         trace: &TraceContext,
@@ -436,9 +463,8 @@ mod tests {
             graph: None,
             workspace_id,
             trace: trace.clone(),
-            action,
-            outcome: "done",
-            reason: None,
+            spec: test_spec(action, "done"),
+            detail: None,
             subject_ids: Vec::new(),
             job: None,
         }
@@ -506,21 +532,33 @@ mod tests {
         // The shapes the drain writes (events/apply.rs, people/apply.rs): a stored event is one
         // `event.accepted`, a changed profile one `trait.change`; a new person adds a
         // `person.created`.
-        type Decision = (&'static str, &'static str, &'static [&'static str]);
+        type Decision = (&'static DecisionSpec, &'static [&'static str]);
         let shapes: [(&str, &[Decision]); 3] = [
             (
                 "track",
-                &[("event.accepted", "valid", &["event", "person"])],
+                &[(
+                    &decision_actions::EVENT_ACCEPTED_VALID,
+                    &["event", "person"],
+                )],
             ),
             (
                 "identify",
-                &[("trait.change", "changed", &["person", "source_record"])],
+                &[(
+                    &decision_actions::TRAIT_CHANGED,
+                    &["person", "source_record"],
+                )],
             ),
             (
                 "track_new_person",
                 &[
-                    ("person.created", "created", &["person", "source_record"]),
-                    ("event.accepted", "valid", &["event", "person"]),
+                    (
+                        &decision_actions::PERSON_CREATED,
+                        &["person", "source_record"],
+                    ),
+                    (
+                        &decision_actions::EVENT_ACCEPTED_VALID,
+                        &["event", "person"],
+                    ),
                 ],
             ),
         ];
@@ -542,16 +580,15 @@ mod tests {
                 let started = Instant::now();
                 let mut tx = crate::begin(&pool).await.unwrap();
                 for _ in 0..size {
-                    for &(action, outcome, subjects) in per_item {
+                    for &(spec, subjects) in per_item {
                         append_decision(
                             &mut *tx,
                             &NewDecision {
                                 graph: None,
                                 workspace_id: ws,
                                 trace: trace.clone(),
-                                action,
-                                outcome,
-                                reason: None,
+                                spec,
+                                detail: None,
                                 subject_ids: subjects
                                     .iter()
                                     .map(|name| (*name, Uuid::new_v4()))
@@ -672,7 +709,7 @@ mod tests {
             (0..500)
                 .map(|_| {
                     let mut record = decision(ws, &trace, "event.accepted");
-                    record.outcome = "valid";
+                    record.spec = &decision_actions::EVENT_ACCEPTED_VALID;
                     record.subject_ids =
                         vec![("event", Uuid::new_v4()), ("person", Uuid::new_v4())];
                     record
@@ -750,7 +787,7 @@ mod tests {
         let trace = TraceContext::root(Cause::api("req-1"));
         let subject = Uuid::new_v4();
         let mut first = decision(ours, &trace, "first");
-        first.reason = Some("because");
+        first.detail = Some("because");
         first.subject_ids = vec![("segment_id", subject)];
         first.job = Some((Uuid::new_v4(), 2));
         append_decision(&pool, &first).await.unwrap();

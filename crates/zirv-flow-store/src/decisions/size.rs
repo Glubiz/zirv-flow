@@ -34,6 +34,7 @@ pub async fn decision_log_size(pool: &PgPool) -> Result<DecisionLogSize, StoreEr
 mod tests {
     use time::Date;
     use uuid::Uuid;
+    use zirv_flow_core::decision_actions::{self, DecisionSpec};
 
     use super::*;
 
@@ -67,8 +68,8 @@ mod tests {
     /// A decision shape as the runtime writes it: what the record carries beyond its keys.
     struct Shape {
         name: &'static str,
-        action: &'static str,
-        outcome: &'static str,
+        spec: &'static DecisionSpec,
+        /// The reason as an SQL literal, for a row with a detail reason.
         reason: &'static str,
         subjects: &'static str,
         job: bool,
@@ -77,17 +78,15 @@ mod tests {
     const SHAPES: [Shape; 3] = [
         Shape {
             name: "ingest",
-            action: "event.applied",
-            outcome: "applied",
+            spec: &decision_actions::EVENT_ACCEPTED_VALID,
             reason: "NULL",
             subjects: "jsonb_build_object('person', gen_random_uuid())",
             job: false,
         },
         Shape {
             name: "flow",
-            action: "flow.step",
-            outcome: "done",
-            reason: "NULL",
+            spec: &decision_actions::FLOW_STEP_DONE,
+            reason: "'send'",
             subjects: "jsonb_build_object('flow', gen_random_uuid(), \
                 'enrollment', gen_random_uuid(), 'person', gen_random_uuid(), \
                 'version', 3, 'node', 'send-welcome')",
@@ -95,9 +94,8 @@ mod tests {
         },
         Shape {
             name: "send",
-            action: "message.send",
-            outcome: "sent",
-            reason: "'gates_passed'",
+            spec: &decision_actions::MESSAGE_SEND_SENT,
+            reason: "'sent'",
             subjects: "jsonb_build_object('message', gen_random_uuid(), \
                 'enrollment', gen_random_uuid(), 'template', gen_random_uuid(), \
                 'destination', gen_random_uuid(), 'person', gen_random_uuid())",
@@ -127,8 +125,8 @@ mod tests {
                     $2::timestamptz + g * interval '1 second', '{}', '{}', {}, 'event', \
                     gen_random_uuid()::text, {}, {}, {} \
              FROM generate_series(1, $3) g",
-            shape.action,
-            shape.outcome,
+            shape.spec.action,
+            shape.spec.outcome,
             shape.reason,
             shape.subjects,
             if shape.job {

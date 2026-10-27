@@ -5,6 +5,7 @@
 use serde_json::json;
 use sqlx::PgConnection;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::sending::{RecordKind, RecordStatus};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -153,10 +154,10 @@ pub async fn record_domain_check(
         previous_status,
     };
     if check.changed() {
-        let (outcome, reason) = if all_ok {
-            ("verified", "records_ok")
+        let spec = if all_ok {
+            &decision_actions::SENDING_DOMAIN_VERIFIED
         } else {
-            ("unverified", "record_failed")
+            &decision_actions::SENDING_DOMAIN_UNVERIFIED
         };
         append_decision(
             connection,
@@ -164,9 +165,8 @@ pub async fn record_domain_check(
                 graph: None,
                 workspace_id: workspace,
                 trace: trace.clone(),
-                action: "sending_domain.verify",
-                outcome,
-                reason: Some(reason),
+                spec,
+                detail: None,
                 subject_ids: vec![("sending_domain", domain_id)],
                 job,
             },

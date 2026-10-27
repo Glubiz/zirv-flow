@@ -6,6 +6,7 @@
 
 use sqlx::PgConnection;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::flow::FlowSettings;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
@@ -30,8 +31,7 @@ async fn record(
     workspace: WorkspaceId,
     flow: Uuid,
     trace: &TraceContext,
-    action: &'static str,
-    outcome: &'static str,
+    spec: &'static DecisionSpec,
 ) -> Result<(), StoreError> {
     append_decision(
         connection,
@@ -39,9 +39,8 @@ async fn record(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action,
-            outcome,
-            reason: None,
+            spec,
+            detail: None,
             subject_ids: vec![("flow", flow)],
             job: None,
         },
@@ -95,8 +94,7 @@ pub async fn publish_flow(
         workspace,
         flow.id,
         trace,
-        "flow.publish",
-        "published",
+        &decision_actions::FLOW_PUBLISHED,
     )
     .await?;
     // A draft that does not parse was never validated, and the API refuses to publish one.
@@ -116,7 +114,7 @@ async fn transition(
     id: Uuid,
     action: FlowAction,
     trace: &TraceContext,
-    decision: (&'static str, &'static str),
+    decision: &'static DecisionSpec,
 ) -> Result<Flow, FlowError> {
     let locked = lock_flow(connection, workspace, id).await?;
     let state = next_state(&locked, action)?;
@@ -132,7 +130,7 @@ async fn transition(
     .fetch_one(&mut *connection)
     .await
     .map_err(StoreError::query)?;
-    record(connection, workspace, id, trace, decision.0, decision.1).await?;
+    record(connection, workspace, id, trace, decision).await?;
     match action {
         // Every in-flight enrollment exits, in batches of a job of their own.
         FlowAction::Archive => {
@@ -161,7 +159,7 @@ pub async fn pause_flow(
         id,
         FlowAction::Pause,
         trace,
-        ("flow.pause", "paused"),
+        &decision_actions::FLOW_PAUSED,
     )
     .await
 }
@@ -179,7 +177,7 @@ pub async fn resume_flow(
         id,
         FlowAction::Resume,
         trace,
-        ("flow.resume", "resumed"),
+        &decision_actions::FLOW_RESUMED,
     )
     .await
 }
@@ -198,7 +196,7 @@ pub async fn archive_flow(
         id,
         FlowAction::Archive,
         trace,
-        ("flow.archive", "archived"),
+        &decision_actions::FLOW_ARCHIVED,
     )
     .await
 }
