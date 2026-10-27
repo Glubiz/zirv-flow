@@ -25800,7 +25800,7 @@ export interface operations {
             };
             cookie?: never;
         };
-        /** @description Optional: the draft revision the caller read */
+        /** @description Optional: an empty body or `null` converts unconditionally; otherwise an object naming the draft revision the caller read */
         requestBody?: {
             content: {
                 "application/json": null | components["schemas"]["ConvertTemplateDraftRequest"];

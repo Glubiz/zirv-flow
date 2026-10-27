@@ -943,7 +943,7 @@ pub(crate) async fn put_draft(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Template id")
     ),
-    request_body(content = Option<ConvertTemplateDraftRequest>, description = "Optional: the draft revision the caller read"),
+    request_body(content = Option<ConvertTemplateDraftRequest>, description = "Optional: an empty body or `null` converts unconditionally; otherwise an object naming the draft revision the caller read"),
     responses(
         (status = 200, description = "The template with its converted draft", body = TemplateDetailBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),

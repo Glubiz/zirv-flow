@@ -21996,7 +21996,7 @@
           }
         ],
         "requestBody": {
-          "description": "Optional: the draft revision the caller read",
+          "description": "Optional: an empty body or `null` converts unconditionally; otherwise an object naming the draft revision the caller read",
           "content": {
             "application/json": {
               "schema": {
