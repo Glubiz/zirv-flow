@@ -43,8 +43,8 @@ function summaryOf(node: ConditionNode, names: Names): string {
 
 function PolicyView({ workspaceId }: { workspaceId: string }) {
   const access = useWorkspaceAccess(workspaceId);
-  const canManage = access.status === "ready" && access.data.canManage;
-  const canWrite = access.status === "ready" && (access.data.canManage || access.data.role !== null);
+  const canManage = access.status === "ready" && access.data.canAdmin;
+  const canWrite = access.status === "ready" && access.data.canEdit;
   const draft = usePolicyDraft(workspaceId);
   const guard = useLeaveGuard(draft.dirty);
   const dimensions = useResource(

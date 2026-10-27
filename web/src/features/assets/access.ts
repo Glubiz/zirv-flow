@@ -13,5 +13,5 @@ export function useAssetAccess(workspaceId: string): AssetAccess {
   const access = useWorkspaceAccess(workspaceId);
   if (access.status === "loading") return { ready: false, canWrite: false, canAdmin: false };
   if (access.status === "error") return { ready: true, canWrite: false, canAdmin: false };
-  return { ready: true, canWrite: access.data.canManage || access.data.role !== null, canAdmin: access.data.canManage };
+  return { ready: true, canWrite: access.data.canEdit, canAdmin: access.data.canAdmin };
 }

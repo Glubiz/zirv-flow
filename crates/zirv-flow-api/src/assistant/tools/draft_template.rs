@@ -462,11 +462,22 @@ mod tests {
     #[test]
     fn the_sender_the_category_and_the_mode_cannot_be_set() {
         for field in ["sender", "category", "mode", "syntax", "theme"] {
-            let arguments = json!({"fragment": {field: "x"}});
-            assert_eq!(
-                apply(TemplateTask::Copy, &code_doc(), &arguments).unwrap_err(),
-                [format!("fragment_field_not_allowed at /fragment/{field}")]
-            );
+            for (task, document) in [
+                (TemplateTask::Copy, code_doc()),
+                (TemplateTask::Translation, code_doc()),
+                (TemplateTask::Copy, blocks_doc()),
+                (TemplateTask::Translation, blocks_doc()),
+                (TemplateTask::BlockLayout, blocks_doc()),
+            ] {
+                let mut arguments = json!({"fragment": {field: "x"}});
+                if task == TemplateTask::Translation {
+                    arguments["fragment"]["lang"] = json!("da");
+                }
+                assert_eq!(
+                    apply(task, &document, &arguments).unwrap_err(),
+                    [format!("fragment_field_not_allowed at /fragment/{field}")]
+                );
+            }
         }
         assert_eq!(
             apply(TemplateTask::Copy, &code_doc(), &json!({"fragment": {}})).unwrap_err(),

@@ -797,16 +797,9 @@ mod tests {
         let fixture = Arc::new(fixture);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let router =
-            Router::new()
-                .route("/f", get(serve_file))
-                .route(
-                    "/redirect",
-                    get(move || async move {
-                        Redirect::temporary(&format!("http://localhost:{port}/f"))
-                    }),
-                )
-                .with_state(Arc::clone(&fixture));
+        let router = Router::new()
+            .route("/f", get(serve_file))
+            .with_state(Arc::clone(&fixture));
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         (format!("http://127.0.0.1:{port}"), fixture)
     }
@@ -1624,7 +1617,19 @@ mod tests {
     #[tokio::test]
     async fn a_redirect_off_the_origin_is_refused_and_not_followed() {
         let (base, fixture) = serve(Fixture::new("a\n1\n")).await;
-        let redirecting = json!({"url": format!("{base}/redirect"), "format": "csv"});
+        let target = format!("{base}/f");
+        let router = Router::new().route(
+            "/redirect",
+            get(move || {
+                let target = target.clone();
+                async move { Redirect::temporary(&target) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let redirecting =
+            json!({"url": format!("http://127.0.0.1:{port}/redirect"), "format": "csv"});
 
         let (_, error) = collect_error(
             read_all(

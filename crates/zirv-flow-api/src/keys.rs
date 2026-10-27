@@ -17,13 +17,38 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
+/// What a key may do. The schema twin of `zirv_flow_core::Scope`, so the generated client knows
+/// the closed set.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApiKeyScope {
+    Ingest,
+    Read,
+    Write,
+    Publish,
+    Admin,
+    Pii,
+}
+
+impl From<Scope> for ApiKeyScope {
+    fn from(scope: Scope) -> Self {
+        match scope {
+            Scope::Ingest => Self::Ingest,
+            Scope::Read => Self::Read,
+            Scope::Write => Self::Write,
+            Scope::Publish => Self::Publish,
+            Scope::Admin => Self::Admin,
+            Scope::Pii => Self::Pii,
+        }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ApiKeyBody {
     id: Uuid,
     name: String,
-    /// Any of `ingest`, `read`, `write`, `publish`, `admin`.
-    #[schema(value_type = Vec<String>, example = json!(["read"]))]
-    scopes: Vec<Scope>,
+    #[schema(example = json!(["read"]))]
+    scopes: Vec<ApiKeyScope>,
     created_by: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
@@ -41,7 +66,7 @@ impl From<&ApiKey> for ApiKeyBody {
         Self {
             id: key.id.as_uuid(),
             name: key.name.clone(),
-            scopes: key.scopes.clone(),
+            scopes: key.scopes.iter().copied().map(ApiKeyScope::from).collect(),
             created_by: key.created_by.map(|user| user.as_uuid()),
             created_at: key.created_at,
             last_used_at: key.last_used_at,
@@ -64,8 +89,8 @@ pub(crate) struct CreateApiKeyRequest {
     /// 1 to 100 characters.
     #[schema(example = "ingest worker")]
     name: String,
-    /// At least one of `ingest`, `read`, `write`, `publish`, `admin`.
-    #[schema(value_type = Vec<String>, example = json!(["read"]))]
+    /// At least one scope.
+    #[schema(value_type = Vec<ApiKeyScope>, example = json!(["read"]))]
     scopes: Vec<String>,
 }
 
@@ -212,6 +237,22 @@ mod tests {
 
         assert_eq!(json["key"], "zfk_x");
         assert_eq!(json["name"], "ci");
+    }
+
+    #[test]
+    fn every_scope_in_the_schema_is_a_scope_the_server_parses() {
+        for scope in [
+            Scope::Ingest,
+            Scope::Read,
+            Scope::Write,
+            Scope::Publish,
+            Scope::Admin,
+            Scope::Pii,
+        ] {
+            let name = serde_json::to_value(ApiKeyScope::from(scope)).unwrap();
+
+            assert_eq!(name, scope.as_str());
+        }
     }
 
     #[test]

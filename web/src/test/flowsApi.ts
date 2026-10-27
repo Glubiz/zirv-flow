@@ -57,7 +57,7 @@ export function flowDetail(overrides: Record<string, unknown> = {}) {
 
 interface Options {
   /** `writer` is an admin; `member` may edit but not publish; `reader` may only look. */
-  role?: "writer" | "editor" | "reader";
+  role?: "writer" | "publisher" | "editor" | "reader";
   flow?: Record<string, unknown>;
   /** The issues the validate endpoint reports, or a function of how many times it was asked. */
   issues?: Issue[] | ((asked: number) => Issue[]);
@@ -68,10 +68,10 @@ export function flowRoutes({ role = "writer", flow, issues = [] }: Options = {})
   let current: Record<string, unknown> = flowDetail(flow);
   let asked = 0;
   return {
-    ...(role === "editor"
+    ...(role === "editor" || role === "publisher"
       ? {
           "GET /api/v1/session": () => json(session(MEMBER)),
-          "GET /api/v1/workspaces/ws1/members": () => json(members("editor")),
+          "GET /api/v1/workspaces/ws1/members": () => json(members(role)),
         }
       : actor(role)),
     ...catalogRoutes(),

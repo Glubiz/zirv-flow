@@ -482,6 +482,8 @@ async fn run_roles_reporting(
         worker_config.export_max_bytes = config.export_max_bytes();
         worker_config.message_retention = config.messages_retention();
         worker_config.decision_retention = config.decisions_retention();
+        worker_config.job_history_days = config.job_history_days();
+        worker_config.audit_days = config.audit_days();
         worker_config.redaction_key = hmac_root
             .as_deref()
             .map(|root| Arc::new(root.hmac_key(zirv_flow_store::HmacPurpose::Redaction)));

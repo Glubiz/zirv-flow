@@ -20,7 +20,7 @@ export function SnippetPage() {
           workspaceId={ws}
           initial={data}
           canWrite={access.canWrite}
-          canAdmin={access.canAdmin}
+          canPublish={access.canPublish}
           onReload={detail.reload}
         />
       )}

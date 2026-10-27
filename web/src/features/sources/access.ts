@@ -7,5 +7,5 @@ export interface SourceAccess {
 
 export function useSourceAccess(workspaceId: string): SourceAccess {
   const access = useWorkspaceAccess(workspaceId);
-  return { canManage: access.status === "ready" && access.data.canManage };
+  return { canManage: access.status === "ready" && access.data.canAdmin };
 }

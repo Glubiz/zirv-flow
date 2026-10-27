@@ -36,7 +36,7 @@ describe("API keys", () => {
     expect(await screen.findByText("No API keys yet")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Create key" }));
 
-    const form = within(screen.getByRole("dialog", { name: "Create an API key" }));
+    const form = within(screen.getByRole("dialog", { name: "New API key" }));
     await user.type(form.getByLabelText("Name"), "Nightly import");
     await user.click(form.getByRole("button", { name: "Create key" }));
 
@@ -54,6 +54,29 @@ describe("API keys", () => {
     expect(post?.headers.get("x-csrf-token")).toBe("csrf-keys");
   });
 
+  it("sends the publish and personal data scopes when they are ticked", async () => {
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER, "csrf-keys")),
+      "GET /api/v1/workspaces/ws1/members": () =>
+        json([{ user_id: OWNER.id, email: OWNER.email, role: "admin", added_at: "2026-10-01T09:00:00Z" }]),
+      "GET /api/v1/workspaces/ws1/api-keys": () => json([]),
+      "POST /api/v1/workspaces/ws1/api-keys": () => json(CREATED, 201),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/api-keys", "/w/:ws/api-keys", <ApiKeysPage />);
+
+    await user.click(await screen.findByRole("button", { name: "Create key" }));
+    const form = within(screen.getByRole("dialog", { name: "New API key" }));
+    await user.type(form.getByLabelText("Name"), "Publisher bot");
+    await user.click(form.getByRole("checkbox", { name: /^Publish/ }));
+    await user.click(form.getByRole("checkbox", { name: /^Personal data/ }));
+    await user.click(form.getByRole("button", { name: "Create key" }));
+
+    await screen.findByRole("dialog", { name: "Copy your new key" });
+    const post = calls.find((call) => call.method === "POST");
+    expect(post?.body).toEqual({ name: "Publisher bot", scopes: ["read", "publish", "pii"] });
+  });
+
   it("keeps focus inside the secret dialog, closes it on Escape and returns focus to the trigger", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
@@ -67,7 +90,7 @@ describe("API keys", () => {
 
     const trigger = await screen.findByRole("button", { name: "Create key" });
     await user.click(trigger);
-    const form = within(screen.getByRole("dialog", { name: "Create an API key" }));
+    const form = within(screen.getByRole("dialog", { name: "New API key" }));
     await user.type(form.getByLabelText("Name"), "Nightly import");
     await user.click(form.getByRole("button", { name: "Create key" }));
 

@@ -1661,7 +1661,12 @@ mod tests {
 
         let result = exchange_code(&ctx, exchange(&url, None, ClientAuth::Body)).await;
 
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Http(
+                crate::http::HttpError::EgressDenied { .. }
+            ))
+        ));
         assert_eq!(idp.mock.hits(), 0, "no request reached the loopback server");
     }
 

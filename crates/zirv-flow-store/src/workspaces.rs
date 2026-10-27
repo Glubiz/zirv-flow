@@ -98,6 +98,8 @@ pub struct Member {
     pub email: String,
     pub role: Role,
     pub view_pii: bool,
+    /// Whether the user is the instance owner.
+    pub is_owner: bool,
     pub created_at: OffsetDateTime,
 }
 
@@ -107,6 +109,7 @@ struct MemberRow {
     email: String,
     role: String,
     view_pii: bool,
+    is_owner: bool,
     created_at: OffsetDateTime,
 }
 
@@ -276,7 +279,7 @@ pub async fn list_members<'e>(
     workspace: WorkspaceId,
 ) -> Result<Vec<Member>, StoreError> {
     let rows: Vec<MemberRow> = sqlx::query_as(
-        "SELECT m.user_id, u.email, m.role, m.view_pii, m.created_at FROM memberships m \
+        "SELECT m.user_id, u.email, m.role, m.view_pii, u.is_owner, m.created_at FROM memberships m \
          JOIN users u ON u.id = m.user_id WHERE m.workspace_id = $1 \
          ORDER BY m.created_at, m.user_id",
     )
@@ -292,6 +295,7 @@ pub async fn list_members<'e>(
                 email: row.email,
                 role: row.role.parse().ok()?,
                 view_pii: row.view_pii,
+                is_owner: row.is_owner,
                 created_at: row.created_at,
             })
         })
