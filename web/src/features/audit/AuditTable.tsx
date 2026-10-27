@@ -18,6 +18,15 @@ export function actorKindLabel(kind: string): string {
   }
 }
 
+function UserIcon() {
+  return (
+    <svg role="img" aria-label="User" className="audit-user-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="5.5" r="2.6" />
+      <path d="M2.8 14c.5-2.6 2.5-4 5.2-4s4.7 1.4 5.2 4" />
+    </svg>
+  );
+}
+
 function Actor({ entry }: { entry: AuditEntry }) {
   const id = entry.actor_id ? (
     <span className="mono" title={entry.actor_id}>
@@ -28,6 +37,13 @@ function Actor({ entry }: { entry: AuditEntry }) {
     return (
       <span className="audit-actor">
         <Pill>API key</Pill> {id}
+      </span>
+    );
+  }
+  if (entry.actor_kind === "user") {
+    return (
+      <span className="audit-actor">
+        <UserIcon /> {id}
       </span>
     );
   }
@@ -61,7 +77,7 @@ export function AuditTable({ entries, selectedId, onSelect }: Props) {
         <tbody>
           {entries.map((entry) => (
             <tr key={entry.id} className={entry.id === selectedId ? "audit-row audit-row-selected" : "audit-row"}>
-              <td>
+              <td className="audit-cell-time">
                 <button
                   type="button"
                   className="audit-open"
@@ -73,14 +89,14 @@ export function AuditTable({ entries, selectedId, onSelect }: Props) {
                 </button>
                 <span className="faint audit-date">{formatDate(entry.occurred_at)}</span>
               </td>
-              <td>
+              <td className="audit-cell-actor">
                 <Actor entry={entry} />
               </td>
-              <td>
+              <td className="audit-cell-action">
                 <span className="audit-label">{actionLabel(entry.action)}</span>
                 <span className="mono faint audit-code">{entry.action}</span>
               </td>
-              <td>
+              <td className="audit-cell-extra">
                 {entry.object_id ? (
                   <>
                     {entry.object_kind && entry.object_kind !== "person" ? `${entry.object_kind} ` : null}
@@ -92,7 +108,7 @@ export function AuditTable({ entries, selectedId, onSelect }: Props) {
                   <span className="faint">None</span>
                 )}
               </td>
-              <td>
+              <td className="audit-cell-extra">
                 {entry.request_id ? (
                   <span className="mono" title={entry.request_id}>
                     {shortId(entry.request_id)}

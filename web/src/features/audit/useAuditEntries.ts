@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { client, unwrap, useResource, type Resource } from "../../api";
 import { queryFromFilters, type AuditEntry, type Filters } from "./model";
@@ -12,6 +12,13 @@ interface Extra {
   base: Page;
   entries: AuditEntry[];
   next: string | null;
+}
+
+/** Whether the load more of the page `base` is running or failed; one that belongs to an older page is ignored. */
+interface Progress {
+  base: Page;
+  loading: boolean;
+  error: unknown;
 }
 
 export interface AuditEntries {
@@ -42,29 +49,35 @@ export function useAuditEntries(workspaceId: string, instance: boolean, filters:
 
   const first = useResource(() => fetchPage(null), [workspaceId, instance, queryKey]);
   const [extra, setExtra] = useState<Extra | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState<unknown>(null);
+  const [progress, setProgress] = useState<Progress | null>(null);
 
   const base = first.status === "ready" ? first.data : null;
+  const current = useRef(base);
+  useEffect(() => {
+    current.current = base;
+  }, [base]);
+  const mine = progress !== null && progress.base === base ? progress : null;
+  const loadingMore = mine?.loading ?? false;
+  const moreError = mine?.error ?? null;
   const more = extra !== null && extra.base === base ? extra : null;
   const next = base ? (more ? more.next : base.next) : null;
 
   const loadMore = useCallback(() => {
     if (base === null || next === null) return;
-    setLoadingMore(true);
-    setMoreError(null);
+    setProgress({ base, loading: true, error: null });
     fetchPage(next).then(
       (page) => {
-        setExtra((current) => ({
+        if (current.current !== base) return;
+        setExtra((held) => ({
           base,
-          entries: [...(current?.base === base ? current.entries : []), ...page.entries],
+          entries: [...(held?.base === base ? held.entries : []), ...page.entries],
           next: page.next,
         }));
-        setLoadingMore(false);
+        setProgress({ base, loading: false, error: null });
       },
       (failure: unknown) => {
-        setMoreError(failure);
-        setLoadingMore(false);
+        if (current.current !== base) return;
+        setProgress({ base, loading: false, error: failure });
       },
     );
   }, [base, next, fetchPage]);

@@ -140,12 +140,23 @@ export interface Change {
   value: string;
 }
 
+const CHANGE_LABELS: Record<string, string> = {
+  view_pii: "Personal data",
+  role: "Role",
+  scopes: "Scopes",
+};
+
+/** The label of a summary key: a known key reads in plain words, any other is derived from the key. */
+export function changeLabel(key: string): string {
+  return CHANGE_LABELS[key] ?? key.replace(/_/g, " ").replace(/^./, (first) => first.toUpperCase());
+}
+
 /** The summary of an entry as key-value rows. */
 export function changesOf(summary: unknown): Change[] {
   if (typeof summary !== "object" || summary === null || Array.isArray(summary)) return [];
   return Object.entries(summary as Record<string, unknown>).map(([key, value]) => ({
     key,
-    label: key.replace(/_/g, " ").replace(/^./, (first) => first.toUpperCase()),
+    label: changeLabel(key),
     value: compact(value),
   }));
 }
@@ -163,12 +174,12 @@ const PAGES: Record<string, string> = {
   sending_domain: "sending-domains",
 };
 
-/** Where an object leads, or none: a person is an opaque id only, and an object that was removed has no page. */
+/** Where an object leads, or none: a person is an opaque id only, and an object that was deleted, removed or erased has no page, while an archived one still does. */
 export function objectHref(workspaceId: string, entry: AuditEntry): string | null {
   const kind = entry.object_kind;
   const id = entry.object_id;
   if (!kind || !id) return null;
-  if (/\.(deleted|removed|archived|erased)$/.test(entry.action)) return null;
+  if (/\.(deleted|removed|erased)$/.test(entry.action)) return null;
   const page = PAGES[kind];
   return page ? `/w/${workspaceId}/${page}/${id}` : null;
 }

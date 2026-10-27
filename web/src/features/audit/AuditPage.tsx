@@ -103,7 +103,7 @@ function AuditContent({ ws }: { ws: string }) {
           <AuditFilters
             key={params.toString()}
             applied={filters}
-            catalogue={catalogue.status === "ready" ? catalogue.data : null}
+            catalogue={catalogue}
             onApply={apply}
           />
           <Panel flush>

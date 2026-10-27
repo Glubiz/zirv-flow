@@ -4696,9 +4696,20 @@ main:focus {
 }
 
 .audit-side {
-  flex: 1 1 320px;
-  max-width: 400px;
+  position: fixed;
+  z-index: 90;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  width: min(420px, 100vw);
+}
+
+.audit-side > .sheet {
+  flex: 1;
   min-width: 0;
+  border-radius: 0;
+  border-width: 0 0 0 1px;
 }
 
 .audit-filters {
@@ -4710,6 +4721,63 @@ main:focus {
 
 .audit-filter-actions {
   display: flex;
+  gap: 8px;
+}
+
+.audit-filters-toggle {
+  display: none;
+}
+
+.audit-actor-field {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.audit-actor-row {
+  display: flex;
+  gap: 8px;
+}
+
+.audit-actor-row > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.audit-action-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.audit-more {
+  grid-column: 1 / -1;
+}
+
+.audit-more summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--ink-2);
+}
+
+.audit-more-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px 16px;
+  margin-top: 12px;
+}
+
+.audit-user-icon {
+  vertical-align: -3px;
+  color: var(--ink-2);
+}
+
+.audit-filter-wrap {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
@@ -4787,4 +4855,72 @@ main:focus {
 .audit-sheet-foot {
   display: flex;
   margin-top: auto;
+}
+
+@media (max-width: 640px) {
+  .audit-filters-toggle {
+    display: inline-flex;
+    align-self: flex-start;
+  }
+
+  .audit-filters-folded {
+    display: none;
+  }
+
+  .audit-table,
+  .audit-table tbody,
+  .audit-table tr,
+  .audit-table td {
+    display: block;
+  }
+
+  .audit-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .audit-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .audit-table tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .audit-table td {
+    min-width: 0;
+    padding: 0;
+    border-top: 0;
+  }
+
+  .audit-cell-actor {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: right;
+  }
+
+  .audit-cell-action {
+    grid-column: 1 / -1;
+    overflow-wrap: break-word;
+  }
+
+  .audit-table .audit-cell-extra {
+    display: none;
+  }
+
+  .audit-date {
+    display: inline;
+    margin-left: 8px;
+  }
+
+  .audit-side {
+    width: 100vw;
+  }
 }

@@ -186,6 +186,151 @@ describe("audit log", () => {
     expect(within(sheet).queryByRole("link", { name: "Open trace" })).not.toBeInTheDocument();
   });
 
+  it("ignores a late Load more of an older filter: the new one stays disabled until it resolves and nothing is appended twice", async () => {
+    let releaseA: () => void = () => undefined;
+    let releaseB: () => void = () => undefined;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const gateB = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    mockApi(
+      routes({
+        "GET /api/v1/workspaces/ws1/audit": async (request) => {
+          const params = new URL(request.url).searchParams;
+          const filtered = params.get("action") === "flow.created";
+          const cursor = params.get("cursor");
+          if (!filtered) {
+            if (cursor === null) return json({ entries: [entry(10)], next_cursor: "a2" });
+            await gateA;
+            return json({ entries: [entry(11, { action: "session.signed_in" })], next_cursor: null });
+          }
+          if (cursor === null) return json({ entries: [entry(20, { action: "flow.created" })], next_cursor: "b2" });
+          await gateB;
+          return json({ entries: [entry(21, { action: "flow.published" })], next_cursor: null });
+        },
+      }),
+    );
+    page();
+    const user = userEvent.setup();
+
+    await screen.findByText("Membership set");
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await screen.findByRole("button", { name: "Loading" });
+
+    await waitFor(() => expect(within(screen.getByLabelText("Action")).getByRole("option", { name: "Flow created (flow.created)" })).toBeInTheDocument());
+    await user.selectOptions(screen.getByLabelText("Action"), "flow.created");
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    await screen.findByText("Flow created");
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    expect(screen.getByRole("button", { name: "Loading" })).toBeDisabled();
+
+    releaseA();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole("button", { name: "Loading" })).toBeDisabled();
+    expect(screen.queryByText("Session signed in")).not.toBeInTheDocument();
+
+    releaseB();
+    expect(await screen.findByText("Flow published")).toBeInTheDocument();
+    expect(screen.getAllByText("Flow published")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Session signed in")).not.toBeInTheDocument();
+  });
+
+  it("shows a failed action catalogue in the Action field and a retry that loads it", async () => {
+    let fail = true;
+    mockApi(
+      routes({
+        "GET /api/v1/workspaces/ws1/audit": () => json({ entries: [entry(1)], next_cursor: null }),
+        "GET /api/v1/workspaces/ws1/audit/actions": () => (fail ? problem(500, "Server error", "No actions today", "t-2") : json(CATALOGUE)),
+      }),
+    );
+    page();
+
+    expect(await screen.findByText("No actions today")).toBeInTheDocument();
+    fail = false;
+    await userEvent.click(screen.getByRole("button", { name: "Retry actions" }));
+    await waitFor(() => expect(within(screen.getByLabelText("Action")).getByRole("option", { name: "Any flow action" })).toBeInTheDocument());
+    expect(screen.queryByText("No actions today")).not.toBeInTheDocument();
+  });
+
+  it("says in the Action field that the catalogue is loading, and that it is empty", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mockApi(
+      routes({
+        "GET /api/v1/workspaces/ws1/audit": () => json({ entries: [entry(1)], next_cursor: null }),
+        "GET /api/v1/workspaces/ws1/audit/actions": async () => {
+          await gate;
+          return json({ areas: [] });
+        },
+      }),
+    );
+    page();
+
+    expect(await screen.findByText("Loading the actions")).toBeInTheDocument();
+    expect(screen.getByLabelText("Action")).toBeDisabled();
+    release();
+    expect(await screen.findByText("No actions are recorded yet")).toBeInTheDocument();
+  });
+
+  it("keeps the bar to Action, Actor, Object, From, To and Apply, with the rest behind More filters", async () => {
+    mockApi(routes({ "GET /api/v1/workspaces/ws1/audit": () => json({ entries: [entry(1)], next_cursor: null }) }));
+    page();
+    await screen.findByText("Membership set");
+
+    const form = screen.getByRole("form", { name: "Filter the audit log" });
+    expect(within(form).queryByLabelText("Actor id")).not.toBeInTheDocument();
+    await userEvent.selectOptions(within(form).getByLabelText("Actor kind"), "user");
+    expect(within(form).getByLabelText("Actor id")).toBeInTheDocument();
+    const more = form.querySelector("details");
+    expect(more).not.toBeNull();
+    expect(within(more as HTMLElement).getByText("More filters")).toBeInTheDocument();
+    expect(within(more as HTMLElement).getByLabelText("Object kind")).toBeInTheDocument();
+    expect(within(more as HTMLElement).getByLabelText("Request id")).toBeInTheDocument();
+    expect(form.querySelector(".audit-more")?.contains(within(form).getByLabelText("Object id"))).toBe(false);
+    expect(screen.getByRole("button", { name: "Filters" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("shows a user actor as the user icon and links an archived flow", async () => {
+    mockApi(
+      routes({
+        "GET /api/v1/workspaces/ws1/audit": () =>
+          json({ entries: [entry(1, { action: "flow.archived", object_kind: "flow", object_id: "flow-1" })], next_cursor: null }),
+      }),
+    );
+    page();
+
+    const table = await screen.findByRole("table");
+    expect(within(table).getByRole("img", { name: "User" })).toBeInTheDocument();
+    expect(within(table).queryByText("User")).not.toBeInTheDocument();
+    await userEvent.click(within(table).getByRole("button", { name: "Open entry flow.archived" }));
+    const sheet = await screen.findByRole("dialog", { name: "Flow archived" });
+    expect(within(sheet).getByRole("link", { name: "flow-1" })).toHaveAttribute("href", "/w/ws1/flows/flow-1");
+  });
+
+  it("closes the entry sheet with Escape and with its button, and returns focus to the row", async () => {
+    mockApi(routes({ "GET /api/v1/workspaces/ws1/audit": () => json({ entries: [entry(1)], next_cursor: null }) }));
+    page();
+    const user = userEvent.setup();
+
+    const row = await screen.findByRole("button", { name: "Open entry membership.set" });
+    await user.click(row);
+    const sheet = await screen.findByRole("dialog", { name: "Membership set" });
+    expect(sheet).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(row).toHaveFocus();
+
+    await user.click(row);
+    await user.click(await screen.findByRole("button", { name: "Close entry" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(row).toHaveFocus();
+  });
+
   it("shows a loading state, then the empty state", async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {

@@ -41,4 +41,17 @@ describe("audit model", () => {
     expect(objectHref("w", { ...base, object_kind: "person", object_id: "p1" })).toBeNull();
     expect(objectHref("w", { ...base, action: "flow.deleted", object_kind: "flow", object_id: "f1" })).toBeNull();
   });
+
+  it("links an archived object, which still has a page", () => {
+    const entry = { id: 1, action: "flow.archived", actor_kind: "user", occurred_at: "", summary: {}, object_kind: "flow", object_id: "f1" };
+    expect(objectHref("w", entry)).toBe("/w/w/flows/f1");
+  });
+
+  it("reads known summary keys in plain words and derives the label of an unknown one", () => {
+    expect(changesOf({ view_pii: true, role: "admin", odd_key: 1 }).map((change) => change.label)).toEqual([
+      "Personal data",
+      "Role",
+      "Odd key",
+    ]);
+  });
 });
