@@ -3461,6 +3461,64 @@ main:focus {
   text-align: right;
 }
 
+.be-snippet {
+  border-style: dashed;
+  background: transparent;
+}
+
+.be-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.be-footer {
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.be-footer-off {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.be-lock {
+  display: inline-flex;
+  padding: 0 6px;
+  color: var(--ink-2);
+}
+
+.be-more {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.be-more > summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.be-more[open] > summary {
+  margin-bottom: 8px;
+}
+
+.tp-hidden {
+  margin: 0;
+}
+
+.tp-hidden .link-button {
+  margin-left: 8px;
+}
+
 /* Template library tabs */
 .library-nav {
   align-self: flex-start;
@@ -3712,6 +3770,429 @@ main:focus {
   outline: 2px dashed var(--night);
   outline-offset: 4px;
   border-radius: var(--radius-control);
+}
+
+/* Menu entries that cannot be chosen, with the reason under them */
+.menu-item[aria-disabled="true"] {
+  color: var(--ink-3);
+  cursor: not-allowed;
+}
+
+.menu-item[aria-disabled="true"]:hover {
+  background: transparent;
+}
+
+.menu-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.menu-reason {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+/* Themes: the list of cards and the editor */
+.th-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.th-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.th-card-thumb {
+  display: block;
+  padding: 16px;
+  background: var(--paper-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.th-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 12px 16px;
+}
+
+.th-card-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.th-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.th-more {
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+}
+
+.th-thumb-page {
+  height: 150px;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.th-thumb-heading {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.th-thumb-text {
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.th-thumb-button {
+  align-self: center;
+  margin-top: auto;
+  padding: 6px 12px;
+  font-size: 11px;
+}
+
+.th-split {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.th-split > .stack {
+  flex: 999 1 480px;
+  min-width: 0;
+}
+
+.th-settings {
+  flex: 1 1 360px;
+  max-width: 440px;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.th-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.th-section:first-child {
+  border-top: 0;
+}
+
+.th-h {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.th-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.th-colour-cell {
+  display: contents;
+}
+
+.th-colour {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.th-colour .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.th-swatch {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--ink-3);
+  border-radius: 6px;
+}
+
+.th-warn {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--attention-ink, #8a4b00);
+}
+
+.th-warn-pill {
+  cursor: pointer;
+  font: inherit;
+}
+
+.th-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 150px;
+  height: 44px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.th-logo img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.th-preview-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.th-version {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.th-version > * {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.th-tokens {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+
+.th-token dd {
+  margin: 0;
+}
+
+/* Template library: the toolbar, the cards and the new template dialog */
+.tl-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+.tl-search {
+  flex: 1 1 240px;
+  max-width: 340px;
+}
+
+.tl-select {
+  width: auto;
+}
+
+.tl-end {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.tl-count {
+  margin-left: 6px;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.tl-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(256px, 1fr));
+  gap: 16px;
+}
+
+.tl-card {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+
+.tl-thumb {
+  height: 160px;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  padding-top: 16px;
+  overflow: hidden;
+  background: var(--paper-3);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-panel) var(--radius-panel) 0 0;
+}
+
+.tl-thumb-paper {
+  width: 64%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 12px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-radius: 4px 4px 0 0;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+}
+
+.tl-thumb-hook {
+  background: var(--paper-3);
+}
+
+.tl-thumb-code {
+  width: 76%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 14px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 6px 6px 0 0;
+  background: var(--night);
+}
+
+.tl-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  padding: 12px 8px 14px 14px;
+}
+
+.tl-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.tl-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.tl-name {
+  font-weight: 700;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.tl-name:hover {
+  text-decoration: underline;
+}
+
+.tl-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tl-foot {
+  margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+}
+
+.tl-chans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 8px;
+}
+
+.tl-chan {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-height: 64px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tl-chan[aria-pressed="true"] {
+  border-color: var(--night);
+  box-shadow: 0 0 0 1px var(--night);
+}
+
+.tl-chan:disabled {
+  cursor: not-allowed;
+  color: var(--ink-3);
+  background: var(--paper);
+}
+
+.tl-chan:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.tl-start {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.tl-picks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 /* Templates: the Review and publish page */

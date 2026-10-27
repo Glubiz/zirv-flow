@@ -17,7 +17,7 @@ function Gate({ children }: { children: React.ReactNode }) {
   return state.status === "signed-in" ? <>{children}</> : <p>Waiting</p>;
 }
 
-function mount(props: { themeLogo?: boolean; role?: "admin" | "member" | null; list?: unknown } = {}) {
+function mount(props: { themeLogo?: boolean; allowUrl?: boolean; role?: "admin" | "member" | null; list?: unknown } = {}) {
   const role = props.role === undefined ? "member" : props.role;
   const user = role === "admin" ? OWNER : MEMBER;
   mockApi({
@@ -33,7 +33,7 @@ function mount(props: { themeLogo?: boolean; role?: "admin" | "member" | null; l
       <SessionProvider>
         <Gate>
           <Routes>
-            <Route path="/w/:ws/x" element={<AssetPicker open onPick={onPick} onClose={onClose} themeLogo={props.themeLogo} />} />
+            <Route path="/w/:ws/x" element={<AssetPicker open onPick={onPick} onClose={onClose} themeLogo={props.themeLogo} allowUrl={props.allowUrl} />} />
           </Routes>
         </Gate>
       </SessionProvider>
@@ -52,6 +52,13 @@ afterEach(() => {
 });
 
 describe("the asset picker", () => {
+  it("hides the web address option when only a library image will do", async () => {
+    mount({ allowUrl: false });
+
+    await screen.findByRole("radio", { name: /banner.jpg/ });
+    expect(screen.queryByRole("button", { name: "Use a web address" })).not.toBeInTheDocument();
+  });
+
   it("returns the chosen image's id and address", async () => {
     const { onPick } = mount();
     const user = userEvent.setup();

@@ -9,9 +9,7 @@ export function themeChoice(document: unknown): ThemeChoice {
   if (doc.kind !== "blocks") return { kind: "none" };
   const theme = doc.content.theme;
   if (theme === "none") return { kind: "none" };
-  if (typeof theme === "object" && theme !== null && typeof (theme as { id?: unknown }).id === "string") {
-    return { kind: "named", id: (theme as { id: string }).id };
-  }
+  if (typeof theme === "object") return { kind: "named", id: theme.id };
   return { kind: "default" };
 }
 

@@ -15,6 +15,7 @@ pub(crate) mod runtime;
 pub(crate) mod schema;
 pub(crate) mod segment_context;
 pub(crate) mod settings;
+pub(crate) mod template_context;
 pub(crate) mod tools;
 
 #[cfg(test)]

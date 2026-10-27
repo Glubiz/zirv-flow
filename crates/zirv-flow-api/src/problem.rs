@@ -49,7 +49,29 @@ pub struct Problem {
     /// The themes whose published version uses a snippet as its footer (`snippet_in_use`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snippet_themes: Option<Vec<SegmentRefProblem>>,
+    /// The live templates a snippet or theme version would stop from sending
+    /// (`snippet_breaks_templates`, `theme_breaks_templates`), at most 20.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub templates: Option<Vec<BrokenTemplateProblem>>,
+    /// How many templates `templates` is the first of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u32>,
+    /// The active flows whose running version sends a template (`template_in_use`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flows: Option<Vec<FlowRefProblem>>,
 }
+
+/// A live template that a new snippet or theme version would stop from sending.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct BrokenTemplateProblem {
+    pub id: uuid::Uuid,
+    pub name: String,
+    /// The codes of its blocking issues with the new version.
+    pub codes: Vec<String>,
+}
+
+/// The most templates a problem lists.
+const MAX_LISTED_TEMPLATES: usize = 20;
 
 /// One issue of a flow.
 #[derive(Clone, Debug, Serialize, ToSchema)]
@@ -82,6 +104,13 @@ pub struct TemplateIssueProblem {
     /// A short explanation for a problem the code alone does not explain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// A flow named in a problem.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FlowRefProblem {
+    pub flow_id: uuid::Uuid,
+    pub flow_name: String,
 }
 
 /// One issue of a segment definition.
@@ -125,6 +154,10 @@ struct SegmentExtra {
     snippet_templates: Option<Vec<SegmentRefProblem>>,
     /// The themes that use a snippet as their footer (`snippet_in_use`).
     snippet_themes: Option<Vec<SegmentRefProblem>>,
+    /// The templates a new snippet or theme version would break, and how many there are.
+    templates: Option<(Vec<BrokenTemplateProblem>, u32)>,
+    /// The active flows that send a template (`template_in_use`).
+    flows: Option<Vec<FlowRefProblem>>,
 }
 
 /// An error that renders as `application/problem+json`.
@@ -677,6 +710,25 @@ impl ApiError {
         }
     }
 
+    /// A template document too large to send to the model.
+    pub(crate) fn ai_template_too_large() -> Self {
+        Self {
+            code: Some("ai_template_too_large"),
+            ..Self::unprocessable(
+                "this template is too large to send to the assistant (more than 96 KiB); \
+                 shorten it first",
+            )
+        }
+    }
+
+    /// A template or a task the assistant does not draft.
+    pub(crate) fn ai_template_unsupported(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("ai_template_unsupported"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
     /// A flow too large to send to the model with its personal literals masked.
     pub(crate) fn ai_flow_too_large() -> Self {
         Self {
@@ -807,6 +859,18 @@ impl ApiError {
         }
     }
 
+    /// Accepting an assistant draft of a template whose draft was saved, or already replaced by
+    /// this very draft, since the assistant's draft was made.
+    pub(crate) fn template_draft_changed_since_assistant_draft() -> Self {
+        Self {
+            code: Some("template_draft_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "The template draft changed after this draft was made; ask the assistant again.",
+            )
+        }
+    }
+
     /// A save or publish of the consent policy that names a draft revision other than the current
     /// one: the draft was saved by someone else since the caller read it.
     pub(crate) fn consent_policy_revision_mismatch() -> Self {
@@ -870,6 +934,36 @@ impl ApiError {
                 ..SegmentExtra::default()
             })),
             ..Self::unprocessable("the snippet is not valid")
+        }
+    }
+
+    /// A snippet version that would stop live templates from sending.
+    pub(crate) fn snippet_breaks_templates(broken: Vec<BrokenTemplateProblem>) -> Self {
+        Self::breaks_templates("snippet_breaks_templates", "snippet", broken)
+    }
+
+    /// A theme version that would stop live templates from sending.
+    pub(crate) fn theme_breaks_templates(broken: Vec<BrokenTemplateProblem>) -> Self {
+        Self::breaks_templates("theme_breaks_templates", "theme", broken)
+    }
+
+    fn breaks_templates(
+        code: &'static str,
+        subject: &str,
+        mut broken: Vec<BrokenTemplateProblem>,
+    ) -> Self {
+        let total = u32::try_from(broken.len()).unwrap_or(u32::MAX);
+        broken.truncate(MAX_LISTED_TEMPLATES);
+        Self {
+            code: Some(code),
+            segment: Some(Box::new(SegmentExtra {
+                templates: Some((broken, total)),
+                ..SegmentExtra::default()
+            })),
+            ..Self::unprocessable(format!(
+                "This {subject} version would stop {total} live templates from sending; fix \
+                 them or the version first."
+            ))
         }
     }
 
@@ -999,6 +1093,21 @@ impl ApiError {
         Self {
             code: Some("theme_not_publishable_default"),
             ..Self::new(StatusCode::CONFLICT, detail)
+        }
+    }
+
+    /// An archive of a template that active flows still send, with those flows.
+    pub(crate) fn template_in_use(flows: Vec<FlowRefProblem>) -> Self {
+        Self {
+            code: Some("template_in_use"),
+            segment: Some(Box::new(SegmentExtra {
+                flows: Some(flows),
+                ..SegmentExtra::default()
+            })),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "active flows still send the template; remove it from them first",
+            )
         }
     }
 
@@ -1142,6 +1251,10 @@ impl From<crate::admin::AdminError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(mut self) -> Response {
+        let templates = self
+            .segment
+            .as_mut()
+            .and_then(|extra| extra.templates.take());
         let problem = Problem {
             kind: "about:blank".into(),
             title: self.status.canonical_reason().unwrap_or("Error").into(),
@@ -1169,6 +1282,9 @@ impl IntoResponse for ApiError {
                 .segment
                 .as_mut()
                 .and_then(|extra| extra.snippet_themes.take()),
+            total: templates.as_ref().map(|(_, total)| *total),
+            templates: templates.map(|(listed, _)| listed),
+            flows: self.segment.as_mut().and_then(|extra| extra.flows.take()),
         };
         let body = serde_json::to_vec(&problem).unwrap_or_default();
         let mut response = (
@@ -1193,6 +1309,43 @@ pub(crate) async fn method_not_allowed() -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_breaks_templates_problem_lists_twenty_and_counts_all() {
+        let broken: Vec<BrokenTemplateProblem> = (0..25)
+            .map(|n| BrokenTemplateProblem {
+                id: uuid::Uuid::from_u128(n),
+                name: format!("Template {n}"),
+                codes: vec!["missing_unsubscribe".to_owned()],
+            })
+            .collect();
+
+        let error = ApiError::snippet_breaks_templates(broken);
+
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.code, Some("snippet_breaks_templates"));
+        assert!(error.detail.contains("25 live templates"));
+        let (listed, total) = error.segment.and_then(|extra| extra.templates).unwrap();
+        assert_eq!((listed.len(), total), (20, 25));
+        assert_eq!(listed[19].name, "Template 19");
+    }
+
+    #[test]
+    fn a_template_in_use_is_a_409_that_lists_the_flows() {
+        let flow = uuid::Uuid::nil();
+        let error = ApiError::template_in_use(vec![FlowRefProblem {
+            flow_id: flow,
+            flow_name: "Welcome".into(),
+        }]);
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code(), Some("template_in_use"));
+        let flows = error
+            .segment
+            .as_ref()
+            .and_then(|extra| extra.flows.as_ref());
+        assert_eq!(flows.map(Vec::len), Some(1));
+    }
 
     #[test]
     fn the_standard_errors_carry_the_expected_status() {

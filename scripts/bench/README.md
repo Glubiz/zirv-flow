@@ -12,6 +12,7 @@ tools here only measure; the results, the environment and the pass or miss calls
 | `bench-no-decisions` | cargo feature of `zirv-flow-store`: decision appends become no-ops (benchmark builds only) |
 | `scripts/bench/oq1/` | the OQ-1 trait storage benchmark (SQL and `run.sh`) |
 | `sendbench` (in `tools/loadgen`), `scripts/bench/m6/` | the send-throughput benchmark (section 11) |
+| `tools/renderbench`, `scripts/bench/m7/render.sh` | the render benchmark through the real render pool, no database (section 12) |
 
 Not reference hardware: record the CPU, RAM, disk, OS, Docker resources and `SHOW ALL` of the
 PostgreSQL that served the run with every result, and say the targets are re-checked on reference
@@ -385,3 +386,21 @@ by address) and prints, one line each, `Target`, `Result` and `Verdict`, then de
 Results are in `$M6_OUT/<label>/`. Run the light variants first (a few thousand people), then the
 full set, and report them in `docs/benchmarks/m6-send.md` with the hardware and PostgreSQL settings
 (`$M4_OUT/stack.txt` from `stack.sh up`).
+
+## 12. Render benchmark (M7, issue #317)
+
+`tools/renderbench` renders a typical block email (about 20 blocks, a theme with a footer snippet and a
+logo, one snippet block, an asset image, three pre-evaluated conditions) through the real render pool
+(`RenderPool::render_email_with`) with as many calls in flight as children, and times each call end to
+end. It runs pool size 1 and the production default (`render.pool_size`, 2), 200 warm-up renders and
+5000 measured per run (the warm-up is not in the percentiles), then the same render in-process. The
+children are the tool's own executable run as `render-host`. It needs no database and no Docker, and
+it is a separate tool, not a `loadgen` mode, because `loadgen` links no zirv-flow crate.
+
+```sh
+RENDER_BENCH_CONSTRAINT="session pinned to the 16 E-core threads (mask 0xFFFF0000)" \
+  scripts/bench/m7/render.sh          # release build; writes docs/benchmarks/data/m7/render.json
+```
+
+The report is `docs/benchmarks/m7-render.md`. The smoke run (20 renders, the pool, a report) is a unit
+test of the tool and runs in the normal test job.

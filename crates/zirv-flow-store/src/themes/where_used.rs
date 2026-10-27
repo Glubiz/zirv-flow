@@ -8,13 +8,16 @@
 //! or absent; stored schema 1 content migrates to `"none"`, and code-mode content has no theme,
 //! so neither follows.
 
+use std::collections::BTreeMap;
+
+use hashbrown::HashMap;
 use sqlx::prelude::FromRow;
-use sqlx::{PgConnection, PgExecutor};
+use sqlx::{Acquire, PgConnection, PgExecutor, Postgres};
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
 use crate::StoreError;
-use crate::templates::{TemplateFlowUse, active_flows_using};
+use crate::templates::{LiveTemplate, TemplateFlowUse, active_flows_using};
 
 /// Whether the block document in `$doc` follows the workspace default theme.
 macro_rules! follows_default {
@@ -35,10 +38,19 @@ macro_rules! follows_default {
     };
 }
 
+pub(crate) use follows_default;
+
 /// Whether the document in `$doc` names the theme in `$2`.
 macro_rules! names_theme {
     ($doc:literal) => {
         concat!($doc, " #>> '{blocks,theme,id}' = $2")
+    };
+}
+
+/// The theme the document in `$doc` names, or null when it names none.
+macro_rules! named_theme {
+    ($doc:literal) => {
+        concat!($doc, " #>> '{blocks,theme,id}'")
     };
 }
 
@@ -159,6 +171,85 @@ pub async fn theme_where_used(
         default_templates,
         active_flows,
     })
+}
+
+/// The templates, not archived, whose current published version renders with the theme: those
+/// that name it, and those that follow the default while it is the default. By template id.
+pub async fn theme_live_templates(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    theme: Uuid,
+) -> Result<Vec<LiveTemplate>, StoreError> {
+    let used = theme_where_used(connection, workspace, theme).await?;
+    let live: BTreeMap<Uuid, String> = used
+        .named_templates
+        .into_iter()
+        .chain(used.default_templates)
+        .filter(|template| template.in_current)
+        .map(|template| (template.id, template.name))
+        .collect();
+    Ok(live
+        .into_iter()
+        .map(|(id, name)| LiveTemplate { id, name })
+        .collect())
+}
+
+/// How many templates of the workspace, not archived, use each theme, by the rule of
+/// [`theme_where_used`]: they name it in their draft or current version, and, for the default
+/// theme only, they follow the default. A theme no template uses is absent. A fixed number of
+/// reads, not one per theme.
+pub async fn theme_template_counts<'e, A>(
+    executor: A,
+    workspace: WorkspaceId,
+) -> Result<HashMap<Uuid, i64>, StoreError>
+where
+    A: Acquire<'e, Database = Postgres>,
+{
+    let mut connection = executor.acquire().await.map_err(StoreError::query)?;
+    let rows: Vec<(String, i64)> = sqlx::query_as(concat!(
+        "SELECT theme, count(*) FROM ( \
+            SELECT d.template_id, ",
+        named_theme!("d.document"),
+        " AS theme FROM template_drafts d JOIN templates t ON t.id = d.template_id \
+              WHERE t.workspace_id = $1 AND t.archived_at IS NULL \
+            UNION \
+            SELECT v.template_id, ",
+        named_theme!("v.document"),
+        " AS theme FROM template_versions v JOIN templates t ON t.id = v.template_id \
+              AND v.version = t.current_version \
+              WHERE t.workspace_id = $1 AND t.archived_at IS NULL \
+         ) held WHERE theme IS NOT NULL GROUP BY theme"
+    ))
+    .bind(workspace.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let mut counts: HashMap<Uuid, i64> = rows
+        .into_iter()
+        .filter_map(|(theme, count)| Some((theme.parse().ok()?, count)))
+        .collect();
+    let default: Option<Uuid> =
+        sqlx::query_scalar("SELECT theme_id FROM workspace_default_theme WHERE workspace_id = $1")
+            .bind(workspace.as_uuid())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::query)?;
+    if let Some(default) = default {
+        let mut users: hashbrown::HashSet<Uuid> =
+            named_templates(&mut *connection, workspace, default)
+                .await?
+                .into_iter()
+                .map(|template| template.id)
+                .collect();
+        users.extend(
+            default_following_templates(&mut *connection, workspace)
+                .await?
+                .into_iter()
+                .map(|template| template.id),
+        );
+        counts.insert(default, i64::try_from(users.len()).unwrap_or(i64::MAX));
+    }
+    Ok(counts)
 }
 
 #[cfg(test)]
@@ -327,6 +418,59 @@ mod tests {
 
         let ids: Vec<Uuid> = found.active_flows.iter().map(|f| f.flow_id).collect();
         assert_eq!(ids, running);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_counts_match_the_where_used_lists(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        let brand = create(&pool, ws, "Brand").await;
+        let other = create(&pool, ws, "Other").await;
+        let unused = create(&pool, ws, "Unused").await;
+        publish(&pool, ws, brand.id).await;
+        set_default_theme(&mut pool.acquire().await.unwrap(), ws, brand.id)
+            .await
+            .unwrap();
+        let named = create_template(&pool, ws, "Named").await;
+        let follows = create_template(&pool, ws, "Follows").await;
+        let both = create_template(&pool, ws, "Both").await;
+        let elsewhere = create_template(&pool, ws, "Elsewhere").await;
+        let gone = create_template(&pool, ws, "Gone").await;
+        set_draft(&pool, ws, named.id, &blocks(json!({"id": brand.id}))).await;
+        set_draft(&pool, ws, follows.id, &blocks(json!("default"))).await;
+        set_draft(&pool, ws, both.id, &blocks(json!({"id": brand.id}))).await;
+        sqlx::query(
+            "INSERT INTO template_versions (workspace_id, template_id, version, document, \
+                validation, trace_id) \
+             SELECT workspace_id, template_id, 1, $2, '[]'::jsonb, gen_random_uuid() \
+             FROM template_drafts WHERE template_id = $1",
+        )
+        .bind(both.id)
+        .bind(blocks(json!("default")))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+            .bind(both.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_draft(&pool, ws, elsewhere.id, &blocks(json!({"id": other.id}))).await;
+        set_draft(&pool, ws, gone.id, &blocks(json!({"id": other.id}))).await;
+        let mut connection = pool.acquire().await.unwrap();
+        archive_template(&mut connection, ws, gone.id)
+            .await
+            .unwrap();
+        drop(connection);
+
+        let counts = theme_template_counts(&pool, ws).await.unwrap();
+
+        assert_eq!(counts.get(&brand.id), Some(&3));
+        assert_eq!(counts.get(&other.id), Some(&1));
+        assert_eq!(counts.get(&unused.id), None);
+        let listed = used(&pool, ws, brand.id).await;
+        assert_eq!(names(&listed.named_templates), ["Both", "Named"]);
+        assert_eq!(names(&listed.default_templates), ["Both", "Follows"]);
     }
 
     #[sqlx::test]

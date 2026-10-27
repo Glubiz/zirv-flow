@@ -15,6 +15,7 @@ use zirv_flow_store::DraftKind;
 
 use super::flow_context::{FLOW_INSTRUCTIONS, FLOW_REFERENCE};
 use super::segment_context::{SEGMENT_INSTRUCTIONS, SEGMENT_REFERENCE};
+use super::template_context::{TEMPLATE_INSTRUCTIONS, TEMPLATE_REFERENCE};
 
 /// The most output tokens a draft may take, for both kinds.
 pub(crate) const MAX_OUTPUT_TOKENS: u32 = 4096;
@@ -412,6 +413,9 @@ pub(crate) fn build_request(
             .system(Content::Instruction(FLOW_INSTRUCTIONS.into()))?
             .system(Content::Instruction(FLOW_REFERENCE.into()))?
             .system(Content::Instruction(SEGMENT_REFERENCE.into()))?,
+        DraftKind::Template => builder
+            .system(Content::Instruction(TEMPLATE_INSTRUCTIONS.into()))?
+            .system(Content::Instruction(TEMPLATE_REFERENCE.into()))?,
     };
     let mut message = context;
     message.push(Content::Schema(format!("The request:\n{prompt}")));

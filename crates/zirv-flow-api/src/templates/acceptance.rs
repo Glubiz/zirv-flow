@@ -349,7 +349,7 @@ mod tests {
                 .lead(
                     "POST",
                     "",
-                    Some(json!({"name": name, "channel": "email", "document": document})),
+                    Some(json!({"name": name, "channel": document["channel"].clone(), "document": document})),
                 )
                 .await;
             assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
@@ -2745,6 +2745,393 @@ mod tests {
                 .iter()
                 .all(|(_, summary)| !summary.contains("Secret"))
         );
+    }
+
+    /// Publishes a flow whose graph sends `template` and returns its id.
+    async fn publish_flow_sending(f: &Fixture, template: &str, name: &str) -> Uuid {
+        let flow = Uuid::now_v7();
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "send", "type": "action.send", "template": template},
+            {"id": "end", "type": "exit"}], "edges": []});
+        let settings = json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}});
+        let mut connection = f.pool.acquire().await.unwrap();
+        zirv_flow_store::create_flow(
+            &mut connection,
+            f.ws,
+            &zirv_flow_store::NewFlow {
+                id: flow,
+                name: name.into(),
+                graph,
+                settings,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+        let mut tx = zirv_flow_store::begin(&f.pool).await.unwrap();
+        let locked = zirv_flow_store::lock_flow(&mut tx, f.ws, flow)
+            .await
+            .unwrap();
+        zirv_flow_store::publish_flow(
+            &mut tx,
+            &zirv_flow_store::Clock::default(),
+            f.ws,
+            &locked,
+            None,
+            &zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("t")),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        flow
+    }
+
+    fn names_of(reply: &Reply) -> Vec<String> {
+        reply
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn no_sender_doc() -> Value {
+        let mut doc = email_doc("Hi", "x");
+        doc["email"]["sender"] = json!("");
+        doc
+    }
+
+    async fn stored_checks(pool: &PgPool, id: &str) -> Option<Value> {
+        sqlx::query_scalar("SELECT checks FROM template_drafts WHERE template_id = $1")
+            .bind(id.parse::<Uuid>().unwrap())
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_list_filters_sorts_and_hides_archived_templates_by_default(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let live = f.create("Live one", email_doc("Hi", "x")).await;
+        let changed = f.create("Changed", email_doc("Hi", "x")).await;
+        f.create("Fresh", email_doc("Spring", "x")).await;
+        f.create("Hook", webhook_doc("{}")).await;
+        let gone = f.create("Gone", email_doc("Hi", "x")).await;
+        for id in [&live, &changed] {
+            let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+            assert_eq!(
+                published.status,
+                StatusCode::CREATED,
+                "{:?}",
+                published.body
+            );
+        }
+        f.put_draft(&changed, email_doc("Hi", "edited")).await;
+        f.lead("DELETE", &format!("/{gone}"), None).await;
+        let names = |tail: &'static str| {
+            let f = &f;
+            async move { names_of(&f.lead("GET", tail, None).await) }
+        };
+
+        assert_eq!(
+            names("?sort=name").await,
+            ["Changed", "Fresh", "Hook", "Live one"]
+        );
+        assert_eq!(names("?status=live").await, ["Live one"]);
+        assert_eq!(names("?status=changes").await, ["Changed"]);
+        assert_eq!(names("?status=draft&sort=name").await, ["Fresh", "Hook"]);
+        assert_eq!(names("?status=archived").await, ["Gone"]);
+        assert_eq!(names("?archived=true").await.len(), 5);
+        assert_eq!(names("?channel=webhook").await, ["Hook"]);
+        assert_eq!(names("?q=spring").await, ["Fresh"]);
+        assert_eq!(names("?q=LIVE").await, ["Live one"]);
+        assert_eq!(names("?theme=none&channel=webhook").await, ["Hook"]);
+        assert!(names("?theme=default").await.is_empty());
+        assert_eq!(names("").await[0], "Changed");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_unknown_list_parameter_value_is_a_400_naming_the_parameter(pool: PgPool) {
+        let f = fixture(&pool).await;
+
+        for (tail, name) in [
+            ("?status=old", "status"),
+            ("?channel=sms", "channel"),
+            ("?sort=popular", "sort"),
+            ("?theme=blue", "theme"),
+            ("?archived=maybe", "archived"),
+        ] {
+            let reply = f.lead("GET", tail, None).await;
+            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{tail}");
+            assert!(
+                reply.body["detail"].as_str().unwrap().contains(name),
+                "{tail}: {:?}",
+                reply.body
+            );
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_list_items_carry_the_draft_state_checks_flows_and_editor(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let live = f.create("Live", email_doc("Hi", "x")).await;
+        let changed = f.create("Changed", email_doc("Hi", "x")).await;
+        let draft_only = f.create("Draft only", email_doc("Hi", "x")).await;
+        let by_key = f
+            .call(
+                "POST",
+                &f.templates(""),
+                Some(json!({"name": "Keyed", "channel": "email", "document": no_sender_doc()})),
+                Auth::Key(&f.write),
+            )
+            .await;
+        assert_eq!(by_key.status, StatusCode::CREATED, "{:?}", by_key.body);
+        for id in [&live, &changed] {
+            f.lead("POST", &format!("/{id}/publish"), None).await;
+        }
+        f.put_draft(&changed, email_doc("Hi", "edited")).await;
+        f.put_draft(&live, email_doc("Hi", "x")).await;
+        publish_flow_sending(&f, &live, "Welcome flow").await;
+        let item = |items: &Reply, name: &str| -> Value {
+            items
+                .body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["name"] == name)
+                .unwrap()
+                .clone()
+        };
+
+        let items = f.lead("GET", "", None).await;
+
+        let live_item = item(&items, "Live");
+        assert_eq!(live_item["draft_changed"], false);
+        assert_eq!(live_item["active_flows"], 1);
+        assert_eq!(live_item["theme"], "none");
+        assert_eq!(live_item["edited_by_email"], "lead@example.com");
+        assert!(live_item["edited_at"].is_string());
+        assert_eq!(live_item["checks"]["blocking"], 0);
+        assert_eq!(item(&items, "Changed")["draft_changed"], true);
+        assert_eq!(item(&items, "Changed")["active_flows"], 0);
+        assert_eq!(item(&items, "Draft only")["draft_changed"], false);
+        assert_eq!(item(&items, "Draft only")["current_version"], Value::Null);
+        assert_eq!(item(&items, "Draft only")["checks"], Value::Null);
+        assert_eq!(item(&items, "Keyed")["edited_by_email"], Value::Null);
+        let saved = f.put_draft(&draft_only, no_sender_doc()).await;
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        let after = f.lead("GET", "?q=draft", None).await;
+        assert!(
+            item(&after, "Draft only")["checks"]["blocking"]
+                .as_i64()
+                .unwrap()
+                >= 1
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_block_template_lists_the_theme_it_follows(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let theme = zirv_flow_store::create_theme(
+            &mut f.pool.acquire().await.unwrap(),
+            f.ws,
+            &zirv_flow_store::NewTheme {
+                id: Uuid::now_v7(),
+                name: "Brand".into(),
+                tokens: json!({"primary": "#112233", "text": "#222222", "background": "#ffffff"}),
+            },
+            None,
+        )
+        .await
+        .unwrap()
+        .0;
+        let doc = |theme: Value| {
+            json!({"schema": 2, "channel": "email", "mode": "blocks",
+                   "blocks": {"subject": "Hi", "sender": SENDER, "lang": "en",
+                              "category": "marketing", "theme": theme}})
+        };
+        f.create("Named", doc(json!({"id": theme.id}))).await;
+        f.create("Following", doc(json!("default"))).await;
+
+        let by_theme = f.lead("GET", &format!("?theme={}", theme.id), None).await;
+        let following = f.lead("GET", "?theme=default", None).await;
+
+        assert_eq!(names_of(&by_theme), ["Named"]);
+        assert_eq!(
+            by_theme.body[0]["theme"],
+            json!({"id": theme.id, "name": "Brand"})
+        );
+        assert_eq!(names_of(&following), ["Following"]);
+        assert_eq!(following.body[0]["theme"], "default");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_stores_the_checks_and_a_failed_validation_still_saves(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+
+        let saved = f.put_draft(&id, no_sender_doc()).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["draft"]["revision"], 2);
+        let stored = stored_checks(&pool, &id).await.unwrap();
+        assert!(stored["blocking"].as_i64().unwrap() >= 1);
+        assert!(stored["warnings"].is_number());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_save_whose_validation_cannot_run_still_saves_and_leaves_the_checks_empty(
+        pool: PgPool,
+    ) {
+        let f = fixture_with(&pool, None).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+
+        let saved = f.put_draft(&id, email_doc("Hi", "y")).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(saved.body["draft"]["revision"], 2);
+        assert_eq!(stored_checks(&pool, &id).await, None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_an_active_flow_sends_cannot_be_archived_until_the_flow_is_paused(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let running = publish_flow_sending(&f, &id, "Running flow").await;
+        let paused = publish_flow_sending(&f, &id, "Paused flow").await;
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(paused)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+
+        let refused = f.lead("DELETE", &format!("/{id}"), None).await;
+
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+        assert_eq!(refused.body["code"], "template_in_use");
+        assert_eq!(
+            refused.body["flows"],
+            json!([{"flow_id": running, "flow_name": "Running flow"}])
+        );
+        let archived: bool =
+            sqlx::query_scalar("SELECT archived_at IS NOT NULL FROM templates WHERE id = $1")
+                .bind(id.parse::<Uuid>().unwrap())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert!(!archived);
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(running)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let allowed = f.lead("DELETE", &format!("/{id}"), None).await;
+        assert_eq!(allowed.status, StatusCode::OK, "{:?}", allowed.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_only_a_draft_flow_names_can_be_archived(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        let mut connection = f.pool.acquire().await.unwrap();
+        zirv_flow_store::create_flow(
+            &mut connection,
+            f.ws,
+            &zirv_flow_store::NewFlow {
+                id: Uuid::now_v7(),
+                name: "Draft flow".into(),
+                graph: json!({"v": 1, "nodes": [
+                    {"id": "send", "type": "action.send", "template": id},
+                    {"id": "end", "type": "exit"}], "edges": []}),
+                settings: json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        drop(connection);
+
+        let archived = f.lead("DELETE", &format!("/{id}"), None).await;
+
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_stored_checks_resolve_snippets_and_the_theme_footer_as_a_publish_does(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let linked = f
+            .snippet(
+                "Legal",
+                json!([{"type": "text", "id": "t", "content": LINK}]),
+            )
+            .await;
+        let theme = f
+            .theme(
+                "Brand",
+                json!({"primary": "#112233", "footer_snippet": linked}),
+            )
+            .await;
+        let mut doc = blocks_doc("Hi", "<p>bye</p>");
+        doc["blocks"]["sections"][1]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "snippet", "id": "legal2", "snippet_id": linked}));
+        doc["blocks"]["theme"] = json!({"id": theme});
+        let id = f.create("Resolved", blocks_doc("Hi", LINK)).await;
+
+        let saved = f.put_draft(&id, doc).await;
+        let stored = stored_checks(&pool, &id).await.unwrap();
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
+        let warnings: i64 = f
+            .count("SELECT jsonb_array_length(validation)::bigint FROM template_versions")
+            .await;
+        assert_eq!(stored["blocking"], 0, "{stored}");
+        assert_eq!(stored["warnings"], warnings);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_broken_snippet_reference_stores_a_blocking_count_and_publish_refuses_it(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let mut doc = blocks_doc("Hi", LINK);
+        doc["blocks"]["sections"][1]["columns"][0]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "snippet", "id": "gone", "snippet_id": Uuid::now_v7()}));
+        let id = f.create("Broken", blocks_doc("Hi", LINK)).await;
+
+        let saved = f.put_draft(&id, doc).await;
+        let stored = stored_checks(&pool, &id).await.unwrap();
+        let published = f.lead("POST", &format!("/{id}/publish"), None).await;
+
+        assert_eq!(saved.status, StatusCode::OK, "{:?}", saved.body);
+        assert!(stored["blocking"].as_i64().unwrap() >= 1, "{stored}");
+        assert_eq!(published.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[sqlx::test]

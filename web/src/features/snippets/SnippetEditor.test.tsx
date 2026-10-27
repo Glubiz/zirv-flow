@@ -239,4 +239,30 @@ describe("publishing a snippet", () => {
     expect(await within(dialog).findByText("The template has no content yet.")).toBeInTheDocument();
     expect(within(dialog).getByText("Blocks publishing")).toBeInTheDocument();
   });
+
+  it("lists the live templates the version would break, with links, and stays open", async () => {
+    mockApi({
+      ...snippetRoutes(),
+      [`POST ${BASE}/publish`]: () =>
+        refusal(422, {
+          code: "snippet_breaks_templates",
+          detail: "This snippet version would stop 25 live templates from sending; fix them or the version first.",
+          total: 25,
+          templates: [{ id: "t9", name: "Weekly news", codes: ["missing_unsubscribe"] }],
+        }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await publishButton());
+    const dialog = await screen.findByRole("dialog");
+    await user.click(await within(dialog).findByRole("button", { name: "Publish" }));
+
+    const link = await within(dialog).findByRole("link", { name: "Weekly news" });
+    expect(link.getAttribute("href")).toMatch(/\/templates\/t9$/);
+    expect(within(dialog).getByText("missing_unsubscribe")).toBeInTheDocument();
+    expect(within(dialog).getByText(/would stop 25 live templates from sending/)).toBeInTheDocument();
+    expect(within(dialog).getByText("and 24 more")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeEnabled();
+  });
 });

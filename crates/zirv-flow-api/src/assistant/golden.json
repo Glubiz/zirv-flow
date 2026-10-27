@@ -362,6 +362,354 @@
            {"pointer": "/all/3", "text": "They are subscribed to the newsletter by email."}
          ]}
       ]
+    },
+    {
+      "name": "template-copy-warmer-welcome",
+      "kind": "template",
+      "task": "copy",
+      "prompt": "Make the welcome warmer and greet the person by their first name.",
+      "traits": [
+        {
+          "key": "first_name",
+          "type": "string",
+          "description": "Given name"
+        },
+        {
+          "key": "plan",
+          "type": "string",
+          "description": "Subscription plan"
+        }
+      ],
+      "template": {
+        "schema": 2,
+        "channel": "email",
+        "mode": "code",
+        "email": {
+          "subject": "Welcome",
+          "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+          "lang": "en",
+          "category": "marketing",
+          "html": "<p>Welcome to the shop.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+          "text": "Welcome to the shop. {{ system.unsubscribe_url }}"
+        }
+      },
+      "expect": [
+        {
+          "path": "/document/email/subject",
+          "contains": "person.first_name"
+        },
+        {
+          "path": "/document/email/html",
+          "contains": "person.first_name"
+        },
+        {
+          "path": "/document/email/sender",
+          "equals": "0192b1a4-7c3e-7000-8000-00000000a001"
+        },
+        {
+          "path": "/document/email/lang",
+          "equals": "en"
+        },
+        {
+          "path": "/subject_variants/0",
+          "absent": true
+        }
+      ],
+      "replay": [
+        {
+          "fragment": {
+            "subject": "Welcome, {{ person.first_name }}!",
+            "html": "<p>Hi {{ person.first_name }}, we are so glad you are here.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+            "text": "Hi {{ person.first_name }}, we are so glad you are here. {{ system.unsubscribe_url }}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "template-copy-repairs-an-unknown-merge-field",
+      "kind": "template",
+      "task": "copy",
+      "prompt": "Mention the plan the person is on.",
+      "traits": [
+        {
+          "key": "first_name",
+          "type": "string",
+          "description": "Given name"
+        },
+        {
+          "key": "plan",
+          "type": "string",
+          "description": "Subscription plan"
+        }
+      ],
+      "template": {
+        "schema": 2,
+        "channel": "email",
+        "mode": "code",
+        "email": {
+          "subject": "Welcome",
+          "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+          "lang": "en",
+          "category": "marketing",
+          "html": "<p>Welcome to the shop.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+          "text": "Welcome to the shop. {{ system.unsubscribe_url }}"
+        }
+      },
+      "expect": [
+        {
+          "path": "/document/email/html",
+          "contains": "person.plan"
+        },
+        {
+          "path": "/document/email/html",
+          "contains": "system.unsubscribe_url"
+        }
+      ],
+      "replay": [
+        {
+          "fragment": {
+            "html": "<p>Your {{ person.tier }} plan is active.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>"
+          }
+        },
+        {
+          "fragment": {
+            "html": "<p>Your {{ person.plan }} plan is active.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>"
+          }
+        }
+      ]
+    },
+    {
+      "name": "template-subject-variants",
+      "kind": "template",
+      "task": "subject_variants",
+      "prompt": "Give me subject lines that make people open the welcome.",
+      "traits": [
+        {
+          "key": "first_name",
+          "type": "string",
+          "description": "Given name"
+        },
+        {
+          "key": "plan",
+          "type": "string",
+          "description": "Subscription plan"
+        }
+      ],
+      "template": {
+        "schema": 2,
+        "channel": "email",
+        "mode": "code",
+        "email": {
+          "subject": "Welcome",
+          "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+          "lang": "en",
+          "category": "marketing",
+          "html": "<p>Welcome to the shop.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+          "text": "Welcome to the shop. {{ system.unsubscribe_url }}"
+        }
+      },
+      "expect": [
+        {
+          "path": "/subject_variants",
+          "contains": "Welcome, {{ person.first_name }}: your first steps"
+        },
+        {
+          "path": "/document/email/subject",
+          "equals": "Welcome, {{ person.first_name }}: your first steps"
+        },
+        {
+          "path": "/document/email/html",
+          "equals": "<p>Welcome to the shop.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>"
+        }
+      ],
+      "replay": [
+        {
+          "subject_variants": [
+            "Welcome, {{ person.first_name }}: your first steps",
+            "Three things to try first",
+            "You are in. Here is where to start"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "template-block-layout-two-columns",
+      "kind": "template",
+      "task": "block_layout",
+      "prompt": "Put the heading on top and the text in two columns with a divider between the sections.",
+      "traits": [
+        {
+          "key": "first_name",
+          "type": "string",
+          "description": "Given name"
+        },
+        {
+          "key": "plan",
+          "type": "string",
+          "description": "Subscription plan"
+        }
+      ],
+      "template": {
+        "schema": 2,
+        "channel": "email",
+        "mode": "blocks",
+        "blocks": {
+          "subject": "Our news",
+          "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+          "lang": "en",
+          "category": "transactional",
+          "footer": "none",
+          "theme": "none",
+          "sections": [
+            {
+              "id": "intro",
+              "columns": [
+                [
+                  {
+                    "type": "heading",
+                    "id": "h1",
+                    "level": 1,
+                    "text": "Our news"
+                  },
+                  {
+                    "type": "text",
+                    "id": "t1",
+                    "content": "<p>Two things happened this month.</p>"
+                  }
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      "expect": [
+        {
+          "path": "/document/blocks/sections/*/id",
+          "equals": "intro"
+        },
+        {
+          "path": "/document/blocks/sections/*/id",
+          "equals": "details"
+        },
+        {
+          "path": "/document/blocks/sections/*/columns/*/*/type",
+          "equals": "divider"
+        },
+        {
+          "path": "/document/blocks/subject",
+          "equals": "Our news"
+        }
+      ],
+      "replay": [
+        {
+          "fragment": {
+            "sections": [
+              {
+                "id": "intro",
+                "columns": [
+                  [
+                    {
+                      "type": "heading",
+                      "id": "h1",
+                      "level": 1,
+                      "text": "Our news"
+                    }
+                  ]
+                ]
+              },
+              {
+                "id": "rule",
+                "columns": [
+                  [
+                    {
+                      "type": "divider",
+                      "id": "d1"
+                    }
+                  ]
+                ]
+              },
+              {
+                "id": "details",
+                "columns": [
+                  [
+                    {
+                      "type": "text",
+                      "id": "t1",
+                      "content": "<p>Two things happened this month.</p>"
+                    }
+                  ],
+                  [
+                    {
+                      "type": "text",
+                      "id": "t2",
+                      "content": "<p>Read on for the details.</p>"
+                    }
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "template-translation-danish",
+      "kind": "template",
+      "task": "translation",
+      "prompt": "Translate the welcome into Danish.",
+      "traits": [
+        {
+          "key": "first_name",
+          "type": "string",
+          "description": "Given name"
+        },
+        {
+          "key": "plan",
+          "type": "string",
+          "description": "Subscription plan"
+        }
+      ],
+      "template": {
+        "schema": 2,
+        "channel": "email",
+        "mode": "code",
+        "email": {
+          "subject": "Welcome",
+          "sender": "0192b1a4-7c3e-7000-8000-00000000a001",
+          "lang": "en",
+          "category": "marketing",
+          "html": "<p>Welcome to the shop.</p><a href=\"{{ system.unsubscribe_url }}\">Unsubscribe</a>",
+          "text": "Welcome to the shop. {{ system.unsubscribe_url }}"
+        }
+      },
+      "expect": [
+        {
+          "path": "/document/email/lang",
+          "equals": "da"
+        },
+        {
+          "path": "/document/email/subject",
+          "equals": "Velkommen"
+        },
+        {
+          "path": "/document/email/html",
+          "contains": "system.unsubscribe_url"
+        },
+        {
+          "path": "/document/email/sender",
+          "equals": "0192b1a4-7c3e-7000-8000-00000000a001"
+        }
+      ],
+      "replay": [
+        {
+          "fragment": {
+            "subject": "Velkommen",
+            "lang": "da",
+            "html": "<p>Velkommen til butikken.</p><a href=\"{{ system.unsubscribe_url }}\">Afmeld</a>",
+            "text": "Velkommen til butikken. {{ system.unsubscribe_url }}"
+          }
+        }
+      ]
     }
   ]
 }
