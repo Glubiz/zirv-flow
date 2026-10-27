@@ -251,7 +251,7 @@ pub async fn search_people(
     search: &PersonSearch,
     limit: u32,
     after: Option<Uuid>,
-    may_see_values: bool,
+    may_view_pii: bool,
 ) -> Result<SearchPage, SearchError> {
     let limit = i64::from(limit.max(1));
     match search {
@@ -279,7 +279,7 @@ pub async fn search_people(
             let definition = find_trait_definition(pool, workspace, key)
                 .await?
                 .ok_or_else(|| invalid("trait.key", "is not a registered trait"))?;
-            if definition.pii && !may_see_values && !matches!(op, TraitOp::Eq | TraitOp::Exists) {
+            if definition.pii && !may_view_pii && !matches!(op, TraitOp::Eq | TraitOp::Exists) {
                 return Err(SearchError::PiiTraitNotSearchable);
             }
             let needle = needle(*op, definition.trait_type, value.as_ref())?;

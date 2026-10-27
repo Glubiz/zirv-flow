@@ -370,7 +370,7 @@ pub use workspace_credentials::{
     record_credential_test, swap_credential_secret, update_credential,
 };
 pub use workspaces::{
-    Member, Membership, UtmSettings, Workspace, create_workspace, find_workspace,
+    Member, Membership, UtmSettings, Workspace, create_workspace, find_membership, find_workspace,
     find_workspace_by_slug, list_members, list_workspaces_for_user, lock_memberships,
     membership_role, orphan_policy, remove_membership, set_membership, set_orphan_policy,
     set_workspace_timezone, set_workspace_utm,
