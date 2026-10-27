@@ -1,5 +1,5 @@
 //! The append-only decision log (architecture section 12.4). This module offers appending
-//! and reading only; nothing updates or deletes a row.
+//! and reading only; nothing updates a row, and only the retention module deletes one, by window.
 //!
 //! The write API takes static strings and durable ids only, so personal data cannot reach
 //! a record by accident.
@@ -12,6 +12,15 @@ use uuid::Uuid;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use crate::StoreError;
+
+mod retention;
+mod size;
+
+pub use retention::{
+    DecisionRetention, DecisionRetentionReport, apply_decision_retention,
+    apply_decision_retention_for,
+};
+pub use size::{DecisionLogSize, decision_log_size};
 
 /// Records per statement of [`append_decisions`]: 11 binds each stay far below PostgreSQL's limit.
 const MAX_BATCH: usize = 1000;
