@@ -271,4 +271,149 @@ mod tests {
         assert!(digests.iter().all(|one| *one == digests[0]));
         assert_eq!(digests[0], digest(&HmacRoot::bootstrap_from(&key)));
     }
+
+    /// The SQL statement of the guide's recovery steps that starts with `start`, as written.
+    fn guide_sql(start: &str) -> String {
+        let guide = include_str!("../../../docs/operations/secrets.md");
+        let mut blocks = Vec::new();
+        let mut open = None;
+        for line in guide.lines() {
+            let line = line.trim();
+            match (&mut open, line) {
+                (None, "```sql") => open = Some(Vec::new()),
+                (Some(lines), "```") => {
+                    blocks.push(lines.join(" "));
+                    open = None;
+                }
+                (Some(lines), text) => lines.push(text.to_owned()),
+                (None, _) => {}
+            }
+        }
+        blocks
+            .into_iter()
+            .find(|block| block.starts_with(start))
+            .unwrap_or_else(|| panic!("the guide has no SQL block starting {start}"))
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_guides_recovery_steps_bring_a_deployment_back_after_the_key_is_lost(pool: PgPool) {
+        use serde_json::json;
+        use uuid::Uuid;
+        use zirv_flow_api::admin::{self, Context};
+        use zirv_flow_core::{SecretBytes, SecretPurpose};
+        use zirv_flow_store::{NewWorkspaceCredential, secrets as store_secrets};
+
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let context = Context::system();
+        let (a, b) = (MasterKey::generate(), MasterKey::generate());
+        let under_a = keyring(&a, None);
+        let old_root = load_hmac_root(&pool, &under_a).await.unwrap();
+        let workspace = admin::create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let ws = workspace.id;
+        let lost = admin::create_secret(
+            &pool,
+            &context,
+            &under_a,
+            ws,
+            SecretPurpose::WorkspaceCredential,
+            &SecretBytes::new(br#"{"password":"lost-value"}"#.to_vec()),
+        )
+        .await
+        .unwrap();
+        let credential = Uuid::now_v7();
+        zirv_flow_store::create_credential(
+            &pool,
+            ws,
+            &NewWorkspaceCredential {
+                id: credential,
+                key: "mail",
+                name: "Mail",
+                kind: "basic",
+                schema: None,
+                fields: &json!({"username": "u"}),
+                secret_id: lost,
+                hints: &json!({"password": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Key A is lost. Key B cannot start the deployment while the old root is stored.
+        let under_b = keyring(&b, None);
+        let refused = load_hmac_root(&pool, &under_b).await.unwrap_err();
+        assert!(refused.starts_with("the HMAC root: "), "{refused}");
+
+        // Step 3 of the guide.
+        sqlx::query(sqlx::AssertSqlSafe(guide_sql(
+            "DELETE FROM deployment_keys",
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Step 4: the start with the new key makes a new root.
+        let new_root = load_hmac_root(&pool, &under_b).await.unwrap();
+        assert_ne!(digest(&new_root), digest(&old_root));
+        assert_eq!(digest(&new_root), digest(&HmacRoot::bootstrap_from(&b)));
+
+        // Step 5: the lost key still wraps the credential's secret, and nothing else.
+        let list = guide_sql("SELECT workspace_id, purpose, count(*)")
+            .replace("<new key id>", &b.key_id());
+        let stale: Vec<(Uuid, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(list.clone()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            stale,
+            [(ws.as_uuid(), "workspace_credential".to_owned(), 1)]
+        );
+        let unopened = zirv_flow_store::open_credential(&pool, &under_b, ws, credential).await;
+        assert!(unopened.is_err());
+
+        // Step 6: rotating the credential replaces the secret and deletes the old row.
+        let fresh = admin::create_secret(
+            &pool,
+            &context,
+            &under_b,
+            ws,
+            SecretPurpose::WorkspaceCredential,
+            &SecretBytes::new(br#"{"password":"new-value"}"#.to_vec()),
+        )
+        .await
+        .unwrap();
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let old = zirv_flow_store::swap_credential_secret(
+            &mut tx,
+            ws,
+            credential,
+            fresh,
+            &json!({"password": ""}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(old, Some(lost));
+        assert!(store_secrets::delete(&mut *tx, ws, lost).await.unwrap());
+        zirv_flow_store::commit(tx).await.unwrap();
+
+        // Step 7: nothing is left under the lost key, the credential opens, and rotation works.
+        let stale: Vec<(Uuid, String, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(list.clone()))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert!(stale.is_empty());
+        let opened = zirv_flow_store::open_credential(&pool, &under_b, ws, credential)
+            .await
+            .unwrap();
+        assert_eq!(opened.secret.expose(), br#"{"password":"new-value"}"#);
+        let c = MasterKey::generate();
+        let report = admin::rotate_master_key(&pool, &context, &keyring(&c, Some(&b)))
+            .await
+            .unwrap();
+        assert_eq!(report.from_key_ids, [b.key_id()]);
+    }
 }
