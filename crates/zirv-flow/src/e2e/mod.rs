@@ -6,6 +6,7 @@
 
 mod harness;
 mod mail;
+mod privacy;
 mod trace;
 
 #[cfg(test)]

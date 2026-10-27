@@ -11,7 +11,8 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 use zirv_flow_render::RenderPool;
 
 use zirv_flow_store::{
-    ClaimedJob, Clock, EventRetention, HmacKey, Keyring, NewDecision, NewJob, PgConnection, PgPool,
+    ClaimedJob, Clock, EventRetention, HmacKey, Keyring, MessageRetention, NewDecision, NewJob,
+    PgConnection, PgPool,
 };
 
 use crate::JobError;
@@ -37,6 +38,7 @@ pub struct JobContext<'a> {
     connection: &'a mut PgConnection,
     job: &'a ClaimedJob,
     event_retention: EventRetention,
+    message_retention: MessageRetention,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
     keyring: Option<Arc<Keyring>>,
@@ -56,6 +58,7 @@ impl<'a> JobContext<'a> {
             connection,
             job,
             event_retention: EventRetention::default(),
+            message_retention: MessageRetention::default(),
             ingest: None,
             identifier_key: None,
             keyring: None,
@@ -132,6 +135,17 @@ impl<'a> JobContext<'a> {
     /// The operator's event retention settings.
     pub fn event_retention(&self) -> &EventRetention {
         &self.event_retention
+    }
+
+    /// Gives the handler the operator's message retention settings.
+    pub(crate) fn with_message_retention(mut self, settings: MessageRetention) -> Self {
+        self.message_retention = settings;
+        self
+    }
+
+    /// The operator's message retention settings.
+    pub fn message_retention(&self) -> &MessageRetention {
+        &self.message_retention
     }
 
     /// Gives the handler what the ingest drain needs.

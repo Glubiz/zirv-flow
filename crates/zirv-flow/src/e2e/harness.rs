@@ -51,7 +51,7 @@ pub(super) const PROVIDER_SECRET: &str = "zz-e2e-feedback-secret-4711";
 
 /// The provider manifest the fake provider stands in for.
 #[cfg(test)]
-const PROVIDER_MANIFEST: &str =
+pub(super) const PROVIDER_MANIFEST: &str =
     include_str!("../../../zirv-flow-connectors/tests/fixtures/providers/bearer_timestamped.json");
 
 /// What one API call answered.
@@ -145,6 +145,9 @@ pub(super) struct World {
     #[cfg(test)]
     pub(super) provider: FakeProvider,
     pub(super) dns: FixtureResolver,
+    /// The deployment's HMAC root, for tests that call the admin operations the CLI does.
+    #[cfg(test)]
+    pub(super) root: HmacRoot,
     render: RenderPool,
     stop: watch::Sender<bool>,
     worker: Option<JoinHandle<()>>,
@@ -251,6 +254,8 @@ impl World {
             #[cfg(test)]
             provider,
             dns,
+            #[cfg(test)]
+            root,
             render,
             stop,
             worker: Some(worker),
@@ -460,6 +465,63 @@ impl World {
                 "/destinations",
                 Some(json!({"kind": "provider", "name": "Provider",
                             "config": self.provider_config(),
+                            "credential_id": credential["id"], "rate": 100, "burst": 100})),
+                StatusCode::CREATED,
+            )
+            .await;
+        destination["id"]
+            .as_str()
+            .expect("a destination id")
+            .to_owned()
+    }
+
+    /// A provider destination called `name` on its own fake `provider`. With `erase` the manifest
+    /// declares an erase call keyed on the email identity.
+    #[cfg(test)]
+    pub(super) async fn provider_destination_on(
+        &self,
+        name: &str,
+        provider: &FakeProvider,
+        erase: bool,
+    ) -> String {
+        let text = PROVIDER_MANIFEST.replace(
+            "https://api.fixture-provider.example.test",
+            &provider.base_url(),
+        );
+        let mut manifest: Value = serde_json::from_str(&text).expect("a manifest");
+        if erase {
+            manifest["destination"]["erase_profile"] = json!({
+                "method": "POST",
+                "path": "/erasures",
+                "idempotency_header": "Idempotency-Key",
+                "key_from": {"identity": "email"},
+                "body": {"key": "/subject"}
+            });
+        }
+        let fields: Vec<Value> = ["token", "feedback_secret"]
+            .iter()
+            .map(|key| {
+                json!({"key": key, "label": key, "type": "string",
+                       "required": true, "secret": true})
+            })
+            .collect();
+        let credential = self
+            .api_ok(
+                "POST",
+                "/credentials",
+                Some(json!({"kind": "custom", "name": name,
+                            "schema": {"fields": fields},
+                            "secret": {"token": PROVIDER_TOKEN,
+                                       "feedback_secret": PROVIDER_SECRET}})),
+                StatusCode::CREATED,
+            )
+            .await;
+        let destination = self
+            .api_ok(
+                "POST",
+                "/destinations",
+                Some(json!({"kind": "provider", "name": name,
+                            "config": {"manifest": manifest},
                             "credential_id": credential["id"], "rate": 100, "burst": 100})),
                 StatusCode::CREATED,
             )
