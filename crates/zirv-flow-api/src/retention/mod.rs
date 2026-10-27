@@ -6,7 +6,7 @@ mod acceptance;
 
 use axum::Json;
 use axum::extract::{Path, State};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use zirv_flow_core::WorkspaceId;
@@ -59,15 +59,26 @@ pub(crate) struct RetentionBody {
     windows: Vec<WindowBody>,
 }
 
-/// The windows a workspace admin may set. A PUT replaces both; a field that is null or left out
-/// returns that window to the deployment value.
+/// The windows a workspace admin may set. A field left out keeps the stored value; an explicit
+/// `null` returns that window to the deployment value.
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PutRetentionRequest {
     /// Days messages are kept; at least the deployment minimum and at most the deployment window.
-    messages_days: Option<i64>,
-    /// Days decision records are kept, within the same rule.
-    decision_days: Option<i64>,
+    /// Left out keeps the stored value; `null` returns to the deployment value.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<i64>)]
+    messages_days: Option<Option<i64>>,
+    /// Days decision records are kept, within the same rule and with the same treatment of a
+    /// missing field and `null`.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<i64>)]
+    decision_days: Option<Option<i64>>,
+}
+
+/// Tells an absent field from a `null` one: absent is `None`, `null` is `Some(None)`.
+fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Option<i64>>, D::Error> {
+    Option::<i64>::deserialize(deserializer).map(Some)
 }
 
 fn window(
@@ -217,9 +228,9 @@ pub(crate) async fn get(
     Ok(Json(load(&state, workspace.id).await?))
 }
 
-/// Replaces the workspace's own message and decision-log windows. A value must be at least the
-/// deployment minimum and at most the deployment window; null (or a missing field) returns the
-/// window to the deployment value. Audit, ingest rejects, import files, job history and events are
+/// Changes the workspace's own message and decision-log windows. A value must be at least the
+/// deployment minimum and at most the deployment window; a missing field keeps the stored value
+/// and null returns the window to the deployment value. Audit, ingest rejects, import files, job history and events are
 /// the deployment's alone, and assistant transcripts stay under the AI settings: any other field
 /// is a 422. Audited as `retention.updated`, with window names and day counts only.
 #[utoipa::path(
@@ -349,6 +360,11 @@ mod tests {
         assert!(serde_json::from_str::<PutRetentionRequest>(r#"{"audit_days":30}"#).is_err());
         let ok: PutRetentionRequest =
             serde_json::from_str(r#"{"messages_days":60,"decision_days":null}"#).unwrap();
-        assert_eq!((ok.messages_days, ok.decision_days), (Some(60), None));
+        assert_eq!(
+            (ok.messages_days, ok.decision_days),
+            (Some(Some(60)), Some(None))
+        );
+        let absent: PutRetentionRequest = serde_json::from_str(r#"{"messages_days":60}"#).unwrap();
+        assert_eq!(absent.decision_days, None);
     }
 }

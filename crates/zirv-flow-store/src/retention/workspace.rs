@@ -42,13 +42,14 @@ pub async fn find_workspace_retention(
     .map_err(StoreError::query)
 }
 
-/// Replaces the workspace's overrides. Locks the workspace row first, so two writers queue and a
-/// workspace that is gone is reported as `None`.
+/// Changes the workspace's overrides. For each window, `None` keeps the stored value, `Some(None)`
+/// returns it to the deployment value and `Some(Some(days))` sets it. Locks the workspace row
+/// first, so two writers queue and a workspace that is gone is reported as `None`.
 pub async fn set_workspace_retention(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
-    messages_days: Option<i32>,
-    decision_days: Option<i32>,
+    messages_days: Option<Option<i32>>,
+    decision_days: Option<Option<i32>>,
     updated_by: Option<Uuid>,
 ) -> Result<Option<WorkspaceRetention>, StoreError> {
     let locked: Option<Uuid> =
@@ -63,15 +64,20 @@ pub async fn set_workspace_retention(
     sqlx::query_as(
         "INSERT INTO workspace_retention (workspace_id, messages_days, decision_days, updated_by) \
          VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (workspace_id) DO UPDATE SET messages_days = EXCLUDED.messages_days, \
-            decision_days = EXCLUDED.decision_days, updated_at = now(), \
-            updated_by = EXCLUDED.updated_by \
+         ON CONFLICT (workspace_id) DO UPDATE SET \
+            messages_days = CASE WHEN $5 THEN EXCLUDED.messages_days \
+                ELSE workspace_retention.messages_days END, \
+            decision_days = CASE WHEN $6 THEN EXCLUDED.decision_days \
+                ELSE workspace_retention.decision_days END, \
+            updated_at = now(), updated_by = EXCLUDED.updated_by \
          RETURNING messages_days, decision_days, updated_at, updated_by",
     )
     .bind(workspace.as_uuid())
-    .bind(messages_days)
-    .bind(decision_days)
+    .bind(messages_days.flatten())
+    .bind(decision_days.flatten())
     .bind(updated_by)
+    .bind(messages_days.is_some())
+    .bind(decision_days.is_some())
     .fetch_optional(connection)
     .await
     .map_err(StoreError::query)
@@ -142,11 +148,11 @@ mod tests {
     async fn setting_replaces_both_overrides_and_null_returns_to_the_deployment(pool: PgPool) {
         let ws = workspace(&pool, "alpha").await;
         let mut tx = begin(&pool).await.unwrap();
-        let first = set_workspace_retention(&mut tx, ws, Some(60), Some(90), None)
+        let first = set_workspace_retention(&mut tx, ws, Some(Some(60)), Some(Some(90)), None)
             .await
             .unwrap()
             .unwrap();
-        let second = set_workspace_retention(&mut tx, ws, None, Some(45), None)
+        let second = set_workspace_retention(&mut tx, ws, Some(None), Some(Some(45)), None)
             .await
             .unwrap()
             .unwrap();
@@ -167,10 +173,30 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_absent_window_keeps_its_stored_value(pool: PgPool) {
+        let ws = workspace(&pool, "alpha").await;
+        let mut tx = begin(&pool).await.unwrap();
+        set_workspace_retention(&mut tx, ws, Some(Some(60)), Some(Some(90)), None)
+            .await
+            .unwrap();
+        let kept = set_workspace_retention(&mut tx, ws, Some(Some(70)), None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        commit(tx).await.unwrap();
+
+        assert_eq!(
+            (kept.messages_days, kept.decision_days),
+            (Some(70), Some(90))
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_lookup_never_exceeds_the_deployment_window(pool: PgPool) {
         let ws = workspace(&pool, "alpha").await;
         let mut tx = begin(&pool).await.unwrap();
-        set_workspace_retention(&mut tx, ws, Some(300), Some(100), None)
+        set_workspace_retention(&mut tx, ws, Some(Some(300)), Some(Some(100)), None)
             .await
             .unwrap();
         commit(tx).await.unwrap();
@@ -186,9 +212,10 @@ mod tests {
     async fn an_unknown_workspace_is_reported_as_none(pool: PgPool) {
         let mut tx = begin(&pool).await.unwrap();
 
-        let saved = set_workspace_retention(&mut tx, WorkspaceId::new(), Some(60), None, None)
-            .await
-            .unwrap();
+        let saved =
+            set_workspace_retention(&mut tx, WorkspaceId::new(), Some(Some(60)), None, None)
+                .await
+                .unwrap();
 
         assert_eq!(saved, None);
     }

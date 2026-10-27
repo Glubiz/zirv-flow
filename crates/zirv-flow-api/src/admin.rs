@@ -1124,32 +1124,41 @@ fn check_window(
     Ok(i32::try_from(days).ok())
 }
 
-/// Replaces a workspace's own message and decision-log windows (ruling d732a27c). Each is in days
-/// and must lie within the deployment bounds and not exceed the deployment window; null returns
-/// to the deployment value. The other windows are the deployment's alone. Audited as
+/// Changes a workspace's own message and decision-log windows (ruling d732a27c). Each is in days
+/// and must lie within the deployment bounds and not exceed the deployment window. A window left
+/// out (`None`) keeps its stored value and `Some(None)` returns it to the deployment value. The
+/// other windows are the deployment's alone. Audited as
 /// `retention.updated` with the window names and day counts only.
 pub async fn set_workspace_retention(
     pool: &PgPool,
     context: &Context,
     deployment: &DeploymentRetention,
     workspace: WorkspaceId,
-    messages_days: Option<i64>,
-    decision_days: Option<i64>,
+    messages_days: Option<Option<i64>>,
+    decision_days: Option<Option<i64>>,
 ) -> Result<WorkspaceRetention, AdminError> {
-    let messages = check_window(
-        "messages_days",
-        messages_days,
-        deployment.messages.min_days,
-        deployment.messages.max_days,
-        deployment.messages.days,
-    )?;
-    let decisions = check_window(
-        "decision_days",
-        decision_days,
-        deployment.decisions.min_days,
-        deployment.decisions.max_days,
-        deployment.decisions.days,
-    )?;
+    let messages = messages_days
+        .map(|days| {
+            check_window(
+                "messages_days",
+                days,
+                deployment.messages.min_days,
+                deployment.messages.max_days,
+                deployment.messages.days,
+            )
+        })
+        .transpose()?;
+    let decisions = decision_days
+        .map(|days| {
+            check_window(
+                "decision_days",
+                days,
+                deployment.decisions.min_days,
+                deployment.decisions.max_days,
+                deployment.decisions.days,
+            )
+        })
+        .transpose()?;
     let updated_by = (context.actor.kind == ActorKind::User)
         .then_some(context.actor.id)
         .flatten();
@@ -1159,13 +1168,20 @@ pub async fn set_workspace_retention(
     )
     .await?
     .ok_or(AdminError::NotFound("workspace"))?;
+    let mut summary = serde_json::Map::new();
+    if messages.is_some() {
+        summary.insert("messages_days".into(), json!(saved.messages_days));
+    }
+    if decisions.is_some() {
+        summary.insert("decision_days".into(), json!(saved.decision_days));
+    }
     audit(
         &mut tx,
         context,
         Some(workspace),
         "retention.updated",
         Some(("workspace", workspace.as_uuid())),
-        json!({ "messages_days": saved.messages_days, "decision_days": saved.decision_days }),
+        serde_json::Value::Object(summary),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

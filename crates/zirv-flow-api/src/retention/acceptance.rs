@@ -297,6 +297,30 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_field_left_out_keeps_its_window_and_an_explicit_null_clears_it(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        fx.put(json!({"messages_days": 60, "decision_days": 90}))
+            .await;
+
+        let only_messages = fx.put(json!({"messages_days": 45})).await;
+
+        assert_eq!(row(&only_messages.body, "messages")["value"], 45);
+        let decisions = row(&only_messages.body, "decision_log");
+        assert_eq!(
+            (&decisions["value"], &decisions["source"]),
+            (&json!(90), &json!("workspace"))
+        );
+        let cleared = fx.put(json!({"decision_days": null})).await;
+        let decisions = row(&cleared.body, "decision_log");
+        assert_eq!(
+            (&decisions["value"], &decisions["source"]),
+            (&json!(395), &json!("deployment"))
+        );
+        assert_eq!(row(&cleared.body, "messages")["value"], 45);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn put_refuses_longer_than_the_deployment_below_the_minimum_and_unknown_fields(
         pool: PgPool,
     ) {
@@ -412,6 +436,15 @@ mod tests {
 
         assert_eq!(action, "retention.updated");
         assert_eq!(summary, json!({"messages_days": 60, "decision_days": null}));
+        fx.put(json!({"decision_days": 45})).await;
+        let latest: Value = sqlx::query_scalar(
+            "SELECT summary FROM audit_log WHERE action = 'retention.updated' \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(latest, json!({"decision_days": 45}));
         let refused = fx.put(json!({"messages_days": 9999})).await;
         assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
         let rows: i64 =
@@ -419,7 +452,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(rows, 1, "a refused change writes no audit row");
+        assert_eq!(rows, 2, "a refused change writes no audit row");
     }
 
     #[sqlx::test]
