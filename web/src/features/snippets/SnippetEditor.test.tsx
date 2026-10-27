@@ -112,7 +112,8 @@ describe("the block editor in snippet mode", () => {
     const frame = await screen.findByTitle("Preview of the snippet");
     expect(frame).toHaveAttribute("sandbox", "");
     const document = new DOMParser().parseFromString(frame.getAttribute("srcdoc") ?? "", "text/html");
-    expect(document.head.firstElementChild).toHaveAttribute("http-equiv", "Content-Security-Policy");
+    expect(document.head.firstElementChild?.localName).toBe("meta");
+    expect(document.head.firstElementChild?.getAttribute("http-equiv")).toBe("Content-Security-Policy");
     expect(document.body.innerHTML).toBe("<p>Free returns</p>");
     expect(screen.getByRole("button", { name: "Mobile" })).toBeInTheDocument();
   });
