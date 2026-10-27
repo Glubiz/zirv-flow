@@ -2774,8 +2774,23 @@ reachable under a public-looking name stays the operator's to split-horizon.
 ### 16.3 Export, erasure and retention
 
 **Export** (`privacy.export`) produces JSON of everything held on a person
-(profile, identities, traits with sources, events, consent history, membership
-history, enrollments, messages) behind an expiring link. **Erasure**
+behind an expiring link: `profile`, `identities`, `source_records`, `events`,
+`consent`, `consent_history`, `lists`, `segments`, `list_history`, `merges`,
+`identity_conflicts`, `enrollments`, `step_executions`, `enrollment_waits`,
+`flow_entries`, `messages` (without the recipient hash), `message_links`,
+`forwarding_outbox`, `erasure_handled_markers`, `ingest_rejects` (the redacted
+payload and reason; rows with no person are out of reach), `decision_records`
+(ids and codes) and `template_preview_people`, with merged people folded under the
+survivor. Deliberately left out, in a constant list that a catalog test checks
+against every table with a person column: `person_changes` (internal change feed),
+`privacy_exports` (the export itself), `event_dedupe` (message ids only),
+`debugger_feed` (a 15-minute buffer of event ids), `jobs` (payload copies of data
+already exported, purged on erase), `ai_transcripts` (free text found by needle
+on erase only, so an export cannot find it), and `suppressions` and
+`erasure_requests` (the ledger, kept on purpose). The uncompressed document is
+capped by `privacy.export_max_bytes` (default 256 MiB): rows are counted as they
+are read, and a person over the cap fails with `export_too_large`, with no
+content stored. **Erasure**
 (`privacy.erase`): (1) record the request in the erasure ledger (person id,
 identifier HMACs); (2) add suppression hashes; (3) delete identities, ledger
 contributions, events in all partitions, ingest rejects, list members, consent,
