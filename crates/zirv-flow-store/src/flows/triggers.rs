@@ -21,6 +21,7 @@ use zirv_flow_core::{Cause, CauseKind, TraceContext, TraceId, WorkspaceId};
 
 use super::arrivals::Arrival;
 use super::enroll::MAX_ENROLL_PEOPLE;
+use crate::people::{PersonLock, lock_people_in_order};
 use crate::segments::{SegmentMembershipChange, SegmentMembershipChanges, lock_segment_refresh};
 use crate::{Clock, NewJob, StoreError, enqueue};
 
@@ -573,15 +574,9 @@ pub async fn lock_audience_page(
             .execute(&mut *connection)
             .await
             .map_err(StoreError::query)?;
-        let locked: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
-            "SELECT id, merged_into FROM people WHERE workspace_id = $1 AND id = ANY($2) \
-             ORDER BY id FOR KEY SHARE",
-        )
-        .bind(workspace.as_uuid())
-        .bind(&people)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(StoreError::query)?;
+        let locked =
+            lock_people_in_order(&mut *connection, workspace, &people, PersonLock::KeyShare)
+                .await?;
         let held: HashSet<Uuid> = locked.iter().map(|(id, _)| *id).collect();
         if locked
             .iter()
