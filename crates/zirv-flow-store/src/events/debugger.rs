@@ -316,6 +316,52 @@ pub async fn debugger_feed_missing<'e>(
     .map_err(StoreError::query)
 }
 
+/// What one read of a viewer found, taken in one snapshot.
+pub struct FeedBatch {
+    /// The rows of the `holes` asked about that have committed.
+    pub filled: Vec<FeedItem>,
+    /// The next rows above `after`.
+    pub rows: Vec<FeedItem>,
+    /// The numbers no row of any workspace holds between `after` and the last of `rows`.
+    pub missing: Vec<i64>,
+}
+
+/// One viewer read: the rows of `holes` that committed, the next `limit` rows above `after`,
+/// and the numbers missing up to the last of them, all in one repeatable-read snapshot. A
+/// number is therefore missing only if no row held it when the rows were read, so a row that
+/// commits in between is never counted as a hole and lost. `reach` bounds how far below the
+/// last row the missing numbers are examined.
+pub async fn read_debugger_batch(
+    pool: &crate::PgPool,
+    workspace: WorkspaceId,
+    after: i64,
+    holes: &[i64],
+    filter: FeedFilter<'_>,
+    limit: i64,
+    reach: i64,
+) -> Result<FeedBatch, StoreError> {
+    let mut snapshot = pool.begin().await.map_err(StoreError::query)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *snapshot)
+        .await
+        .map_err(StoreError::query)?;
+    let filled = if holes.is_empty() {
+        Vec::new()
+    } else {
+        read_debugger_feed_at(&mut *snapshot, workspace, holes, filter).await?
+    };
+    let rows = read_debugger_feed(&mut *snapshot, workspace, after, filter, limit).await?;
+    let missing = match rows.last() {
+        Some(last) => debugger_feed_missing(&mut *snapshot, after, last.seq, reach).await?,
+        None => Vec::new(),
+    };
+    Ok(FeedBatch {
+        filled,
+        rows,
+        missing,
+    })
+}
+
 /// The last `seq` the feed has handed out, of any workspace, or 0 when none was (a fresh or
 /// crashed feed). It does not fall when rows are pruned, so a position at or below it is
 /// real; one above it can only come from a feed that started over.

@@ -15,10 +15,10 @@ pub use apply::{EventOutcome, EventRecord, apply_event_batch};
 #[cfg(test)]
 pub(crate) use apply::{NewEvent, insert_event};
 pub use debugger::{
-    DEBUGGER_CHANNEL, DebuggerListener, FEED_RETENTION_MINUTES, FeedFilter, FeedItem,
+    DEBUGGER_CHANNEL, DebuggerListener, FEED_RETENTION_MINUTES, FeedBatch, FeedFilter, FeedItem,
     WATCH_SECONDS, debugger_epoch, debugger_epoch_peek, debugger_feed_head, debugger_feed_missing,
     debugger_feed_position, debugger_feed_start, listen_for_debugger, prune_debugger_feed,
-    read_debugger_feed, read_debugger_feed_at, touch_debugger_watch,
+    read_debugger_batch, read_debugger_feed, read_debugger_feed_at, touch_debugger_watch,
 };
 pub use explore::{
     BREAKDOWN_VALUES, Breakdown, Bucket, CountResult, ExploreError, ExploreFilter, ExploreLimits,

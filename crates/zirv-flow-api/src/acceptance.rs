@@ -9785,6 +9785,81 @@ email,b@example.com,
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_that_commits_after_the_window_is_not_delivered(pool: PgPool) {
+        let patience = std::time::Duration::from_millis(500);
+        let (router, _state) = quick_state(&pool, patience).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        // Writer 1 stays open; writer 2 commits, so seq 1 becomes a hole.
+        let mut writer_1 = pool.begin().await.unwrap();
+        feed_row(&mut *writer_1, &ws, "from_1").await;
+        feed_row(&pool, &ws, "from_2").await;
+        notify_feed(&pool, &ws).await;
+        let first = viewer.take(1).await;
+        // The window is twice the patience; a wake after it drops the hole.
+        tokio::time::sleep(patience * 2 + std::time::Duration::from_millis(400)).await;
+        notify_feed(&pool, &ws).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        writer_1.commit().await.unwrap();
+        notify_feed(&pool, &ws).await;
+
+        assert_eq!(names(&first), ["from_2"]);
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(800))
+                .await
+                .is_none(),
+            "a row that commits after its hole expired is the documented limit"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_open_stream_notices_a_crash_on_its_poll_and_resets(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&ws, ""), Auth::Session(&owner), None).await;
+        inv_store(
+            &pool,
+            &ws,
+            (0..3)
+                .map(|_| inv_record("a@example.com", "before", None, 1, json!({})))
+                .collect(),
+        )
+        .await;
+        let before = viewer.take(3).await;
+        let old_epoch = before[2].id.clone().unwrap();
+        // A crash empties the feed and its epoch and restarts the sequence below the stream's
+        // watermark; the restarted server then writes two rows.
+        sqlx::query("TRUNCATE debugger_feed RESTART IDENTITY")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("TRUNCATE debugger_epoch")
+            .execute(&pool)
+            .await
+            .unwrap();
+        feed_row(&pool, &ws, "after").await;
+        feed_row(&pool, &ws, "after").await;
+
+        let frames = viewer.take(3).await;
+
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].data["reset"], true);
+        assert_eq!(names(&frames[1..]), ["after", "after"]);
+        let epoch_of = |id: &str| id.split_once(':').map(|(epoch, _)| epoch.to_owned());
+        let new_epoch = epoch_of(frames[1].id.as_deref().unwrap());
+        assert_ne!(new_epoch, epoch_of(&old_epoch));
+        assert_eq!(new_epoch, epoch_of(frames[2].id.as_deref().unwrap()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_resume_position_beyond_the_feed_is_clamped_and_announced(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
@@ -9977,7 +10052,8 @@ email,b@example.com,
         assert_eq!(frames[0].data["name"], "yours");
         assert!(!frames[0].raw.contains("not_yours"));
         // No wait for the numbers of the other workspace: the position is already past them.
-        assert_eq!(frames[0].id.as_deref(), Some("3"));
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(frames[0].id, Some(format!("{epoch}:3")));
         assert!(
             viewer
                 .next(std::time::Duration::from_millis(300))

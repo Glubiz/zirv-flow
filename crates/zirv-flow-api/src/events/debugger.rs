@@ -13,30 +13,33 @@
 //!
 //! The feed's `seq` is assigned when a row is inserted, not when its transaction commits, so
 //! rows can become visible out of order, and the identity is shared by every workspace. A
-//! viewer therefore keeps a low watermark (every `seq` up to it is settled) and the set of
-//! rows it sent above it. A number another workspace holds is settled; a number nobody holds
-//! is a hole, and the viewer waits a few seconds for it before giving up on it (its writer
-//! rolled back). A viewer without a position starts at the newest row older than that wait,
-//! so it also gets the rows of writers that were still open when it connected.
+//! viewer therefore keeps a watermark (the highest `seq` it has read) and the holes below it:
+//! numbers that no row of any workspace held when the watermark passed them, each with the
+//! time it was first noticed. A number another workspace holds, or a filter hides, is not a
+//! hole. Each read takes the rows above the watermark in batches, plus point lookups of the
+//! holes, so a writer that commits after its number was passed is delivered, out of order,
+//! once. A hole is dropped when its row is delivered, when it is older than the lookback
+//! window ([`LOOKBACK_FACTOR`] times the patience), or when it falls more than [`MAX_BEHIND`]
+//! below the watermark, and the set is pruned after every batch, so it never holds more than
+//! [`MAX_BEHIND`] numbers. A row that commits after its hole was dropped is not delivered.
+//! A viewer without a position starts at the newest row older than the patience and takes the
+//! missing numbers in the window below it as holes, so it also gets the rows of writers that
+//! were still open when it connected.
 //!
-//! Giving up on a hole is not final. Each read also looks back over a window below the
-//! watermark ([`LOOKBACK_FACTOR`] times the patience in age, at most [`MAX_BEHIND`] numbers)
-//! and sends any row there that the viewer has not sent, so a writer that commits after its
-//! number was passed is delivered, out of order, instead of lost. The viewer remembers what it
-//! sent across that window, so no row is sent twice, and a connection seeds that memory with
-//! the rows already committed in the window, so it does not replay them. A row that commits
-//! after it left the window can still be missed.
-//!
-//! A frame's `id` is `<epoch>:<watermark>`: the watermark after it, so resuming from it never
-//! skips a row (it may repeat rows above it), and the epoch names the life of the unlogged
-//! feed. A crash empties the feed and starts `seq` over; a position from another epoch, or in
-//! the older bare-number format, is answered with a reset `gap` frame.
+//! A frame's `id` is `<epoch>:<position>`, where the position is just below the oldest hole,
+//! or the watermark when there is none, so resuming from it never skips a row that was still
+//! being waited for (it may repeat rows above it). A resume does not recover a hole: a late
+//! row below the resume point whose writer committed while the client was away is not
+//! delivered. The epoch names the life of the unlogged feed. A crash empties the feed and starts
+//! `seq` over; a position from another epoch, or in the older bare-number format, is answered
+//! with a reset `gap` frame, and so is an open stream that notices on its periodic poll that
+//! the epoch changed or the feed's head fell below its watermark.
 //!
 //! The feed holds redacted values only; `reveal` shows them as stored, never as received.
 //! Nothing here logs a name, an identifier or a value.
 
 use hashbrown::HashMap;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -57,8 +60,9 @@ use uuid::Uuid;
 use zirv_flow_core::events::{mask_event, mask_sample};
 use zirv_flow_core::{TraceId, WorkspaceId};
 use zirv_flow_store::{
-    FeedFilter, FeedItem, PgPool, debugger_epoch, debugger_feed_position, debugger_feed_seqs,
-    debugger_feed_start, listen_for_debugger, read_debugger_feed, touch_debugger_watch,
+    FeedBatch, FeedFilter, FeedItem, PgPool, StoreError, debugger_epoch, debugger_epoch_peek,
+    debugger_feed_missing, debugger_feed_position, debugger_feed_start, listen_for_debugger,
+    read_debugger_batch, touch_debugger_watch,
 };
 
 use crate::AppState;
@@ -72,25 +76,20 @@ const CHANNEL_FRAMES: usize = 64;
 /// Feed rows read per query.
 const BATCH: i64 = 200;
 
-/// How many `seq` numbers a viewer looks at when settling its watermark.
-const WINDOW: i64 = 1000;
-
-/// How long a viewer waits for a missing `seq` before it gives up on it.
+/// How long a connection without a position treats a writer as possibly still open, and the
+/// base of the lookback window.
 const PATIENCE: Duration = Duration::from_secs(10);
 
-/// The most rows a viewer holds above its watermark; beyond it, holes are given up at once.
-const MAX_AHEAD: usize = 5000;
-
-/// How far below the watermark a viewer keeps looking for late rows, as a multiple of the
-/// patience. A hole is given up after one patience, by when its writer may already have been
-/// open for about as long, so twice the patience still catches a writer that commits up to one
-/// patience after its number was passed. The age is that of the row's `at`, the start of its
-/// writer's transaction.
+/// How long a hole lives, as a multiple of the patience, counted from when the viewer noticed
+/// it. A row is written when its writer starts, so a writer that commits up to one patience
+/// after its number was passed has usually been open for about as long again; twice the
+/// patience catches it, and a longer window would only keep point lookups alive for numbers
+/// that were rolled back.
 const LOOKBACK_FACTOR: u32 = 2;
 
-/// The most `seq` numbers the lookback reaches below the watermark, and so the most rows a
-/// viewer remembers having sent below it. It bounds the memory and the exclusion list of a
-/// read when the feed is fast enough that the age window would hold more.
+/// The most holes a viewer keeps, as the most `seq` numbers a hole may lie below the
+/// watermark. It bounds the viewer's memory and the array of the point lookup, whatever the
+/// feed's rate, and the numbers one missing-number probe examines.
 const MAX_BEHIND: i64 = 5000;
 
 /// A viewer that hears nothing still polls this often, as a safety net for a missed
@@ -334,86 +333,73 @@ async fn listen(hub: Weak<HubInner>) {
     }
 }
 
-/// One viewer's place in the feed: every `seq` up to `watermark` is settled, and `sent` holds
-/// the rows already delivered above it and in the lookback window below it. See the module
-/// documentation.
+/// One viewer's place in the feed: the highest `seq` it has read, and the holes below it.
+/// See the module documentation.
 struct Cursor {
     watermark: i64,
-    sent: BTreeSet<i64>,
-    /// The first missing `seq` above the watermark, and when it was first missed.
-    waiting: Option<(i64, Instant)>,
+    /// Numbers below the watermark that no row held when it passed them, with when each was
+    /// first noticed.
+    holes: BTreeMap<i64, Instant>,
 }
 
 impl Cursor {
     fn new(watermark: i64) -> Self {
         Self {
             watermark,
-            sent: BTreeSet::new(),
-            waiting: None,
+            holes: BTreeMap::new(),
         }
     }
 
-    fn sent_list(&self) -> Vec<i64> {
-        self.sent.iter().copied().collect()
+    /// A cursor at `watermark` whose holes are the `missing` numbers below it, noticed `now`.
+    fn seeded(watermark: i64, missing: &[i64], now: Instant) -> Self {
+        let mut cursor = Self::new(watermark);
+        cursor.holes = missing
+            .iter()
+            .copied()
+            .filter(|seq| *seq <= watermark)
+            .map(|seq| (seq, now))
+            .collect();
+        cursor.prune(now, Duration::MAX);
+        cursor
     }
 
-    fn deliver(&mut self, seq: i64) {
-        self.sent.insert(seq);
+    fn hole_list(&self) -> Vec<i64> {
+        self.holes.keys().copied().collect()
     }
 
-    /// Forgets the rows at or below `floor`, which the lookback no longer reaches. Rows above
-    /// the watermark are kept: they are what stops the viewer sending them twice.
-    fn prune(&mut self, floor: i64) {
-        let bound = floor.min(self.watermark);
-        self.sent = self.sent.split_off(&(bound + 1));
+    /// The `seq` a frame names: just below the oldest hole, else the watermark.
+    fn position(&self) -> i64 {
+        self.holes
+            .keys()
+            .next()
+            .map_or(self.watermark, |oldest| oldest - 1)
     }
 
-    /// Moves the watermark over every `seq` that is settled. `present` lists, in order, the
-    /// numbers the feed holds above the watermark and whether the viewer's filters match
-    /// them. A number is settled when the viewer sent it, or the feed holds it and the
-    /// filters hide it. A number the feed does not hold is a hole while a later one exists:
-    /// the viewer waits `patience` for its writer to commit, then gives up on it.
-    fn advance(&mut self, present: &[(i64, bool)], now: Instant, patience: Duration) {
-        loop {
-            let next = self.watermark + 1;
-            let held = present.binary_search_by_key(&next, |(seq, _)| *seq).ok();
-            let settled = self.sent.contains(&next) || held.is_some_and(|at| !present[at].1);
-            if settled {
-                self.watermark = next;
-                self.waiting = None;
-                continue;
-            }
-            if held.is_some() {
-                // A row to send that the viewer has not read yet.
-                return;
-            }
-            let later = present.iter().any(|(seq, _)| *seq > next)
-                || self.sent.iter().any(|seq| *seq > next);
-            if !later {
-                return;
-            }
-            let give_up = self.sent.range(next..).count() > MAX_AHEAD
-                || self.waiting.is_some_and(|(seq, since)| {
-                    seq == next && now.duration_since(since) >= patience
-                });
-            if give_up {
-                // The numbers up to the next one anybody holds are the same age: all go.
-                let after = present
-                    .iter()
-                    .map(|(seq, _)| *seq)
-                    .chain(self.sent.iter().copied())
-                    .filter(|seq| *seq > next)
-                    .min()
-                    .unwrap_or(next + 1);
-                self.watermark = after - 1;
-                self.waiting = None;
-                continue;
-            }
-            if self.waiting.is_none_or(|(seq, _)| seq != next) {
-                self.waiting = Some((next, now));
-            }
+    /// A row above the watermark was read: the `missing` numbers between the watermark and it
+    /// become holes, and the watermark moves to it.
+    fn pass(&mut self, seq: i64, missing: &[i64], now: Instant) {
+        if seq <= self.watermark {
             return;
         }
+        let from = missing.partition_point(|hole| *hole <= self.watermark);
+        for hole in missing[from..].iter().take_while(|hole| **hole < seq) {
+            self.holes.entry(*hole).or_insert(now);
+        }
+        self.watermark = seq;
+    }
+
+    /// The row of a hole was delivered.
+    fn fill(&mut self, seq: i64) {
+        self.holes.remove(&seq);
+    }
+
+    /// Drops the holes older than `window` and those more than [`MAX_BEHIND`] below the
+    /// watermark.
+    fn prune(&mut self, now: Instant, window: Duration) {
+        let floor = self.watermark - MAX_BEHIND;
+        self.holes = self.holes.split_off(&(floor + 1));
+        self.holes
+            .retain(|_, noticed| now.duration_since(*noticed) < window);
     }
 }
 
@@ -594,7 +580,7 @@ struct Viewer {
     reveal: bool,
     /// The feed's epoch, in every frame id.
     epoch: String,
-    /// How long to wait for a missing `seq`; the lookback is a multiple of it.
+    /// The base of the lookback window.
     patience: Duration,
     subscription: Subscription,
     frames: mpsc::Sender<Event>,
@@ -619,13 +605,34 @@ async fn stopped(stop: &mut Option<watch::Receiver<bool>>) {
 /// One viewer's reader: sends the rows it has not sent whenever woken, and ends when the
 /// client is gone or the server shuts down. `cursor` is where to begin; `reset` says
 /// the client's position belonged to another life of the feed, so it is told with a gap frame.
+/// Every [`POLL`] it also checks that a crash did not reset the feed under it.
 async fn pump(mut viewer: Viewer, mut cursor: Cursor, reset: bool) {
     let mut skipped = 0_u64;
     let mut told_degraded = false;
-    if reset && viewer.frames.try_send(gap_frame(0, true)).is_err() {
-        return;
-    }
+    let mut reset_pending = reset;
+    let mut next_poll = tokio::time::Instant::now() + POLL;
     loop {
+        if tokio::time::Instant::now() >= next_poll {
+            next_poll = tokio::time::Instant::now() + POLL;
+            if feed_was_reset(&viewer, cursor.watermark).await
+                && let Ok(epoch) = debugger_epoch(&viewer.pool).await
+            {
+                viewer.epoch = epoch;
+                let fresh = debugger_feed_start(&viewer.pool, viewer.patience)
+                    .await
+                    .unwrap_or(0);
+                cursor = seeded_cursor(&viewer, fresh).await;
+                skipped = 0;
+                reset_pending = true;
+            }
+        }
+        if reset_pending {
+            match viewer.frames.try_send(gap_frame(0, true)) {
+                Ok(()) => reset_pending = false,
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+            }
+        }
         let degraded = viewer.subscription.degraded();
         if degraded != told_degraded {
             match viewer.frames.try_send(status_frame(degraded)) {
@@ -646,7 +653,7 @@ async fn pump(mut viewer: Viewer, mut cursor: Cursor, reset: bool) {
                 }
             }
         }
-        if !read_new(&mut viewer, &mut cursor, &mut skipped).await {
+        if !reset_pending && !read_new(&mut viewer, &mut cursor, &mut skipped).await {
             return;
         }
         tokio::select! {
@@ -655,95 +662,103 @@ async fn pump(mut viewer: Viewer, mut cursor: Cursor, reset: bool) {
                     return;
                 }
             }
-            () = tokio::time::sleep(POLL) => {}
+            () = tokio::time::sleep_until(next_poll) => {}
             () = viewer.frames.closed() => return,
             () = stopped(&mut viewer.stop) => return,
         }
     }
 }
 
-/// The lowest `seq` the lookback reaches below `watermark`: the newest row older than the
-/// lookback age, but never more than [`MAX_BEHIND`] numbers down. On a read error there is no
-/// lookback.
+/// Whether the feed started over since the viewer last knew it: its epoch is gone or
+/// replaced, or its head is below the viewer's watermark (a restarted sequence). A read error
+/// is not a reset.
+async fn feed_was_reset(viewer: &Viewer, watermark: i64) -> bool {
+    match debugger_epoch_peek(&viewer.pool).await {
+        Ok(Some(epoch)) if epoch == viewer.epoch => {}
+        Ok(_) => return true,
+        Err(_) => return false,
+    }
+    debugger_feed_position(&viewer.pool)
+        .await
+        .is_ok_and(|head| head < watermark)
+}
+
+/// How long a hole lives.
+fn lookback(viewer: &Viewer) -> Duration {
+    viewer.patience * LOOKBACK_FACTOR
+}
+
+/// The lowest `seq` a seeding looks at below `watermark`: the newest row older than the
+/// lookback age, but never more than [`MAX_BEHIND`] numbers down. On a read error there is
+/// none.
 async fn lookback_floor(viewer: &Viewer, watermark: i64) -> i64 {
-    let lookback = viewer.patience * LOOKBACK_FACTOR;
-    let aged = debugger_feed_start(&viewer.pool, lookback)
+    let aged = debugger_feed_start(&viewer.pool, lookback(viewer))
         .await
         .unwrap_or(watermark);
     aged.max(watermark - MAX_BEHIND).min(watermark)
 }
 
-/// A cursor at `watermark` that already counts as sent every row committed in the lookback
-/// window up to it, so a connection or a skip ahead does not replay them; only a row that
-/// commits later is delivered below the watermark.
+/// A cursor at `watermark` whose holes are the numbers in the lookback window below it that
+/// no row holds, so a connection or a skip ahead delivers a writer that commits later and
+/// replays nothing already committed.
 async fn seeded_cursor(viewer: &Viewer, watermark: i64) -> Cursor {
-    let mut cursor = Cursor::new(watermark);
     let floor = lookback_floor(viewer, watermark).await;
-    let committed = debugger_feed_seqs(
+    let missing = debugger_feed_missing(&viewer.pool, floor, watermark, MAX_BEHIND)
+        .await
+        .unwrap_or_default();
+    Cursor::seeded(watermark, &missing, Instant::now())
+}
+
+async fn read_batch(viewer: &Viewer, cursor: &Cursor) -> Result<FeedBatch, StoreError> {
+    read_debugger_batch(
         &viewer.pool,
         viewer.workspace,
-        floor,
-        FeedFilter::default(),
+        cursor.watermark,
+        &cursor.hole_list(),
+        viewer.filter.as_store(),
+        BATCH,
         MAX_BEHIND,
     )
     .await
-    .unwrap_or_default();
-    for (seq, _) in committed.into_iter().filter(|(seq, _)| *seq <= watermark) {
-        cursor.deliver(seq);
-    }
-    cursor
 }
 
-/// Sends every row the viewer has not sent, including late ones in the lookback window below
-/// the watermark, then settles the watermark. False when the client is gone.
+/// Sends every row the viewer has not sent: the holes that filled, then the rows above the
+/// watermark, in batches. False when the client is gone.
 async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -> bool {
-    let workspace = viewer.workspace;
-    let floor = lookback_floor(viewer, cursor.watermark).await;
-    cursor.prune(floor);
-    let pool = &viewer.pool;
     loop {
-        let rows = match read_debugger_feed(
-            pool,
-            workspace,
-            floor,
-            &cursor.sent_list(),
-            viewer.filter.as_store(),
-            BATCH,
-        )
-        .await
-        {
-            Ok(rows) => rows,
+        cursor.prune(Instant::now(), lookback(viewer));
+        let batch = match read_batch(viewer, cursor).await {
+            Ok(batch) => batch,
             Err(error) => {
                 warn!(%error, "the debugger feed could not be read");
                 return true;
             }
         };
-        // Read after the rows, so it holds every number they do.
-        let present = debugger_feed_seqs(
-            pool,
-            workspace,
-            cursor.watermark,
-            viewer.filter.as_store(),
-            WINDOW,
-        )
-        .await
-        .unwrap_or_default();
-        let count = rows.len();
-        for item in rows {
-            cursor.deliver(item.seq);
-            cursor.advance(&present, Instant::now(), viewer.patience);
+        let count = batch.rows.len();
+        let now = Instant::now();
+        let ordered = batch
+            .filled
+            .into_iter()
+            .map(|item| (true, item))
+            .chain(batch.rows.into_iter().map(|item| (false, item)));
+        for (was_hole, item) in ordered {
+            if was_hole {
+                cursor.fill(item.seq);
+            } else {
+                cursor.pass(item.seq, &batch.missing, now);
+            }
             match viewer.frames.try_send(item_frame(
                 item,
                 viewer.reveal,
                 &viewer.epoch,
-                cursor.watermark,
+                cursor.position(),
             )) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Closed(_)) => return false,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     // Skip ahead rather than wait: a slow viewer must not hold anything.
                     *skipped += 1;
-                    if let Ok(head) = debugger_feed_position(pool).await {
+                    if let Ok(head) = debugger_feed_position(&viewer.pool).await {
                         *skipped += u64::try_from(head - cursor.watermark).unwrap_or(0);
                         *cursor = seeded_cursor(viewer, cursor.watermark.max(head)).await;
                     }
@@ -751,7 +766,7 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
                 }
             }
         }
-        cursor.advance(&present, Instant::now(), viewer.patience);
+        cursor.prune(Instant::now(), lookback(viewer));
         if i64::try_from(count).is_ok_and(|count| count < BATCH) {
             return true;
         }
@@ -765,10 +780,12 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
 /// safe to resume from: send it back as `Last-Event-ID` and the stream continues after it,
 /// possibly repeating a few rows the client already has (their `seq` identifies them). A row
 /// whose writer commits late is sent when it does, so frames may arrive out of order by `seq`;
-/// a row that commits more than twice the 10 s patience after it was written can still be
-/// missed. The epoch names the life of the feed, which is unlogged and starts over after a
-/// crash: a position from another epoch, or an older bare number, is answered with a `gap`
-/// frame whose `reset` is true, and the stream starts at the current position. A viewer that
+/// a row that commits more than twice the 10 s patience after a later row was sent can still
+/// be missed, and a resumed stream does not deliver a late row below its resume point whose
+/// writer committed while the client was away. The epoch names the life of the feed, which is
+/// unlogged and starts over after a crash: a position from another epoch, or an older bare
+/// number, is answered with a `gap` frame whose `reset` is true, and the stream starts at the
+/// current position; an open stream that notices the crash on its poll does the same. A viewer that
 /// cannot keep up gets an `event: gap` frame with the number of rows skipped (an upper bound
 /// when filters apply). While the server's notifier is down, an `event: status` frame says
 /// `degraded` and the stream polls every few seconds instead of reacting at once; another says
@@ -1013,110 +1030,115 @@ mod tests {
         assert!(second.ticks.has_changed().unwrap());
     }
 
-    fn present(seqs: &[i64]) -> Vec<(i64, bool)> {
-        seqs.iter().map(|seq| (*seq, true)).collect()
-    }
-
     #[test]
-    fn a_row_that_commits_late_below_the_cursor_is_still_delivered() {
+    fn a_row_passing_missing_numbers_leaves_them_as_holes_and_a_late_row_fills_one() {
         let now = Instant::now();
         let mut cursor = Cursor::new(4);
         // B took seq 6 and committed; A (seq 5) is still open.
-        cursor.deliver(6);
-        cursor.advance(&present(&[6]), now, PATIENCE);
-        let held_back = cursor.watermark;
-        let reads_while_open = cursor.sent_list();
-        // A commits.
-        cursor.deliver(5);
-        cursor.advance(&present(&[5, 6]), now, PATIENCE);
+        cursor.pass(6, &[5], now);
+        let while_open = (cursor.watermark, cursor.position(), cursor.hole_list());
+        // A commits and is read through its hole.
+        cursor.fill(5);
 
-        assert_eq!(held_back, 4, "the watermark waits for the hole");
         assert_eq!(
-            reads_while_open,
-            [6],
-            "the next read excludes what was sent"
+            while_open,
+            (6, 4, vec![5]),
+            "a resume must not skip the hole"
         );
-        assert_eq!(cursor.watermark, 6);
+        assert_eq!((cursor.watermark, cursor.position()), (6, 6));
+        assert!(cursor.holes.is_empty(), "delivered once, then forgotten");
+    }
+
+    #[test]
+    fn only_the_missing_numbers_between_the_watermark_and_the_row_become_holes() {
+        let now = Instant::now();
+        let mut cursor = Cursor::new(10);
+
+        // 3 is below the watermark and 20 is above the row: neither is this row's to open.
+        cursor.pass(15, &[3, 12, 20], now);
+        cursor.pass(14, &[13], now);
+
+        assert_eq!(cursor.hole_list(), [12]);
         assert_eq!(
-            cursor.sent_list(),
-            [5, 6],
-            "kept for the lookback, pruned later"
+            cursor.watermark, 15,
+            "a row below the watermark moves nothing"
         );
     }
 
     #[test]
-    fn a_row_below_the_watermark_stays_sent_until_the_lookback_leaves_it() {
+    fn a_hole_expires_after_the_window_counted_from_when_it_was_noticed() {
+        let now = Instant::now();
+        let window = Duration::from_secs(20);
+        let mut cursor = Cursor::new(4);
+        cursor.pass(10, &[5], now);
+
+        cursor.prune(now + window / 2, window);
+        let early = cursor.hole_list();
+        cursor.prune(now + window, window);
+
+        assert_eq!(early, [5]);
+        assert!(cursor.holes.is_empty());
+    }
+
+    #[test]
+    fn a_hole_too_far_below_the_watermark_is_dropped() {
         let now = Instant::now();
         let mut cursor = Cursor::new(0);
-        cursor.deliver(1);
-        cursor.deliver(2);
-        cursor.advance(&present(&[1, 2]), now, PATIENCE);
+        cursor.pass(MAX_BEHIND + 100, &[10, 101, 102], now);
 
-        let kept = cursor.sent_list();
-        cursor.prune(1);
-        let after_one = cursor.sent_list();
-        cursor.prune(50);
+        cursor.prune(now, Duration::from_secs(20));
 
-        assert_eq!(cursor.watermark, 2);
-        assert_eq!(kept, [1, 2], "a late re-read excludes what was sent");
-        assert_eq!(after_one, [2]);
+        assert_eq!(cursor.hole_list(), [101, 102]);
+    }
+
+    #[test]
+    fn a_burst_of_many_batches_keeps_the_hole_set_bounded() {
+        let now = Instant::now();
+        let window = Duration::from_secs(20);
+        let mut cursor = Cursor::new(0);
+        let mut most = 0;
+        // Fifty batches of BATCH rows, each row leaving two missing numbers before it, at one
+        // instant: nothing expires by age, so only the reach below the watermark bounds it.
+        for batch in 0..50_i64 {
+            let first = batch * BATCH * 3;
+            let mut missing = Vec::new();
+            for row in 1..=BATCH {
+                let seq = first + row * 3;
+                missing.extend([seq - 2, seq - 1]);
+                cursor.pass(seq, &missing, now);
+            }
+            cursor.prune(now, window);
+            most = most.max(cursor.holes.len());
+        }
+
+        let reach = usize::try_from(MAX_BEHIND).unwrap();
+        assert!(most <= reach, "{most} holes held");
+        assert!(most > reach / 2, "the bound, not the burst, limited it");
         assert!(
-            cursor.sent.is_empty(),
-            "pruning never goes above the watermark"
+            cursor
+                .holes
+                .keys()
+                .all(|hole| *hole > cursor.watermark - MAX_BEHIND)
         );
     }
 
     #[test]
-    fn pruning_keeps_rows_above_the_watermark() {
+    fn a_seeded_cursor_holds_the_missing_numbers_up_to_its_start_as_holes() {
         let now = Instant::now();
-        let mut cursor = Cursor::new(4);
-        cursor.deliver(6);
-        cursor.advance(&present(&[6]), now, PATIENCE);
 
-        cursor.prune(100);
+        let cursor = Cursor::seeded(8, &[3, 7, 9], now);
 
-        assert_eq!(cursor.watermark, 4);
-        assert_eq!(cursor.sent_list(), [6]);
+        assert_eq!(cursor.watermark, 8);
+        assert_eq!(cursor.hole_list(), [3, 7], "9 lies above the start");
+        assert_eq!(cursor.position(), 2);
     }
 
     #[test]
-    fn a_hole_is_given_up_after_the_patience_and_not_before() {
-        let now = Instant::now();
-        let mut cursor = Cursor::new(4);
-        cursor.deliver(6);
-        cursor.advance(&present(&[6]), now, PATIENCE);
+    fn a_resume_cursor_has_no_holes_below_its_watermark() {
+        let cursor = Cursor::new(42);
 
-        cursor.advance(&present(&[6]), now + PATIENCE / 2, PATIENCE);
-        let early = cursor.watermark;
-        cursor.advance(&present(&[6]), now + PATIENCE, PATIENCE);
-
-        assert_eq!(early, 4);
-        assert_eq!(cursor.watermark, 6, "the writer of seq 5 rolled back");
-    }
-
-    #[test]
-    fn rows_a_filter_hides_settle_without_waiting_and_a_tail_is_not_a_hole() {
-        let now = Instant::now();
-        let mut cursor = Cursor::new(0);
-        cursor.deliver(3);
-
-        cursor.advance(&[(1, false), (2, false), (3, true)], now, PATIENCE);
-        let settled = cursor.watermark;
-        cursor.advance(&[], now + PATIENCE * 3, PATIENCE);
-
-        assert_eq!(settled, 3);
-        assert_eq!(cursor.watermark, 3);
-        assert!(cursor.waiting.is_none());
-    }
-
-    #[test]
-    fn a_row_to_send_blocks_the_watermark_until_it_is_sent() {
-        let now = Instant::now();
-        let mut cursor = Cursor::new(0);
-
-        cursor.advance(&present(&[1, 2]), now, PATIENCE);
-
-        assert_eq!(cursor.watermark, 0);
+        assert!(cursor.hole_list().is_empty());
+        assert_eq!(cursor.position(), 42);
     }
 
     #[test]
@@ -1182,41 +1204,6 @@ mod tests {
         assert!(before.is_err());
         assert!(after.is_ok());
         assert!(never.is_err());
-    }
-
-    #[test]
-    fn numbers_another_workspace_holds_are_settled_not_holes() {
-        let now = Instant::now();
-        let mut cursor = Cursor::new(0);
-        cursor.deliver(4);
-        // Seqs 1 to 3 and 5 belong to other workspaces; 4 is this viewer's, already sent.
-        let global = [(1, false), (2, false), (3, false), (4, true), (5, false)];
-
-        cursor.advance(&global, now, PATIENCE);
-
-        assert_eq!(cursor.watermark, 5);
-        assert!(
-            cursor.waiting.is_none(),
-            "no wait for other workspaces' numbers"
-        );
-    }
-
-    #[test]
-    fn giving_up_on_a_hole_skips_the_whole_run_of_missing_numbers() {
-        let now = Instant::now();
-        let mut cursor = Cursor::new(0);
-        cursor.deliver(9);
-        let global = [(9, true)];
-        cursor.advance(&global, now, PATIENCE);
-        let waiting = cursor.watermark;
-
-        cursor.advance(&global, now + PATIENCE, PATIENCE);
-
-        assert_eq!(waiting, 0);
-        assert_eq!(
-            cursor.watermark, 9,
-            "one wait covers numbers 1 to 8, not one wait each"
-        );
     }
 
     #[tokio::test]
