@@ -818,7 +818,7 @@ else's data.
   connections, including every broker address learned from metadata, pass the
   egress policy (16.1). Values are JSON only in v1; Avro and Protobuf with a
   schema registry come post-1.0 (OQ-31). The `rskafka` TLS and compression
-  features are validated on both musl release architectures (amd64, arm64).
+  features are validated on the musl release target (x86_64-unknown-linux-musl).
   Its zstd feature is off: `rskafka` 0.6 pins `zstd` 0.13, which has
   RUSTSEC-2026-0391, 0398, 0403 and 0410, and 0403 is reachable from broker
   bytes. Gzip, Snappy and LZ4 batches read; a zstd batch fails the read. It
@@ -2995,7 +2995,7 @@ rows, and the survivor is re-evaluated through its `merge` change class (7.1).
 | Health | `/healthz` liveness; `/readyz` readiness (DB reachable, schema version matches, role loops running) |
 | Config | TOML file + env overrides `ZIRV_FLOW_<SECTION>__<KEY>` (e.g. `ZIRV_FLOW_DATABASE__URL`). Sections: `server` (bind, `public_url` for tracking links), `database` (url, `read_url`, pool, `migrate_on_start`), `worker` (concurrency, kinds), `ops` (`bind`, off by default: metrics and health listener for worker-only and scheduler-only processes), `log` (`filter`, an EnvFilter directive, default `info`; `format`, `json` or `text`, default `json`), `secrets` (`master_key_file`, `master_key`), `ai` (allowed providers/models/base URLs). `config check` prints the result with secrets redacted. |
 | Migrations | sqlx, embedded, forward-only. `zirv-flow migrate` explicitly, or guarded `database.migrate_on_start` / `--migrate` under an advisory lock (one migrator). Startup refuses an unknown (newer) schema, and pending migrations when migrating is not enabled. |
-| Packaging | GHCR image (multi-stage, non-root, linux amd64/arm64); a static Linux release binary from CD; `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Worker-only and scheduler-only processes serve `/metrics`, `/healthz` and `/readyz` on `ops.bind` (off by default); with `serve` the endpoints stay on `server.bind`. PostgreSQL 16 or newer is required. |
+| Packaging | GHCR image (multi-stage, non-root, linux/amd64); `docker-compose.yml` quickstart (`zirv-flow all` + Postgres, health checks, volume). Larger setups: `serve` behind a load balancer, N workers, two schedulers, and a CDN or caching proxy in front of `/a/` image assets. Worker-only and scheduler-only processes serve `/metrics`, `/healthz` and `/readyz` on `ops.bind` (off by default); with `serve` the endpoints stay on `server.bind`. PostgreSQL 16 or newer is required. |
 | Backup and restore | Postgres is the only stateful component: `pg_dump` when small, WAL archiving + point-in-time recovery in production. Back up the master key and config separately. Restore = database, matching binary, erasure replay; rehearsed in M8. |
 | Upgrades (v1) | Back up, stop all roles, `zirv-flow migrate` with the new binary, start. Mixed-version rolling upgrades are OQ-17. |
 
@@ -3233,8 +3233,8 @@ they were ruled as their capabilities were added to the plan.
   the partitions and fetches each from per-partition next offsets stored in our
   database, written in the apply-batch transaction with the lease fenced inside
   it. JSON values only in v1; Avro and Protobuf with a schema registry come
-  post-1.0. The TLS and compression features are validated on both musl
-  architectures (amd64, arm64). Sections 7.6 and 14.
+  post-1.0. The TLS and compression features are validated on the musl
+  release target (x86_64-unknown-linux-musl). Sections 7.6 and 14.
 - **OQ-26:** Assistant transcripts are not stored by default. A workspace admin
   can opt in to a debugging window of 1 to 30 days (default 7), purged by a
   retention job; changing the setting is audited. The content-free call audit
