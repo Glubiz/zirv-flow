@@ -153,7 +153,7 @@ pub(crate) async fn preview(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<SnippetPreviewRequest>,
 ) -> Result<Json<SnippetPreviewBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id: Uuid = path_id(&id)?;
     let (mut content, source, checked, catalog) = {
         let mut connection = state

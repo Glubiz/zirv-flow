@@ -49,10 +49,11 @@ pub use inspector::{
 };
 pub use lifecycle::{archive_flow, pause_flow, publish_flow, resume_flow};
 pub use runtime::{
-    Enrollment, EnrollmentStatus, EnrollmentUpdate, NewStepExecution, NewWait, STEP_JOB_KIND,
-    SYNC_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord, WEBHOOK_JOB_KIND,
-    clear_waits, count_in_flight_enrollments, find_enrollment, lock_enrollment, record_steps,
-    register_wait, save_enrollment, settle_wait_step, step_zones, wait_filters,
+    Enrollment, EnrollmentSample, EnrollmentStatus, EnrollmentUpdate, NewStepExecution, NewWait,
+    STEP_JOB_KIND, SYNC_JOB_KIND, StepJobInput, StepJobPayload, StepOutcome, StepRecord,
+    WEBHOOK_JOB_KIND, clear_waits, count_in_flight_enrollments, find_enrollment, lock_enrollment,
+    record_steps, register_wait, sample_enrollments, save_enrollment, settle_wait_step, step_zones,
+    wait_filters,
 };
 pub use send::{
     DELIVERY_UNCONFIRMED, EndedOrphan, HARD_BOUNCE, INTERNAL_ERROR, JOB_DEAD, SEND_JOB_KIND,

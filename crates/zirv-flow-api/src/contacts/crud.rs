@@ -190,7 +190,7 @@ pub(crate) async fn create(
     headers: HeaderMap,
     ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let idempotency = IdempotencyKey::of(&headers, &method, &uri, &body)?;
     let request: CreateContactRequest = parse(body)?;
     run(
@@ -356,7 +356,7 @@ pub(crate) async fn replace(
     headers: HeaderMap,
     ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let idempotency = IdempotencyKey::of(&headers, &method, &uri, &body)?;
     let request: ContactFieldsRequest = parse(body)?;
     run(
@@ -404,7 +404,7 @@ pub(crate) async fn patch(
     headers: HeaderMap,
     ApiJson(body): ApiJson<Value>,
 ) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let idempotency = IdempotencyKey::of(&headers, &method, &uri, &body)?;
     let request: ContactFieldsRequest = parse(body)?;
     run(
@@ -450,7 +450,7 @@ pub(crate) async fn remove(
     uri: Uri,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let idempotency = IdempotencyKey::of(&headers, &method, &uri, &Value::Null)?;
     run(
         &state,

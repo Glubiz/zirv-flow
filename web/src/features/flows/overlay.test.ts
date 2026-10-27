@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { Graph } from "./model";
-import { pathOverlay } from "./overlay";
+import { countsHeight, overlayExtra, pathOverlay } from "./overlay";
 
 /** A branch whose two arms lead to the same step, and a plain step with one wire to the next. */
 const GRAPH = {
@@ -36,5 +36,28 @@ describe("pathOverlay", () => {
       // A single wire between two steps is certain without a port.
       expect(pathEdges?.has("next")).toBe(true);
     }
+  });
+});
+
+describe("count badge height", () => {
+  it("adds one line for the short badges of a plain step and a line per skip reason", () => {
+    expect(countsHeight({ entered: 1, waiting: 1, failed: 0 })).toBe(26);
+    expect(countsHeight({ entered: 1, waiting: 1, failed: 1 })).toBe(52);
+    expect(countsHeight({ entered: 1, waiting: 0, failed: 0, skipped: [{ reason: "a", count: 1 }] })).toBe(52);
+    expect(countsHeight({ entered: 1, waiting: 0, failed: 0, skipped: [{ reason: "a", count: 1 }, { reason: "b", count: 2 }] })).toBe(78);
+  });
+});
+
+describe("extra card height", () => {
+  const tally = { entered: 1, waiting: 1, failed: 0 };
+
+  it("adds the mark line to a counted card: the grid plus 18 px and the 2 px gap", () => {
+    expect(overlayExtra(tally, false)).toBe(26);
+    expect(overlayExtra(tally, true)).toBe(46);
+  });
+
+  it("leaves a card with a mark but no counts, and a card with neither, at its usual height", () => {
+    expect(overlayExtra(undefined, true)).toBe(0);
+    expect(overlayExtra(undefined, false)).toBe(0);
   });
 });

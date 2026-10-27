@@ -24,7 +24,7 @@ function mount() {
   );
 }
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -184,7 +184,7 @@ describe("a webhook source", () => {
     mockApi({
       ...ADMIN,
       "GET /api/v1/session": () => json(session(MEMBER, "csrf-member")),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
     });
     mount();
 

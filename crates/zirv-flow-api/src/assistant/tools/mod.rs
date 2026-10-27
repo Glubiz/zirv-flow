@@ -101,18 +101,16 @@ pub(crate) fn find(name: &str) -> Option<Tool> {
     registry().into_iter().find(|tool| tool.name() == name)
 }
 
-/// Authorizes the context's user as a workspace admin, again. A user whose role was taken away
-/// since the run began is refused here, at the next call.
-pub(super) async fn authorize_again(context: &ToolContext) -> Result<(), ToolError<ApiError>> {
-    authorize(
-        &context.state,
-        &context.principal,
-        context.workspace,
-        Need::Admin,
-    )
-    .await
-    .map(|_| ())
-    .map_err(ToolError::Failed)
+/// Authorizes the context's user for `need` in the workspace, again. A user whose role was taken
+/// away since the run began is refused here, at the next call.
+pub(super) async fn authorize_again(
+    context: &ToolContext,
+    need: Need,
+) -> Result<(), ToolError<ApiError>> {
+    authorize(&context.state, &context.principal, context.workspace, need)
+        .await
+        .map(|_| ())
+        .map_err(ToolError::Failed)
 }
 
 /// Checks arguments against the tool's schema. The lines name a path and a rule, never a value.

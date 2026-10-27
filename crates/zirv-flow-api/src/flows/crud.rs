@@ -428,7 +428,7 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(body): ApiJson<CreateFlowRequest>,
 ) -> Result<(StatusCode, Json<FlowDetailBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let name = check_name(&body.name)?.to_owned();
     let (_, graph) = parse_graph(body.graph.unwrap_or_else(empty_graph))?;
     let (_, settings) = parse_settings(body.settings.unwrap_or_else(default_settings))?;
@@ -513,7 +513,7 @@ pub(crate) async fn update(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<UpdateFlowRequest>,
 ) -> Result<Json<FlowDetailBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id = path_id(&id)?;
     let mut fields: Vec<&'static str> = Vec::new();
     let name = body
@@ -590,7 +590,7 @@ pub(crate) async fn validate(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<ValidationBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let flow = zirv_flow_store::find_flow(&mut *tx, workspace.id, path_id(&id)?)
         .await?

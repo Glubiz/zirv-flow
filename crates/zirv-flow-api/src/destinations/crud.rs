@@ -466,7 +466,7 @@ pub(crate) async fn options(
     principal: Principal,
     Path(ws): Path<String>,
 ) -> Result<Json<Vec<DestinationOptionBody>>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let destinations = zirv_flow_store::list_destinations(&state.pool, workspace.id, true).await?;
     Ok(Json(
         destinations

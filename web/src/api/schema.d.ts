@@ -394,8 +394,9 @@ export interface paths {
          *     assistant: the model is asked, its answer validated
          *     with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
          *     repairs. The answer is the validated draft with its diff against the saved version and a dry
-         *     run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
-         *     signed in; an API key is refused. Every attempt is a gated model call: it counts against the
+         *     run, or the last problems. Only a validated draft can be accepted. Editors and above who are
+         *     signed in (a mapping or manifest draft reads a source, so it takes an admin); an API key is
+         *     refused. Every attempt is a gated model call: it counts against the
          *     budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
          *     proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
          */
@@ -419,7 +420,7 @@ export interface paths {
          * Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not
          *     changed since and that it still passes the rules a save applies, then returns it for the
          *     editor to load as its unsaved draft. Nothing is written to the stream or the source; saving
-         *     stays a separate action. Audited as `ai.draft.accepted`. Workspace admins who are signed in.
+         *     stays a separate action. Audited as `ai.draft.accepted`. Editors and above who are signed in.
          */
         post: operations["accept_ai_draft"];
         delete?: never;
@@ -1032,14 +1033,20 @@ export interface paths {
          * Watches the workspace's events as they are decided: one `item` frame per outcome
          *     (`accepted`, `flagged`, `unplanned`, `rejected` or `duplicate`), live, with no
          *     history beyond the last few seconds before it connected (so a batch that was still
-         *     committing is not missed). Each frame's `id` is a position that is safe to resume from: send it back as
-         *     `Last-Event-ID` and the stream continues after it, possibly repeating a few rows the
-         *     client already has (their `seq` identifies them). A position beyond the feed (the feed is
-         *     unlogged and starts over after a crash) is clamped to its end and announced with a `gap`
-         *     frame whose `reset` is true. A viewer that cannot keep up gets an `event: gap` frame with
-         *     the number of rows skipped (an upper bound when filters apply). While the server's
-         *     notifier is down, an `event: status` frame says `degraded` and the stream polls every few
-         *     seconds instead of reacting at once; another says it recovered.
+         *     committing is not missed). Each frame's `id` is `<epoch>:<position>`, a position that is
+         *     safe to resume from: send it back as `Last-Event-ID` and the stream continues after it,
+         *     possibly repeating a few rows the client already has (their `seq` identifies them). A row
+         *     whose writer commits late is sent when it does, so frames may arrive out of order by `seq`;
+         *     a row that commits more than twice the 10 s patience after a later row was sent can still
+         *     be missed, and a resumed stream does not deliver a late row below its resume point whose
+         *     writer committed while the client was away. The epoch names the life of the feed, which is
+         *     unlogged and starts over after a crash: a position from another epoch, or an older bare
+         *     number, is answered with a `gap` frame whose `reset` is true, and the stream starts at the
+         *     current position; an open stream that notices the crash on its poll does the same. A viewer that
+         *     cannot keep up gets an `event: gap` frame with the number of rows skipped (an upper bound
+         *     when filters apply). While the server's notifier is down, an `event: status` frame says
+         *     `degraded` and the stream polls every few seconds instead of reacting at once; another says
+         *     it recovered.
          * @description While at least one viewer watches a workspace, ingestion writes a feed row per event;
          *     when none does, it writes nothing extra. Values are masked per viewer as in the person
          *     timeline; `reveal=true` shows the stored (redacted) values to a viewer who may see values
@@ -1605,7 +1612,7 @@ export interface paths {
         put?: never;
         /**
          * Starts a flow whose trigger is `manual` for an audience: the current members of a segment or
-         *     the members of a list. Admin only, and audited as `flow.started`. The audience is queued as a
+         *     the members of a list. Publisher and above, and audited as `flow.started`. The audience is queued as a
          *     `flow.enroll` job that pages through it, a thousand people at a time, under the cause
          *     `manual`. A paused flow takes nobody and records the skip.
          */
@@ -2068,7 +2075,7 @@ export interface paths {
          *     more than 1,000 rows are done and the rejected share is above the import's threshold; the
          *     batches already applied stay applied. Running the same file again with the same source and
          *     stream changes nothing. The answer is the import in `running`; poll it. Audited as
-         *     `import.run_started`.
+         *     `import.run_started`. Publishers and above, or a key with the `publish` scope.
          */
         post: operations["run_import"];
         delete?: never;
@@ -2233,7 +2240,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The members of a workspace. Any member can read this. */
+        /** The members of a workspace. Any member, whatever the role, can read this. */
         get: operations["list_members"];
         put?: never;
         post?: never;
@@ -4630,7 +4637,7 @@ export interface components {
             /** Format: date-time */
             revoked_at?: string | null;
             /**
-             * @description Any of `ingest`, `read`, `write`, `admin`.
+             * @description Any of `ingest`, `read`, `write`, `publish`, `admin`.
              * @example [
              *       "read"
              *     ]
@@ -5115,7 +5122,7 @@ export interface components {
              */
             name: string;
             /**
-             * @description At least one of `ingest`, `read`, `write`, `admin`.
+             * @description At least one of `ingest`, `read`, `write`, `publish`, `admin`.
              * @example [
              *       "read"
              *     ]
@@ -7647,8 +7654,8 @@ export interface components {
             added_at: string;
             email: string;
             /**
-             * @description `admin` or `member`.
-             * @example member
+             * @description `admin`, `publisher`, `editor` or `viewer`.
+             * @example editor
              */
             role: string;
             /** Format: uuid */
@@ -8569,7 +8576,7 @@ export interface components {
             to_person_id: string;
         };
         RoleBody: {
-            /** @example member */
+            /** @example editor */
             role: string;
             /** Format: uuid */
             user_id: string;
@@ -9327,7 +9334,7 @@ export interface components {
             theme_id: string;
         };
         SetRoleRequest: {
-            /** @description `admin` or `member`. */
+            /** @description `admin`, `publisher`, `editor` or `viewer`. */
             role: string;
         };
         SetupRequest: {
@@ -12178,7 +12185,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            /** @description Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -12284,7 +12291,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, or an API key (`ai_user_required`) */
+            /** @description Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`) */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -16985,7 +16992,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17266,7 +17273,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17329,7 +17336,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17390,7 +17397,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17472,7 +17479,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17542,7 +17549,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17607,7 +17614,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -17974,7 +17981,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -19262,7 +19269,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A key without the write scope, or a missing CSRF token */
+            /** @description A key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -20161,6 +20168,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description The change would leave the workspace with no admin (`last_admin`); only the owner may do that */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description Invalid role */
             422: {
                 headers: {
@@ -20213,6 +20229,15 @@ export interface operations {
             };
             /** @description No such workspace or member, or no access */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The change would leave the workspace with no admin (`last_admin`); only the owner may do that */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23538,7 +23563,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -26178,7 +26203,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -27494,7 +27519,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description Not a workspace admin, a key without the admin scope, or a missing CSRF token */
+            /** @description Not a publisher, a key without the publish scope, or a missing CSRF token */
             403: {
                 headers: {
                     [name: string]: unknown;

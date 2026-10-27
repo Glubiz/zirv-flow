@@ -215,7 +215,7 @@ pub(crate) async fn import(
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Result<Json<ImportBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let list: Uuid = path_id(&id)?;
     let dry = dry_run(query.as_deref().unwrap_or_default())?;
     if !is_csv(&headers) {

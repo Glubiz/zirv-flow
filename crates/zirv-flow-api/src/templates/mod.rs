@@ -37,7 +37,7 @@ pub(crate) async fn authorize_render(
     real_person: bool,
 ) -> Result<Workspace, ApiError> {
     if !real_person {
-        return authorize(state, principal, ws, Need::Write).await;
+        return authorize(state, principal, ws, Need::Edit).await;
     }
     // Until the `view_pii` grant exists, a real person's values are for admins.
     authorize(state, principal, ws, Need::Admin)

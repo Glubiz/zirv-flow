@@ -245,7 +245,7 @@ describe("the Review and publish page", () => {
   });
 
   it("offers a member who is not an admin the sample person only, and no way to publish", async () => {
-    const calls = mockApi({ ...templateRoutes({ role: "member", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
+    const calls = mockApi({ ...templateRoutes({ role: "editor", detail: templateDetail({}, blocksDoc(heading("Hi"))), saved: PEOPLE }), [PREVIEW]: () => rendered() });
     mount();
 
     expect(await screen.findByText("Only workspace admins can publish.")).toBeInTheDocument();

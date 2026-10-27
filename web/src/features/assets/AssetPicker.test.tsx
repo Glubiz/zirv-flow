@@ -17,8 +17,8 @@ function Gate({ children }: { children: React.ReactNode }) {
   return state.status === "signed-in" ? <>{children}</> : <p>Waiting</p>;
 }
 
-function mount(props: { themeLogo?: boolean; allowUrl?: boolean; role?: "admin" | "member" | null; list?: unknown } = {}) {
-  const role = props.role === undefined ? "member" : props.role;
+function mount(props: { themeLogo?: boolean; allowUrl?: boolean; role?: "admin" | "editor" | null; list?: unknown } = {}) {
+  const role = props.role === undefined ? "editor" : props.role;
   const user = role === "admin" ? OWNER : MEMBER;
   mockApi({
     "GET /api/v1/session": () => json(session(user, "csrf-pick")),

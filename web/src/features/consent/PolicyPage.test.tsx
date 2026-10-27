@@ -36,17 +36,17 @@ function draftBody(rules: unknown[] = [BUILTIN], revision = 0, published: number
   return { rules, revision, published_version: published, updated_at: revision === 0 ? null : "2026-10-20T09:00:00Z" };
 }
 
-function members(role: "admin" | "member" | null) {
+function members(role: "admin" | "editor" | null) {
   return role === null ? [] : [{ user_id: MEMBER.id, email: MEMBER.email, role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
-type Role = "admin" | "member" | "reader";
+type Role = "admin" | "editor" | "reader";
 
 function routes(role: Role, extra: Record<string, Handler> = {}): Record<string, Handler> {
   const who = role === "admin" ? OWNER : MEMBER;
   return {
     "GET /api/v1/session": () => json(session(who)),
-    "GET /api/v1/workspaces/ws1/members": () => json(members(role === "admin" ? "admin" : role === "member" ? "member" : null)),
+    "GET /api/v1/workspaces/ws1/members": () => json(members(role === "admin" ? "admin" : role === "editor" ? "editor" : null)),
     ...catalogRoutes(),
     [`GET ${WS}/traits`]: () => json([...TRAITS, trait("account_state", "string")]),
     [`GET ${WS}/consent/dimensions`]: () => json([TOPIC_DIMENSION, VERTICAL]),
@@ -226,7 +226,7 @@ describe("consent policy builder", () => {
   it("says when someone else saved the draft first, and loads theirs", async () => {
     let reads = 0;
     mockApi(
-      routes("member", {
+      routes("editor", {
         [`GET ${WS}/consent/policy/draft`]: () => {
           reads += 1;
           return json(draftBody([BUILTIN], reads));
@@ -247,7 +247,7 @@ describe("consent policy builder", () => {
   });
 
   it("hides publishing, history and the check from a member, and editing from a reader", async () => {
-    mockApi(routes("member"));
+    mockApi(routes("editor"));
     const first = mount();
     expect(await screen.findByRole("button", { name: "Save draft" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();

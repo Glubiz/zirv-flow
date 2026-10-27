@@ -13,8 +13,10 @@ pub enum Scope {
     Ingest,
     /// GET requests.
     Read,
-    /// Mutations, except members and keys.
+    /// Editor-level mutations: drafts, previews and test mode.
     Write,
+    /// Publisher-level mutations: publishing, pausing and the operator actions.
+    Publish,
     /// Members and keys.
     Admin,
 }
@@ -25,6 +27,7 @@ impl Scope {
             Self::Ingest => "ingest",
             Self::Read => "read",
             Self::Write => "write",
+            Self::Publish => "publish",
             Self::Admin => "admin",
         }
     }
@@ -44,10 +47,11 @@ impl FromStr for Scope {
             "ingest" => Ok(Self::Ingest),
             "read" => Ok(Self::Read),
             "write" => Ok(Self::Write),
+            "publish" => Ok(Self::Publish),
             "admin" => Ok(Self::Admin),
             _ => Err(ValidationError::new(
                 "scopes",
-                "must be ingest, read, write or admin",
+                "must be ingest, read, write, publish or admin",
             )),
         }
     }
@@ -59,7 +63,13 @@ mod tests {
 
     #[test]
     fn every_scope_round_trips_through_text() {
-        for scope in [Scope::Ingest, Scope::Read, Scope::Write, Scope::Admin] {
+        for scope in [
+            Scope::Ingest,
+            Scope::Read,
+            Scope::Write,
+            Scope::Publish,
+            Scope::Admin,
+        ] {
             assert_eq!(scope.to_string().parse::<Scope>().unwrap(), scope);
         }
     }
@@ -71,6 +81,7 @@ mod tests {
         assert_eq!(error.field(), "scopes");
         assert!("READ".parse::<Scope>().is_err());
         assert!("".parse::<Scope>().is_err());
+        assert!("PUBLISH".parse::<Scope>().is_err());
     }
 
     #[test]

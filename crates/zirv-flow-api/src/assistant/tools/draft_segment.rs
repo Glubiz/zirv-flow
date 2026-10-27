@@ -20,6 +20,7 @@ use zirv_flow_segments::{Catalog, Definition, Issue, TraitStorage, compile, pars
 use super::{DraftTarget, ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
 use crate::assistant::segment_context::nodes;
+use crate::auth::Need;
 use crate::problem::ApiError;
 use crate::segments::catalog_of;
 
@@ -155,7 +156,7 @@ impl AiTool<ToolContext> for DraftSegment {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Edit).await?;
             let DraftTarget::Segment { segment_id } = &context.target else {
                 return Err(ToolError::Failed(ApiError::internal()));
             };

@@ -2,8 +2,8 @@
 //!
 //! Both only queue a `flow.enroll` job, so they share the path every other trigger takes: the
 //! job enrolls through `store::enroll_entries`, which enforces the re-entry rule and records each
-//! refusal. The API trigger takes `Write` (ruling 43163028); a manual start for an audience takes
-//! `Admin`, since it can enroll a whole segment or list at once.
+//! refusal. The API trigger takes `Edit` (ruling 92d5483d); a manual start for an audience takes
+//! `Publish`, since it can enroll a whole segment or list at once.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -168,7 +168,7 @@ pub(crate) async fn enroll_person(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<EnrollPersonRequest>,
 ) -> Result<(StatusCode, Json<QueuedBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let id = path_id(&id)?;
     if body
         .idempotency_key
@@ -205,7 +205,7 @@ pub(crate) async fn enroll_person(
 }
 
 /// Starts a flow whose trigger is `manual` for an audience: the current members of a segment or
-/// the members of a list. Admin only, and audited as `flow.started`. The audience is queued as a
+/// the members of a list. Publisher and above, and audited as `flow.started`. The audience is queued as a
 /// `flow.enroll` job that pages through it, a thousand people at a time, under the cause
 /// `manual`. A paused flow takes nobody and records the skip.
 #[utoipa::path(
@@ -221,7 +221,7 @@ pub(crate) async fn enroll_person(
     responses(
         (status = 202, description = "Queued", body = QueuedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not a publisher, a key without the publish scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, flow, segment or list, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The flow is not published or paused, or its trigger is not `manual` (`code` is `flow_state`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The body names no audience or both", body = Problem, content_type = "application/problem+json")
@@ -234,7 +234,7 @@ pub(crate) async fn start(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<StartFlowRequest>,
 ) -> Result<(StatusCode, Json<QueuedBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Publish).await?;
     let id = path_id(&id)?;
     let flow = startable(&state, workspace.id, id, "manual").await?;
     let source = match (body.segment_id, body.list_id) {

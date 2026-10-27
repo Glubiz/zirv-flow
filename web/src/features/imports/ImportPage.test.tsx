@@ -8,7 +8,7 @@ import { stepFor, ImportPage } from "./ImportPage";
 import type { CsvImport } from "./labels";
 import { anImport, LISTS, SAMPLES, TRAITS } from "./testData";
 
-const members = (role: "admin" | "member", userId: string) => [
+const members = (role: "admin" | "editor", userId: string) => [
   { user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" },
 ];
 
@@ -33,7 +33,7 @@ interface Server {
 }
 
 /** A small stand-in for the API: the import it serves changes as the page acts on it. */
-function server(start: Partial<CsvImport>, options: { masked?: boolean; role?: "admin" | "member"; user?: typeof OWNER; memberId?: string } = {}): Server {
+function server(start: Partial<CsvImport>, options: { masked?: boolean; role?: "admin" | "editor"; user?: typeof OWNER; memberId?: string } = {}): Server {
   const user = options.user ?? OWNER;
   const state: Server = { current: anImport(start), masked: options.masked ?? false, routes: {} };
   const base = "/api/v1/workspaces/ws1/imports/imp-1";
@@ -210,7 +210,7 @@ describe("the map step", () => {
   });
 
   it("hides the sample values from someone who may not see values", async () => {
-    mockApi(server({}, { masked: true, role: "member", user: MEMBER }).routes);
+    mockApi(server({}, { masked: true, role: "editor", user: MEMBER }).routes);
     mount();
 
     expect(await screen.findByText("Sample values are hidden for your role. The mapping works the same.")).toBeInTheDocument();

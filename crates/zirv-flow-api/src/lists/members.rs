@@ -224,7 +224,7 @@ pub(crate) async fn add(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<AddMembersRequest>,
 ) -> Result<Json<AddMembersBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let list: Uuid = path_id(&id)?;
     if body.person_ids.len() + body.identifiers.len() > MAX_PEOPLE_PER_CALL {
         return Err(invalid("people", "a call takes at most 1000 people").into());
@@ -297,7 +297,7 @@ pub(crate) async fn remove(
     Path((ws, id)): Path<(String, String)>,
     ApiJson(body): ApiJson<RemoveMembersRequest>,
 ) -> Result<Json<RemoveMembersBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let list: Uuid = path_id(&id)?;
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
     let outcome = zirv_flow_store::remove_members(

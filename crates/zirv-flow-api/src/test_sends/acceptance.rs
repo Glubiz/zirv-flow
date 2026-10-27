@@ -168,7 +168,7 @@ mod tests {
         let other_admin = key(other_ws, Scope::Admin).await;
         let mut ids = Vec::new();
         for (email, role) in [
-            ("member@example.com", Some(Role::Member)),
+            ("member@example.com", Some(Role::Editor)),
             ("lead@example.com", Some(Role::Admin)),
             ("stranger@example.com", None),
         ] {

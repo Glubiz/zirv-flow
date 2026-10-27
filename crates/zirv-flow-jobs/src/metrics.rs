@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use uuid::Uuid;
 use zirv_flow_core::Freshness;
-use zirv_flow_store::{DestinationStat, DrainOutcome, ForwardingStat, QueueDepth, StreamFreshness};
+use zirv_flow_store::{
+    DestinationStat, DrainOutcome, EnrollmentSample, ForwardingStat, QueueDepth, StreamFreshness,
+};
 
 /// How a job attempt ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,6 +170,29 @@ pub(crate) fn set_dirty_age(seconds: f64) {
 /// The `zirv_flow_segment_dirty_backlog` gauge: the people marked dirty, over all workspaces.
 pub(crate) fn set_dirty_backlog(people: i64) {
     metrics::gauge!("zirv_flow_segment_dirty_backlog").set(people as f64);
+}
+
+/// The leader-sampled enrollment gauges: `zirv_flow_enrollments{state}` for `active` and
+/// `waiting`, and `zirv_flow_timer_lateness_seconds`, the age of the oldest waiting enrollment
+/// whose `wake_at` has passed (0 with none). Pass the default sample to zero them, for an instance
+/// that stops leading.
+pub(crate) fn set_enrollments(sample: &EnrollmentSample) {
+    metrics::gauge!("zirv_flow_enrollments", "state" => "active").set(sample.active as f64);
+    metrics::gauge!("zirv_flow_enrollments", "state" => "waiting").set(sample.waiting as f64);
+    metrics::gauge!("zirv_flow_timer_lateness_seconds").set(sample.oldest_late_seconds as f64);
+}
+
+/// The `zirv_flow_enrollments_last_sample_timestamp_seconds` gauge: the Unix time of the last
+/// successful enrollment sample. The gauges above keep their last values when a sample fails, so
+/// an alert on this series going stale covers the case where the sampler cannot see.
+pub(crate) fn set_enrollments_sampled(unix_seconds: i64) {
+    metrics::gauge!("zirv_flow_enrollments_last_sample_timestamp_seconds").set(unix_seconds as f64);
+}
+
+/// The `zirv_flow_timer_wake_lateness_seconds` histogram: how long after its `wake_at` a timer's
+/// `flow.step` ran. It is what architecture 19 states the p99 of.
+pub(crate) fn record_wake_lateness(seconds: f64) {
+    metrics::histogram!("zirv_flow_timer_wake_lateness_seconds").record(seconds.max(0.0));
 }
 
 /// The queue-depth gauge `zirv_flow_jobs{kind,state}`. It remembers which pairs it has set,
@@ -425,11 +450,39 @@ pub(crate) fn record_retention(table: &'static str, deleted: u64, ran_at_unix: f
         .set(ran_at_unix);
 }
 
+/// Sets the decision-log size gauges: `zirv_flow_decision_log_bytes` is what the partitions of
+/// `decision_records` take on disk and `zirv_flow_decision_log_partitions` how many there are.
+pub(crate) fn record_decision_log_size(bytes: u64, partitions: u64) {
+    metrics::gauge!("zirv_flow_decision_log_bytes").set(bytes as f64);
+    metrics::gauge!("zirv_flow_decision_log_partitions").set(partitions as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
+
+    #[test]
+    fn the_decision_log_size_sets_two_gauges_that_the_next_run_replaces() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_decision_log_size(9_000, 4);
+            record_decision_log_size(8_192, 3);
+        });
+        let output = handle.render();
+
+        assert!(
+            output.contains("zirv_flow_decision_log_bytes 8192"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_decision_log_partitions 3"),
+            "{output}"
+        );
+    }
 
     #[test]
     fn a_retention_run_counts_its_rows_and_stamps_its_time_by_table() {
@@ -635,6 +688,58 @@ mod tests {
         assert!(output.contains("zirv_flow_ingest_late_total 2"), "{output}");
         assert!(
             output.contains("zirv_flow_ingest_inbox_age_seconds 12.5"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn the_enrollment_gauges_follow_the_sample_and_zero_with_the_default() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let sample = EnrollmentSample {
+            active: 4,
+            waiting: 9,
+            oldest_late_seconds: 31,
+        };
+
+        metrics::with_local_recorder(&recorder, || set_enrollments(&sample));
+        let first = handle.render();
+        metrics::with_local_recorder(&recorder, || set_enrollments(&EnrollmentSample::default()));
+        let second = handle.render();
+
+        for expected in [
+            "zirv_flow_enrollments{state=\"active\"} 4",
+            "zirv_flow_enrollments{state=\"waiting\"} 9",
+            "zirv_flow_timer_lateness_seconds 31",
+        ] {
+            assert!(first.contains(expected), "{expected} in {first}");
+        }
+        for expected in [
+            "zirv_flow_enrollments{state=\"active\"} 0",
+            "zirv_flow_enrollments{state=\"waiting\"} 0",
+            "zirv_flow_timer_lateness_seconds 0",
+        ] {
+            assert!(second.contains(expected), "{expected} in {second}");
+        }
+    }
+
+    #[test]
+    fn a_wake_lateness_is_observed_and_a_clock_behind_the_timer_records_zero() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_wake_lateness(2.5);
+            record_wake_lateness(-1.0);
+        });
+
+        let output = handle.render();
+        assert!(
+            output.contains("zirv_flow_timer_wake_lateness_seconds_count 2"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_timer_wake_lateness_seconds_sum 2.5"),
             "{output}"
         );
     }

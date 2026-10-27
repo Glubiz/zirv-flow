@@ -709,7 +709,7 @@ mod tests {
                 .await
                 .unwrap();
             sqlx::query(
-                "INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+                "INSERT INTO memberships (workspace_id, user_id, role) VALUES ($1, $2, 'editor')",
             )
             .bind(self.ws.as_uuid())
             .bind(id)
