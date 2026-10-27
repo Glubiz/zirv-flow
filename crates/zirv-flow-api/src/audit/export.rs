@@ -161,13 +161,9 @@ async fn export(
         header::CONTENT_TYPE,
         HeaderValue::from_static(format.content_type()),
     );
-    let extension = match format {
-        Format::Ndjson => "ndjson",
-        Format::Csv => "csv",
-    };
     headers.insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"audit.{extension}\""))
+        HeaderValue::from_str(&format!("attachment; filename=\"audit.{}\"", format.name()))
             .map_err(|_| ApiError::internal())?,
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
