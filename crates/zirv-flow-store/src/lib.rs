@@ -13,6 +13,7 @@ mod consent;
 mod contacts;
 mod decisions;
 mod destinations;
+mod drop_lock;
 mod events;
 mod feedback;
 mod flows;
