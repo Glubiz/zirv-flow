@@ -24,6 +24,11 @@ pub(crate) const SEGMENT_KEYS: &[(&str, &str)] = &[];
 /// at the field. Every other array (the conditions of a branch, say) is compared whole.
 pub(crate) const FLOW_KEYS: &[(&str, &str)] = &[("/graph/nodes", "id"), ("/graph/edges", "id")];
 
+/// A template draft is the whole document: the sections of a block email are a list of rules
+/// matched by their ids, so moving a section is not a change and a change inside one is reported
+/// at the field. The columns and their blocks are compared whole.
+pub(crate) const TEMPLATE_KEYS: &[(&str, &str)] = &[("/blocks/sections", "id")];
+
 /// The arrays of a manifest that are lists of rules, as `(path, key field)`.
 pub(crate) const MANIFEST_KEYS: &[(&str, &str)] = &[
     ("/streams", "name"),
@@ -397,5 +402,32 @@ mod tests {
                 ("/primary_key", ChangeKind::Changed)
             ]
         );
+    }
+
+    #[test]
+    fn template_sections_are_matched_by_id_and_text_changes_are_reported_at_the_field() {
+        let saved = json!({"email": {"subject": "Hi", "lang": "en"}, "blocks": {"sections": [
+            {"id": "a", "columns": [[{"type": "heading", "id": "h", "text": "One"}]]},
+            {"id": "b", "columns": [[]]}
+        ]}});
+        let draft = json!({"email": {"subject": "Hej", "lang": "da"}, "blocks": {"sections": [
+            {"id": "b", "columns": [[]]},
+            {"id": "a", "columns": [[{"type": "heading", "id": "h", "text": "One"}]]}
+        ]}});
+
+        let found = changes(Some(&saved), &draft, TEMPLATE_KEYS);
+
+        assert_eq!(
+            paths(&found),
+            [
+                ("/email/lang", ChangeKind::Changed),
+                ("/email/subject", ChangeKind::Changed),
+            ]
+        );
+        let layout = json!({"blocks": {"sections": [{"id": "c", "columns": [[]]}]}});
+        let moved = changes(Some(&saved), &layout, TEMPLATE_KEYS);
+        assert!(moved.iter().any(
+            |change| change.path == "/blocks/sections/c" && change.change == ChangeKind::Added
+        ));
     }
 }

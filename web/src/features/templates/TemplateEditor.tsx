@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
@@ -10,7 +10,6 @@ import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
 import { SenderOptionsProvider } from "./senderOptions";
-import { TestSendDialog } from "./TestSendDialog";
 import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
 import {
@@ -55,8 +54,10 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
+  const [goTo, setGoTo] = useState<{ id: string; n: number } | undefined>(undefined);
   const [publishing, setPublishing] = useState(false);
-  const [testing, setTesting] = useState(false);
+  const [toTest, setToTest] = useState(false);
+  const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
   const [versionsKey, setVersionsKey] = useState(0);
@@ -192,7 +193,16 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     void refresh();
   }
 
+  /** Saves the draft first, so the test page sends what the editor shows. */
+  async function openTestPage() {
+    if (await flush()) setToTest(true);
+  }
+
   const guard = useLeaveGuard(editable && save !== "saved");
+  useEffect(() => {
+    if (toTest && save === "saved") void navigate(`/w/${workspaceId}/templates/${template.id}/test`);
+  }, [toTest, save, navigate, workspaceId, template.id]);
+
   const issues: readonly TemplateIssue[] = preview.status === "ready" ? preview.data.issues : [];
   const blocking = blockingCount(issues);
   const status = statusOf(template);
@@ -235,7 +245,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           </Button>
         ) : null}
         {editable && template.channel === "email" ? (
-          <Button onClick={() => setTesting(true)}>Test send</Button>
+          <Button onClick={() => void openTestPage()}>Send a test</Button>
         ) : null}
         {editable && canAdmin ? (
           <Button variant="primary" disabled={!canPublish} onClick={() => setPublishing(true)} aria-describedby="tp-publish-why">
@@ -262,7 +272,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
 
       {tab === "editor" ? (
         <div className="tp-split">
-          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} />
+          <SourcePane workspaceId={workspaceId} doc={doc} onChange={change} readOnly={!editable} onConvert={() => setConverting(true)} issues={issues} checked={preview.status === "ready"} template={template} onTemplate={setTemplate} goTo={goTo} />
           {canWrite ? (
             <PreviewPane
               templateId={template.id}
@@ -273,6 +283,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
               canAdmin={canAdmin}
               person={person}
               onPerson={setPerson}
+              onGoToBlock={doc.kind === "blocks" ? (id) => setGoTo((last) => ({ id, n: (last?.n ?? 0) + 1 })) : undefined}
             />
           ) : (
             <p className="muted">Members of the workspace can preview a template.</p>
@@ -310,7 +321,6 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           </div>
         </Dialog>
       ) : null}
-      {testing ? <TestSendDialog workspaceId={workspaceId} template={template} flush={flush} personId={person?.id ?? null} onClose={() => setTesting(false)} /> : null}
     </div>
     </SenderOptionsProvider>
   );

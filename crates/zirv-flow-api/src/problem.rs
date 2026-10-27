@@ -710,6 +710,25 @@ impl ApiError {
         }
     }
 
+    /// A template document too large to send to the model.
+    pub(crate) fn ai_template_too_large() -> Self {
+        Self {
+            code: Some("ai_template_too_large"),
+            ..Self::unprocessable(
+                "this template is too large to send to the assistant (more than 96 KiB); \
+                 shorten it first",
+            )
+        }
+    }
+
+    /// A template or a task the assistant does not draft.
+    pub(crate) fn ai_template_unsupported(detail: impl Into<String>) -> Self {
+        Self {
+            code: Some("ai_template_unsupported"),
+            ..Self::unprocessable(detail)
+        }
+    }
+
     /// A flow too large to send to the model with its personal literals masked.
     pub(crate) fn ai_flow_too_large() -> Self {
         Self {
@@ -824,6 +843,18 @@ impl ApiError {
             ..Self::new(
                 StatusCode::CONFLICT,
                 "the draft changed while it was being validated; publish again",
+            )
+        }
+    }
+
+    /// Accepting an assistant draft of a template whose draft was saved, or already replaced by
+    /// this very draft, since the assistant's draft was made.
+    pub(crate) fn template_draft_changed_since_assistant_draft() -> Self {
+        Self {
+            code: Some("template_draft_changed"),
+            ..Self::new(
+                StatusCode::CONFLICT,
+                "The template draft changed after this draft was made; ask the assistant again.",
             )
         }
     }

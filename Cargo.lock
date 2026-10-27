@@ -5885,6 +5885,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zirv-flow-renderbench"
+version = "0.136.0"
+dependencies = [
+ "clap",
+ "serde_json",
+ "tokio",
+ "zirv-flow-render",
+ "zirv-flow-templates",
+]
+
+[[package]]
 name = "zirv-flow-segments"
 version = "0.136.0"
 dependencies = [

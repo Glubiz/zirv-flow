@@ -19,6 +19,7 @@ import {
   type SendSettings,
   type SettingsDraft,
 } from "./model";
+import { TestInboxesSection } from "./TestInboxesSection";
 import { UtmSection } from "./UtmSection";
 
 export function SendingSettingsPage() {
@@ -64,6 +65,7 @@ export function SendingSettingsPage() {
           onSaved={workspace.reload}
         />
       ) : null}
+      {access.status === "ready" ? <TestInboxesSection key={`inboxes:${ws}`} workspaceId={ws} canManage={canManage} canRead={access.data.role !== null} /> : null}
     </div>
   );
 }

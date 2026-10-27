@@ -386,9 +386,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or
-         *     `flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few
-         *     synthetic people) with the assistant: the model is asked, its answer validated
+         * Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,
+         *     `segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a
+         *     `simulation` of a few synthetic people; a template draft names its template in `template_id`
+         *     and its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns
+         *     `renders`, the template's draft and the result rendered for the sample person) with the
+         *     assistant: the model is asked, its answer validated
          *     with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
          *     repairs. The answer is the validated draft with its diff against the saved version and a dry
          *     run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
@@ -3804,6 +3807,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/test-sends/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the caller may still send this hour: their own count and the workspace's, against the
+         *     limits `POST .../test-send` enforces, counted in the same window.
+         */
+        get: operations["test_send_quota"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/themes": {
         parameters: {
             query?: never;
@@ -4330,6 +4353,9 @@ export interface components {
             /** Format: uuid */
             source_id?: string | null;
             stream?: string | null;
+            template?: null | components["schemas"]["TemplateDetailBody"];
+            /** Format: uuid */
+            template_id?: string | null;
         };
         AddMembersBody: {
             /** @description People newly added. */
@@ -5942,12 +5968,18 @@ export interface components {
             /** @description For an invalid draft, the problems of the last attempt. */
             issues: components["schemas"]["DraftIssue"][];
             kind: components["schemas"]["DraftKindBody"];
+            renders?: null | components["schemas"]["TemplateRendersBody"];
             simulation?: null | components["schemas"]["SimulationBody"];
             /**
              * @description `valid`, or `invalid` when no attempt passed validation: then there is no `content` and
              *     the draft cannot be accepted.
              */
             status: string;
+            /**
+             * @description For the template task `subject_variants`: the subjects offered, the first of which is in
+             *     the document. Empty for every other draft.
+             */
+            subject_variants: string[];
         };
         /**
          * @description One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
@@ -5963,7 +5995,7 @@ export interface components {
          * @description What a draft is of.
          * @enum {string}
          */
-        DraftKindBody: "mapping" | "manifest" | "segment" | "flow";
+        DraftKindBody: "mapping" | "manifest" | "segment" | "flow" | "template";
         /** @description What to draft. */
         DraftRequest: {
             /**
@@ -6003,6 +6035,13 @@ export interface components {
             source_id?: string | null;
             /** @description The stream whose mapping is drafted. Required for a mapping, refused for a manifest. */
             stream?: string | null;
+            task?: null | components["schemas"]["TemplateTask"];
+            /**
+             * Format: uuid
+             * @description For a template: the template whose draft is changed. Required for a template, refused for
+             *     the others.
+             */
+            template_id?: string | null;
         };
         /** @description What the draft does on real data: the #87 preview of a mapping, or the sample of a manifest. */
         DryRunBody: {
@@ -8272,6 +8311,22 @@ export interface components {
              */
             start: string;
         };
+        QuotaBody: {
+            /** @description The caller's own sends; an API key has none. */
+            member: components["schemas"]["QuotaUsageBody"];
+            /**
+             * Format: date-time
+             * @description When the next test send is accepted again: the later release time of the limits that are
+             *     full now, as the refusal computes it. Null when the caller can send now.
+             */
+            resets_at?: string | null;
+            workspace: components["schemas"]["QuotaUsageBody"];
+        };
+        /** @description Test sends counted in the rolling hour against a limit. */
+        QuotaUsageBody: {
+            limit: number;
+            used: number;
+        };
         ReadBody: {
             /**
              * @description The read rule answer: among the states that cover the message the latest change wins;
@@ -8353,6 +8408,12 @@ export interface components {
         RemoveMembersRequest: {
             /** @description At most 1000. */
             person_ids: string[];
+        };
+        /** @description One rendered email: the parts of a preview. */
+        RenderedEmailBody: {
+            html?: string | null;
+            subject?: string | null;
+            text?: string | null;
         };
         /** @description A theme or snippet and the version a message was rendered with. */
         RenderedVersionBody: {
@@ -9895,6 +9956,16 @@ export interface components {
             used_by: components["schemas"]["TemplateUseBody"][];
             version: components["schemas"]["TemplateVersionBody"];
         };
+        /** @description A template draft before and after the change, both rendered for the sample person. */
+        TemplateRendersBody: {
+            after?: null | components["schemas"]["RenderedEmailBody"];
+            before?: null | components["schemas"]["RenderedEmailBody"];
+        };
+        /**
+         * @description What the marketer asks the assistant to do to a template.
+         * @enum {string}
+         */
+        TemplateTask: "copy" | "subject_variants" | "block_layout" | "translation";
         /** @description The theme the draft follows: `default`, `none`, or the theme it names. */
         TemplateThemeBody: components["schemas"]["TemplateThemeChoice"] | components["schemas"]["TemplateNamedTheme"];
         /**
@@ -9983,6 +10054,11 @@ export interface components {
             /** Format: uuid */
             destination_id: string;
             /**
+             * Format: int32
+             * @description The draft revision a draft test rendered; null for a version test.
+             */
+            draft_revision?: number | null;
+            /**
              * Format: uuid
              * @description Also the idempotency key at the destination.
              */
@@ -10001,6 +10077,11 @@ export interface components {
             /** @description A fixed code that says why a test did not go out. */
             reason?: string | null;
             /**
+             * @description A member's email, or the hint of the allowlist entry the test went to; `removed address`
+             *     once the entry is gone. Never an allowlisted address.
+             */
+            recipient_display: string;
+            /**
              * Format: uuid
              * @description The workspace member the test went to; null for an allowlisted address.
              */
@@ -10012,6 +10093,8 @@ export interface components {
             render_context: string;
             /** Format: uuid */
             sender_identity_id: string;
+            /** @description The email of the member who asked; null for an API key or a removed member. */
+            sent_by_email?: string | null;
             /** Format: uuid */
             template_id: string;
             /**
@@ -10020,13 +10103,18 @@ export interface components {
              */
             template_version?: number | null;
         };
-        /** @description Who a test goes to. Exactly one of the two fields is given. */
+        /** @description Who a test goes to. Exactly one of the three fields is given. */
         TestSendRecipient: {
             /**
              * @description An address on the workspace's test-send allowlist.
              * @example qa@example.com
              */
             address?: string | null;
+            /**
+             * Format: uuid
+             * @description An entry of the allowlist, by the id the allowlist options list. The address stays sealed.
+             */
+            allowlist_entry?: string | null;
             /**
              * Format: uuid
              * @description A member of this workspace; the test goes to the address on their account.
@@ -11966,7 +12054,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The assistant is off (`ai_disabled`), or the source does not use a manifest */
+            /** @description The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -11984,7 +12072,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported` */
+            /** @description A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -12002,7 +12090,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The model provider failed (`ai_provider_error`), or the source did */
+            /** @description The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`) */
             502: {
                 headers: {
                     [name: string]: unknown;
@@ -12011,7 +12099,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The server has no master key to open the provider key */
+            /** @description The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`) */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -12072,7 +12160,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`) */
+            /** @description The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -12081,7 +12169,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues) */
+            /** @description The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -26454,6 +26542,8 @@ export interface operations {
             query?: {
                 /** @description Only the tests of this template */
                 template_id?: string;
+                /** @description Only the tests that rendered this draft revision */
+                draft_revision?: number;
                 /** @description Rows per page, 1 to 200; default 50 */
                 limit?: number;
                 /** @description The next_before of the previous page */
@@ -26477,13 +26567,63 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendsBody"];
                 };
             };
-            /** @description limit or template_id is out of range or malformed, or before is not a cursor */
+            /** @description limit, template_id or draft_revision is out of range or malformed, or before is not a cursor */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_send_quota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The hourly counts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaBody"];
                 };
             };
             /** @description Not authenticated */

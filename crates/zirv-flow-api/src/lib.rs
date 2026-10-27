@@ -424,6 +424,10 @@ fn routes() -> Router<AppState> {
         )
         .route("/api/v1/workspaces/{ws}/test-sends", get(test_sends::list))
         .route(
+            "/api/v1/workspaces/{ws}/test-sends/quota",
+            get(test_sends::quota),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/test-send-allowlist",
             get(test_sends::allowlist_list).post(test_sends::allowlist_add),
         )

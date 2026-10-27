@@ -177,6 +177,7 @@ depend on fewer crates than listed; any workspace edge not listed fails CI.
 | `zirv-flow-templates` | `zirv-flow-core` |
 | `zirv-flow-render` | `zirv-flow-core`, `zirv-flow-templates` |
 | `zirv-flow-loadgen` (tools/loadgen) | none |
+| `zirv-flow-renderbench` (tools/renderbench) | `zirv-flow-render`, `zirv-flow-templates` |
 | `zirv-flow-api` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-identity`, `zirv-flow-templates`, `zirv-flow-render` |
 | `zirv-flow-jobs` | `zirv-flow-core`, `zirv-flow-store`, `zirv-flow-segments`, `zirv-flow-engine`, `zirv-flow-connectors`, `zirv-flow-ai`, `zirv-flow-templates`, `zirv-flow-render` |
 
@@ -1720,6 +1721,7 @@ As built (#303): the renderer and the validator resolve nothing; the caller pass
 - **Template library (#332):** the list is the library. As built (#332): `GET /templates` takes `q` (a case-insensitive substring of the name, the draft's subject or a merge field the draft uses), `channel` (`email` or `webhook`), `status` (`live`, `changes`, `draft`, `archived`; without it everything except archived, and `archived=true` still adds archived ones), `theme` (a theme id, `default` or `none`) and `sort` (`edited`, the default, `name`, `most_used`: non-test messages of the last 30 days); an unknown value of any of them is a 400 that names the parameter. Each item adds `draft_changed`, `checks` (`{blocking, warnings}`, or null when the draft was not checked), `active_flows` (flows in the `published` state whose running version names the template, from one grouped query), `theme` (`"default"`, `"none"` or `{id, name}`, read from `blocks.theme` of the draft; code mode and webhooks are `"none"`), `edited_by_email` (null for an API key or a member who left) and `edited_at`. Migration 0067 adds the nullable `template_drafts.checks`; a draft save clears it, and once the save has committed `PUT /templates/{id}/draft` validates the saved document once as a publish does (`publish_inputs` and `publish_issues` in `templates/publish.rs`, through the render pool, with a 5 second cap) and stores the counts for that revision. A failed or skipped validation leaves it null and logs a warning with the template id only; the save and its response are unchanged. `DELETE /templates/{id}` is refused with 409 `template_in_use` and the flows (`flows`: `{flow_id, flow_name}`) while a `published` flow's running version names the template; a draft or paused flow does not block. A flow publish share-locks the templates it names, in id order, before it validates them, so an archive and a flow publish cannot both commit. The library page is `web/src/features/templates/TemplatesPage.tsx`.
 - **Assistant template drafts (#309):** a template tool (the ninth in the registry) drafts email copy, subject variants, block layouts and translations. The draft is an `ai_drafts` row of kind `template`, validated by template validation with bounded repair before it is stored. The response carries the field diff and a render diff at desktop and mobile widths. Accepting writes the template's ordinary draft after validation passes again and never publishes. An accepted translation updates only the current draft, including its `lang`; saving it as a new template is a separate marketer action.
 - **Test sends:** a `template.test_send` job sends through the real destination, but only to workspace members' verified addresses or a workspace allowlist. Test sends are rate-limited, marked `test`, excluded from frequency caps and engagement stats, and kept in a test-send log under message retention.
+- **Send a test page (#333):** `w/:ws/templates/:id/test` replaces the test-send dialog and sends each recipient as its own `POST /templates/{id}/test-send`, one after another; a 429 stops the rest and shows the reset time. As built: `GET /test-sends/quota` (read, per caller) returns `member` and `workspace` as `{used, limit}` and `resets_at`, counted by the same window function the reservation enforces. `to` also takes `{"allowlist_entry": <id>}`, so the page never needs an address: the entry's stored hash and hint are read and the address stays sealed. `GET /test-sends` rows gain `recipient_display` (the member's email, else the matched allowlist entry's hint, else `removed address`, derived at read time with nothing new stored), `sent_by_email` and `draft_revision`, and the list takes `draft_revision`. Migration `0066_test_send_draft_revision.sql` adds `test_sends.draft_revision`, set at the request from the draft it read and rewritten by the job to the revision it rendered; it is `NULL` for a version test.
 - **Webhook payloads:** headers and a JSON body template. MiniJinja is allowed only inside string values, so the structure always stays valid JSON; a value that is exactly one merge tag may take the field's registry type (number, boolean). Sample-payload preview with a real or sample person; body size limit.
 
 **As built (test sends, #224).**
@@ -2371,6 +2373,25 @@ reports, the keys of a pasted webhook sample and pasted documentation are `Untru
 values are `Personal`, now fenced like `Untrusted` and bringing the same notice. The keys of a
 webhook sample that parse as an email or phone are left out of the context.
 
+As built (#309): the ninth tool, `draft_template`, drafts a change to an email template's draft
+(`kind: "template"` with `template_id` and a `task`: `copy`, `subject_variants`, `block_layout` or
+`translation`; `ai_drafts.template_id`, migration 0065). The model fills in a fragment of the content
+fields its task may set (never the sender, category, theme or mode) or, for subject variants, two to
+five subjects; the fragment is merged onto the draft's document. The result is validated by the same
+two calls a publish makes, `publish_inputs` and `publish_issues` (the field catalog, the
+effective theme, snippets and conditions of #307, through the render pool), and repaired up to
+`ai.max_repair_attempts`; an unknown merge field comes back as `unknown_merge_field` at its place,
+with the field's name shown to the model only. The context is the document, the merge-field, theme
+and snippet names and the task. Under schema-only privacy the literals of every `visible_if` are
+masked with the segment assistant's placeholders and restored in the answer, and a condition the
+mask walk cannot fully cover is refused (`ai_template_unsupported`); with the opt-in the document
+goes as personal data. The row holds no person value.
+The response carries the field diff (`TEMPLATE_KEYS`) and the draft and the result rendered for the
+sample person with inert tracking (`renders.before`, `renders.after`, html and text). Accepting
+validates again, then locks the template and writes only its draft, including `lang`, when the
+draft's revision is the one the assistant draft was made from (else 409 `template_draft_changed`);
+it creates no template and no version and publishes nothing.
+
 ### 13.4 Context, audit and limits
 
 Schema-only context is the default: field and event names, types, descriptions
@@ -2984,6 +3005,7 @@ a cold cache can take about 15 s. D4.1 on `jsonb` was not re-run. The figures ar
 M5 measures timer lateness at 1 million waiting enrollments (exit criterion 8). The 10 million row stays the target for the M8 reference-hardware run.
 
 **As measured (M5, provisional until the M8 hardware run).** Timer lateness at 1,000,000 waiting enrollments (900,000 spread over 40 minutes plus 100,000 waking in one minute, seeded by SQL from rows a product-path sample wrote, so no evidence of enrollment throughput) on a development machine, image 0.76.0, in [docs/benchmarks/m5-flows.md](benchmarks/m5-flows.md). With no ingest load the target is met, with a thin margin: p99 52.4 s and 51.8 s in two runs (max 55.8 s), the tail being the burst backlog, since one worker at concurrency 4 drains about 1,100 wake jobs/s (the job throughput row). With 2,000 events/s running at the same time it is missed: p99 136.4 s, max 141.7 s, the drain falling to 832 jobs/s with PostgreSQL at 480% CPU (#207). The ingest API p99 in that run was 1,016 ms server-side, beside #151.
+**As measured (M7, provisional until the M8 hardware run).** Template render of a typical block email (20 blocks, theme, snippet, asset image, 3 pre-evaluated conditions; 21 KB of HTML) through the real render pool on a development machine, in [docs/benchmarks/m7-render.md](benchmarks/m7-render.md): p50 1.40 ms, p95 1.57 ms, p99 1.67 ms at the production pool size of 2 (5000 renders, saturated). The target is met by a factor of about 30.
 
 ## 20. Key decisions
 

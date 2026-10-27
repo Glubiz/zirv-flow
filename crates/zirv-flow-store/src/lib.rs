@@ -324,13 +324,15 @@ pub use templates::{
     template_active_flow_counts, template_where_used, update_template,
 };
 pub use test_sends::{
-    ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, MEMBER_HOURLY_LIMIT, NewTestSend,
-    TEST_SEND_JOB_KIND, TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome,
+    ABANDONED as TEST_SEND_ABANDONED, AllowlistEntry, ListedTestSend, MEMBER_HOURLY_LIMIT,
+    NewTestSend, QuotaUsage, REMOVED_ADDRESS as TEST_SEND_REMOVED_ADDRESS, TEST_SEND_JOB_KIND,
+    TEST_SEND_RETENTION_MONTHS, TestSend, TestSendCursor, TestSendOutcome, TestSendQuota,
     TestSendReservation, WORKSPACE_HOURLY_LIMIT, abandon_orphaned_test_sends, add_allowlist_entry,
     delete_allowlist_by_hash, delete_allowlist_entry, delete_test_sends_before,
-    delete_test_sends_by_hash, find_allowlist_entry, find_test_send, finish_test_send,
-    is_test_send, list_allowlist, list_test_sends, masked_hint, open_allowlist_address,
-    record_test_send_versions, reserve_test_send, test_send_may_go,
+    delete_test_sends_by_hash, find_allowlist_entry, find_allowlist_target, find_test_send,
+    finish_test_send, is_test_send, list_allowlist, list_test_sends, masked_hint,
+    open_allowlist_address, record_test_send_versions, reserve_test_send,
+    set_test_send_draft_revision, test_send_may_go, test_send_quota,
 };
 pub use themes::{
     EffectiveTheme, LockedTheme, NewTheme, Theme, ThemeChoice, ThemeDraft, ThemeError, ThemePatch,

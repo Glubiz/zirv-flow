@@ -3369,6 +3369,156 @@ main:focus {
   border-top: 1px solid var(--line);
 }
 
+/* Templates: the Send a test page */
+.ts-split {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.ts-form {
+  flex: 1 1 380px;
+  max-width: 480px;
+}
+
+.ts-log {
+  flex: 999 1 520px;
+  min-width: 0;
+}
+
+.ts-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.ts-recipient {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.ts-recipient:hover {
+  background: var(--paper);
+}
+
+.ts-recipient input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--night);
+}
+
+.ts-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--line);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ts-pair {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.ts-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  border-radius: var(--radius-control);
+  background: var(--paper);
+  font-size: 13px;
+}
+
+.ts-results {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ts-when {
+  white-space: nowrap;
+}
+
+.ts-kept {
+  text-align: right;
+}
+
+.be-snippet {
+  border-style: dashed;
+  background: transparent;
+}
+
+.be-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--paper-3);
+  color: var(--ink-2);
+  font-size: 0.8125rem;
+}
+
+.be-footer {
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.be-footer-off {
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.be-lock {
+  display: inline-flex;
+  padding: 0 6px;
+  color: var(--ink-2);
+}
+
+.be-more {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.be-more > summary {
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+
+.be-more[open] > summary {
+  margin-bottom: 8px;
+}
+
+.tp-hidden {
+  margin: 0;
+}
+
+.tp-hidden .link-button {
+  margin-left: 8px;
+}
+
 /* Template library tabs */
 .library-nav {
   align-self: flex-start;

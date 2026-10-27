@@ -1,0 +1,59 @@
+{
+  "arch": "x86_64",
+  "benchmark": "render",
+  "commit": "28f5b67c",
+  "constraint": "session tree pinned to the 16 E-core threads (affinity mask 0xFFFF0000); cargo jobs = 4; release build; the script changes no affinity",
+  "in_process": {
+    "count": 5000,
+    "max_ms": 31.292,
+    "p50_ms": 1.011,
+    "p95_ms": 1.473,
+    "p99_ms": 5.23
+  },
+  "logical_cpus": 32,
+  "machine": "13th Gen Intel(R) Core(TM) i9-13900K (MINGW64_NT-10.0-26300)",
+  "method": {
+    "count": 5000,
+    "in_flight": "as many as the pool has children",
+    "pool_sizes": [
+      1,
+      2
+    ],
+    "production_pool_size": 2,
+    "timing": "RenderPool::render_email_with, whole call",
+    "warmup": 200
+  },
+  "os": "windows",
+  "pool_runs": [
+    {
+      "count": 5000,
+      "max_ms": 17.371,
+      "p50_ms": 1.412,
+      "p95_ms": 1.581,
+      "p99_ms": 1.698,
+      "pool_size": 1
+    },
+    {
+      "count": 5000,
+      "max_ms": 4.734,
+      "p50_ms": 1.404,
+      "p95_ms": 1.573,
+      "p99_ms": 1.669,
+      "pool_size": 2
+    }
+  ],
+  "profile": "release",
+  "tool_version": "0.133.0",
+  "verdict": {
+    "met": true,
+    "p95_ms": 1.573,
+    "pool_size": 2,
+    "target_p95_ms": 50.0
+  },
+  "workload": {
+    "blocks": 20,
+    "conditions": 3,
+    "html_bytes": 21034,
+    "snippet_blocks": 1
+  }
+}

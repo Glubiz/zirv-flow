@@ -1577,7 +1577,7 @@
         "tags": [
           "ai"
         ],
-        "summary": "Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or\n`flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few\nsynthetic people) with the assistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
+        "summary": "Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,\n`segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a\n`simulation` of a few synthetic people; a template draft names its template in `template_id`\nand its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns\n`renders`, the template's draft and the result rendered for the sample person) with the\nassistant: the model is asked, its answer validated\nwith the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`\nrepairs. The answer is the validated draft with its diff against the saved version and a dry\nrun, or the last problems. Only a validated draft can be accepted. Workspace admins who are\nsigned in; an API key is refused. Every attempt is a gated model call: it counts against the\nbudget and the rate limit, and with the assistant off, nothing is read or sent. A reverse\nproxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.",
         "operationId": "create_ai_draft",
         "parameters": [
           {
@@ -1653,7 +1653,7 @@
             }
           },
           "409": {
-            "description": "The assistant is off (`ai_disabled`), or the source does not use a manifest",
+            "description": "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1673,7 +1673,7 @@
             }
           },
           "422": {
-            "description": "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`",
+            "description": "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1693,7 +1693,7 @@
             }
           },
           "502": {
-            "description": "The model provider failed (`ai_provider_error`), or the source did",
+            "description": "The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1703,7 +1703,7 @@
             }
           },
           "503": {
-            "description": "The server has no master key to open the provider key",
+            "description": "The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1794,7 +1794,7 @@
             }
           },
           "409": {
-            "description": "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`)",
+            "description": "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1804,7 +1804,7 @@
             }
           },
           "422": {
-            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues)",
+            "description": "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -23313,6 +23313,16 @@
             }
           },
           {
+            "name": "draft_revision",
+            "in": "query",
+            "description": "Only the tests that rendered this draft revision",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Rows per page, 1 to 200; default 50",
@@ -23345,11 +23355,82 @@
             }
           },
           "400": {
-            "description": "limit or template_id is out of range or malformed, or before is not a cursor",
+            "description": "limit, template_id or draft_revision is out of range or malformed, or before is not a cursor",
             "content": {
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/test-sends/quota": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "What the caller may still send this hour: their own count and the workspace's, against the\nlimits `POST .../test-send` enforces, counted in the same window.",
+        "operationId": "test_send_quota",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The hourly counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaBody"
                 }
               }
             }
@@ -26616,6 +26697,24 @@
               "string",
               "null"
             ]
+          },
+          "template": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateDetailBody",
+                "description": "For a template: the template and its draft after the document was copied into the draft,\nwith `lang` and the revision as they are now. Nothing was published or sent."
+              }
+            ]
+          },
+          "template_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -30271,7 +30370,8 @@
           "status",
           "attempts",
           "issues",
-          "changes"
+          "changes",
+          "subject_variants"
         ],
         "properties": {
           "attempts": {
@@ -30318,6 +30418,17 @@
           "kind": {
             "$ref": "#/components/schemas/DraftKindBody"
           },
+          "renders": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateRendersBody",
+                "description": "For a template: the draft and the result rendered for the sample person with inert\ntracking, so the client can show them at desktop and mobile widths. Absent for the other\nkinds and for an invalid draft."
+              }
+            ]
+          },
           "simulation": {
             "oneOf": [
               {
@@ -30332,6 +30443,13 @@
           "status": {
             "type": "string",
             "description": "`valid`, or `invalid` when no attempt passed validation: then there is no `content` and\nthe draft cannot be accepted."
+          },
+          "subject_variants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "For the template task `subject_variants`: the subjects offered, the first of which is in\nthe document. Empty for every other draft."
           }
         }
       },
@@ -30362,7 +30480,8 @@
           "mapping",
           "manifest",
           "segment",
-          "flow"
+          "flow",
+          "template"
         ]
       },
       "DraftRequest": {
@@ -30431,6 +30550,25 @@
               "null"
             ],
             "description": "The stream whose mapping is drafted. Required for a mapping, refused for a manifest."
+          },
+          "task": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateTask",
+                "description": "For a template: what to do. Required for a template, refused for the others."
+              }
+            ]
+          },
+          "template_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "For a template: the template whose draft is changed. Required for a template, refused for\nthe others."
           }
         },
         "additionalProperties": false
@@ -36256,6 +36394,48 @@
           }
         }
       },
+      "QuotaBody": {
+        "type": "object",
+        "required": [
+          "member",
+          "workspace"
+        ],
+        "properties": {
+          "member": {
+            "$ref": "#/components/schemas/QuotaUsageBody",
+            "description": "The caller's own sends; an API key has none."
+          },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the next test send is accepted again: the later release time of the limits that are\nfull now, as the refusal computes it. Null when the caller can send now."
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/QuotaUsageBody"
+          }
+        }
+      },
+      "QuotaUsageBody": {
+        "type": "object",
+        "description": "Test sends counted in the rolling hour against a limit.",
+        "required": [
+          "used",
+          "limit"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "used": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "ReadBody": {
         "type": "object",
         "required": [
@@ -36436,6 +36616,30 @@
               "format": "uuid"
             },
             "description": "At most 1000."
+          }
+        }
+      },
+      "RenderedEmailBody": {
+        "type": "object",
+        "description": "One rendered email: the parts of a preview.",
+        "properties": {
+          "html": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -40469,6 +40673,44 @@
           }
         }
       },
+      "TemplateRendersBody": {
+        "type": "object",
+        "description": "A template draft before and after the change, both rendered for the sample person.",
+        "properties": {
+          "after": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedEmailBody",
+                "description": "The drafted document."
+              }
+            ]
+          },
+          "before": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RenderedEmailBody",
+                "description": "The template's draft as it is now; absent when it has blocking issues and does not render."
+              }
+            ]
+          }
+        }
+      },
+      "TemplateTask": {
+        "type": "string",
+        "description": "What the marketer asks the assistant to do to a template.",
+        "enum": [
+          "copy",
+          "subject_variants",
+          "block_layout",
+          "translation"
+        ]
+      },
       "TemplateThemeBody": {
         "oneOf": [
           {
@@ -40657,6 +40899,7 @@
           "template_id",
           "destination_id",
           "sender_identity_id",
+          "recipient_display",
           "render_context",
           "outcome",
           "created_at"
@@ -40676,6 +40919,14 @@
           "destination_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "draft_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision a draft test rendered; null for a version test."
           },
           "id": {
             "type": "string",
@@ -40702,6 +40953,10 @@
             ],
             "description": "A fixed code that says why a test did not go out."
           },
+          "recipient_display": {
+            "type": "string",
+            "description": "A member's email, or the hint of the allowlist entry the test went to; `removed address`\nonce the entry is gone. Never an allowlisted address."
+          },
           "recipient_member_id": {
             "type": [
               "string",
@@ -40719,6 +40974,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "sent_by_email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The email of the member who asked; null for an API key or a removed member."
+          },
           "template_id": {
             "type": "string",
             "format": "uuid"
@@ -40735,7 +40997,7 @@
       },
       "TestSendRecipient": {
         "type": "object",
-        "description": "Who a test goes to. Exactly one of the two fields is given.",
+        "description": "Who a test goes to. Exactly one of the three fields is given.",
         "properties": {
           "address": {
             "type": [
@@ -40744,6 +41006,14 @@
             ],
             "description": "An address on the workspace's test-send allowlist.",
             "example": "qa@example.com"
+          },
+          "allowlist_entry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "An entry of the allowlist, by the id the allowlist options list. The address stays sealed."
           },
           "member": {
             "type": [
