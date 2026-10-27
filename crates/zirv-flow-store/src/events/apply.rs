@@ -27,6 +27,7 @@ use super::schemas::{
     EventPolicy, PublishedSchema, draft_inferred_schema, find_published_schema, get_event_policy,
 };
 use crate::changes::mark_person;
+use crate::decisions::DecisionBuffer;
 use crate::flows::{Arrival, enqueue_arrivals};
 use crate::people::{find_known_person, normalize_identifiers, record_resolution, resolve_person};
 use crate::{NewDecision, PgPool, StoreError, append_decision, begin, commit};
@@ -118,17 +119,21 @@ pub(crate) struct EventBatch {
     arrivals: Vec<Arrival>,
     /// The stored events the forwarding outbox is told about in `finish`.
     forwards: Vec<crate::ForwardRef>,
+    /// The decisions of the batch, appended in one statement by `finish`. A drain batch queues the
+    /// decisions of its profile records here too, so a trace keeps the order they were made in.
+    pub(crate) decisions: DecisionBuffer,
 }
 
 impl EventBatch {
-    /// Ends the batch: one query matches the accepted events against the event waits of
-    /// enrollments (a `flow.step` job per match), and one notification goes to the debugger if it
-    /// wrote feed rows. Call it once after the last record, in the transaction that holds them.
+    /// Ends the batch: one statement appends its decisions, one query matches the accepted events
+    /// against the event waits of enrollments (a `flow.step` job per match), and one notification
+    /// goes to the debugger if it wrote feed rows. Call it once after the last record, in the transaction that holds them.
     pub(crate) async fn finish(
         &mut self,
         connection: &mut PgConnection,
         workspace: WorkspaceId,
     ) -> Result<(), StoreError> {
+        self.decisions.flush(connection).await?;
         let arrivals = std::mem::take(&mut self.arrivals);
         enqueue_arrivals(connection, workspace, &arrivals).await?;
         let forwards = std::mem::take(&mut self.forwards);
@@ -375,24 +380,25 @@ async fn judge_event_record(
 
     // Only an accepted event creates or attaches anything. If a concurrent batch claims the
     // `messageId` first, the person writes are rolled back with the savepoint.
+    let decisions_mark = batch.decisions.mark();
     let mut savepoint = connection.begin().await.map_err(StoreError::query)?;
     let resolution =
         resolve_person(&mut savepoint, workspace, &identifiers, None, &record.trace).await?;
     let person_id = resolution.person_id;
     if resolution.created {
         decide(
-            &mut savepoint,
+            batch,
             workspace,
             record,
             "person.created",
             "created",
             None,
             vec![("person", person_id)],
-        )
-        .await?;
+        );
     }
     record_resolution(
         &mut savepoint,
+        &mut batch.decisions,
         workspace,
         &record.trace,
         person_id,
@@ -416,6 +422,7 @@ async fn judge_event_record(
         .map_err(StoreError::query)?;
         if claimed.rows_affected() == 0 {
             savepoint.rollback().await.map_err(StoreError::query)?;
+            batch.decisions.discard_after(decisions_mark);
             let original = count_duplicate(connection, workspace, message_id)
                 .await?
                 .ok_or_else(StoreError::retryable_race)?;
@@ -456,15 +463,14 @@ async fn judge_event_record(
         occurred_at: timing.occurred_at,
     });
     decide(
-        connection,
+        batch,
         workspace,
         record,
         "event.accepted",
         state.as_str(),
         None,
         vec![("event", event_id), ("person", person_id)],
-    )
-    .await?;
+    );
     Ok(EventOutcome::Accepted {
         event_id,
         person_id,
@@ -647,15 +653,14 @@ async fn refuse(
     let mut subjects = vec![("reject", reject_id)];
     subjects.extend(refusal.person_id.map(|person| ("person", person)));
     decide(
-        connection,
+        batch,
         workspace,
         record,
         "event.rejected",
         "rejected",
         Some(refusal.reason),
         subjects,
-    )
-    .await?;
+    );
     Ok(EventOutcome::Rejected {
         reject_id,
         reason: refusal.reason,
@@ -742,29 +747,26 @@ pub(crate) async fn reject_apply_failed(
     )
     .await
 }
-async fn decide(
-    connection: &mut PgConnection,
+/// Queues the decision of one event for the batch's flush in [`EventBatch::finish`].
+fn decide(
+    batch: &mut EventBatch,
     workspace: WorkspaceId,
     record: &EventRecord,
     action: &'static str,
     outcome: &'static str,
     reason: Option<&'static str>,
     subject_ids: Vec<(&'static str, Uuid)>,
-) -> Result<(), StoreError> {
-    append_decision(
-        connection,
-        &NewDecision {
-            graph: None,
-            workspace_id: workspace,
-            trace: record.trace.clone(),
-            action,
-            outcome,
-            reason,
-            subject_ids,
-            job: None,
-        },
-    )
-    .await
+) {
+    batch.decisions.push(NewDecision {
+        graph: None,
+        workspace_id: workspace,
+        trace: record.trace.clone(),
+        action,
+        outcome,
+        reason,
+        subject_ids,
+        job: None,
+    });
 }
 
 #[cfg(test)]

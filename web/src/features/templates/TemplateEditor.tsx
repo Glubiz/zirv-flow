@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 
-import { client, describeError, unwrap, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
 import { useLeaveGuard } from "../segments";
 import { ConvertDialog } from "./ConvertDialog";
@@ -43,6 +43,8 @@ interface Props {
   canAdmin: boolean;
 }
 
+const isDraftConflict = (error: unknown) => error instanceof ApiError && error.code === "template_draft_revision_mismatch";
+
 export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Props) {
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
@@ -66,6 +68,9 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const holdingRef = useRef(false);
   /** The revision of the server's draft as the editor last saw it, to tell a lost accept from none. */
   const draftRevision = useRef(initial.draft.revision);
+  /** Set when a save found the draft changed by someone else: nothing more is sent until the newer draft is loaded. */
+  const [conflict, setConflict] = useState(false);
+  const conflictRef = useRef(false);
 
   const archived = template.archived_at !== null && template.archived_at !== undefined;
   const editable = canWrite && !archived;
@@ -88,13 +93,14 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     if (!dirty.current) return true;
     if (convertedRef.current && docRef.current.kind === "blocks") return true;
     if (holdingRef.current) return true;
+    if (conflictRef.current) return false;
     const sent = revision.current;
     setSave("saving");
     try {
       const saved = await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/templates/{id}/draft", {
           params: { path: { ws: workspaceId, id: template.id } },
-          body: { document: asBody(writeDocument(docRef.current)) },
+          body: { document: asBody(writeDocument(docRef.current)), revision: draftRevision.current },
         }),
       );
       draftRevision.current = saved.draft.revision;
@@ -107,13 +113,25 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
       if (live.current) setSaveFailure(null);
       return true;
     } catch (error) {
-      if (live.current) {
+      if (isDraftConflict(error)) markConflict();
+      else if (live.current) {
         setSave("error");
         setSaveFailure(describeError(error));
       }
       return false;
     }
   }, [workspaceId, template.id]);
+
+  /** Another change was saved first: the edit stays in the editor and is not sent again. */
+  function markConflict() {
+    conflictRef.current = true;
+    window.clearTimeout(timer.current);
+    if (live.current) {
+      setConflict(true);
+      setSave("error");
+      setSaveFailure(null);
+    }
+  }
 
   /** Saves the draft if it changed, after any save already running. Resolves false when the save failed. */
   const flush = useCallback((): Promise<boolean> => {
@@ -186,6 +204,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   function converted(detail: TemplateDetail) {
     const next = readDocument(detail.draft.document);
     convertedRef.current = true;
+    draftRevision.current = detail.draft.revision;
     clearTimeout(timer.current);
     docRef.current = next;
     dirty.current = false;
@@ -220,6 +239,8 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     const next = readDocument(detail.draft.document);
     window.clearTimeout(timer.current);
     draftRevision.current = detail.draft.revision;
+    conflictRef.current = false;
+    setConflict(false);
     docRef.current = next;
     dirty.current = false;
     revision.current += 1;
@@ -238,6 +259,15 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     adopt(await readTemplate(), null);
   }
 
+  /** Replaces the edit with the newer draft; a failed read keeps the edit and says so. */
+  async function loadNewer() {
+    try {
+      await reload();
+    } catch (error) {
+      setSaveFailure(describeError(error));
+    }
+  }
+
   /** After a lost reply: the draft the server holds is adopted when it is not the one the editor knows. */
   async function reconcile(subject: string | null): Promise<boolean> {
     try {
@@ -248,6 +278,13 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     } catch {
       return false;
     }
+  }
+
+  /** A save that finds the draft changed ends the conversion before it starts: the notice above says why. */
+  async function flushForConvert(): Promise<boolean> {
+    const saved = await flush();
+    if (!saved && conflictRef.current) setConverting(false);
+    return saved;
   }
 
   function saveNow() {
@@ -338,6 +375,12 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           {publishWhy}
         </p>
       ) : null}
+      {conflict ? (
+        <div className="notice tp-banner" role="status">
+          <span className="row-grow">Another change was saved to this draft. Your edit is still here and has not been saved.</span>
+          <Button onClick={() => void loadNewer()}>Load the newer draft</Button>
+        </div>
+      ) : null}
       {saveFailure ? (
         <div className="tp-banner">
           <InlineError {...saveFailure} />
@@ -391,7 +434,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
       ) : null}
       {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {converting ? (
-        <ConvertDialog workspaceId={workspaceId} templateId={template.id} flush={flush} onClose={() => setConverting(false)} onConverted={converted} />
+        <ConvertDialog workspaceId={workspaceId} templateId={template.id} revision={() => draftRevision.current} flush={flushForConvert} onConflict={markConflict} onClose={() => setConverting(false)} onConverted={converted} />
       ) : null}
       {guard.pending !== null ? (
         <Dialog title="Leave without saving?" onClose={guard.stay}>
