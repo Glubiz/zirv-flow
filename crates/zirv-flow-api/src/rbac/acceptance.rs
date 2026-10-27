@@ -1593,7 +1593,7 @@ mod tests {
         let upload = send(
             &world.router,
             "POST",
-            &world.url(&format!("/imports?name=Customers&file_name=c.csv")),
+            &world.url("/imports?name=Customers&file_name=c.csv"),
             Some((
                 "text/csv".into(),
                 format!("Email,Plan\n{EMAIL},pro\nnot-an-email,free\n").into_bytes(),
@@ -1656,7 +1656,7 @@ mod tests {
         .unwrap();
 
         Seeded {
-            person: person,
+            person,
             conflict,
             list,
             segment,
