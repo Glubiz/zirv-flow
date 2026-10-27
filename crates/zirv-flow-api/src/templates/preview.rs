@@ -37,6 +37,10 @@ pub(crate) struct TemplatePreviewRequest {
     person_id: Option<Uuid>,
     /// Preview this published version. Absent: the draft.
     version: Option<i32>,
+    /// Give each section and block the class `zf-block-<id>` in the HTML, so a page can mark
+    /// them. Only the preview does this; a send, a test send and a publish never do.
+    #[serde(default)]
+    annotate: bool,
 }
 
 /// A header of the rendered message or request.
@@ -291,13 +295,17 @@ pub(crate) async fn preview(
     let rendered = if blocked {
         None
     } else {
+        let extras = RenderExtras {
+            annotate: body.annotate,
+            ..inputs.extras.clone()
+        };
         Some(
             render(
                 pool,
                 content.render_kind(),
                 &doc,
                 &context,
-                &inputs.extras,
+                &extras,
                 utm.as_ref(),
             )
             .await?,

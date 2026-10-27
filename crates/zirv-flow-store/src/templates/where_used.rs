@@ -54,6 +54,19 @@ pub async fn template_where_used<'e>(
     .map_err(StoreError::query)
 }
 
+/// The flows that send the template now: the `published` flows whose running version names it, by
+/// the rule of [`template_where_used`]. A draft, paused or archived flow is not listed; the
+/// archive of a template is refused while there is one.
+pub async fn active_published_flows<'e>(
+    executor: impl PgExecutor<'e>,
+    workspace: WorkspaceId,
+    template: Uuid,
+) -> Result<Vec<TemplateUse>, StoreError> {
+    let mut used = template_where_used(executor, workspace, template).await?;
+    used.retain(|used| used.active && used.flow_state == "published");
+    Ok(used)
+}
+
 /// An active flow that sends one of a set of templates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TemplateFlowUse {
@@ -95,6 +108,51 @@ pub async fn active_flows_using(
         (a.flow_name.to_lowercase(), a.flow_id).cmp(&(b.flow_name.to_lowercase(), b.flow_id))
     });
     Ok(active)
+}
+
+/// How much an active flow sends a template.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemplateSendVolume {
+    pub flow_id: Uuid,
+    pub flow_name: String,
+    /// The non-test messages of the last 7 days, divided by 7.
+    pub per_day: f64,
+}
+
+/// The active flows that send `template`, each with its average messages a day over the last 7
+/// days. A flow is active when it is `published` and its running version names the template; test
+/// messages do not count. One read grouped by flow over the `(workspace_id, template_id, created_at)`
+/// index. By flow name.
+pub async fn template_send_volume(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    template: Uuid,
+) -> Result<Vec<TemplateSendVolume>, StoreError> {
+    let flows: Vec<TemplateUse> = template_where_used(&mut *connection, workspace, template)
+        .await?
+        .into_iter()
+        .filter(|used| used.active && used.flow_state == "published")
+        .collect();
+    let counts: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT flow_id, count(*) FROM messages \
+         WHERE workspace_id = $1 AND template_id = $2 AND NOT test AND flow_id IS NOT NULL \
+            AND created_at >= now() - interval '7 days' \
+         GROUP BY flow_id",
+    )
+    .bind(workspace.as_uuid())
+    .bind(template)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let counts: HashMap<Uuid, i64> = counts.into_iter().collect();
+    Ok(flows
+        .into_iter()
+        .map(|used| TemplateSendVolume {
+            per_day: counts.get(&used.flow_id).copied().unwrap_or(0) as f64 / 7.0,
+            flow_id: used.flow_id,
+            flow_name: used.flow_name,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -210,5 +268,153 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    async fn insert_message(
+        pool: &PgPool,
+        ws: WorkspaceId,
+        person: Uuid,
+        flow: Uuid,
+        template: Uuid,
+        test: bool,
+        days_old: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, node_id, \
+                template_id, destination_id, status, test, created_at, completed_at) \
+             VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), $3, 'n', $4, \
+                gen_random_uuid(), 'sent', $5, now() - make_interval(days => $6), now())",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(flow)
+        .bind(template)
+        .bind(test)
+        .bind(days_old)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn send_volume_averages_seven_days_without_test_messages_for_active_flows(pool: PgPool) {
+        let ws = flows::workspace(&pool, "one").await;
+        let template = Uuid::now_v7();
+        let busy = publish_flow_naming(&pool, ws, "Busy", Some(template)).await;
+        let quiet = publish_flow_naming(&pool, ws, "Quiet", Some(template)).await;
+        let paused = publish_flow_naming(&pool, ws, "Paused", Some(template)).await;
+        let stale = publish_flow_naming(&pool, ws, "Stale", Some(template)).await;
+        sqlx::query("UPDATE flows SET state = 'paused' WHERE id = $1")
+            .bind(paused)
+            .execute(&pool)
+            .await
+            .unwrap();
+        flows::edit(&pool, ws, stale, "other").await;
+        flows::publish(&pool, ws, stale).await.unwrap();
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for _ in 0..14 {
+            insert_message(&pool, ws, person, busy, template, false, 1).await;
+        }
+        insert_message(&pool, ws, person, busy, template, true, 1).await;
+        insert_message(&pool, ws, person, busy, template, false, 8).await;
+        insert_message(&pool, ws, person, busy, Uuid::now_v7(), false, 1).await;
+        insert_message(&pool, ws, person, paused, template, false, 1).await;
+        insert_message(&pool, ws, person, stale, template, false, 1).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let volume = template_send_volume(&mut connection, ws, template)
+            .await
+            .unwrap();
+
+        let seen: Vec<(Uuid, f64)> = volume.iter().map(|v| (v.flow_id, v.per_day)).collect();
+        assert_eq!(seen, [(busy, 2.0), (quiet, 0.0)]);
+        assert_eq!(volume[0].flow_name, "Busy");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_send_volume_read_uses_the_template_index(pool: PgPool) {
+        let ws = flows::workspace(&pool, "one").await;
+        let mut connection = pool.acquire().await.unwrap();
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id, traits) VALUES ($1, $2, '{}')")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        // Many templates, so the planner has a template to be selective about.
+        sqlx::query(
+            "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, node_id, \
+                template_id, destination_id, status, test, created_at, completed_at) \
+             SELECT gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), 'n', \
+                ('00000000-0000-7000-8000-' || lpad((n % 200)::text, 12, '0'))::uuid, \
+                gen_random_uuid(), 'sent', false, now(), now() \
+             FROM generate_series(1, 4000) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE messages")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let plan: Vec<(String,)> = sqlx::query_as(
+            "EXPLAIN SELECT flow_id, count(*) FROM messages \
+             WHERE workspace_id = $1 AND template_id = $2 AND NOT test AND flow_id IS NOT NULL \
+                AND created_at >= now() - interval '7 days' \
+             GROUP BY flow_id",
+        )
+        .bind(ws.as_uuid())
+        .bind(Uuid::parse_str("00000000-0000-7000-8000-000000000007").unwrap())
+        .fetch_all(&mut *connection)
+        .await
+        .unwrap();
+
+        let plan: Vec<String> = plan.into_iter().map(|(line,)| line).collect();
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("messages_template_idx")),
+            "{plan:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn only_a_published_flow_running_the_template_counts_as_active(pool: PgPool) {
+        use crate::FlowAction;
+        use crate::templates::template_active_flow_counts;
+
+        let ws = flows::workspace(&pool, "one").await;
+        let template = Uuid::now_v7();
+        let running = publish_flow_naming(&pool, ws, "Running", Some(template)).await;
+        let also = publish_flow_naming(&pool, ws, "Also", Some(template)).await;
+        let paused = publish_flow_naming(&pool, ws, "Paused", Some(template)).await;
+        flows::lifecycle(&pool, ws, paused, FlowAction::Pause)
+            .await
+            .unwrap();
+        let moved_on = publish_flow_naming(&pool, ws, "Moved on", Some(template)).await;
+        flows::edit(&pool, ws, moved_on, "other").await;
+        flows::publish(&pool, ws, moved_on).await.unwrap();
+        flows::create(&pool, ws, "Draft").await;
+
+        let blocking = active_published_flows(&pool, ws, template).await.unwrap();
+        let counts = template_active_flow_counts(&pool, ws).await.unwrap();
+
+        let ids: Vec<Uuid> = blocking.iter().map(|used| used.flow_id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&running) && ids.contains(&also));
+        assert_eq!(counts.get(&template), Some(&2));
+        assert_eq!(counts.len(), 1);
     }
 }

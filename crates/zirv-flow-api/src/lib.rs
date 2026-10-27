@@ -403,8 +403,16 @@ fn routes() -> Router<AppState> {
             get(templates::publish::version),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats",
+            get(templates::publish::version_stats),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/templates/{id}/where-used",
             get(templates::where_used::where_used),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/send-volume",
+            get(templates::where_used::send_volume),
         )
         .route(
             "/api/v1/workspaces/{ws}/templates/{id}/preview",
@@ -423,6 +431,10 @@ fn routes() -> Router<AppState> {
             post(test_sends::test_send),
         )
         .route("/api/v1/workspaces/{ws}/test-sends", get(test_sends::list))
+        .route(
+            "/api/v1/workspaces/{ws}/test-sends/quota",
+            get(test_sends::quota),
+        )
         .route(
             "/api/v1/workspaces/{ws}/test-send-allowlist",
             get(test_sends::allowlist_list).post(test_sends::allowlist_add),

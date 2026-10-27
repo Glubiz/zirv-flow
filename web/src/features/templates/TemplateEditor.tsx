@@ -1,18 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, Pill } from "../../ui";
 import { useLeaveGuard } from "../segments";
 import { ConvertDialog } from "./ConvertDialog";
 import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane";
-import { PublishDialog } from "./PublishDialog";
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
 import { assistable, TemplateAssistant } from "./TemplateAssistant";
 import { SenderOptionsProvider } from "./senderOptions";
-import { TestSendDialog } from "./TestSendDialog";
-import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
 import {
   asBody,
@@ -32,11 +29,10 @@ import {
 export const DEBOUNCE_MS = 400;
 
 type SaveState = "saved" | "pending" | "saving" | "error";
-type Tab = "editor" | "versions" | "used";
+type Tab = "editor" | "used";
 
 const TABS: readonly { id: Tab; label: string }[] = [
   { id: "editor", label: "Editor" },
-  { id: "versions", label: "Versions" },
   { id: "used", label: "Where used" },
 ];
 
@@ -50,18 +46,18 @@ interface Props {
 export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Props) {
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
-  const [tab, setTab] = useState<Tab>("editor");
+  const [query] = useSearchParams();
+  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "used" ? "used" : "editor"));
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
+  const [leaveFor, setLeaveFor] = useState<"test" | "publish" | "history" | null>(null);
   const [goTo, setGoTo] = useState<{ id: string; n: number } | undefined>(undefined);
-  const [publishing, setPublishing] = useState(false);
-  const [testing, setTesting] = useState(false);
+  const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
   const [published, setPublished] = useState<string | null>(null);
-  const [versionsKey, setVersionsKey] = useState(0);
   const [assistantOpen, setAssistantOpen] = useState(false);
   /** Once opened, the panel stays mounted while hidden, so a draft under review survives a look at the editor. */
   const [assistantUsed, setAssistantUsed] = useState(false);
@@ -259,7 +255,16 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
     void refresh();
   }
 
+  /** Saves the draft first, so the page it opens works on what the editor shows. */
+  async function openPage(page: "test" | "publish" | "history") {
+    if (await flush()) setLeaveFor(page);
+  }
+
   const guard = useLeaveGuard(editable && save !== "saved");
+  useEffect(() => {
+    if (leaveFor !== null && save === "saved") void navigate(`/w/${workspaceId}/templates/${template.id}/${leaveFor}`);
+  }, [leaveFor, save, navigate, workspaceId, template.id]);
+
   const issues: readonly TemplateIssue[] = preview.status === "ready" ? preview.data.issues : [];
   const blocking = blockingCount(issues);
   const status = statusOf(template);
@@ -283,6 +288,16 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           <span className="faint">{modeLabel(doc)}</span>
         </span>
         <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={setTab} />
+        <Link
+          className="fl-tab"
+          to={`/w/${workspaceId}/templates/${template.id}/history`}
+          onClick={(event) => {
+            event.preventDefault();
+            void openPage("history");
+          }}
+        >
+          Versions
+        </Link>
         <div className="fl-status" role="status">
           {!editable ? (
             <span className="muted">{archived ? "This template is archived. You can look at it but not change it." : "You can look at this template but not change it."}</span>
@@ -310,10 +325,10 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           </Button>
         ) : null}
         {editable && template.channel === "email" ? (
-          <Button onClick={() => setTesting(true)}>Test send</Button>
+          <Button onClick={() => void openPage("test")}>Send a test</Button>
         ) : null}
         {editable && canAdmin ? (
-          <Button variant="primary" disabled={!canPublish} onClick={() => setPublishing(true)} aria-describedby="tp-publish-why">
+          <Button variant="primary" disabled={!canPublish} onClick={() => void openPage("publish")} aria-describedby="tp-publish-why">
             Publish…
           </Button>
         ) : null}
@@ -374,23 +389,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           )}
         </div>
       ) : null}
-      {tab === "versions" ? <VersionsView workspaceId={workspaceId} templateId={template.id} reloadKey={versionsKey} /> : null}
-      {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={versionsKey} /> : null}
-
-      {publishing ? (
-        <PublishDialog
-          workspaceId={workspaceId}
-          template={template}
-          flush={flush}
-          onClose={() => setPublishing(false)}
-          onPublished={(next, version) => {
-            setTemplate(next);
-            setPublishing(false);
-            setVersionsKey((key) => key + 1);
-            setPublished(`Published version ${version.version}. Flows that send this template use it from their next send.`);
-          }}
-        />
-      ) : null}
+      {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {converting ? (
         <ConvertDialog workspaceId={workspaceId} templateId={template.id} flush={flush} onClose={() => setConverting(false)} onConverted={converted} />
       ) : null}
@@ -405,7 +404,6 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           </div>
         </Dialog>
       ) : null}
-      {testing ? <TestSendDialog workspaceId={workspaceId} template={template} flush={flush} personId={person?.id ?? null} onClose={() => setTesting(false)} /> : null}
     </div>
     </SenderOptionsProvider>
   );

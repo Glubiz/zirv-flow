@@ -36,3 +36,8 @@ export function formatAgo(value: string, now: number = Date.now()): string {
   if (seconds < 86400) return unit(Math.floor(seconds / 3600), "hour");
   return unit(Math.floor(seconds / 86400), "day");
 }
+
+export function formatTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}

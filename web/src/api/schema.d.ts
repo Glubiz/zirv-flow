@@ -3034,7 +3034,13 @@ export interface paths {
          *     blocks), and each asset image must name a live asset of the workspace; a snippet with no block
          *     is refused as `missing_content`. A theme logo image is accepted: the template or theme that
          *     holds the snippet checks it. A blocking issue is a 422
-         *     `snippet_invalid` that lists every issue and writes nothing. The response lists the templates,
+         *     `snippet_invalid` that lists every issue and writes nothing. The live templates whose current
+         *     version renders with the snippet (a snippet block, or a theme footer) are validated with the
+         *     draft in place of the published version, at most 200 in template id order; past 200 the publish
+         *     goes ahead on the result for the first 200. A blocking issue in one of them, such as a footer
+         *     without an unsubscribe link in a marketing template, is a 422 `snippet_breaks_templates` that
+         *     lists up to 20 of them with their issue codes and the total, and writes nothing. Warnings do
+         *     not refuse. The response lists the templates,
          *     themes and active flows that use the snippet. Audited as `snippet.published`.
          */
         post: operations["publish_snippet"];
@@ -3477,7 +3483,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The workspace's live templates by name; archived ones with `archived=true`. */
+        /**
+         * The workspace's templates for the library, newest edit first; archived ones with
+         *     `archived=true` or `status=archived`.
+         */
         get: operations["list_templates"];
         put?: never;
         /** Creates a template with its first draft. Audited as `template.created`. */
@@ -3524,7 +3533,9 @@ export interface paths {
         /**
          * Replaces the template's draft. The draft is not validated beyond being a template document of
          *     the template's channel and category with a registered content type: a template is edited in
-         *     steps, and the publish checks it. Audited as `template.draft_saved`.
+         *     steps, and the publish checks it. After the save commits the draft is validated once and its
+         *     issue counts stored (`checks` in the template list); a validation that cannot run leaves them
+         *     empty and never fails the save. Audited as `template.draft_saved`.
          */
         put: operations["save_template_draft"];
         post?: never;
@@ -3631,9 +3642,32 @@ export interface paths {
          *     is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
          *     successful publish are in the response and stored with the version. The document's sender must
          *     be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
+         *     An optional body `{ "note", "revision" }` adds a note of at most 500 characters to the version and
+         *     publishes only if the draft is still `revision`.
          *     Audited as `template.published`.
          */
         post: operations["publish_template"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/send-volume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The active flows that send this template, each with the average non-test messages a day over
+         *     the last 7 days. A flow is active when it is published and its running version names the
+         *     template. By flow name.
+         */
+        get: operations["template_send_volume"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3689,6 +3723,26 @@ export interface paths {
         };
         /** One version of a template. */
         get: operations["get_template_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What one version sent: its non-test message count and the theme and snippet versions those
+         *     messages recorded.
+         */
+        get: operations["get_template_version_stats"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3788,6 +3842,26 @@ export interface paths {
         };
         /** The workspace's test-send log, newest first, optionally of one template (`template_id`). */
         get: operations["list_test_sends"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/test-sends/quota": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the caller may still send this hour: their own count and the workspace's, against the
+         *     limits `POST .../test-send` enforces, counted in the same window.
+         */
+        get: operations["test_send_quota"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3918,7 +3992,12 @@ export interface paths {
          *     blocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the
          *     footer a snippet of the workspace that is not archived and has a published version
          *     (`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue
-         *     and writes nothing. The logo's asset reference is written with the version. The response lists
+         *     and writes nothing. The live templates that name the theme, or follow it while it is the
+         *     default, are validated with the draft in place of the published version, at most 200 in
+         *     template id order; past 200 the publish goes ahead on the result for the first 200. A blocking
+         *     issue in one of them, such as a removed footer in a marketing template, is a 422
+         *     `theme_breaks_templates` that lists up to 20 of them with their issue codes and the total, and
+         *     writes nothing. Warnings do not refuse. The logo's asset reference is written with the version. The response lists
          *     the templates and active flows that use the theme. Audited as `theme.published`.
          */
         post: operations["publish_theme"];
@@ -4590,10 +4669,14 @@ export interface components {
         };
         /** @description A published version that uses an asset. */
         AssetOwnerBody: {
+            /** @description Whether the owner is archived. */
+            archived: boolean;
             /** Format: uuid */
             id: string;
             /** @description `template`, `theme` or `snippet`. */
             kind: string;
+            /** @description The owner's current name; null when the owner no longer exists. */
+            name?: string | null;
             /** Format: int32 */
             version: number;
         };
@@ -4662,6 +4745,14 @@ export interface components {
              *     appended.
              */
             batch: components["schemas"]["BatchItemRequest"][];
+        };
+        /** @description A live template that a new snippet or theme version would stop from sending. */
+        BrokenTemplateProblem: {
+            /** @description The codes of its blocking issues with the new version. */
+            codes: string[];
+            /** Format: uuid */
+            id: string;
+            name: string;
         };
         BucketBody: {
             /** Format: date-time */
@@ -6839,6 +6930,12 @@ export interface components {
             /** @enum {string} */
             mode: "always";
         };
+        /** @description A flow named in a problem. */
+        FlowRefProblem: {
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+        };
         /** @description A cron slot in its own time zone. */
         FlowScheduleTrigger: {
             audience: components["schemas"]["FlowAudience"];
@@ -8024,6 +8121,8 @@ export interface components {
              *     concerns, never a value from the flow.
              */
             flow_issues?: components["schemas"]["FlowIssueProblem"][] | null;
+            /** @description The active flows whose running version sends a template (`template_in_use`). */
+            flows?: components["schemas"]["FlowRefProblem"][] | null;
             /**
              * @description What is wrong with a segment definition (`segment_invalid`): a JSON pointer into the
              *     definition and a fixed code for each issue, never a value from it.
@@ -8042,7 +8141,17 @@ export interface components {
              *     and where, never a value from the document.
              */
             template_issues?: components["schemas"]["TemplateIssueProblem"][] | null;
+            /**
+             * @description The live templates a snippet or theme version would stop from sending
+             *     (`snippet_breaks_templates`, `theme_breaks_templates`), at most 20.
+             */
+            templates?: components["schemas"]["BrokenTemplateProblem"][] | null;
             title: string;
+            /**
+             * Format: int32
+             * @description How many templates `templates` is the first of.
+             */
+            total?: number | null;
             /**
              * @description The `x-trace-id` of the failed request; look it up with
              *     `GET /api/v1/workspaces/{ws}/traces/{trace_id}`.
@@ -8254,6 +8363,22 @@ export interface components {
              * @example 21:00
              */
             start: string;
+        };
+        QuotaBody: {
+            /** @description The caller's own sends; an API key has none. */
+            member: components["schemas"]["QuotaUsageBody"];
+            /**
+             * Format: date-time
+             * @description When the next test send is accepted again: the later release time of the limits that are
+             *     full now, as the refusal computes it. Null when the caller can send now.
+             */
+            resets_at?: string | null;
+            workspace: components["schemas"]["QuotaUsageBody"];
+        };
+        /** @description Test sends counted in the rolling hour against a limit. */
+        QuotaUsageBody: {
+            limit: number;
+            used: number;
         };
         ReadBody: {
             /**
@@ -8628,6 +8753,12 @@ export interface components {
         SaveTemplateDraftRequest: {
             /** @description The content document. */
             document: Record<string, never>;
+            /**
+             * Format: int32
+             * @description The draft revision the caller read. When given and the draft has been saved since, the save
+             *     is a 409 `template_draft_revision_mismatch` and writes nothing. Absent saves unconditionally.
+             */
+            revision?: number | null;
         };
         SaveThemeDraftRequest: {
             /**
@@ -9766,6 +9897,13 @@ export interface components {
          * @enum {string}
          */
         TemplateChannelRequest: "email" | "webhook";
+        /** @description The counts of the issues the draft's last validation found. */
+        TemplateChecksBody: {
+            /** Format: int32 */
+            blocking: number;
+            /** Format: int32 */
+            warnings: number;
+        };
         /** @description A template with its draft. */
         TemplateDetailBody: components["schemas"]["TemplateBody"] & {
             draft: components["schemas"]["TemplateDraftBody"];
@@ -9804,6 +9942,28 @@ export interface components {
             /** @description `blocking` or `warning`. */
             severity: string;
         };
+        /** @description A template in the library list: the template and the facts the library shows. */
+        TemplateListItemBody: components["schemas"]["TemplateBody"] & {
+            /**
+             * Format: int64
+             * @description How many active flows send the template.
+             */
+            active_flows: number;
+            checks?: null | components["schemas"]["TemplateChecksBody"];
+            /** @description The draft differs from the current version; false before the first publish. */
+            draft_changed: boolean;
+            /** Format: date-time */
+            edited_at: string;
+            /** @description The email of the member who saved the draft last; null for an API key or a removed member. */
+            edited_by_email?: string | null;
+            theme: components["schemas"]["TemplateThemeBody"];
+        };
+        /** @description A theme a block email names. */
+        TemplateNamedTheme: {
+            /** Format: uuid */
+            id: string;
+            name: string;
+        };
         /** @description The rendered template and its validation results. */
         TemplatePreviewBody: {
             /** @description A webhook's JSON body. */
@@ -9837,6 +9997,11 @@ export interface components {
         };
         TemplatePreviewRequest: {
             /**
+             * @description Give each section and block the class `zf-block-<id>` in the HTML, so a page can mark
+             *     them. Only the preview does this; a send, a test send and a publish never do.
+             */
+            annotate?: boolean;
+            /**
              * Format: uuid
              * @description Preview as this person. Needs the workspace admin role, because the render shows their
              *     values. Absent: a sample person built from the field registry's types.
@@ -9847,6 +10012,17 @@ export interface components {
              * @description Preview this published version. Absent: the draft.
              */
             version?: number | null;
+        };
+        /** @description The optional body of a publish. */
+        TemplatePublishRequest: {
+            /** @description A note for the version history, at most 500 characters. Blank is no note. */
+            note?: string | null;
+            /**
+             * Format: int32
+             * @description The revision of the draft that was reviewed. When given, a draft saved since is a 409
+             *     `template_draft_changed` and nothing is published.
+             */
+            revision?: number | null;
         };
         /** @description The new version and the template after the publish. */
         TemplatePublishedBody: {
@@ -9860,11 +10036,29 @@ export interface components {
             after?: null | components["schemas"]["RenderedEmailBody"];
             before?: null | components["schemas"]["RenderedEmailBody"];
         };
+        /** @description How much one active flow sends the template. */
+        TemplateSendVolumeBody: {
+            /** Format: uuid */
+            flow_id: string;
+            flow_name: string;
+            /**
+             * Format: double
+             * @description The average non-test messages a day over the last 7 days.
+             */
+            per_day: number;
+        };
         /**
          * @description What the marketer asks the assistant to do to a template.
          * @enum {string}
          */
         TemplateTask: "copy" | "subject_variants" | "block_layout" | "translation";
+        /** @description The theme the draft follows: `default`, `none`, or the theme it names. */
+        TemplateThemeBody: components["schemas"]["TemplateThemeChoice"] | components["schemas"]["TemplateNamedTheme"];
+        /**
+         * @description A theme choice that names no theme row.
+         * @enum {string}
+         */
+        TemplateThemeChoice: "default" | "none";
         /** @description One flow with a version that names the template. */
         TemplateUseBody: {
             /** @description Whether the version the flow runs now is one of them. */
@@ -9889,6 +10083,8 @@ export interface components {
         TemplateVersionBody: {
             /** @description The document as it was published. */
             document: Record<string, never>;
+            /** @description The note written when it was published. */
+            note?: string | null;
             /** Format: date-time */
             published_at: string;
             /** Format: uuid */
@@ -9898,6 +10094,18 @@ export interface components {
             /** @description The warnings found when it was published; a blocking issue refuses the publish. */
             warnings: components["schemas"]["TemplateIssueProblem"][];
         };
+        /** @description What one template version sent. */
+        TemplateVersionStatsBody: {
+            /**
+             * Format: int64
+             * @description The non-test messages sent with the version.
+             */
+            messages: number;
+            /** @description Whether more combinations exist than `renders` lists. */
+            more: boolean;
+            /** @description The distinct theme and snippet combinations, most used first, at most 20. */
+            renders: components["schemas"]["VersionRenderBody"][];
+        };
         /** @description One published version in the history list: no document, which `GET .../versions/{n}` returns. */
         TemplateVersionSummaryBody: {
             /**
@@ -9906,6 +10114,8 @@ export interface components {
              *     publish.
              */
             blocking: number;
+            /** @description The note written when it was published. */
+            note?: string | null;
             /** Format: date-time */
             published_at: string;
             /** Format: uuid */
@@ -9946,6 +10156,11 @@ export interface components {
             /** Format: uuid */
             destination_id: string;
             /**
+             * Format: int32
+             * @description The draft revision a draft test rendered; null for a version test.
+             */
+            draft_revision?: number | null;
+            /**
              * Format: uuid
              * @description Also the idempotency key at the destination.
              */
@@ -9964,6 +10179,11 @@ export interface components {
             /** @description A fixed code that says why a test did not go out. */
             reason?: string | null;
             /**
+             * @description A member's email, or the hint of the allowlist entry the test went to; `removed address`
+             *     once the entry is gone. Never an allowlisted address.
+             */
+            recipient_display: string;
+            /**
              * Format: uuid
              * @description The workspace member the test went to; null for an allowlisted address.
              */
@@ -9975,6 +10195,8 @@ export interface components {
             render_context: string;
             /** Format: uuid */
             sender_identity_id: string;
+            /** @description The email of the member who asked; null for an API key or a removed member. */
+            sent_by_email?: string | null;
             /** Format: uuid */
             template_id: string;
             /**
@@ -9983,13 +10205,18 @@ export interface components {
              */
             template_version?: number | null;
         };
-        /** @description Who a test goes to. Exactly one of the two fields is given. */
+        /** @description Who a test goes to. Exactly one of the three fields is given. */
         TestSendRecipient: {
             /**
              * @description An address on the workspace's test-send allowlist.
              * @example qa@example.com
              */
             address?: string | null;
+            /**
+             * Format: uuid
+             * @description An entry of the allowlist, by the id the allowlist options list. The address stays sealed.
+             */
+            allowlist_entry?: string | null;
             /**
              * Format: uuid
              * @description A member of this workspace; the test goes to the address on their account.
@@ -10598,6 +10825,23 @@ export interface components {
             nodes: components["schemas"]["NodeCountBody"][];
             /** Format: int32 */
             version: number;
+        };
+        /** @description One theme and snippet combination recorded on the messages sent with a version. */
+        VersionRenderBody: {
+            /**
+             * Format: int64
+             * @description The non-test messages with this combination.
+             */
+            count: number;
+            /** @description Snippet id to the version number used. */
+            snippet_versions: Record<string, never>;
+            /**
+             * Format: uuid
+             * @description The theme in effect, or none.
+             */
+            theme_id?: string | null;
+            /** Format: int32 */
+            theme_version?: number | null;
         };
         /** @description A wait the walk went into. */
         WaitBody: {
@@ -23298,7 +23542,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft has blocking issues (`snippet_invalid`, with `template_issues`) */
+            /** @description The draft has blocking issues (`snippet_invalid`, with `template_issues`), or would stop live templates from sending (`snippet_breaks_templates`, with `templates` and `total`) */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -25130,6 +25374,16 @@ export interface operations {
             query?: {
                 /** @description Include archived templates; default false */
                 archived?: boolean;
+                /** @description A case-insensitive substring of the name, the draft's subject or a merge field the draft uses */
+                q?: string;
+                /** @description `email` or `webhook` */
+                channel?: string;
+                /** @description `live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates */
+                status?: string;
+                /** @description A theme id, `default` or `none` */
+                theme?: string;
+                /** @description `edited` (the default), `name` or `most_used` (non-test messages in the last 30 days) */
+                sort?: string;
             };
             header?: never;
             path: {
@@ -25146,10 +25400,10 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TemplateBody"][];
+                    "application/json": components["schemas"]["TemplateListItemBody"][];
                 };
             };
-            /** @description archived is not true or false */
+            /** @description archived is not true or false, or another parameter has an unknown value */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -25435,7 +25689,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is already archived (`code` is `template_archived`) */
+            /** @description The template is already archived (`code` is `template_archived`), or an active flow still sends it (`code` is `template_in_use`, with the flows in `flows`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -25500,7 +25754,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is archived (`code` is `template_archived`) */
+            /** @description The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -25863,7 +26117,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["TemplatePublishRequest"];
+            };
+        };
         responses: {
             /** @description The template and its new version */
             201: {
@@ -25872,6 +26130,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TemplatePublishedBody"];
+                };
+            };
+            /** @description The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Not authenticated */
@@ -25901,7 +26168,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`) */
+            /** @description The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`) */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -25912,6 +26179,58 @@ export interface operations {
             };
             /** @description The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`) */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    template_send_volume: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active flows that send the template, with their daily volume */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateSendVolumeBody"][];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace or template, or no access */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -26088,6 +26407,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TemplateVersionBody"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, template or version, or no access */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_template_version_stats: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+                /** @description Template id */
+                id: string;
+                /** @description Version number */
+                n: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The messages sent with the version and their theme and snippet versions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TemplateVersionStatsBody"];
                 };
             };
             /** @description Not authenticated */
@@ -26407,6 +26780,8 @@ export interface operations {
             query?: {
                 /** @description Only the tests of this template */
                 template_id?: string;
+                /** @description Only the tests that rendered this draft revision */
+                draft_revision?: number;
                 /** @description Rows per page, 1 to 200; default 50 */
                 limit?: number;
                 /** @description The next_before of the previous page */
@@ -26430,13 +26805,63 @@ export interface operations {
                     "application/json": components["schemas"]["TestSendsBody"];
                 };
             };
-            /** @description limit or template_id is out of range or malformed, or before is not a cursor */
+            /** @description limit, template_id or draft_revision is out of range or malformed, or before is not a cursor */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Not authenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description A key without the read scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such workspace, or no access to it */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    test_send_quota: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Workspace id */
+                ws: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The hourly counts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuotaBody"];
                 };
             };
             /** @description Not authenticated */
@@ -27068,7 +27493,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The draft has blocking issues (`theme_invalid`, with `template_issues`) */
+            /** @description The draft has blocking issues (`theme_invalid`, with `template_issues`), or would stop live templates from sending (`theme_breaks_templates`, with `templates` and `total`) */
             422: {
                 headers: {
                     [name: string]: unknown;

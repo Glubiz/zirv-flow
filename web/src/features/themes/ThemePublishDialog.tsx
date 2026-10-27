@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Link } from "react-router";
 
-import { ApiError, client, describeError, unwrap, type ErrorSummary, type Resource } from "../../api";
+import { ApiError, client, describeError, unwrap, type BrokenTemplate, type ErrorSummary, type Resource } from "../../api";
 import { Button, Dialog, ErrorState, InlineError, LoadingState } from "../../ui";
 import { plural } from "../../ui/format";
-import { IssueList } from "../templates";
+import { BrokenTemplates, IssueList } from "../templates";
 import { nextVersion, reachedTemplates, type Theme, type ThemeIssue, type ThemeUsedBy, type ThemeVersion } from "./model";
 
 /** How many templates the dialog names before the rest go behind "more". */
@@ -29,11 +29,13 @@ export function ThemePublishDialog({ workspaceId, theme, usedBy, issues, flush, 
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [refused, setRefused] = useState<ThemeIssue[]>([]);
   const [more, setMore] = useState(false);
+  const [broken, setBroken] = useState<{ detail: string; templates: BrokenTemplate[]; total: number } | null>(null);
 
   async function publish() {
     setBusy(true);
     setFailure(null);
     setRefused([]);
+    setBroken(null);
     try {
       if (!(await flush())) {
         setFailure({ title: "The draft could not be saved", detail: "Fix that, then publish again.", traceId: null });
@@ -44,6 +46,8 @@ export function ThemePublishDialog({ workspaceId, theme, usedBy, issues, flush, 
       onPublished(published.theme, published.version);
     } catch (error) {
       if (error instanceof ApiError && error.code === "theme_invalid") setRefused(error.templateIssues);
+      else if (error instanceof ApiError && error.code === "theme_breaks_templates")
+        setBroken({ detail: error.detail, templates: error.templates, total: error.total });
       else setFailure(describeError(error));
       setBusy(false);
     }
@@ -87,6 +91,7 @@ export function ThemePublishDialog({ workspaceId, theme, usedBy, issues, flush, 
         ) : null}
         {issues.length > 0 ? <IssueList issues={issues} checked /> : null}
         {refused.length > 0 ? <IssueList issues={refused} checked /> : null}
+        {broken ? <BrokenTemplates workspaceId={workspaceId} {...broken} /> : null}
         {failure ? <InlineError {...failure} /> : null}
         <div className="dialog-actions">
           <Button onClick={onClose}>Cancel</Button>

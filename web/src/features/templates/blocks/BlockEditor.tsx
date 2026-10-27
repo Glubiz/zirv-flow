@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useSearchParams } from "react-router";
 
 import type { SnippetOption } from "../../snippets";
 
@@ -112,7 +113,12 @@ function Editor(props: Props & { scope: ThemeScope; snippetNames: SnippetNames }
   const tabs = panelTabs(scope);
   const content = doc.content;
   const locked = readOnly || doc.newer;
-  const [selected, setSelected] = useState<string | null>(null);
+  const [params] = useSearchParams();
+  /** The `?block=<id>` of a Fix link opens the editor with that block selected, when the document has it. */
+  const [selected, setSelected] = useState<string | null>(() => {
+    const asked = params.get("block");
+    return asked !== null && (findById(content, asked) !== undefined || content.sections.some((entry) => entry.id === asked)) ? asked : null;
+  });
   const [tab, setTab] = useState<PanelTab>("block");
   const [drag, setDrag] = useState<Drag | null>(null);
   const [target, setTarget] = useState<InsertTarget | null>(null);

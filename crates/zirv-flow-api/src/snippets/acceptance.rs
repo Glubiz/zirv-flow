@@ -238,6 +238,49 @@ mod tests {
             reply.body["id"].as_str().unwrap().to_owned()
         }
 
+        /// A block template with a published current version, written to the store directly so the
+        /// sender check of the template publish does not apply; returns its id.
+        async fn live_template(
+            &self,
+            name: &str,
+            category: &str,
+            theme: Value,
+            sections: Value,
+        ) -> String {
+            let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+                "subject": "Hi", "sender": "0192b1a4-7c3e-7000-8000-00000000a001", "lang": "en",
+                "category": category, "theme": theme, "sections": sections}});
+            let reply = self
+                .admin(
+                    "POST",
+                    "/templates",
+                    Some(
+                        json!({"name": name, "channel": "email", "category": category,
+                        "document": document}),
+                    ),
+                )
+                .await;
+            assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+            let id = reply.body["id"].as_str().unwrap().to_owned();
+            let template: Uuid = id.parse().unwrap();
+            sqlx::query(
+                "INSERT INTO template_versions (workspace_id, template_id, version, document, \
+                    validation, trace_id) \
+                 SELECT workspace_id, template_id, 1, document, '[]'::jsonb, gen_random_uuid() \
+                 FROM template_drafts WHERE template_id = $1",
+            )
+            .bind(template)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+                .bind(template)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+            id
+        }
+
         /// A published flow whose graph names `template`; returns its id.
         async fn flow_naming(&self, name: &str, template: &str) -> Uuid {
             let flow = Uuid::now_v7();
@@ -289,6 +332,16 @@ mod tests {
 
     fn heading(text: &str) -> Value {
         json!({"blocks": [{"type": "heading", "id": "h", "level": 2, "text": text}]})
+    }
+
+    /// Snippet content with the unsubscribe link, which a footer needs.
+    fn unsubscribe_content() -> Value {
+        json!({"blocks": [{"type": "text", "id": "legal", "content":
+            r#"<p><a href="{{ system.unsubscribe_url }}">Unsubscribe</a></p>"#}]})
+    }
+
+    fn section_of(block: Value) -> Value {
+        json!([{"id": "s", "columns": [[block]]}])
     }
 
     fn issue_codes(reply: &Reply) -> Vec<String> {
@@ -854,5 +907,170 @@ mod tests {
         assert_eq!(preview.body["code"], "render_unavailable");
         assert_eq!(f.count("SELECT count(*) FROM snippet_versions").await, 0);
         let _ = f.other_ws;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_footer_version_without_the_unsubscribe_link_is_refused_while_a_live_marketing_template_follows_the_default_theme(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = f.create("Footer", unsubscribe_content()).await;
+        assert_eq!(f.publish(&footer).await.status, StatusCode::CREATED);
+        let theme = f
+            .admin(
+                "POST",
+                "/themes",
+                Some(json!({"name": "Brand", "tokens": {"footer_snippet": footer}})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/themes/{theme}/publish"), None)
+            .await;
+        f.admin("PUT", "/themes/default", Some(json!({"theme_id": theme})))
+            .await;
+        let intro = || section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"}));
+        let marketing = f
+            .live_template("News", "marketing", json!("default"), intro())
+            .await;
+        f.live_template("Receipt", "transactional", json!("default"), intro())
+            .await;
+        f.put_draft(&footer, heading("No link"), None).await;
+
+        let refused = f.publish(&footer).await;
+        let versions_after_refusal = f.count("SELECT count(*) FROM snippet_versions").await;
+        let archived = f
+            .admin("DELETE", &format!("/templates/{marketing}"), None)
+            .await;
+        let accepted = f.publish(&footer).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "snippet_breaks_templates");
+        assert_eq!(refused.body["total"], 1);
+        assert_eq!(
+            refused.body["templates"][0]["id"],
+            json!(marketing),
+            "{:?}",
+            refused.body
+        );
+        assert_eq!(
+            refused.body["templates"][0]["codes"],
+            json!(["missing_unsubscribe"])
+        );
+        assert_eq!(versions_after_refusal, 1);
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert_eq!(accepted.status, StatusCode::CREATED, "{:?}", accepted.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_snippet_block_version_that_breaks_a_marketing_template_is_refused_and_a_transactional_one_is_not(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let snippet = f.create("Legal", unsubscribe_content()).await;
+        assert_eq!(f.publish(&snippet).await.status, StatusCode::CREATED);
+        let block = json!({"type": "snippet", "id": "sn", "snippet_id": snippet});
+        let marketing = f
+            .live_template(
+                "News",
+                "marketing",
+                json!("none"),
+                section_of(block.clone()),
+            )
+            .await;
+        f.live_template("Receipt", "transactional", json!("none"), section_of(block))
+            .await;
+        f.put_draft(&snippet, heading("No link"), None).await;
+
+        let refused = f.publish(&snippet).await;
+
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "snippet_breaks_templates");
+        assert_eq!(refused.body["total"], 1);
+        assert_eq!(refused.body["templates"][0]["id"], json!(marketing));
+        assert_eq!(f.count("SELECT count(*) FROM snippet_versions").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_template_naming_an_archived_theme_still_blocks_a_footer_without_the_link(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let footer = f.create("Footer", unsubscribe_content()).await;
+        assert_eq!(f.publish(&footer).await.status, StatusCode::CREATED);
+        let theme = f
+            .admin(
+                "POST",
+                "/themes",
+                Some(json!({"name": "Brand", "tokens": {"footer_snippet": footer}})),
+            )
+            .await
+            .body["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.admin("POST", &format!("/themes/{theme}/publish"), None)
+            .await;
+        let named = f
+            .live_template(
+                "Named",
+                "marketing",
+                json!({"id": theme}),
+                section_of(json!({"type": "heading", "id": "h", "level": 1, "text": "Hi"})),
+            )
+            .await;
+        let archived = f.admin("DELETE", &format!("/themes/{theme}"), None).await;
+        f.put_draft(&footer, heading("No link"), None).await;
+
+        let refused = f.publish(&footer).await;
+
+        assert_eq!(archived.status, StatusCode::OK, "{:?}", archived.body);
+        assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refused.body["code"], "snippet_breaks_templates");
+        assert_eq!(refused.body["templates"][0]["id"], json!(named));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_live_template_whose_published_document_no_longer_parses_does_not_block(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let snippet = f.create("Legal", unsubscribe_content()).await;
+        assert_eq!(f.publish(&snippet).await.status, StatusCode::CREATED);
+        let stale = f.template_holding("Stale", &snippet).await;
+        let mut document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+            "subject": "Hi", "category": "marketing", "sections": [{"id": "s", "columns": [[
+                {"type": "snippet", "id": "sn", "snippet_id": snippet}]]}]}});
+        document["unknown_field"] = json!(true);
+        let template: Uuid = stale.parse().unwrap();
+        sqlx::query(
+            "INSERT INTO template_versions (workspace_id, template_id, version, document,                 validation, trace_id)              SELECT workspace_id, template_id, 1, $2, '[]'::jsonb, gen_random_uuid()              FROM template_drafts WHERE template_id = $1",
+        )
+        .bind(template)
+        .bind(&document)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE templates SET current_version = 1 WHERE id = $1")
+            .bind(template)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        f.put_draft(&snippet, heading("Plain"), None).await;
+
+        let published = f.publish(&snippet).await;
+
+        assert_eq!(
+            published.status,
+            StatusCode::CREATED,
+            "{:?}",
+            published.body
+        );
     }
 }

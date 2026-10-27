@@ -608,6 +608,8 @@ mod tests {
         assert_eq!(body["used_by"][0]["kind"], "template");
         assert_eq!(body["used_by"][0]["id"], owner.to_string());
         assert_eq!(body["used_by"][0]["version"], 4);
+        assert_eq!(body["used_by"][0]["name"], Value::Null);
+        assert_eq!(body["used_by"][0]["archived"], false);
         let list = f
             .call("GET", &f.assets(f.ws, ""), Some(&f.read))
             .await
@@ -621,6 +623,85 @@ mod tests {
             )
             .await;
         assert_eq!(foreign.status, StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn used_by_names_a_template_theme_and_snippet_owner_and_flags_an_archived_one(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let asset = f.upload_png("pic", 2, 2).await;
+        let (template, theme, snippet) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let ws = f.ws.as_uuid();
+        sqlx::query(
+            "INSERT INTO templates (id, workspace_id, name, channel, category, archived_at) \
+             VALUES ($1, $2, 'Order shipped', 'email', 'transactional', now())",
+        )
+        .bind(template)
+        .bind(ws)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO themes (id, workspace_id, name) VALUES ($1, $2, 'Plain')")
+            .bind(theme)
+            .bind(ws)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO snippets (id, workspace_id, name) VALUES ($1, $2, 'Footer')")
+            .bind(snippet)
+            .bind(ws)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        for (kind, owner) in [
+            (AssetOwnerKind::Template, template),
+            (AssetOwnerKind::Theme, theme),
+            (AssetOwnerKind::Snippet, snippet),
+        ] {
+            record_references(
+                &mut connection,
+                f.ws,
+                kind,
+                owner,
+                1,
+                &[AssetId::from_uuid(id_of(&asset))],
+            )
+            .await
+            .unwrap();
+        }
+
+        let body = f
+            .call(
+                "GET",
+                &f.assets(f.ws, &format!("/{}", id_of(&asset))),
+                Some(&f.read),
+            )
+            .await
+            .json();
+
+        let used: Vec<(&str, &str, bool)> = body["used_by"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| {
+                (
+                    o["kind"].as_str().unwrap(),
+                    o["name"].as_str().unwrap(),
+                    o["archived"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            used,
+            [
+                ("snippet", "Footer", false),
+                ("template", "Order shipped", true),
+                ("theme", "Plain", false),
+            ]
+        );
     }
 
     #[sqlx::test]

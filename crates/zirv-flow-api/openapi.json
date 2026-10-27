@@ -18550,7 +18550,7 @@
         "tags": [
           "snippets"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; a snippet with no block\nis refused as `missing_content`. A theme logo image is accepted: the template or theme that\nholds the snippet checks it. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated by the renderer's\nsnippet rules (no section, no snippet block, no `visible_if`, known merge fields, sound\nblocks), and each asset image must name a live asset of the workspace; a snippet with no block\nis refused as `missing_content`. A theme logo image is accepted: the template or theme that\nholds the snippet checks it. A blocking issue is a 422\n`snippet_invalid` that lists every issue and writes nothing. The live templates whose current\nversion renders with the snippet (a snippet block, or a theme footer) are validated with the\ndraft in place of the published version, at most 200 in template id order; past 200 the publish\ngoes ahead on the result for the first 200. A blocking issue in one of them, such as a footer\nwithout an unsubscribe link in a marketing template, is a 422 `snippet_breaks_templates` that\nlists up to 20 of them with their issue codes and the total, and writes nothing. Warnings do\nnot refuse. The response lists the templates,\nthemes and active flows that use the snippet. Audited as `snippet.published`.",
         "operationId": "publish_snippet",
         "parameters": [
           {
@@ -18626,7 +18626,7 @@
             }
           },
           "422": {
-            "description": "The draft has blocking issues (`snippet_invalid`, with `template_issues`)",
+            "description": "The draft has blocking issues (`snippet_invalid`, with `template_issues`), or would stop live templates from sending (`snippet_breaks_templates`, with `templates` and `total`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21344,7 +21344,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "The workspace's live templates by name; archived ones with `archived=true`.",
+        "summary": "The workspace's templates for the library, newest edit first; archived ones with\n`archived=true` or `status=archived`.",
         "operationId": "list_templates",
         "parameters": [
           {
@@ -21365,6 +21365,51 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "A case-insensitive substring of the name, the draft's subject or a merge field the draft uses",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "channel",
+            "in": "query",
+            "description": "`email` or `webhook`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`live` (published, draft unchanged), `changes` (published, draft changed), `draft` (never published) or `archived`; without it, everything except archived templates",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "theme",
+            "in": "query",
+            "description": "A theme id, `default` or `none`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "`edited` (the default), `name` or `most_used` (non-test messages in the last 30 days)",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -21375,14 +21420,14 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/TemplateBody"
+                    "$ref": "#/components/schemas/TemplateListItemBody"
                   }
                 }
               }
             }
           },
           "400": {
-            "description": "archived is not true or false",
+            "description": "archived is not true or false, or another parameter has an unknown value",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21790,7 +21835,7 @@
             }
           },
           "409": {
-            "description": "The template is already archived (`code` is `template_archived`)",
+            "description": "The template is already archived (`code` is `template_archived`), or an active flow still sends it (`code` is `template_in_use`, with the flows in `flows`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -21815,7 +21860,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. Audited as `template.draft_saved`.",
+        "summary": "Replaces the template's draft. The draft is not validated beyond being a template document of\nthe template's channel and category with a registered content type: a template is edited in\nsteps, and the publish checks it. After the save commits the draft is validated once and its\nissue counts stored (`checks` in the template list); a validation that cannot run leaves them\nempty and never fails the save. Audited as `template.draft_saved`.",
         "operationId": "save_template_draft",
         "parameters": [
           {
@@ -21891,7 +21936,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`)",
+            "description": "The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22425,7 +22470,7 @@
         "tags": [
           "templates"
         ],
-        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAudited as `template.published`.",
+        "summary": "Publishes the draft as the next immutable version. The draft is validated against the\nworkspace's field registry and event catalog and the reserved `person.email`; a blocking issue\nis a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a\nsuccessful publish are in the response and stored with the version. The document's sender must\nbe a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.\nAn optional body `{ \"note\", \"revision\" }` adds a note of at most 500 characters to the version and\npublishes only if the draft is still `revision`.\nAudited as `template.published`.",
         "operationId": "publish_template",
         "parameters": [
           {
@@ -22449,6 +22494,22 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TemplatePublishRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "201": {
             "description": "The template and its new version",
@@ -22456,6 +22517,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TemplatePublishedBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
                 }
               }
             }
@@ -22491,7 +22562,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)",
+            "description": "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22502,6 +22573,90 @@
           },
           "422": {
             "description": "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/send-volume": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "The active flows that send this template, each with the average non-test messages a day over\nthe last 7 days. A flow is active when it is published and its running version names the\ntemplate. By flow name.",
+        "operationId": "template_send_volume",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The active flows that send the template, with their daily volume",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateSendVolumeBody"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace or template, or no access",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22782,6 +22937,97 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TemplateVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, template or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "What one version sent: its non-test message count and the theme and snippet versions those\nmessages recorded.",
+        "operationId": "get_template_version_stats",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The messages sent with the version and their theme and snippet versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateVersionStatsBody"
                 }
               }
             }
@@ -23268,6 +23514,16 @@
             }
           },
           {
+            "name": "draft_revision",
+            "in": "query",
+            "description": "Only the tests that rendered this draft revision",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
             "name": "limit",
             "in": "query",
             "description": "Rows per page, 1 to 200; default 50",
@@ -23300,11 +23556,82 @@
             }
           },
           "400": {
-            "description": "limit or template_id is out of range or malformed, or before is not a cursor",
+            "description": "limit, template_id or draft_revision is out of range or malformed, or before is not a cursor",
             "content": {
               "application/problem+json": {
                 "schema": {
                   "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/test-sends/quota": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "What the caller may still send this hour: their own count and the workspace's, against the\nlimits `POST .../test-send` enforces, counted in the same window.",
+        "operationId": "test_send_quota",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The hourly counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaBody"
                 }
               }
             }
@@ -24149,7 +24476,7 @@
         "tags": [
           "themes"
         ],
-        "summary": "Publishes the draft as the next immutable version. The tokens are checked by the renderer's\ntheme rules (colours, width, font, URL and ids; contrast below WCAG AA is a warning and never\nblocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the\nfooter a snippet of the workspace that is not archived and has a published version\n(`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue\nand writes nothing. The logo's asset reference is written with the version. The response lists\nthe templates and active flows that use the theme. Audited as `theme.published`.",
+        "summary": "Publishes the draft as the next immutable version. The tokens are checked by the renderer's\ntheme rules (colours, width, font, URL and ids; contrast below WCAG AA is a warning and never\nblocks), the logo must be a live asset of the workspace (`broken_asset_reference`), and the\nfooter a snippet of the workspace that is not archived and has a published version\n(`broken_snippet_reference`). A blocking issue is a 422 `theme_invalid` that lists every issue\nand writes nothing. The live templates that name the theme, or follow it while it is the\ndefault, are validated with the draft in place of the published version, at most 200 in\ntemplate id order; past 200 the publish goes ahead on the result for the first 200. A blocking\nissue in one of them, such as a removed footer in a marketing template, is a 422\n`theme_breaks_templates` that lists up to 20 of them with their issue codes and the total, and\nwrites nothing. Warnings do not refuse. The logo's asset reference is written with the version. The response lists\nthe templates and active flows that use the theme. Audited as `theme.published`.",
         "operationId": "publish_theme",
         "parameters": [
           {
@@ -24225,7 +24552,7 @@
             }
           },
           "422": {
-            "description": "The draft has blocking issues (`theme_invalid`, with `template_issues`)",
+            "description": "The draft has blocking issues (`theme_invalid`, with `template_issues`), or would stop live templates from sending (`theme_breaks_templates`, with `templates` and `total`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -27276,9 +27603,14 @@
         "required": [
           "kind",
           "id",
-          "version"
+          "version",
+          "archived"
         ],
         "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "Whether the owner is archived."
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -27286,6 +27618,13 @@
           "kind": {
             "type": "string",
             "description": "`template`, `theme` or `snippet`."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The owner's current name; null when the owner no longer exists."
           },
           "version": {
             "type": "integer",
@@ -27447,6 +27786,31 @@
               "$ref": "#/components/schemas/BatchItemRequest"
             },
             "description": "At least one item, at most `ingest.max_batch_items`. All are validated before any is\nappended."
+          }
+        }
+      },
+      "BrokenTemplateProblem": {
+        "type": "object",
+        "description": "A live template that a new snippet or theme version would stop from sending.",
+        "required": [
+          "id",
+          "name",
+          "codes"
+        ],
+        "properties": {
+          "codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The codes of its blocking issues with the new version."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -32674,6 +33038,23 @@
         ],
         "description": "Whether a person may enter again."
       },
+      "FlowRefProblem": {
+        "type": "object",
+        "description": "A flow named in a problem.",
+        "required": [
+          "flow_id",
+          "flow_name"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          }
+        }
+      },
       "FlowScheduleTrigger": {
         "type": "object",
         "description": "A cron slot in its own time zone.",
@@ -35672,6 +36053,16 @@
             },
             "description": "What is wrong with a flow (`flow_invalid`): a fixed code and the node, edge and pointer it\nconcerns, never a value from the flow."
           },
+          "flows": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/FlowRefProblem"
+            },
+            "description": "The active flows whose running version sends a template (`template_in_use`)."
+          },
           "issues": {
             "type": [
               "array",
@@ -35724,8 +36115,27 @@
             },
             "description": "What is wrong with a template document (`template_invalid`): a fixed code, how bad it is\nand where, never a value from the document."
           },
+          "templates": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/BrokenTemplateProblem"
+            },
+            "description": "The live templates a snippet or theme version would stop from sending\n(`snippet_breaks_templates`, `theme_breaks_templates`), at most 20."
+          },
           "title": {
             "type": "string"
+          },
+          "total": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many templates `templates` is the first of.",
+            "minimum": 0
           },
           "trace_id": {
             "type": [
@@ -36196,6 +36606,48 @@
             "type": "string",
             "description": "When a quiet period starts, local `HH:MM`.",
             "example": "21:00"
+          }
+        }
+      },
+      "QuotaBody": {
+        "type": "object",
+        "required": [
+          "member",
+          "workspace"
+        ],
+        "properties": {
+          "member": {
+            "$ref": "#/components/schemas/QuotaUsageBody",
+            "description": "The caller's own sends; an API key has none."
+          },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the next test send is accepted again: the later release time of the limits that are\nfull now, as the refusal computes it. Null when the caller can send now."
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/QuotaUsageBody"
+          }
+        }
+      },
+      "QuotaUsageBody": {
+        "type": "object",
+        "description": "Test sends counted in the rolling hour against a limit.",
+        "required": [
+          "used",
+          "limit"
+        ],
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "used": {
+            "type": "integer",
+            "minimum": 0
           }
         }
       },
@@ -37078,6 +37530,14 @@
           "document": {
             "type": "object",
             "description": "The content document."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision the caller read. When given and the draft has been saved since, the save\nis a 409 `template_draft_revision_mismatch` and writes nothing. Absent saves unconditionally."
           }
         }
       },
@@ -40103,6 +40563,24 @@
           "webhook"
         ]
       },
+      "TemplateChecksBody": {
+        "type": "object",
+        "description": "The counts of the issues the draft's last validation found.",
+        "required": [
+          "blocking",
+          "warnings"
+        ],
+        "properties": {
+          "blocking": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "warnings": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "TemplateDetailBody": {
         "allOf": [
           {
@@ -40213,6 +40691,76 @@
           }
         }
       },
+      "TemplateListItemBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TemplateBody"
+          },
+          {
+            "type": "object",
+            "required": [
+              "draft_changed",
+              "active_flows",
+              "theme",
+              "edited_at"
+            ],
+            "properties": {
+              "active_flows": {
+                "type": "integer",
+                "format": "int64",
+                "description": "How many active flows send the template."
+              },
+              "checks": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TemplateChecksBody",
+                    "description": "The draft's last validation; null when it has not been checked."
+                  }
+                ]
+              },
+              "draft_changed": {
+                "type": "boolean",
+                "description": "The draft differs from the current version; false before the first publish."
+              },
+              "edited_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "edited_by_email": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The email of the member who saved the draft last; null for an API key or a removed member."
+              },
+              "theme": {
+                "$ref": "#/components/schemas/TemplateThemeBody"
+              }
+            }
+          }
+        ],
+        "description": "A template in the library list: the template and the facts the library shows."
+      },
+      "TemplateNamedTheme": {
+        "type": "object",
+        "description": "A theme a block email names.",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "TemplatePreviewBody": {
         "type": "object",
         "description": "The rendered template and its validation results.",
@@ -40306,6 +40854,10 @@
       "TemplatePreviewRequest": {
         "type": "object",
         "properties": {
+          "annotate": {
+            "type": "boolean",
+            "description": "Give each section and block the class `zf-block-<id>` in the HTML, so a page can mark\nthem. Only the preview does this; a send, a test send and a publish never do."
+          },
           "person_id": {
             "type": [
               "string",
@@ -40321,6 +40873,27 @@
             ],
             "format": "int32",
             "description": "Preview this published version. Absent: the draft."
+          }
+        }
+      },
+      "TemplatePublishRequest": {
+        "type": "object",
+        "description": "The optional body of a publish.",
+        "properties": {
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A note for the version history, at most 500 characters. Blank is no note."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The revision of the draft that was reviewed. When given, a draft saved since is a 409\n`template_draft_changed` and nothing is published."
           }
         }
       },
@@ -40376,6 +40949,29 @@
           }
         }
       },
+      "TemplateSendVolumeBody": {
+        "type": "object",
+        "description": "How much one active flow sends the template.",
+        "required": [
+          "flow_id",
+          "flow_name",
+          "per_day"
+        ],
+        "properties": {
+          "flow_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "flow_name": {
+            "type": "string"
+          },
+          "per_day": {
+            "type": "number",
+            "format": "double",
+            "description": "The average non-test messages a day over the last 7 days."
+          }
+        }
+      },
       "TemplateTask": {
         "type": "string",
         "description": "What the marketer asks the assistant to do to a template.",
@@ -40384,6 +40980,25 @@
           "subject_variants",
           "block_layout",
           "translation"
+        ]
+      },
+      "TemplateThemeBody": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/TemplateThemeChoice"
+          },
+          {
+            "$ref": "#/components/schemas/TemplateNamedTheme"
+          }
+        ],
+        "description": "The theme the draft follows: `default`, `none`, or the theme it names."
+      },
+      "TemplateThemeChoice": {
+        "type": "string",
+        "description": "A theme choice that names no theme row.",
+        "enum": [
+          "default",
+          "none"
         ]
       },
       "TemplateUseBody": {
@@ -40444,6 +41059,13 @@
             "type": "object",
             "description": "The document as it was published."
           },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The note written when it was published."
+          },
           "published_at": {
             "type": "string",
             "format": "date-time"
@@ -40468,6 +41090,33 @@
           }
         }
       },
+      "TemplateVersionStatsBody": {
+        "type": "object",
+        "description": "What one template version sent.",
+        "required": [
+          "messages",
+          "renders",
+          "more"
+        ],
+        "properties": {
+          "messages": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The non-test messages sent with the version."
+          },
+          "more": {
+            "type": "boolean",
+            "description": "Whether more combinations exist than `renders` lists."
+          },
+          "renders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VersionRenderBody"
+            },
+            "description": "The distinct theme and snippet combinations, most used first, at most 20."
+          }
+        }
+      },
       "TemplateVersionSummaryBody": {
         "type": "object",
         "description": "One published version in the history list: no document, which `GET .../versions/{n}` returns.",
@@ -40482,6 +41131,13 @@
             "type": "integer",
             "format": "int64",
             "description": "The blocking issues stored with the version; always 0, because a blocking issue refuses the\npublish."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The note written when it was published."
           },
           "published_at": {
             "type": "string",
@@ -40555,6 +41211,7 @@
           "template_id",
           "destination_id",
           "sender_identity_id",
+          "recipient_display",
           "render_context",
           "outcome",
           "created_at"
@@ -40574,6 +41231,14 @@
           "destination_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "draft_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision a draft test rendered; null for a version test."
           },
           "id": {
             "type": "string",
@@ -40600,6 +41265,10 @@
             ],
             "description": "A fixed code that says why a test did not go out."
           },
+          "recipient_display": {
+            "type": "string",
+            "description": "A member's email, or the hint of the allowlist entry the test went to; `removed address`\nonce the entry is gone. Never an allowlisted address."
+          },
           "recipient_member_id": {
             "type": [
               "string",
@@ -40617,6 +41286,13 @@
             "type": "string",
             "format": "uuid"
           },
+          "sent_by_email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The email of the member who asked; null for an API key or a removed member."
+          },
           "template_id": {
             "type": "string",
             "format": "uuid"
@@ -40633,7 +41309,7 @@
       },
       "TestSendRecipient": {
         "type": "object",
-        "description": "Who a test goes to. Exactly one of the two fields is given.",
+        "description": "Who a test goes to. Exactly one of the three fields is given.",
         "properties": {
           "address": {
             "type": [
@@ -40642,6 +41318,14 @@
             ],
             "description": "An address on the workspace's test-send allowlist.",
             "example": "qa@example.com"
+          },
+          "allowlist_entry": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "An entry of the allowlist, by the id the allowlist options list. The address stays sealed."
           },
           "member": {
             "type": [
@@ -42384,6 +43068,40 @@
           },
           "version": {
             "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "VersionRenderBody": {
+        "type": "object",
+        "description": "One theme and snippet combination recorded on the messages sent with a version.",
+        "required": [
+          "snippet_versions",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The non-test messages with this combination."
+          },
+          "snippet_versions": {
+            "type": "object",
+            "description": "Snippet id to the version number used."
+          },
+          "theme_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The theme in effect, or none."
+          },
+          "theme_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32"
           }
         }

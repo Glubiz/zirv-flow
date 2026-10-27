@@ -10,6 +10,7 @@
 //! only through the render pool in the application state, never in this process.
 
 pub(crate) mod crud;
+pub(crate) mod dependents;
 pub(crate) mod inputs;
 pub(crate) mod preview;
 pub(crate) mod preview_people;
