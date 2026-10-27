@@ -23,6 +23,8 @@ pub(crate) struct MemberBody {
     /// `admin`, `publisher`, `editor` or `viewer`.
     #[schema(value_type = String, example = "editor")]
     role: Role,
+    /// Whether a publisher, editor or viewer sees personal values unmasked. An admin always does.
+    view_pii: bool,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     added_at: OffsetDateTime,
@@ -34,6 +36,7 @@ impl From<&Member> for MemberBody {
             user_id: member.user_id.as_uuid(),
             email: member.email.clone(),
             role: member.role,
+            view_pii: member.view_pii,
             added_at: member.created_at,
         }
     }
@@ -43,6 +46,9 @@ impl From<&Member> for MemberBody {
 pub(crate) struct SetRoleRequest {
     /// `admin`, `publisher`, `editor` or `viewer`.
     role: String,
+    /// Grants or revokes the personal-values grant; leave it out to keep the stored value.
+    #[serde(default)]
+    view_pii: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -50,6 +56,7 @@ pub(crate) struct RoleBody {
     user_id: Uuid,
     #[schema(value_type = String, example = "editor")]
     role: Role,
+    view_pii: bool,
 }
 
 /// The members of a workspace. Any member, whatever the role, can read this.
@@ -107,11 +114,19 @@ pub(crate) async fn set(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
     let user: UserId = path_id(&user)?;
     let role: Role = body.role.parse()?;
-    let membership =
-        admin::set_member(&state.pool, &principal.context(), workspace.id, user, role).await?;
+    let membership = admin::set_member_grant(
+        &state.pool,
+        &principal.context(),
+        workspace.id,
+        user,
+        role,
+        body.view_pii,
+    )
+    .await?;
     Ok(Json(RoleBody {
         user_id: membership.user_id.as_uuid(),
         role: membership.role,
+        view_pii: membership.view_pii,
     }))
 }
 
@@ -155,13 +170,25 @@ mod tests {
             user_id: UserId::new(),
             email: "a@example.com".into(),
             role: Role::Admin,
+            view_pii: true,
             created_at: OffsetDateTime::UNIX_EPOCH,
         };
 
         let json = serde_json::to_value(MemberBody::from(&member)).unwrap();
 
         assert_eq!(json["role"], "admin");
+        assert_eq!(json["view_pii"], true);
         assert_eq!(json["added_at"], "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn an_omitted_view_pii_is_none_so_the_stored_grant_is_kept() {
+        let without: SetRoleRequest = serde_json::from_str(r#"{"role":"editor"}"#).unwrap();
+        let with: SetRoleRequest =
+            serde_json::from_str(r#"{"role":"editor","view_pii":false}"#).unwrap();
+
+        assert_eq!(without.view_pii, None);
+        assert_eq!(with.view_pii, Some(false));
     }
 
     #[test]

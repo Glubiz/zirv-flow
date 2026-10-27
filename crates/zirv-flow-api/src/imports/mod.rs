@@ -142,19 +142,19 @@ pub(crate) struct CsvImportDetailBody {
 }
 
 impl CsvImportDetailBody {
-    pub(crate) fn new(import: &Import, samples: Vec<Vec<String>>, may_see_values: bool) -> Self {
+    pub(crate) fn new(import: &Import, samples: Vec<Vec<String>>, may_view_pii: bool) -> Self {
         let samples = samples
             .into_iter()
             .map(|row| {
                 row.into_iter()
-                    .map(|cell| may_see_values.then_some(cell))
+                    .map(|cell| may_view_pii.then_some(cell))
                     .collect()
             })
             .collect();
         Self {
             import: CsvImportBody::from(import),
             samples,
-            samples_masked: !may_see_values,
+            samples_masked: !may_view_pii,
         }
     }
 }

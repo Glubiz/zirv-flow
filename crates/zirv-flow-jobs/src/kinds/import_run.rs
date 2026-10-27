@@ -720,6 +720,66 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_running_import_whose_file_was_erased_for_a_person_fails_with_a_code(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let import = start(&pool, ws, &file(10, 0), 10, None).await;
+        let mut connection = pool.acquire().await.unwrap();
+
+        let erased = zirv_flow_store::erase_import_values(
+            &mut connection,
+            ws,
+            &["user3@example.com".into()],
+        )
+        .await
+        .unwrap();
+        attempt(&pool, &import, None).await.unwrap();
+
+        assert_eq!(erased.chunks, 1);
+        let done = reread(&pool, &import).await;
+        assert_eq!(done.status, ImportStatus::Failed);
+        assert_eq!(done.error_code.as_deref(), Some("erased"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_batch_loaded_before_the_erase_and_committed_after_it_writes_nothing(pool: PgPool) {
+        let ws = workspace(&pool, "one").await;
+        plan_trait(&pool, ws).await;
+        let import = start(&pool, ws, &file(10, 0), 10, None).await;
+        let probe = Probe {
+            stop_after: None,
+            before_commit: Some(Box::new({
+                let pool = pool.clone();
+                move || {
+                    let pool = pool.clone();
+                    Box::pin(async move {
+                        // The worker has read and planned its rows; the erase lands now.
+                        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                        zirv_flow_store::erase_import_values(
+                            &mut tx,
+                            ws,
+                            &["user3@example.com".into()],
+                        )
+                        .await
+                        .unwrap();
+                        zirv_flow_store::commit(tx).await.unwrap();
+                    })
+                }
+            })),
+        };
+
+        attempt_probed(&pool, &import, &probe).await.unwrap();
+
+        let done = reread(&pool, &import).await;
+        assert_eq!(done.status, ImportStatus::Failed);
+        assert_eq!(done.error_code.as_deref(), Some("erased"));
+        assert_eq!((done.rows_done, done.rows_applied), (0, 0));
+        assert_eq!(snapshot(&pool, ws).await.1, 0, "no person was written");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn ten_thousand_rows_run_to_the_end(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         plan_trait(&pool, ws).await;

@@ -359,6 +359,46 @@ mod tests {
 
     #[sqlx::test(migrations = false)]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_view_pii_migration_gives_every_existing_membership_no_grant(pool: PgPool) {
+        sqlx::raw_sql(include_str!("../migrations/0001_accounts.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(concat!(
+            "INSERT INTO workspaces (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000a1', 'Acme', 'acme'); ",
+            "INSERT INTO users (id, email, password_hash) VALUES ",
+            "('00000000-0000-0000-0000-0000000000b1', 'admin@example.com', 'x'), ",
+            "('00000000-0000-0000-0000-0000000000b2', 'member@example.com', 'x'); ",
+            "INSERT INTO memberships (workspace_id, user_id, role) VALUES ",
+            "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b1', 'admin'), ",
+            "('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000b2', 'member')"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0073_membership_roles.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!("../migrations/0078_membership_view_pii.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, bool)> =
+            sqlx::query_as("SELECT role, view_pii FROM memberships ORDER BY role")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![("admin".to_owned(), false), ("editor".to_owned(), false)]
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_roles_migration_turns_members_into_editors_and_keeps_admins(pool: PgPool) {
         sqlx::raw_sql(include_str!("../migrations/0001_accounts.sql"))
             .execute(&pool)

@@ -2,7 +2,11 @@
 //! import ends, the refused rows' cells 30 days after they were written. The import row, its
 //! counters and its reject codes' count stay.
 
-use crate::{PgPool, StoreError};
+use uuid::Uuid;
+use zirv_flow_core::WorkspaceId;
+
+use crate::by_value::field_pattern;
+use crate::{PgConnection, PgPool, StoreError};
 
 /// Days the stored file is kept after its import ended.
 pub const CHUNK_RETENTION_DAYS: i32 = 7;
@@ -90,6 +94,103 @@ pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention
         abandoned: abandoned.len() as u64,
         uploads,
     })
+}
+
+/// What [`erase_import_values`] deleted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ImportErasure {
+    /// Chunks deleted: the whole file of every import with a chunk that held a needle.
+    pub chunks: u64,
+    pub rejects: u64,
+}
+
+/// Erases the erased person's values from the workspace's stored import data: the uploaded file
+/// and the refused rows' cells. `needles` are the person's ids and identifier values, matched
+/// as whole fields and ignoring case (an email also as a substring), by the rule in
+/// [`crate::by_value`]: an external id `42` finds a `42` cell, never `1427`.
+///
+/// A file is chunked at 1 MiB and a value can straddle a boundary, so each chunk is matched
+/// with the byte before it and the start of the next one, and an import with one matching chunk
+/// loses all of its chunks: a file with a hole in it could not be run anyway. In the same
+/// transaction, before the chunks go, every such import that has not ended is set `failed` with
+/// the code `erased` (the file held an erased person's data). A worker that already read rows
+/// then cannot commit them: the batch checkpoint locks the import row and requires `running`.
+/// A streaming upload share-locks its import row with every chunk it writes, so the fence waits
+/// for a chunk in flight, the chunks are deleted by a second statement that sees it, and a later
+/// chunk is refused (`StoreError::is_erased`). An identifier holding a delimiter, a quote or a
+/// newline matches only as one correctly quoted cell; one made only of those and whitespace is
+/// ignored.
+///
+/// Cost: the workspace's chunks (a 7 day window) are read once per erase, each window decoded
+/// once and tested against one combined pattern for all needles, never once per needle. The
+/// CSV is matched as `escape` text, so a value with non-ASCII bytes matches itself, and a value
+/// written in another spelling in the file is missed. The refused rows' cells (30 days) are
+/// tested the same way, one scalar at a time.
+///
+/// Both deletes are bounded by the workspace (`import_chunks_workspace_idx`,
+/// `import_rejects_workspace_idx`).
+pub async fn erase_import_values(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    needles: &[String],
+) -> Result<ImportErasure, StoreError> {
+    if needles.is_empty() {
+        return Ok(ImportErasure::default());
+    }
+    let hit: Vec<Uuid> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        r"WITH pat AS (SELECT {encoded} AS re,
+                (SELECT max(octet_length(x)) FROM unnest($2::text[]) AS x) AS len),
+         hit AS (
+            SELECT DISTINCT c.import_id FROM import_chunks c
+            LEFT JOIN import_chunks p ON p.import_id = c.import_id AND p.seq = c.seq - 1
+            LEFT JOIN import_chunks n ON n.import_id = c.import_id AND n.seq = c.seq + 1
+            CROSS JOIN pat
+            WHERE c.workspace_id = $1 AND encode(
+                CASE WHEN c.seq = 0 THEN ''::bytea ELSE '\x58'::bytea
+                    || coalesce(substring(p.data FROM octet_length(p.data)), ''::bytea) END
+                || c.data
+                || coalesce(substring(n.data FROM 1 FOR pat.len + 1)
+                    || CASE WHEN octet_length(n.data) > pat.len + 1
+                            THEN '\x58'::bytea ELSE ''::bytea END, ''::bytea),
+                'escape') ~* pat.re),
+         fenced AS (
+            UPDATE imports SET status = 'failed', error_code = 'erased',
+                finished_at = coalesce(finished_at, now()), updated_at = now()
+            WHERE workspace_id = $1 AND id IN (SELECT import_id FROM hit)
+              AND status NOT IN ('succeeded', 'failed', 'cancelled')
+            RETURNING id)
+         SELECT import_id FROM hit",
+        encoded = field_pattern("$2", true)
+    )))
+    .bind(workspace.as_uuid())
+    .bind(needles)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    // A second statement, so its snapshot sees a chunk an upload committed while the fence
+    // waited for that upload's share lock on the import row.
+    let chunks =
+        sqlx::query("DELETE FROM import_chunks WHERE workspace_id = $1 AND import_id = ANY($2)")
+            .bind(workspace.as_uuid())
+            .bind(&hit)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::query)?
+            .rows_affected();
+    let rejects = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r"DELETE FROM import_rejects r WHERE r.workspace_id = $1 AND EXISTS (
+            SELECT 1 FROM jsonb_path_query(r.raw, 'strict $.**') AS cell
+            WHERE jsonb_typeof(cell) NOT IN ('object', 'array')
+              AND (cell #>> '{{}}') ~* {plain})",
+        plain = field_pattern("$2", false)
+    )))
+    .bind(workspace.as_uuid())
+    .bind(needles)
+    .execute(connection)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(ImportErasure { chunks, rejects })
 }
 
 #[cfg(test)]

@@ -7660,6 +7660,8 @@ export interface components {
             role: string;
             /** Format: uuid */
             user_id: string;
+            /** @description Whether a publisher, editor or viewer sees personal values unmasked. An admin always does. */
+            view_pii: boolean;
         };
         MemberIdentifierBody: {
             /** @example email */
@@ -8580,6 +8582,7 @@ export interface components {
             role: string;
             /** Format: uuid */
             user_id: string;
+            view_pii: boolean;
         };
         RotateCredentialRequest: {
             /**
@@ -9336,6 +9339,8 @@ export interface components {
         SetRoleRequest: {
             /** @description `admin`, `publisher`, `editor` or `viewer`. */
             role: string;
+            /** @description Grants or revokes the personal-values grant; leave it out to keep the stored value. */
+            view_pii?: boolean | null;
         };
         SetupRequest: {
             /** @example owner@example.com */

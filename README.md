@@ -534,13 +534,14 @@ Passwords are 12 to 1024 characters.
   DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
   needs none.
 - **API keys.** A workspace admin creates a key with scopes (`ingest`, `read`,
-  `write`, `publish`, `admin`); the response shows the `zfk_...` key once, and
+  `write`, `publish`, `admin`, `pii`); the response shows the `zfk_...` key once, and
   only a hash is stored. Send it as `Authorization: Bearer <key>`. A key works
   only in its own workspace and never on instance-level endpoints (`/users`,
   creating workspaces, `/session`). `read` allows GETs, `write` the editor-level
   drafts, `publish` the publisher actions and `admin` members, keys and the
   rest of the admin routes; scopes do not imply one another, so a `write` key
-  cannot publish and a `publish` key cannot edit.
+  cannot publish and a `publish` key cannot edit. `pii` shows personal values
+  unmasked and reads nothing alone: a key needs `read` as well.
 - **Roles.** A workspace membership is `admin`, `publisher`, `editor` or
   `viewer`; the instance owner is a flag on the user, not a role. A viewer
   reads. An editor also changes drafts (segments, flows, templates, snippets,
@@ -555,6 +556,13 @@ Passwords are 12 to 1024 characters.
   with a 409 (`last_admin`) unless the caller is the instance owner. Where a
   section below says "any member", read editor or above; "admin" on a publish
   route reads publisher or above.
+- **Personal values.** The instance owner, a workspace admin and an `admin` key see
+  identifiers, trait values, event properties and consent evidence unmasked. A
+  publisher, editor or viewer sees them masked unless the admin sets `view_pii` on
+  their membership (`PUT .../members/{user_id}` with `"view_pii": true`; leaving it
+  out keeps the stored value; `GET .../members` shows it). A key sees them with the
+  `pii` scope. The grant is also what an editor needs to preview, test-send or test a
+  flow as a real person. Migration 0078 starts every membership at false.
 - **Upgrading to roles.** Migration 0073 gives every existing `admin` key the
   `publish` scope, so deployed admin keys keep publishing. A `write` key that
   runs imports (`POST .../imports/{id}/run`) needs `publish` added by hand.
@@ -756,7 +764,9 @@ admin sets within `events.min_retention_days` and `events.max_retention_days`; r
 `events.reject_retention_days`. A daily job (03:17 UTC) deletes what is past its limit in
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
 records of events that no longer exist. Each batch and each partition drop commits separately,
-with its handled markers, so a failed run keeps completed work and the next run continues.
+with its handled markers, so a failed run keeps completed work and the next run continues. A
+partition drop waits at most 2 seconds for the table lock and is skipped (logged, retried by the
+next daily run) rather than stalling ingest.
 The scheduler leader creates the partitions for this and next month.
 
 **Decision-log retention.** A daily job (03:53 UTC, `decisions.retention`) drops each monthly
@@ -1199,7 +1209,25 @@ identifier value. Operator duties:
   the database, a snapshot that also covers erasures made before the key was set. It prints counts
   and writes no audit entry.
 - The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
-  person id nor a ledger hash is out of its reach (#373).
+  person id nor a ledger hash is out of its reach: transcripts, rejects that never named a
+  person, imported files and refused rows, and idempotency keys are found by value, so the live
+  erase is the control and their retention windows (30 days, 7 days, 24 hours) bound the rest.
+- **What the live erase finds by value, and its limits.** The person's ids and identifier values
+  are matched ignoring case. Assistant transcripts keep substring matching. Everything else
+  matches an identifier only as a whole field: a CSV cell (bounded by the start or end of the
+  text, a newline, a quote, or one of `,` `;` tab `|`) in the stored import files and the refused
+  rows' cells, a JSON scalar value, the message id or the sample cell in rejects with no person,
+  and the whole contact idempotency key. An email also matches as a substring anywhere in those,
+  because it is distinctive and is the common value embedded in a notes column. So an external id
+  `42` deletes a `42` cell and never `1427`; a non-email identifier embedded in free text is not
+  found, and a value spelled differently is missed. A value split across two chunks is found, and
+  the whole file is deleted; every such import that has not ended is set `failed` with the code
+  `erased` in the same transaction, so a running worker cannot commit a batch afterwards. Cost:
+  the erase reads the workspace's import files of the last 7 days once, each chunk tested against
+  all identifiers in one pass. Each delete is bounded by the workspace. The content scan also reads
+  the surviving tables (suppressions, the ledger, the audit log): their rows stay, plaintext may
+  not. The erasure ledger file (`privacy.ledger_dir`) is outside the database, so the scan does
+  not cover it.
 
 **Exporting a person.** `POST .../privacy/exports` (same body as an erasure; workspace admins
 only; CSRF; audited as `privacy.export_requested`) enqueues `privacy.export`, which builds one
