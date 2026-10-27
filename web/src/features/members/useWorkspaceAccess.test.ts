@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { accessFor, type Member } from "./useWorkspaceAccess";
 
 function member(role: string, viewPii = false): Member {
-  return { user_id: "u1", email: "a@example.test", role, added_at: "2026-10-01T09:00:00Z", view_pii: viewPii };
+  return { user_id: "u1", email: "a@example.test", role, added_at: "2026-10-01T09:00:00Z", view_pii: viewPii, owner: false };
 }
 
 describe("accessFor", () => {

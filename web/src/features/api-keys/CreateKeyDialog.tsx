@@ -4,16 +4,19 @@ import { client, describeError, unwrap, type components, type ErrorSummary } fro
 import { Button, CopyButton, Dialog, InlineError, TextField } from "../../ui";
 
 type Created = components["schemas"]["CreatedApiKeyBody"];
-type Scope = "ingest" | "read" | "write" | "publish" | "admin" | "pii";
+type Scope = components["schemas"]["ApiKeyScope"];
 
-const SCOPES: { value: Scope; label: string; help: string }[] = [
-  { value: "ingest", label: "Ingest", help: "Send data in" },
-  { value: "read", label: "Read", help: "Look at data" },
-  { value: "write", label: "Write", help: "Edit drafts" },
-  { value: "publish", label: "Publish", help: "Go live" },
-  { value: "admin", label: "Admin", help: "Manage access" },
-  { value: "pii", label: "Personal data", help: "See real values" },
-];
+// Keyed by the generated type: a scope the server adds is a type error here until it has a hint.
+const SCOPE_HINTS: Record<Scope, { label: string; help: string }> = {
+  ingest: { label: "Ingest", help: "Send data in" },
+  read: { label: "Read", help: "Look at data" },
+  write: { label: "Write", help: "Edit drafts" },
+  publish: { label: "Publish", help: "Go live" },
+  admin: { label: "Admin", help: "Manage access" },
+  pii: { label: "Personal data", help: "See real values" },
+};
+
+const SCOPES = (Object.keys(SCOPE_HINTS) as Scope[]).map((value) => ({ value, ...SCOPE_HINTS[value] }));
 
 interface CreateKeyDialogProps {
   workspaceId: string;

@@ -27544,14 +27544,25 @@
           "scopes": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ApiKeyScope"
             },
-            "description": "Any of `ingest`, `read`, `write`, `publish`, `admin`.",
             "example": [
               "read"
             ]
           }
         }
+      },
+      "ApiKeyScope": {
+        "type": "string",
+        "description": "What a key may do. The schema twin of `zirv_flow_core::Scope`, so the generated client knows\nthe closed set.",
+        "enum": [
+          "ingest",
+          "read",
+          "write",
+          "publish",
+          "admin",
+          "pii"
+        ]
       },
       "AssetBody": {
         "type": "object",
@@ -28657,9 +28668,9 @@
           "scopes": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ApiKeyScope"
             },
-            "description": "At least one of `ingest`, `read`, `write`, `publish`, `admin`.",
+            "description": "At least one scope.",
             "example": [
               "read"
             ]

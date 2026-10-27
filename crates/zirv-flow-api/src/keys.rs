@@ -17,12 +17,24 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
+/// What a key may do. The schema twin of `zirv_flow_core::Scope`, so the generated client knows
+/// the closed set.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ApiKeyScope {
+    Ingest,
+    Read,
+    Write,
+    Publish,
+    Admin,
+    Pii,
+}
+
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ApiKeyBody {
     id: Uuid,
     name: String,
-    /// Any of `ingest`, `read`, `write`, `publish`, `admin`.
-    #[schema(value_type = Vec<String>, example = json!(["read"]))]
+    #[schema(value_type = Vec<ApiKeyScope>, example = json!(["read"]))]
     scopes: Vec<Scope>,
     created_by: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339")]
@@ -64,8 +76,8 @@ pub(crate) struct CreateApiKeyRequest {
     /// 1 to 100 characters.
     #[schema(example = "ingest worker")]
     name: String,
-    /// At least one of `ingest`, `read`, `write`, `publish`, `admin`.
-    #[schema(value_type = Vec<String>, example = json!(["read"]))]
+    /// At least one scope.
+    #[schema(value_type = Vec<ApiKeyScope>, example = json!(["read"]))]
     scopes: Vec<String>,
 }
 
@@ -212,6 +224,24 @@ mod tests {
 
         assert_eq!(json["key"], "zfk_x");
         assert_eq!(json["name"], "ci");
+    }
+
+    #[test]
+    fn every_scope_in_the_schema_is_a_scope_the_server_parses() {
+        let all = [
+            ApiKeyScope::Ingest,
+            ApiKeyScope::Read,
+            ApiKeyScope::Write,
+            ApiKeyScope::Publish,
+            ApiKeyScope::Admin,
+            ApiKeyScope::Pii,
+        ];
+
+        for scope in all {
+            let name = serde_json::to_value(scope).unwrap();
+
+            assert!(name.as_str().unwrap().parse::<Scope>().is_ok(), "{name}");
+        }
     }
 
     #[test]

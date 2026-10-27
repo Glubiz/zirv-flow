@@ -1,4 +1,4 @@
-import { screen, within } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Link } from "react-router";
 import { describe, expect, it } from "vitest";
@@ -145,8 +145,8 @@ describe("members", () => {
     expect(screen.getByRole("combobox", { name: `Role for ${MEMBER.email}` })).toBeEnabled();
   });
 
-  it("shows the reason when the server refuses with last_admin", async () => {
-    mockApi({
+  it("refetches, shows the reason and disables the role control after a last_admin refusal of a role change", async () => {
+    const calls = mockApi({
       "GET /api/v1/session": () => json(session(OWNER)),
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
       "GET /api/v1/workspaces/ws1/members": () => json(members("admin")),
@@ -158,6 +158,102 @@ describe("members", () => {
     await user.selectOptions(await screen.findByRole("combobox", { name: "Role for boss@example.test" }), "editor");
 
     expect(await screen.findByText("A workspace needs an admin")).toBeInTheDocument();
+    await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/members"))).toHaveLength(2));
+    expect(screen.getByRole("combobox", { name: "Role for boss@example.test" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove boss@example.test" })).toBeDisabled();
+  });
+
+  it("shows the same reason, not a dialog error, when a removal is refused with last_admin", async () => {
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("admin")),
+      "DELETE /api/v1/workspaces/ws1/members/u-boss": () => problem(409, "Conflict", "last admin", undefined, "last_admin"),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    await user.click(await screen.findByRole("button", { name: "Remove boss@example.test" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Remove boss@example.test" }));
+
+    expect(await screen.findByText("A workspace needs an admin")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.filter((call) => call.method === "GET" && call.path.endsWith("/members"))).toHaveLength(2));
+    expect(screen.getByRole("button", { name: "Remove boss@example.test" })).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Role for boss@example.test" })).toBeDisabled();
+  });
+
+  it("asks before an admin demotes themselves, and cancelling sends nothing", async () => {
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(MEMBER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("admin")),
+      "PUT /api/v1/workspaces/ws1/members/u-member": () => json({}),
+      "PUT /api/v1/workspaces/ws1/members/u-boss": () => json({}),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: `Role for ${MEMBER.email}` }), "editor");
+
+    const dialog = screen.getByRole("dialog", { name: "Change your own role?" });
+    expect(within(dialog).getByText("You will lose access to this page.")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Keep my role" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(0);
+    expect(screen.getByRole("combobox", { name: `Role for ${MEMBER.email}` })).toHaveValue("admin");
+
+    await user.selectOptions(screen.getByRole("combobox", { name: "Role for boss@example.test" }), "editor");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: `Role for ${MEMBER.email}` }), "viewer");
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Change my role" }));
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(2));
+    expect(calls.filter((call) => call.method === "PUT")[1]?.body).toEqual({ role: "viewer" });
+  });
+
+  it("does not ask the owner to confirm changing their own admin role", async () => {
+    const calls = mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () =>
+        json([
+          { user_id: "u-boss", email: "boss@example.test", role: "admin", added_at: "2026-10-01T09:00:00Z" },
+          { user_id: OWNER.id, email: OWNER.email, role: "admin", added_at: "2026-10-02T09:00:00Z" },
+        ]),
+      "PUT /api/v1/workspaces/ws1/members/u-owner": () => json({}),
+    });
+    const user = userEvent.setup();
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    await user.selectOptions(await screen.findByRole("combobox", { name: `Role for ${OWNER.email}` }), "editor");
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1));
+  });
+
+  it("shows the owner as Owner with the Personal data switch on and disabled and no role select or Remove", async () => {
+    mockApi({
+      "GET /api/v1/session": () => json(session(OWNER)),
+      "GET /api/v1/workspaces": () => json([WORKSPACE]),
+      "GET /api/v1/workspaces/ws1/members": () =>
+        json([
+          { user_id: OWNER.id, email: OWNER.email, role: "admin", owner: true, view_pii: false, added_at: "2026-10-01T09:00:00Z" },
+          { user_id: "u-boss", email: "boss@example.test", role: "admin", owner: false, view_pii: false, added_at: "2026-10-02T09:00:00Z" },
+          { user_id: "u-boss2", email: "boss2@example.test", role: "admin", owner: false, view_pii: false, added_at: "2026-10-03T09:00:00Z" },
+        ]),
+    });
+    renderRoute("/w/ws1/members", "/w/:ws/members", page());
+
+    const row = within((await screen.findByText(OWNER.email)).closest("tr") as HTMLElement);
+    expect(row.getByText("Owner")).toBeInTheDocument();
+    expect(row.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(row.queryByRole("button", { name: /^Remove/ })).not.toBeInTheDocument();
+    const toggle = row.getByRole("switch", { name: `Personal data for ${OWNER.email}` });
+    expect(toggle).toBeChecked();
+    expect(toggle).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Role for boss@example.test" })).toBeEnabled();
   });
 
   it("lists what each role can do behind a Roles disclosure", async () => {
