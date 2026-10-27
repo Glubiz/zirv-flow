@@ -457,6 +457,25 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_empty_put_changes_nothing_and_writes_no_audit_row(pool: PgPool) {
+        let fx = fixture(&pool).await;
+
+        let reply = fx.put(json!({})).await;
+
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(row(&reply.body, "messages")["source"], "deployment");
+        let (overrides, audits): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM workspace_retention), \
+                    (SELECT count(*) FROM audit_log WHERE action = 'retention.updated')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((overrides, audits), (0, 0));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn get_shows_the_last_run_of_a_window(pool: PgPool) {
         let fx = fixture(&pool).await;
         zirv_flow_store::record_retention_run(&pool, "audit", datetime!(2026-06-01 4:19 UTC), 12)

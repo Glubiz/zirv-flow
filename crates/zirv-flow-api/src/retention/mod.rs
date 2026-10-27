@@ -230,7 +230,8 @@ pub(crate) async fn get(
 
 /// Changes the workspace's own message and decision-log windows. A value must be at least the
 /// deployment minimum and at most the deployment window; a missing field keeps the stored value
-/// and null returns the window to the deployment value. Audit, ingest rejects, import files, job history and events are
+/// and null returns the window to the deployment value, so an empty body changes nothing and is
+/// not audited. Audit, ingest rejects, import files, job history and events are
 /// the deployment's alone, and assistant transcripts stay under the AI settings: any other field
 /// is a 422. Audited as `retention.updated`, with window names and day counts only.
 #[utoipa::path(
@@ -256,15 +257,17 @@ pub(crate) async fn put(
     ApiJson(request): ApiJson<PutRetentionRequest>,
 ) -> Result<Json<RetentionBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
-    admin::set_workspace_retention(
-        &state.pool,
-        &principal.context(),
-        &state.retention,
-        workspace.id,
-        request.messages_days,
-        request.decision_days,
-    )
-    .await?;
+    if request.messages_days.is_some() || request.decision_days.is_some() {
+        admin::set_workspace_retention(
+            &state.pool,
+            &principal.context(),
+            &state.retention,
+            workspace.id,
+            request.messages_days,
+            request.decision_days,
+        )
+        .await?;
+    }
     Ok(Json(load(&state, workspace.id).await?))
 }
 

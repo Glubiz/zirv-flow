@@ -1201,8 +1201,8 @@ creates a new person, who stays suppressed: the suppression keeps the address fr
 **CSV imports.** The import tables hold no person id, so erasure and deletion do not reach them.
 The stored file (`import_chunks`) is deleted after the configured window (`retention.import_file_days`, default 7 days) once its import ends, and the rejected
 rows' cells (`import_rejects.raw`) after the configured window (`retention.import_reject_days`, default 30 days) from when they were written, so the cells of an erased
-person can survive in either until then. Both age out within the one-month window of an erasure
-request; see [CSV import](#csv-import).
+person can survive in either until then. At the defaults both age out within the one-month window of
+an erasure request; a longer configured window must stay within it; see [CSV import](#csv-import).
 
 **After a restore.** Backups keep erased data until they age out, so after restoring a backup run
 
