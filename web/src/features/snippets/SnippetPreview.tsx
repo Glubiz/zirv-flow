@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { ErrorSummary } from "../../api";
-import { ErrorState, LoadingState } from "../../ui";
+import { ErrorState, LoadingState, previewDocument } from "../../ui";
 import type { SnippetPreview } from "./model";
 
 export type PreviewState =
@@ -45,7 +45,7 @@ export function SnippetPreviewPane({ state, refreshing, onRetry }: Props) {
       ) : null}
       {state.status === "ready" && state.data.rendered ? (
         <div className={width === "mobile" ? "tp-frame tp-frame-mobile" : "tp-frame"}>
-          <iframe title="Preview of the snippet" sandbox="" srcDoc={state.data.html ?? ""} className="tp-iframe" />
+          <iframe title="Preview of the snippet" sandbox="" srcDoc={previewDocument(state.data.html ?? "")} className="tp-iframe" />
         </div>
       ) : null}
       <p className="faint">Rendered on the server by the renderer a send uses. Links are inert in the preview.</p>

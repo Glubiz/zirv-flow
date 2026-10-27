@@ -8,6 +8,8 @@
 //! the assistant's manifest tool all call it.
 
 mod destination;
+#[cfg(any(test, feature = "test-support"))]
+mod fuzz;
 mod issue;
 mod model;
 mod parse;
@@ -19,6 +21,8 @@ pub use destination::{
     BodyMatch, BounceKindSpec, DomainStatusSpec, ErrorAction, ErrorRule, FeedbackSpec,
     MessageField, Provider, SendMethod, SendSpec, StatusRange, VerificationSpec, place,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use fuzz::check_manifest;
 pub use issue::{Issue, code};
 pub use model::{
     Auth, CredentialSpec, CursorType, DeleteSignal, FieldSpec, IncrementalSpec, KeyLocation,

@@ -34,6 +34,8 @@ pub use model::{
 };
 pub(crate) use model::{font_css, is_color};
 pub(crate) use render::render;
+#[cfg(any(test, feature = "test-support"))]
+pub use sanitize::check_sanitize_source;
 pub use snippet::{MAX_SNIPPET_BLOCKS, SnippetContent, validate_snippet};
 
 pub(super) struct Blocks;

@@ -1,0 +1,93 @@
+name: Parser Fuzzing
+
+on:
+  schedule:
+    - cron: '41 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: 'Seconds per target (1-1200)'
+        required: false
+        default: '600'
+  pull_request:
+    paths: ['fuzz/**']
+
+permissions:
+  contents: read
+
+env:
+  FUZZ_TOOLCHAIN: nightly-2026-10-26
+
+jobs:
+  properties:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      ZIRV_FLOW_FUZZ_CASES: ${{ github.event_name == 'pull_request' && '64' || '2000' }}
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - name: Install Rust
+        run: rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+      - name: Parser Properties And Target Drift Guard
+        run: >-
+          cargo +"$FUZZ_TOOLCHAIN" test --locked --lib
+          -p zirv-flow-core -p zirv-flow-segments -p zirv-flow-connectors
+          -p zirv-flow-templates fuzz_ -- --nocapture
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [segment_ast, manifest, template_document, sanitize_source]
+    steps:
+      - uses: actions/checkout@v4.4.0
+      - name: Install Rust And cargo-fuzz
+        run: |
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
+          cargo +stable install cargo-fuzz --version 0.13.1 --locked
+      - name: Restore Corpus
+        uses: actions/cache/restore@v4.3.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Seed From Fixtures And Goldens
+        id: seed
+        run: bash fuzz/seed-corpus.sh
+      - name: Build Target
+        run: cargo +"$FUZZ_TOOLCHAIN" fuzz build "${{ matrix.target }}"
+      - name: Fuzz (60 Seconds On Pull Requests)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_SECONDS: ${{ inputs.seconds }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          seconds="${INPUT_SECONDS:-600}"
+          if [ "$EVENT_NAME" = pull_request ]; then seconds=60; fi
+          case "$seconds" in
+            ''|*[!0-9]*) echo 'seconds must be an integer from 1 to 1200' >&2; exit 1 ;;
+          esac
+          if [ "${#seconds}" -gt 4 ] || [ "$seconds" -lt 1 ] || [ "$seconds" -gt 1200 ]; then
+            echo 'seconds must be an integer from 1 to 1200' >&2
+            exit 1
+          fi
+          cargo +"$FUZZ_TOOLCHAIN" fuzz run "$TARGET" -- \
+            -max_total_time="$seconds" -max_len=800000 -timeout=10 -rss_limit_mb=2048
+      - name: Save Corpus
+        if: always() && steps.seed.outcome == 'success'
+        uses: actions/cache/save@v4.3.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Upload Crashers And Resolved Dependencies
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/
+            fuzz/Cargo.lock
+          if-no-files-found: ignore
+          retention-days: 14
