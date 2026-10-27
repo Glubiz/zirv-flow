@@ -5,6 +5,7 @@
 //! a log line or a URL gives them. It reports the table, the column and the row count, never a
 //! value.
 //!
+//! The survivor tables are read as well, for the values without the person ids the ledger keeps.
 //! A drift guard classifies every table of the catalog, so a migration that adds one fails here
 //! until the new table is placed in exactly one reviewed class below.
 
@@ -214,6 +215,8 @@ mod tests {
     const SKETCH: &str = "Please email ada@example.com about the unpaid invoice";
     /// A sign-up form id only the survivor's merged record carried.
     const ANON: &str = "anon-1";
+    /// A bystander's value that contains the survivor's external id `1` without being it.
+    const COLLIDING: &str = "1427";
 
     /// `value` as a log line, a URL or a form gives it: lowercased, trimmed, percent-encoded and
     /// form-encoded, and a phone number without its plus sign.
@@ -271,27 +274,47 @@ mod tests {
         .unwrap()
     }
 
-    /// `table.column: count rows` for every column outside [`SURVIVORS`] that holds any of
-    /// `needles` (already lowercased). Never a value.
-    async fn leftovers(pool: &PgPool, needles: &[String]) -> Vec<String> {
+    /// `table.column: count rows` for every text-like column of every table that holds any of
+    /// `needles` (already lowercased); the [`SURVIVORS`] are read for `survivors` instead, which
+    /// leaves out the person ids their ledger keeps by design. Never a value.
+    ///
+    /// A `bytea` column is read as `escape` text with the needle spelled the same way, so a
+    /// backslash or a non-ASCII byte matches itself. A JSON column is matched on its text and
+    /// again value by value, so a quote or backslash that the JSON text escapes is still found.
+    async fn leftovers(pool: &PgPool, needles: &[String], survivors: &[String]) -> Vec<String> {
         let mut found = Vec::new();
         for table in base_tables(pool).await {
-            if SURVIVORS.iter().any(|(name, _)| *name == table) {
+            let wanted = if SURVIVORS.iter().any(|(name, _)| *name == table) {
+                survivors
+            } else {
+                needles
+            };
+            if wanted.is_empty() {
                 continue;
             }
             for (column, kind) in text_columns(pool, &table).await {
-                let text = if kind == "bytea" {
-                    format!("encode({column}, 'escape')")
-                } else {
-                    format!("{column}::text")
+                let condition = match kind.as_str() {
+                    "bytea" => format!(
+                        "position(encode(convert_to(needle, 'UTF8'), 'escape') \
+                            IN lower(encode({column}, 'escape'))) > 0"
+                    ),
+                    "jsonb" | "json" => format!(
+                        "position(needle IN lower({column}::text)) > 0 OR EXISTS ( \
+                            SELECT 1 FROM jsonb_path_query({column}::jsonb, 'strict $.**') AS v \
+                            WHERE position(needle IN lower(v #>> '{{}}')) > 0)"
+                    ),
+                    "ARRAY" => format!(
+                        "position(needle IN lower({column}::text)) > 0 \
+                            OR position(needle IN lower(array_to_string({column}, chr(1)))) > 0"
+                    ),
+                    _ => format!("position(needle IN lower({column}::text)) > 0"),
                 };
                 // Names come from the catalog and this module, never from input.
                 let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                     "SELECT count(*) FROM {table} WHERE EXISTS ( \
-                        SELECT 1 FROM unnest($1::text[]) AS needle \
-                        WHERE position(needle IN lower({text})) > 0)"
+                        SELECT 1 FROM unnest($1::text[]) AS needle WHERE {condition})"
                 )))
-                .bind(needles)
+                .bind(wanted)
                 .fetch_one(pool)
                 .await
                 .unwrap();
@@ -327,8 +350,10 @@ mod tests {
 
     /// What the seed planted, so the test can look for it afterwards.
     struct Planted {
-        /// The survivor's values, in the forms a scan looks for.
+        /// The survivor's values and ids, in the forms a scan looks for.
         needles: Vec<String>,
+        /// The same without the person ids, which the ledger keeps by design.
+        values: Vec<String>,
         /// The bystander's values.
         kept: Vec<String>,
     }
@@ -451,8 +476,8 @@ mod tests {
 
     /// Adds, to what [`seed_everything`] built, a distinctive value of the survivor in every data
     /// class and a different value of the bystander in each class the erasure finds by value.
-    /// The bystander's values hold no `1`: the survivor has the external id `1`, which the
-    /// by-value deletes match as a substring.
+    /// The bystander also has values that merely contain `1`, the survivor's external id: the
+    /// by-value deletes match a non-email identifier as a whole field only.
     async fn plant(pool: &PgPool, seeded: &Seeded) -> Planted {
         let Seeded {
             ws,
@@ -543,21 +568,19 @@ mod tests {
         null_person_reject(pool, ws, json!({"contact": grace})).await;
         test_send(pool, ws, grace).await;
         idempotency_key(pool, ws, "retry-grace@example.com-ext").await;
+        let id_file = format!("id\n{COLLIDING}\n");
+        upload(pool, ws, "bystander-id", id_file.as_bytes()).await;
+        let colliding = upload(pool, ws, "bystander-id-refused", b"id\n").await;
+        import_reject(pool, ws, colliding, json!({"id": COLLIDING})).await;
+        null_person_reject(pool, ws, json!({"contact": COLLIDING, "at": "x1y"})).await;
+        idempotency_key(pool, ws, &format!("retry-{COLLIDING}")).await;
         let _ = bystander;
 
+        let values = [EMAIL, PHONE, EXTERNAL, NAME, COUPON, EVIDENCE, SKETCH, ANON];
         Planted {
-            needles: all_forms(&[
-                EMAIL,
-                PHONE,
-                EXTERNAL,
-                NAME,
-                COUPON,
-                EVIDENCE,
-                SKETCH,
-                ANON,
-                &person.to_string(),
-            ]),
-            kept: all_forms(&[grace]),
+            needles: all_forms(&[&values[..], &[&person.to_string()]].concat()),
+            values: all_forms(&values),
+            kept: all_forms(&[grace, COLLIDING]),
         }
     }
 
@@ -605,7 +628,7 @@ mod tests {
     async fn no_table_holds_a_value_of_an_erased_person_outside_the_allowlist(pool: PgPool) {
         let seeded = seed_everything(&pool).await;
         let planted = plant(&pool, &seeded).await;
-        let before = leftovers(&pool, &planted.needles).await;
+        let before = leftovers(&pool, &planted.needles, &planted.values).await;
         let tables_before: Vec<&str> = before
             .iter()
             .map(|hit| hit.split('.').next().unwrap())
@@ -636,14 +659,14 @@ mod tests {
             }
         ));
         assert_eq!(
-            leftovers(&pool, &planted.needles).await,
+            leftovers(&pool, &planted.needles, &planted.values).await,
             Vec::<String>::new()
         );
         // The merged person's ids are gone as well.
-        let merged = leftovers(&pool, &all_forms(&[&seeded.merged.to_string()])).await;
+        let merged = leftovers(&pool, &all_forms(&[&seeded.merged.to_string()]), &[]).await;
         assert_eq!(merged, Vec::<String>::new());
         // The bystander's values remain in every class that is found by value.
-        let kept = leftovers(&pool, &planted.kept).await;
+        let kept = leftovers(&pool, &planted.kept, &planted.kept).await;
         for table in [
             "identities",
             "ai_transcripts",
@@ -671,7 +694,9 @@ mod tests {
         let seeded = seed_everything(&pool).await;
         let planted = plant(&pool, &seeded).await;
 
-        let report = leftovers(&pool, &planted.needles).await.join("\n");
+        let report = leftovers(&pool, &planted.needles, &planted.values)
+            .await
+            .join("\n");
 
         assert!(
             report.contains("ai_transcripts.content: 1 rows"),
@@ -719,5 +744,55 @@ mod tests {
         assert!(SURVIVORS.iter().all(|(_, reason)| !reason.is_empty()));
         assert!(BY_VALUE.iter().all(|(_, how)| !how.is_empty()));
         assert!(VALUE_FREE.iter().all(|(_, reason)| !reason.is_empty()));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_value_with_a_backslash_or_a_quote_is_found_in_a_chunk_and_in_a_json_payload(
+        pool: PgPool,
+    ) {
+        let seeded = seed_everything(&pool).await;
+        let tricky = r#"a\b"c"#.to_owned();
+        upload(
+            &pool,
+            seeded.ws,
+            "tricky",
+            format!("v\n{tricky}\n").as_bytes(),
+        )
+        .await;
+        null_person_reject(&pool, seeded.ws, json!({"deep": [{"v": tricky}]})).await;
+        let accented = "zoë";
+        null_person_reject(&pool, seeded.ws, json!({"v": accented})).await;
+
+        let hits = leftovers(&pool, &[tricky.clone(), accented.to_owned()], &[]).await;
+
+        assert!(
+            hits.iter().any(|hit| hit.starts_with("import_chunks.data")),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .any(|hit| hit.starts_with("ingest_rejects.payload")),
+            "{hits:?}"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_plaintext_value_in_a_survivor_table_fails_the_scan(pool: PgPool) {
+        let seeded = seed_everything(&pool).await;
+        let marker = "zq-planted-audit-value".to_owned();
+        sqlx::query(
+            "INSERT INTO audit_log (workspace_id, actor_kind, action, summary)              VALUES ($1, 'system', 'test', $2)",
+        )
+        .bind(seeded.ws.as_uuid())
+        .bind(json!({"note": marker}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let hits = leftovers(&pool, &[], &[marker]).await;
+
+        assert_eq!(hits, ["audit_log.summary: 1 rows"]);
     }
 }
