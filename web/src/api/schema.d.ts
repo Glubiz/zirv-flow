@@ -2702,7 +2702,8 @@ export interface paths {
         /**
          * Changes the workspace's own message and decision-log windows. A value must be at least the
          *     deployment minimum and at most the deployment window; a missing field keeps the stored value
-         *     and null returns the window to the deployment value. Audit, ingest rejects, import files, job history and events are
+         *     and null returns the window to the deployment value, so an empty body changes nothing and is
+         *     not audited. Audit, ingest rejects, import files, job history and events are
          *     the deployment's alone, and assistant transcripts stay under the AI settings: any other field
          *     is a 422. Audited as `retention.updated`, with window names and day counts only.
          */
