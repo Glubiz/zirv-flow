@@ -768,7 +768,9 @@ mod tests {
         .await
         .unwrap();
 
-        let report = delete_expired_import_data(&pool).await.unwrap();
+        let report = delete_expired_import_data(&pool, &crate::RetentionSettings::default())
+            .await
+            .unwrap();
 
         assert_eq!(
             report,
@@ -804,7 +806,9 @@ mod tests {
             .await
             .unwrap();
 
-        let report = delete_expired_import_data(&pool).await.unwrap();
+        let report = delete_expired_import_data(&pool, &crate::RetentionSettings::default())
+            .await
+            .unwrap();
 
         assert_eq!((report.abandoned, report.chunks), (2, 2));
         for id in [stale_uploaded.id, stale_mapped.id] {
@@ -845,7 +849,9 @@ mod tests {
             .await
             .unwrap();
 
-        let report = delete_expired_import_data(&pool).await.unwrap();
+        let report = delete_expired_import_data(&pool, &crate::RetentionSettings::default())
+            .await
+            .unwrap();
 
         assert_eq!(report.uploads, 1);
         assert!(

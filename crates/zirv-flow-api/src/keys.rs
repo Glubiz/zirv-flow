@@ -89,8 +89,8 @@ pub(crate) struct CreateApiKeyRequest {
     /// 1 to 100 characters.
     #[schema(example = "ingest worker")]
     name: String,
-    /// At least one scope.
-    #[schema(value_type = Vec<ApiKeyScope>, example = json!(["read"]))]
+    /// At least one of `ingest`, `read`, `write`, `publish`, `admin`, `pii`.
+    #[schema(value_type = Vec<String>, example = json!(["read"]))]
     scopes: Vec<String>,
 }
 

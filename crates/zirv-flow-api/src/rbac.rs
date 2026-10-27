@@ -404,6 +404,9 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/api/v1/workspaces/{ws}/privacy/exports/{id}/download" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/privacy/settings" => READ;
     Put    "/api/v1/workspaces/{ws}/privacy/settings" => ADMIN;
+    // retention
+    Get    "/api/v1/workspaces/{ws}/retention" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/retention" => ADMIN;
     // assets
     Get    "/api/v1/workspaces/{ws}/assets" => READ;
     Post   "/api/v1/workspaces/{ws}/assets" => EDIT;
@@ -750,3 +753,6 @@ mod tests {
         assert!(unlisted_mounts("    // .merge(other_routes())").is_empty());
     }
 }
+
+#[cfg(test)]
+mod acceptance;

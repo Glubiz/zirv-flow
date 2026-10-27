@@ -563,13 +563,15 @@ pub async fn abandon_orphaned_test_sends(
 pub async fn delete_test_sends_before(
     pool: &PgPool,
     now: OffsetDateTime,
+    months: u32,
 ) -> Result<u64, StoreError> {
-    delete_test_sends_in_batches(pool, now, BATCH).await
+    delete_test_sends_in_batches(pool, now, months, BATCH).await
 }
 
 async fn delete_test_sends_in_batches(
     pool: &PgPool,
     now: OffsetDateTime,
+    months: u32,
     batch_size: i64,
 ) -> Result<u64, StoreError> {
     let mut total = 0;
@@ -580,7 +582,7 @@ async fn delete_test_sends_in_batches(
                 WHERE created_at < $1::timestamptz - make_interval(months => $2) LIMIT $3)",
         )
         .bind(now)
-        .bind(TEST_SEND_RETENTION_MONTHS)
+        .bind(i32::try_from(months).unwrap_or(i32::MAX))
         .bind(batch_size)
         .execute(pool)
         .await
@@ -900,7 +902,7 @@ mod tests {
         assert!(is_test_send(&pool, recent.id).await.unwrap());
         assert!(!is_test_send(&pool, Uuid::now_v7()).await.unwrap());
 
-        assert_eq!(delete_test_sends_before(&pool, now).await.unwrap(), 1);
+        assert_eq!(delete_test_sends_before(&pool, now, 13).await.unwrap(), 1);
         let gone = delete_test_sends_by_hash(&mut connection, ws, &[vec![1; 32]])
             .await
             .unwrap();
@@ -938,7 +940,7 @@ mod tests {
         .await
         .unwrap();
 
-        let error = delete_test_sends_in_batches(&pool, now, 1)
+        let error = delete_test_sends_in_batches(&pool, now, 13, 1)
             .await
             .unwrap_err();
         assert!(format!("{error:?}").contains("later test send batch failed"));
