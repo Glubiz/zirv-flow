@@ -2231,6 +2231,58 @@ mod tests {
         assert!(production.notifications * 20 < always.notifications.max(1));
     }
 
+    /// Compares the three enqueue variants fairly: one discarded warm-up each, then
+    /// `ZIRV_FLOW_BENCH_NOTIFY_ROUNDS` rounds in a rotated order, `TRUNCATE jobs` before every run
+    /// (done by `stress`), once with the ready-kind index and once without it. Prints the median
+    /// and range of commits/s and the median lock-wait share; asserts nothing.
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_NOTIFY_ROUNDS to measure"]
+    async fn the_enqueue_variants_compared_over_rotated_rounds(pool: PgPool) {
+        let Some(rounds) = std::env::var("ZIRV_FLOW_BENCH_NOTIFY_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            eprintln!("ZIRV_FLOW_BENCH_NOTIFY_ROUNDS is not set: skipping the comparison");
+            return;
+        };
+        let run_for = Duration::from_secs(6);
+        let variants = [Notify::Never, Notify::Always, Notify::Production];
+        for indexed in [true, false] {
+            if !indexed {
+                sqlx::query("DROP INDEX jobs_ready_kind_idx")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            for variant in variants {
+                stress(&pool, variant, run_for).await;
+            }
+            let mut results: Vec<(Notify, Vec<f64>, Vec<f64>)> = variants
+                .iter()
+                .map(|variant| (*variant, Vec::new(), Vec::new()))
+                .collect();
+            for round in 0..rounds {
+                for step in 0..variants.len() {
+                    let slot = (round + step) % variants.len();
+                    let run = stress(&pool, variants[slot], run_for).await;
+                    results[slot].1.push(run.commits_per_second);
+                    results[slot].2.push(run.commit_share);
+                }
+            }
+            for (variant, mut rates, mut shares) in results {
+                rates.sort_by(f64::total_cmp);
+                shares.sort_by(f64::total_cmp);
+                eprintln!(
+                    "SUMMARY index={indexed} {variant:?}: median {:.0}/s range {:.0}-{:.0} median share {:.3}",
+                    rates[rates.len() / 2],
+                    rates[0],
+                    rates[rates.len() - 1],
+                    shares[shares.len() / 2],
+                );
+            }
+        }
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_wake_check_uses_the_ready_kind_index_despite_a_large_backlog(pool: PgPool) {
