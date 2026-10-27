@@ -34,6 +34,30 @@ describe("lifecycle actions are for admins", () => {
     }
   });
 
+  it("offers a publisher the lifecycle actions and an editor the test button only", async () => {
+    mockApi(flowRoutes({ role: "publisher", flow: { state: "published", current_version: 2 } }));
+    const view = mount();
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Publish…" })).toBeEnabled();
+    view.unmount();
+
+    mockApi(flowRoutes({ role: "editor", flow: { state: "published", current_version: 2 } }));
+    mount();
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    expect(screen.getByRole("button", { name: "Test" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Publish…" })).not.toBeInTheDocument();
+  });
+
+  it("offers a viewer no write control at all", async () => {
+    mockApi(flowRoutes({ role: "reader", flow: { state: "published", current_version: 2 } }));
+    mount();
+    await screen.findByRole("group", { name: /^Wait: 1 day/ });
+    for (const name of ["Test", "Add a step", "Undo", ...ACTIONS]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    }
+  });
+
   it("offers only the actions the state allows", async () => {
     const expected: Record<string, string[]> = {
       draft: ["Publish…", "Archive…"],

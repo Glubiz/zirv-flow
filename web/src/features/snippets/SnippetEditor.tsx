@@ -29,12 +29,12 @@ interface Props {
   workspaceId: string;
   initial: SnippetDetail;
   canWrite: boolean;
-  canAdmin: boolean;
+  canPublish: boolean;
   /** Reads the snippet again, after someone else saved. */
   onReload: () => void;
 }
 
-export function SnippetEditor({ workspaceId, initial, canWrite, canAdmin, onReload }: Props) {
+export function SnippetEditor({ workspaceId, initial, canWrite, canPublish: mayPublish, onReload }: Props) {
   const [snippet, setSnippet] = useState<Snippet>(initial);
   const [doc, setDoc] = useState(() => snippetEditable(initial.draft.content));
   const [tab, setTab] = useState<Tab>("editor");
@@ -199,13 +199,13 @@ export function SnippetEditor({ workspaceId, initial, canWrite, canAdmin, onRelo
             Save draft
           </Button>
         ) : null}
-        {editable && canAdmin ? (
+        {editable && mayPublish ? (
           <Button variant="primary" disabled={!canPublish} onClick={() => setPublishing(true)} aria-describedby="sn-publish-why">
             Publish…
           </Button>
         ) : null}
       </div>
-      {publishWhy && editable && canAdmin ? (
+      {publishWhy && editable && mayPublish ? (
         <p id="sn-publish-why" className="faint tp-why">
           {publishWhy}
         </p>

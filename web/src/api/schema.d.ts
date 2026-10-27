@@ -4738,13 +4738,18 @@ export interface components {
             /** Format: date-time */
             revoked_at?: string | null;
             /**
-             * @description Any of `ingest`, `read`, `write`, `publish`, `admin`.
              * @example [
              *       "read"
              *     ]
              */
-            scopes: string[];
+            scopes: components["schemas"]["ApiKeyScope"][];
         };
+        /**
+         * @description What a key may do. The schema twin of `zirv_flow_core::Scope`, so the generated client knows
+         *     the closed set.
+         * @enum {string}
+         */
+        ApiKeyScope: "ingest" | "read" | "write" | "publish" | "admin" | "pii";
         /** @description An image asset. */
         AssetBody: {
             /** @example image/png */
@@ -5272,12 +5277,12 @@ export interface components {
              */
             name: string;
             /**
-             * @description At least one of `ingest`, `read`, `write`, `publish`, `admin`.
+             * @description At least one scope.
              * @example [
              *       "read"
              *     ]
              */
-            scopes: string[];
+            scopes: components["schemas"]["ApiKeyScope"][];
         };
         /** @description The body of `POST /contacts`. */
         CreateContactRequest: {
@@ -7803,6 +7808,11 @@ export interface components {
             /** Format: date-time */
             added_at: string;
             email: string;
+            /**
+             * @description Whether this member is the instance owner, who has every right in every workspace.
+             *     Present for workspace admins and the owner only; left out for everyone else.
+             */
+            owner?: boolean | null;
             /**
              * @description `admin`, `publisher`, `editor` or `viewer`.
              * @example editor

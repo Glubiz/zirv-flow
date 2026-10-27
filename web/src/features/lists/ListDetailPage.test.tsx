@@ -83,7 +83,7 @@ describe("a list", () => {
     const table = await screen.findByRole("table", { name: "People in this list, newest first" });
     expect(within(table).getByText("Hidden")).toBeInTheDocument();
     expect(within(table).queryByText("ada@example.test")).not.toBeInTheDocument();
-    expect(screen.getByText(/they are hidden from you/)).toBeInTheDocument();
+    expect(screen.getByText(/hidden without the personal data permission/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Import CSV" })).toBeInTheDocument();
   });
 

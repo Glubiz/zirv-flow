@@ -40,7 +40,7 @@ interface Props {
   state: FlowDetail["state"];
   /** The newest published version of the flow. */
   current: number | null;
-  canAdmin: boolean;
+  canPublish: boolean;
   /** Whether the assistant is on and the person may use it: a trace can then be explained. */
   assistantOn: boolean;
   /** The assistant refused a request because it is off or no longer the person's to use. */
@@ -314,7 +314,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
               <span>
                 {waitingHere === null ? "Counting who is still in this version…" : `${waitingHere} waiting in version ${version}, which is no longer the current one.`}
               </span>
-              {props.canAdmin ? (
+              {props.canPublish ? (
                 <>
                   <Button
                     aria-disabled={acting || exitReason !== null || undefined}
@@ -327,7 +327,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
                   {exitReason ? <span className="faint">{exitReason}</span> : null}
                 </>
               ) : (
-                <span className="faint">Ending their enrollments needs a workspace admin.</span>
+                <span className="faint">Ending their enrollments needs a publisher.</span>
               )}
             </div>
           ) : null}
@@ -365,7 +365,7 @@ function InspectorBody({ versions, ...props }: Props & { versions: FlowVersion[]
                         workspaceId={workspaceId}
                         graph={graphs.get(data.enrollment.version)?.graph}
                         names={names}
-                        canAdmin={props.canAdmin}
+                        canPublish={props.canPublish}
                         assistantOn={props.assistantOn}
                         onAssistantGone={props.onAssistantGone}
                         acting={acting}
@@ -647,7 +647,7 @@ function EnrollmentDetail({
   workspaceId,
   graph,
   names,
-  canAdmin,
+  canPublish,
   assistantOn,
   onAssistantGone,
   acting,
@@ -662,7 +662,7 @@ function EnrollmentDetail({
   workspaceId: string;
   graph: Graph | undefined;
   names: Names;
-  canAdmin: boolean;
+  canPublish: boolean;
   assistantOn: boolean;
   onAssistantGone: () => void;
   acting: boolean;
@@ -723,9 +723,9 @@ function EnrollmentDetail({
         {failed && enrollment.error ? <span className="form-error">{enrollment.error}</span> : null}
       </div>
       {failed ? (
-        canAdmin ? (
+        canPublish ? (
           <>
-            <div ref={actions} className="row" role="group" aria-label="Admin actions">
+            <div ref={actions} className="row" role="group" aria-label="Operator actions">
               <Button variant="primary" aria-disabled={acting || reason !== null || undefined} onClick={onRetry}>
                 {failedAt ? `Retry ${failedAt}` : "Retry"}
               </Button>
@@ -736,7 +736,7 @@ function EnrollmentDetail({
             {reason ? <p className="faint">{reason}</p> : null}
           </>
         ) : (
-          <p className="faint">Retrying or skipping a failed step needs a workspace admin.</p>
+          <p className="faint">Retrying or skipping a failed step needs a publisher.</p>
         )
       ) : null}
       <div className="fl-sheet-section">

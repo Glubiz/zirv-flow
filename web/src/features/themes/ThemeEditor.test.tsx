@@ -178,6 +178,34 @@ describe("roles", () => {
     await user.click(screen.getByRole("tab", { name: "Where used" }));
   });
 
+  it("shows a viewer no write control and no preview", async () => {
+    const calls = mockApi(themeRoutes({ role: "reader" }));
+    mount();
+
+    expect(await screen.findByRole("heading", { level: 1, name: "Warm" })).toBeInTheDocument();
+    expect(screen.getByText("Previewing a theme needs the editor role.")).toBeInTheDocument();
+    for (const name of ["Publish…", "Save draft"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /More actions/ })).not.toBeInTheDocument();
+    expect(previews(calls)).toHaveLength(0);
+  });
+
+  it("shows a viewer a version's tokens without asking for a preview", async () => {
+    const calls = mockApi({
+      ...themeRoutes({ role: "reader", versions: [{ version: 1, published_at: "2026-10-05T09:00:00Z", warnings: 0, published_by: null }] }),
+      [`GET ${BASE}/versions/1`]: () => json({ version: 1, published_at: "2026-10-05T09:00:00Z", tokens: tokens(), warnings: [] }),
+    });
+    const user = userEvent.setup();
+    mount();
+
+    await user.click(await screen.findByRole("tab", { name: "Versions" }));
+    await user.click(await screen.findByRole("button", { name: "View version 1" }));
+
+    const view = await screen.findByRole("region", { name: "Version 1" });
+    expect(await within(view).findByLabelText("Tokens of this version")).toBeInTheDocument();
+    expect(within(view).queryByTitle("Preview of version 1")).not.toBeInTheDocument();
+    expect(previews(calls)).toHaveLength(0);
+  });
+
   it("gives an admin the menu, with Archive disabled on the default theme", async () => {
     mockApi(themeRoutes({ detail: themeDetail({ is_default: true, current_version: 1 }) }));
     const user = userEvent.setup();

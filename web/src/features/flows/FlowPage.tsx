@@ -97,7 +97,11 @@ function FlowLoader({ workspaceId, flowId }: { workspaceId: string; flowId: stri
       </div>
     );
   }
-  return <Editor workspaceId={workspaceId} flow={flow.data} canWrite={access.canWrite} canAdmin={access.canAdmin} />;
+  return <Editor workspaceId={workspaceId} flow={flow.data} canWrite={access.canWrite}
+      canPublish={access.canPublish}
+      canAdmin={access.canAdmin}
+      canTestWithPerson={access.canTestWithPerson}
+    />;
 }
 
 function stateLabel(state: FlowDetail["state"], version: number | null): string | null {
@@ -115,12 +119,16 @@ function Editor({
   workspaceId,
   flow,
   canWrite,
+  canPublish,
   canAdmin,
+  canTestWithPerson,
 }: {
   workspaceId: string;
   flow: FlowDetail;
   canWrite: boolean;
+  canPublish: boolean;
   canAdmin: boolean;
+  canTestWithPerson: boolean;
 }) {
   const [life, setLife] = useState<Life>({ state: flow.state, version: flow.current_version ?? null });
   const archived = life.state === "archived";
@@ -637,7 +645,7 @@ function Editor({
             {testing ? "Exit test" : "Test"}
           </Button>
         ) : null}
-        {canAdmin && life.state !== "archived" ? (
+        {canPublish && life.state !== "archived" ? (
           <div className="fl-actions">
             <Button id="flow-primary-action" variant="primary" disabled={acting || busy} aria-disabled={inFlight || undefined} onClick={openPublish}>
               {inFlight ? "Publishing…" : "Publish…"}
@@ -710,7 +718,7 @@ function Editor({
                 <TestSheet
                   workspaceId={workspaceId}
                   flowId={flow.id}
-                  canSeePeople={canAdmin}
+                  canSeePeople={canTestWithPerson}
                   describeStep={describeStep}
                   portName={portName}
                   graph={draft.graph}
@@ -792,7 +800,7 @@ function Editor({
             flowId={flow.id}
             state={life.state}
             current={life.version}
-            canPublish={canAdmin && !archived}
+            canPublish={canPublish && !archived}
             publishing={inFlight}
             acting={acting}
             onPublish={openPublish}
@@ -807,7 +815,7 @@ function Editor({
           flowId={flow.id}
           state={life.state}
           current={life.version}
-          canAdmin={canAdmin}
+          canPublish={canPublish}
           assistantOn={assistantOn}
           onAssistantGone={reloadAssistant}
           names={names}
