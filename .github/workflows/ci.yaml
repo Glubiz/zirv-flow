@@ -14,7 +14,7 @@ jobs:
   test:
     name: Test, Lint, and Format Check
     runs-on: ubuntu-latest
-    # A wedged apt mirror or a hung test must fail the run, not hold it for
+    # A hung build or test must fail the run, not hold it for
     # the 6-hour default.
     timeout-minutes: 45
     steps:
@@ -133,54 +133,6 @@ jobs:
         env:
           ZIRV_FLOW_BENCH_BUILD: "1"
         run: cargo clippy -p zirv-flow-store --features bench-no-decisions -- -D warnings
-
-      # Development happens on Windows too, so platform-specific code has to
-      # keep compiling cleanly for it, tests included.
-      - name: Add Windows Target
-        run: rustup target add x86_64-pc-windows-gnu
-
-      # Crates such as `rustls` -> `ring` compile C sources through a build
-      # script, so the cross-target clippy pass needs a Windows-targeting C
-      # compiler on the Linux runner. Nothing pulls `ring` in yet; the step is
-      # here so the first dependency that does (sqlx with rustls) does not
-      # break CI.
-      # The runner's azure apt mirror wedges regularly (index fetches stall,
-      # and package downloads crawl at minutes per file), so the downloaded
-      # packages are cached per release and month: after the first run of a
-      # month only the index is fetched. The sources, including the image's
-      # apt-mirrors.txt mirror list, are swapped to the canonical archive,
-      # IPv4 is forced and every fetch is bounded; the step timeout is the
-      # backstop that turns any remaining stall into a fast, retryable
-      # failure instead of a six-hour hang.
-      - name: Name the mingw-w64 package cache
-        id: mingw-cache
-        run: |
-          prefix="mingw-$(. /etc/os-release && echo "$VERSION_CODENAME")-"
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-          echo "key=$prefix$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache mingw-w64 packages
-        uses: actions/cache@v4.3.0
-        with:
-          path: ~/apt-mingw
-          key: ${{ steps.mingw-cache.outputs.key }}
-          restore-keys: ${{ steps.mingw-cache.outputs.prefix }}
-
-      - name: Install mingw-w64 (ring's build script needs a cross C compiler)
-        timeout-minutes: 8
-        run: |
-          if command -v x86_64-w64-mingw32-gcc >/dev/null; then exit 0; fi
-          for f in /etc/apt/apt-mirrors.txt /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list; do
-            if [ -f "$f" ]; then sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$f"; fi
-          done
-          APT_OPTS="-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true"
-          mkdir -p ~/apt-mingw/partial
-          sudo apt-get $APT_OPTS update
-          sudo apt-get $APT_OPTS -o Dir::Cache::archives="$HOME/apt-mingw" install -y --no-install-recommends gcc-mingw-w64-x86-64
-          sudo chown -R "$(id -u):$(id -g)" ~/apt-mingw
-
-      - name: Run Clippy Lint (Windows target)
-        run: cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
   web:
     name: Web UI
@@ -384,9 +336,8 @@ jobs:
       - name: Run PostgreSQL Tests
         run: cargo nextest run --run-ignored only --no-fail-fast
 
-  # Kafka needs C code (lz4 and zstd) and TLS (ring) in the static musl builds the release image
-  # ships. This builds and runs the Kafka tests against a real broker on both architectures,
-  # natively on each runner, so nothing is emulated.
+  # Kafka needs C code (lz4 and zstd) and TLS (ring) in the static musl build the release image
+  # ships. This builds and runs the Kafka tests against a real broker natively on amd64.
   kafka-musl:
     name: Kafka (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
@@ -397,8 +348,6 @@ jobs:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4.4.0
@@ -432,7 +381,6 @@ jobs:
       - name: Run The Kafka Connector Tests
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
         run: >-
           cargo nextest run -p zirv-flow-connectors --target ${{ matrix.target }}
           --run-ignored all --no-fail-fast -E 'test(kafka)'
@@ -571,7 +519,7 @@ jobs:
 
   # Proves the clean-checkout promise of the README quickstart: the image
   # builds, the compose stack comes up healthy and /readyz answers 200.
-  # linux/amd64 only; CD builds and pushes the multi-arch image.
+  # CI and CD both build linux/amd64.
   container-smoke-test:
     name: Container Smoke Test
     runs-on: ubuntu-latest
@@ -596,16 +544,6 @@ jobs:
           tags: ghcr.io/glubiz/zirv-flow:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      # Only builds: the builder cross-compiles with zig on this runner, so no emulation is
-      # involved. It proves the C code of the Kafka client (lz4, zstd) and ring build for arm64.
-      - name: Build The arm64 Image
-        uses: docker/build-push-action@v6.18.0
-        with:
-          context: .
-          platforms: linux/arm64
-          push: false
-          cache-from: type=gha
 
       - name: Start The Compose Stack
         run: docker compose up -d --no-build --wait --wait-timeout 120

@@ -29,6 +29,8 @@ mod passwords;
 mod people;
 mod privacy;
 mod problem;
+#[cfg(test)]
+mod rbac;
 mod request_id;
 mod segments;
 mod sending;
