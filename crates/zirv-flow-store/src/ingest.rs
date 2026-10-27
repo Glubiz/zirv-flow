@@ -20,11 +20,14 @@ use zirv_flow_core::people::Identifier;
 use zirv_flow_core::{Cause, HmacKey, TraceContext, TraceId, WorkspaceId};
 
 use crate::contacts::{lock_contacts, replace_stored_fields};
+use crate::decisions::DecisionBuffer;
 use crate::events::{
     EventBatch, EventOutcome, EventRecord, FailedItem, apply_event_record, reject_apply_failed,
 };
 use crate::events::{Refusal, insert_record_rejects};
-use crate::people::{ProfileOutcome, ProfileRecord, apply_profile_record};
+use crate::people::{
+    ProfileOutcome, ProfileRecord, apply_profile_record, apply_profile_record_into,
+};
 use crate::webhooks::HookResult;
 use crate::webhooks::{HookConfigs, HookMapped, apply_hook_record, map_hook_row};
 use crate::{NewJob, PgConnection, PgPool, StoreError, begin, commit, enqueue};
@@ -565,9 +568,22 @@ async fn apply_contact(
     workspace: WorkspaceId,
     record: &ProfileRecord,
 ) -> Result<ProfileOutcome, StoreError> {
+    let mut decisions = DecisionBuffer::default();
+    let outcome = apply_contact_into(connection, workspace, record, &mut decisions).await?;
+    decisions.flush(connection).await?;
+    Ok(outcome)
+}
+
+/// [`apply_contact`] that leaves its decisions in `decisions` for the caller to flush.
+async fn apply_contact_into(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    record: &ProfileRecord,
+    decisions: &mut DecisionBuffer,
+) -> Result<ProfileOutcome, StoreError> {
     let mut record = record.clone();
     replace_stored_fields(connection, workspace, &mut record).await?;
-    apply_profile_record(connection, workspace, &record).await
+    apply_profile_record_into(connection, workspace, &record, decisions).await
 }
 
 /// The traits a contact record could not store, as a key to reason-code map: a single write
@@ -682,11 +698,14 @@ pub async fn drain_batch(
     for row in &rows {
         match map_with(row, &hooks).ok_or_else(StoreError::poison)? {
             Mapped::Profile(record) => {
-                let result = apply_profile_record(&mut tx, workspace, &record).await?;
+                let result =
+                    apply_profile_record_into(&mut tx, workspace, &record, &mut events.decisions)
+                        .await?;
                 tally_profile(&mut outcome, "identify", &result);
             }
             Mapped::Contact(record) => {
-                let result = apply_contact(&mut tx, workspace, &record).await?;
+                let result =
+                    apply_contact_into(&mut tx, workspace, &record, &mut events.decisions).await?;
                 // Rolls the batch back, so that the row is isolated and rejected singly.
                 if !dropped_fields(&result).is_empty() {
                     return Err(StoreError::poison());
@@ -1224,6 +1243,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(people, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_drain_batch_appends_its_decisions_in_one_statement_in_the_order_made(pool: PgPool) {
+        let ws = workspace(&pool, "ours").await;
+        let trace = TraceContext::root(Cause::api("req-1"));
+        append(
+            &pool,
+            ws,
+            &trace,
+            &[
+                track("a", "m-1", "seen", json!({})),
+                identify("b", "m-2", json!({"plan": "pro"})),
+                track("a", "m-3", "seen", json!({})),
+                track("c", "m-4", "seen", json!({})),
+                track("a", "m-3", "seen", json!({})),
+            ],
+        )
+        .await;
+
+        let outcome = drain_batch(&pool, ws, Shard::ALL, &key(), 500)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.rows, 5);
+        let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 50).await.unwrap();
+        let made: Vec<(&str, &str)> = decisions
+            .iter()
+            .map(|d| (d.action.as_str(), d.outcome.as_str()))
+            .collect();
+        assert_eq!(
+            made,
+            [
+                ("person.created", "created"),
+                ("event.accepted", "unplanned"),
+                ("person.created", "created"),
+                ("trait.change", "changed"),
+                ("event.accepted", "unplanned"),
+                ("person.created", "created"),
+                ("event.accepted", "unplanned"),
+            ]
+        );
+        let keys: Vec<Vec<String>> = decisions
+            .iter()
+            .map(|d| {
+                let mut keys: Vec<String> =
+                    d.subject_ids.as_object().unwrap().keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .collect();
+        assert_eq!(keys[0], ["person"]);
+        assert_eq!(keys[1], ["event", "person"]);
+        assert_eq!(keys[2], ["person", "source_record"]);
+        assert_eq!(keys[3], ["person", "source_record"]);
+        assert!(decisions.iter().all(|d| d.cause.kind == CauseKind::Api));
+        assert!(
+            decisions
+                .iter()
+                .all(|d| d.job_id.is_none() && d.attempt.is_none())
+        );
+        // Rows written by one statement share a command id; one drain batch, one statement.
+        let statements: i64 = sqlx::query_scalar(
+            "SELECT count(DISTINCT cmin::text) FROM decision_records WHERE workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(statements, 1);
     }
 
     /// The benchmark script's rows as `(kind, items, p50_ms, p99_ms)`.
