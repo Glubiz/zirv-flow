@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import type { ErrorSummary } from "../../api";
-import { ErrorState, LoadingState } from "../../ui";
+import { ErrorState, LoadingState, previewDocument } from "../../ui";
 import type { ThemePreview } from "./model";
 
 export type PreviewState =
@@ -50,7 +50,7 @@ export function ThemePreviewPane({ state, refreshing, onRetry, frameTitle = "Pre
       ) : null}
       {state.status === "ready" && state.data.rendered ? (
         <div className={width === "mobile" ? "tp-frame tp-frame-mobile" : "tp-frame"}>
-          <iframe title={frameTitle} sandbox="" srcDoc={state.data.html ?? ""} className="tp-iframe" />
+          <iframe title={frameTitle} sandbox="" srcDoc={previewDocument(state.data.html ?? "")} className="tp-iframe" />
         </div>
       ) : null}
     </section>
