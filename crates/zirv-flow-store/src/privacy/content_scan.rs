@@ -269,6 +269,18 @@ mod tests {
         .unwrap()
     }
 
+    /// A table or column name as a quoted identifier: a `"` inside the name is doubled.
+    fn quote_ident(name: &str) -> String {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+
+    #[test]
+    fn a_quote_inside_an_identifier_is_doubled() {
+        assert_eq!(quote_ident("plain"), "\"plain\"");
+        assert_eq!(quote_ident("a\"b"), "\"a\"\"b\"");
+        assert_eq!(quote_ident("\"; DROP"), "\"\"\"; DROP\"");
+    }
+
     /// `(column, data type)` of the table's text-like columns.
     async fn text_columns(pool: &PgPool, table: &str) -> Vec<(String, String)> {
         sqlx::query_as(
@@ -302,7 +314,8 @@ mod tests {
                 continue;
             }
             for (column, kind) in text_columns(pool, &table).await {
-                let quoted = format!("\"{column}\"");
+                let quoted = quote_ident(&column);
+                let table_ident = quote_ident(&table);
                 let condition = match kind.as_str() {
                     "bytea" => format!(
                         "position(encode(convert_to(needle, 'UTF8'), 'escape') \
@@ -321,7 +334,7 @@ mod tests {
                 };
                 // Names come from the catalog and this module, never from input.
                 let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-                    "SELECT count(*) FROM {table} WHERE EXISTS ( \
+                    "SELECT count(*) FROM {table_ident} WHERE EXISTS ( \
                         SELECT 1 FROM unnest($1::text[]) AS needle WHERE {condition})"
                 )))
                 .bind(wanted)
