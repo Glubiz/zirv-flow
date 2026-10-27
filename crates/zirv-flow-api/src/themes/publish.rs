@@ -205,7 +205,7 @@ pub(crate) async fn publish_theme(
         Some(workspace),
         "theme.published",
         Some(("theme", id)),
-        json!({ "name": theme.name, "version": version.version, "warnings": issues.len() }),
+        json!({ "version": version.version, "warnings": issues.len() }),
     )
     .await?;
     let used = zirv_flow_store::theme_where_used(&mut tx, workspace, id).await?;

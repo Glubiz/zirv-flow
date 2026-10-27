@@ -10,6 +10,7 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
 use super::crud::{
@@ -129,9 +130,8 @@ pub async fn publish_template(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "template.publish",
-            outcome: "published",
-            reason: None,
+            spec: &decision_actions::TEMPLATE_PUBLISHED,
+            detail: None,
             subject_ids: vec![("template", template.id)],
             job: None,
         },

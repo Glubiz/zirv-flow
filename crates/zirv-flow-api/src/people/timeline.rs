@@ -62,7 +62,7 @@ pub(crate) struct DecisionEntryBody {
     outcome: String,
     /// A reason code; never personal data.
     reason: Option<String>,
-    /// `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.
+    /// `event`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`.
     cause_kind: String,
     /// Durable domain ids by name; never personal data.
     #[schema(value_type = Object)]

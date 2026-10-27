@@ -14,6 +14,7 @@ use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::SuppressionReason;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::events::{EMAIL_BOUNCED_EVENT, EMAIL_COMPLAINED_EVENT, EMAIL_DELIVERED_EVENT};
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -49,6 +50,16 @@ impl FeedbackEvent {
             Self::Delivered => EMAIL_DELIVERED_EVENT,
             Self::BouncedHard | Self::BouncedSoft => EMAIL_BOUNCED_EVENT,
             Self::Complained => EMAIL_COMPLAINED_EVENT,
+        }
+    }
+
+    /// The registry row of the decision that records the feedback.
+    const fn spec(self) -> &'static decision_actions::DecisionSpec {
+        match self {
+            Self::Delivered => &decision_actions::MESSAGE_FEEDBACK_DELIVERED,
+            Self::BouncedHard => &decision_actions::MESSAGE_FEEDBACK_BOUNCED_HARD,
+            Self::BouncedSoft => &decision_actions::MESSAGE_FEEDBACK_BOUNCED_SOFT,
+            Self::Complained => &decision_actions::MESSAGE_FEEDBACK_COMPLAINED,
         }
     }
 
@@ -294,27 +305,24 @@ pub async fn record_provider_feedback(
     let mut decisions = vec![NewDecision {
         workspace_id: feedback.workspace,
         trace: trace.clone(),
-        action: "message.feedback",
-        outcome: "recorded",
-        reason: Some(feedback.event.reason()),
+        spec: feedback.event.spec(),
+        detail: None,
         subject_ids: ids(person_live.then_some(("event", event_id))),
         job: None,
         graph: None,
     }];
-    let (outcome, reason) = match suppression {
+    let made = match suppression {
         SuppressionMade::NotAsked => None,
-        SuppressionMade::Organization => Some(("added", "organization_hard_bounce")),
-        SuppressionMade::Workspace => Some(("added", "workspace_complaint")),
-        SuppressionMade::Unable => Some(("unable", "address_hash_missing")),
-    }
-    .unzip();
-    if let (Some(outcome), Some(reason)) = (outcome, reason) {
+        SuppressionMade::Organization => Some(&decision_actions::SUPPRESSION_FEEDBACK_ORGANIZATION),
+        SuppressionMade::Workspace => Some(&decision_actions::SUPPRESSION_FEEDBACK_WORKSPACE),
+        SuppressionMade::Unable => Some(&decision_actions::SUPPRESSION_FEEDBACK_UNABLE),
+    };
+    if let Some(spec) = made {
         decisions.push(NewDecision {
             workspace_id: feedback.workspace,
             trace,
-            action: "suppression.feedback",
-            outcome,
-            reason: Some(reason),
+            spec,
+            detail: None,
             subject_ids: ids(None),
             job: None,
             graph: None,

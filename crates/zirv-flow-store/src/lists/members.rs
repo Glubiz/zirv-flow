@@ -10,6 +10,7 @@ use sqlx::prelude::FromRow;
 use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::people::IdentifierKind;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
@@ -109,6 +110,13 @@ impl Change {
         match self {
             Self::Added => "added",
             Self::Removed => "removed",
+        }
+    }
+
+    const fn spec(self) -> &'static decision_actions::DecisionSpec {
+        match self {
+            Self::Added => &decision_actions::LIST_MEMBERSHIP_ADDED,
+            Self::Removed => &decision_actions::LIST_MEMBERSHIP_REMOVED,
         }
     }
 }
@@ -238,9 +246,8 @@ async fn record_changes(
             graph: None,
             workspace_id: recorded.workspace,
             trace: recorded.trace.clone(),
-            action: "list.membership",
-            outcome: recorded.change.as_str(),
-            reason: Some(recorded.source.as_str()),
+            spec: recorded.change.spec(),
+            detail: Some(recorded.source.as_str()),
             subject_ids: vec![("list", recorded.list), ("person", *person)],
             job: None,
         })
@@ -605,9 +612,8 @@ pub(crate) async fn move_on_merge(
                 graph: None,
                 workspace_id: workspace,
                 trace: trace.clone(),
-                action: "list.membership",
-                outcome: "moved",
-                reason: Some(ListSource::Merge.as_str()),
+                spec: &decision_actions::LIST_MEMBERSHIP_MOVED,
+                detail: None,
                 subject_ids: vec![
                     ("person", survivor),
                     ("survivor", survivor),

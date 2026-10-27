@@ -743,7 +743,11 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        for (enrollment, outcome) in [(mine, "done"), (theirs, "done"), (mine, "waiting")] {
+        for (enrollment, spec) in [
+            (mine, &zirv_flow_core::decision_actions::FLOW_STEP_DONE),
+            (theirs, &zirv_flow_core::decision_actions::FLOW_STEP_DONE),
+            (mine, &zirv_flow_core::decision_actions::FLOW_STEP_WAITING),
+        ] {
             append_decision(
                 &pool,
                 &NewDecision {
@@ -753,9 +757,8 @@ mod tests {
                     }),
                     workspace_id: ws,
                     trace: trace(),
-                    action: "flow.step",
-                    outcome,
-                    reason: None,
+                    spec,
+                    detail: None,
                     subject_ids: vec![("flow", flow), ("enrollment", enrollment)],
                     job: None,
                 },

@@ -213,7 +213,7 @@ async fn publish_now(
         Some(workspace),
         "flow.published",
         Some(("flow", flow.id)),
-        json!({ "name": flow.name, "version": version.version }),
+        json!({ "version": version.version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -300,7 +300,7 @@ async fn lifecycle(
         Some(workspace),
         audited,
         Some(("flow", flow.id)),
-        json!({ "name": flow.name, "state": flow.state.as_str() }),
+        json!({ "state": flow.state.as_str() }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

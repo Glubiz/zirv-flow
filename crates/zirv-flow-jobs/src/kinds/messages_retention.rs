@@ -11,6 +11,8 @@ use zirv_flow_store::{
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
+/// The deletes commit batch by batch before the `retention.ran` row is written, so a failure
+/// after them leaves no row.
 pub(crate) struct MessagesRetention;
 
 impl JobKind for MessagesRetention {
@@ -45,6 +47,12 @@ impl JobKind for MessagesRetention {
             messages_deleted = report.messages_deleted,
             "message retention ran"
         );
+        ctx.audit_retention(
+            Self::KIND,
+            now - time::Duration::days(i64::from(settings.days)),
+            &[("messages_deleted", report.messages_deleted)],
+        )
+        .await?;
         Ok(())
     }
 }
@@ -132,7 +140,13 @@ mod tests {
             .await
             .unwrap();
         drop(guard);
-        tx.rollback().await.unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let audit = zirv_flow_store::list_audit(&pool, 10).await.unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].action, "retention.ran");
+        assert_eq!(audit[0].actor_kind, "system");
+        assert_eq!(audit[0].summary["job"], "messages.retention");
+        assert_eq!(audit[0].summary["counts"]["messages_deleted"], 1);
 
         let left: Vec<String> = sqlx::query_scalar("SELECT node_id FROM messages")
             .fetch_all(&pool)

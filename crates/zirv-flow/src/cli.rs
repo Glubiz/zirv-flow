@@ -93,9 +93,9 @@ pub(crate) enum AdminCommand {
         /// Only this workspace, by slug. All workspaces when omitted.
         #[arg(long, value_name = "SLUG")]
         workspace: Option<String>,
-        /// A privacy.ledger_dir to merge first: every file is validated (one bad file stops the
-        /// command, naming it, before anything changes), the entries the database lacks are
-        /// added as completed, and the replay then covers them.
+        /// A privacy.ledger_dir to merge first: the entries the database lacks are added as
+        /// completed, and the replay then covers them. A bad file does not stop the others; it
+        /// is named on stderr and the command exits non-zero after applying the rest.
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
     },

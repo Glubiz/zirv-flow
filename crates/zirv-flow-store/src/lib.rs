@@ -76,7 +76,7 @@ pub use assets::{
 };
 pub use audit::{
     AUDIT_BATCH, Actor, ActorKind, AuditEntry, AuditFilter, AuditPage, NewAuditEntry, append_audit,
-    count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
+    append_audit_once_in, count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
 };
 pub use changes::{
     DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, claim_dirty, dirty_backlog, dirty_heads,
@@ -242,8 +242,9 @@ pub use privacy::{
     check_ledger_dir, delete_person, download_export, erase_person, expire_exports, export_ledger,
     find_erasure_request, find_ledger_entry, find_privacy_export, finish_erasure_call,
     idempotency_key, list_erasure_calls, list_erasure_requests, list_privacy_exports,
-    lock_person_call_shared, merge_ledger_entries, read_ledger_dir, reconcile_ledger_file,
-    replay_erasures, request_erasure, request_export, update_ledger_lists, write_ledger_file,
+    lock_person_call_shared, merge_ledger_entries, read_ledger_dir, read_ledger_dir_each,
+    reconcile_ledger_file, replay_erasures, request_erasure, request_export, update_ledger_lists,
+    write_ledger_file,
 };
 pub use retention::{
     AUDIT_DAYS_BOUNDS, DeploymentRetention, EXPORT_HOURS_BOUNDS, IMPORT_FILE_DAYS_BOUNDS,
@@ -418,6 +419,7 @@ enum StoreErrorKind {
     Timeout,
     RunActive,
     Erased,
+    AuditSummary,
 }
 
 impl StoreError {
@@ -538,6 +540,16 @@ impl StoreError {
         Self::new(StoreErrorKind::Erased)
     }
 
+    /// An audit summary that holds a banned key or a value shaped like personal data.
+    pub(crate) fn audit_summary(issue: zirv_flow_core::audit::SummaryIssue) -> Self {
+        Self::with_source(StoreErrorKind::AuditSummary, issue)
+    }
+
+    /// Whether the write was refused because the audit summary broke the redaction rules.
+    pub fn is_audit_summary(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::AuditSummary)
+    }
+
     /// Whether the write was refused because an erasure ended the import being uploaded.
     pub fn is_erased(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Erased)
@@ -608,6 +620,10 @@ impl fmt::Display for StoreError {
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
             StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
+            StoreErrorKind::AuditSummary => {
+                formatter.write_str("the audit summary was refused")?;
+                self.write_source(formatter)
+            }
             StoreErrorKind::Erased => {
                 formatter.write_str("the import was erased while it was being uploaded")
             }

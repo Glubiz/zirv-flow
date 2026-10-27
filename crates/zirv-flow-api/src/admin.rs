@@ -555,23 +555,32 @@ pub async fn workspace_by_slug(pool: &PgPool, slug: &str) -> Result<WorkspaceId,
         .id)
 }
 
+/// What [`replay_erasures`] did: the counts, and the ledger files it could not use.
+#[derive(Debug)]
+pub struct ErasureReplay {
+    pub report: ReplayReport,
+    /// The files of `from` that were corrupt or of an unknown format, in file-name order. They
+    /// name a file, never a value. The caller must report them and fail.
+    pub bad_files: Vec<zirv_flow_store::LedgerFileError>,
+}
+
 /// Re-applies the completed erasure ledger of one workspace (by slug) or of all of them after a
 /// backup restore: re-adds the `erased` suppressions, erases every ledger person that exists
 /// again, and removes pending inbox rows that name an erased identifier. Returns counts only,
 /// and audits them as `privacy.erasures_replayed`.
 ///
-/// With `from`, the ledger files of that directory are read first and all validated: one corrupt
-/// or unknown-format file fails the call, naming it, before anything changes. The entries the
-/// database lacks (of the workspace, when one is given) are then merged in as completed, files
-/// for a workspace that does not exist here are skipped and counted, and the replay runs over
-/// the merged ledger.
+/// With `from`, the ledger files of that directory are read one by one. A corrupt or
+/// unknown-format file does not stop the others: it is listed in [`ErasureReplay::bad_files`] and
+/// every good entry is still applied. The entries the database lacks (of the workspace, when one
+/// is given) are merged in as completed, files for a workspace that does not exist here are
+/// skipped and counted, and the replay runs over the merged ledger.
 pub async fn replay_erasures(
     pool: &PgPool,
     context: &Context,
     workspace: Option<&str>,
     root: &HmacRoot,
     from: Option<&Path>,
-) -> Result<ReplayReport, AdminError> {
+) -> Result<ErasureReplay, AdminError> {
     let workspace = match workspace {
         Some(slug) => {
             let slug = Slug::parse(slug)?;
@@ -584,10 +593,16 @@ pub async fn replay_erasures(
         }
         None => None,
     };
-    let mut entries = match from {
-        Some(dir) => zirv_flow_store::read_ledger_dir(dir)?,
-        None => Vec::new(),
-    };
+    let mut entries = Vec::new();
+    let mut bad_files = Vec::new();
+    if let Some(dir) = from {
+        for read in zirv_flow_store::read_ledger_dir_each(dir)? {
+            match read {
+                Ok(entry) => entries.push(entry),
+                Err(error) => bad_files.push(error),
+            }
+        }
+    }
     if let Some(only) = workspace {
         entries.retain(|entry| entry.workspace_id == only.as_uuid());
     }
@@ -618,11 +633,12 @@ pub async fn replay_erasures(
             "inbox_rows": report.inbox_rows,
             "merged": report.merged,
             "skipped_workspaces": report.skipped_workspaces,
+            "bad_files": bad_files.len(),
         }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    Ok(report)
+    Ok(ErasureReplay { report, bad_files })
 }
 
 /// Writes a ledger file into `out` for every completed erasure of the database, a full snapshot
@@ -995,7 +1011,7 @@ pub async fn save_ai_settings(
             Some(workspace),
             "ai.settings.updated",
             Some(("ai_settings", workspace.as_uuid())),
-            json!({"changed": changed, "values": values}),
+            json!({"changed": changed, "after": values}),
         )
         .await?;
     }
@@ -1662,14 +1678,14 @@ mod tests {
         // Newest first: the key replacement, the budget change, then the first save.
         assert_eq!(updates[0]["changed"], json!(["provider_key"]));
         assert_eq!(updates[1]["changed"], json!(["monthly_budget_micros"]));
-        assert_eq!(updates[1]["values"]["monthly_budget_micros"], 9_000_000);
+        assert_eq!(updates[1]["after"]["monthly_budget_micros"], 9_000_000);
         assert!(
             updates[2]["changed"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("transcript_days"))
         );
-        assert_eq!(updates[2]["values"]["transcript_days"], 7);
+        assert_eq!(updates[2]["after"]["transcript_days"], 7);
         let text = format!("{entries:?}");
         assert!(!text.contains("hunter"), "{text}");
     }

@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use sqlx::PgConnection;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::events::{
     SYNC_FAILED_EVENT, SYNC_SUCCEEDED_EVENT, WEBHOOK_FAILED_EVENT, WEBHOOK_SUCCEEDED_EVENT,
 };
@@ -153,15 +154,6 @@ pub enum WebhookResult {
     Failed,
 }
 
-impl WebhookResult {
-    const fn outcome(self) -> &'static str {
-        match self {
-            Self::Succeeded => "succeeded",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 /// What makes a finished call a profile sync: where it went and what it did. Never the key or a
 /// trait value.
 #[derive(Clone, Copy, Debug)]
@@ -204,17 +196,19 @@ impl WebhookOutcome<'_> {
         }
     }
 
-    const fn decision_action(&self) -> &'static str {
-        match self.sync {
-            None => "webhook.call",
-            Some(SyncDetail {
-                operation: SyncOperation::Upsert,
-                ..
-            }) => "sync.upsert",
-            Some(SyncDetail {
-                operation: SyncOperation::Remove,
-                ..
-            }) => "sync.remove",
+    const fn decision_spec(&self) -> &'static DecisionSpec {
+        use decision_actions as a;
+        let operation = match self.sync {
+            None => None,
+            Some(SyncDetail { operation, .. }) => Some(operation),
+        };
+        match (operation, self.result) {
+            (None, WebhookResult::Succeeded) => &a::WEBHOOK_CALL_SUCCEEDED,
+            (None, WebhookResult::Failed) => &a::WEBHOOK_CALL_FAILED,
+            (Some(SyncOperation::Upsert), WebhookResult::Succeeded) => &a::SYNC_UPSERT_SUCCEEDED,
+            (Some(SyncOperation::Upsert), WebhookResult::Failed) => &a::SYNC_UPSERT_FAILED,
+            (Some(SyncOperation::Remove), WebhookResult::Succeeded) => &a::SYNC_REMOVE_SUCCEEDED,
+            (Some(SyncOperation::Remove), WebhookResult::Failed) => &a::SYNC_REMOVE_FAILED,
         }
     }
 }
@@ -301,9 +295,8 @@ pub async fn record_webhook_outcome(
             graph: pinned.map(|(_, version)| GraphPoint::at(version, outcome.node)),
             workspace_id: outcome.workspace,
             trace: outcome.trace.clone(),
-            action: outcome.decision_action(),
-            outcome: outcome.result.outcome(),
-            reason: outcome.reason,
+            spec: outcome.decision_spec(),
+            detail: outcome.reason,
             subject_ids,
             job: Some(outcome.job),
         },

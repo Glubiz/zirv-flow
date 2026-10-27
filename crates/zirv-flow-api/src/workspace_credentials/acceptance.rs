@@ -610,6 +610,19 @@ mod tests {
                 "credential.created",
             ]
         );
+        // A custom schema's field names are typed by an admin, so no summary holds them.
+        let summaries: Vec<String> = sqlx::query_scalar(
+            "SELECT summary::text FROM audit_log WHERE action LIKE 'credential.%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        for summary in summaries {
+            assert!(
+                !summary.contains("region") && !summary.contains("token"),
+                "{summary}"
+            );
+        }
     }
 
     #[sqlx::test]

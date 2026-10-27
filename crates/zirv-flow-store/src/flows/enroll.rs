@@ -12,6 +12,7 @@ use hashbrown::{HashMap, HashSet};
 use sqlx::PgConnection;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::flow::{FlowGraph, FlowSettings, Reentry};
 use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 
@@ -266,9 +267,8 @@ pub async fn enroll_entries(
             graph: Some(GraphPoint::of_version(request.version)),
             workspace_id: request.workspace,
             trace,
-            action: "flow.enroll",
-            outcome: "skipped",
-            reason: Some(reason),
+            spec: &decision_actions::FLOW_ENROLL_SKIPPED,
+            detail: Some(reason),
             subject_ids: vec![("flow", request.flow), ("person", *person)],
             job: None,
         })
@@ -311,9 +311,8 @@ pub async fn enroll_entries(
             graph: Some(GraphPoint::of_version(request.version)),
             workspace_id: request.workspace,
             trace: enrolled.trace.clone(),
-            action: "flow.enroll",
-            outcome: "enrolled",
-            reason: None,
+            spec: &decision_actions::FLOW_ENROLLED,
+            detail: None,
             subject_ids: vec![
                 ("flow", request.flow),
                 ("person", enrolled.person),

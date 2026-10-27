@@ -3251,9 +3251,16 @@ mod tests {
             let record = |action, outcome, reason| zirv_flow_store::NewDecision {
                 workspace_id: ws,
                 trace: trace.clone(),
-                action,
-                outcome,
-                reason,
+                spec: Box::leak(Box::new(
+                    zirv_flow_core::decision_actions::DecisionSpec::for_test(
+                        action,
+                        outcome,
+                        zirv_flow_core::decision_actions::Reason::Detail("test"),
+                        &[zirv_flow_core::CauseKind::Api],
+                        &[],
+                    ),
+                )),
+                detail: reason,
                 subject_ids: subjects.clone(),
                 job: None,
                 graph: Some(zirv_flow_store::GraphPoint::at(1, "bump")),
@@ -3715,7 +3722,14 @@ mod tests {
             .map(|node| node.as_str().unwrap())
             .collect();
         assert_eq!(tested_path, simulated);
-        assert_eq!(fx.flow_writes().await, writes, "so is test mode");
+        // Test mode writes its one audit row (the eighth count) and nothing else.
+        let mut after_test = writes.clone();
+        after_test[7] += 1;
+        assert_eq!(
+            fx.flow_writes().await,
+            after_test,
+            "so is test mode, bar its audit row"
+        );
         assert_eq!(simulation["unreached_nodes"], json!([]));
     }
 
