@@ -592,6 +592,7 @@ mod tests {
         assert_eq!(first.len(), 12);
         assert_ne!(first, after_crash);
     }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn pruning_deletes_old_rows_and_keeps_recent_ones(pool: PgPool) {

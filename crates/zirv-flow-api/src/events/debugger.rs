@@ -768,10 +768,11 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
 /// a row that commits more than twice the 10 s patience after it was written can still be
 /// missed. The epoch names the life of the feed, which is unlogged and starts over after a
 /// crash: a position from another epoch, or an older bare number, is answered with a `gap`
-/// frame whose `reset` is true, and the stream starts at the current position. A viewer that cannot keep up gets an `event: gap` frame with
-/// the number of rows skipped (an upper bound when filters apply). While the server's
-/// notifier is down, an `event: status` frame says `degraded` and the stream polls every few
-/// seconds instead of reacting at once; another says it recovered.
+/// frame whose `reset` is true, and the stream starts at the current position. A viewer that
+/// cannot keep up gets an `event: gap` frame with the number of rows skipped (an upper bound
+/// when filters apply). While the server's notifier is down, an `event: status` frame says
+/// `degraded` and the stream polls every few seconds instead of reacting at once; another says
+/// it recovered.
 ///
 /// While at least one viewer watches a workspace, ingestion writes a feed row per event;
 /// when none does, it writes nothing extra. Values are masked per viewer as in the person
