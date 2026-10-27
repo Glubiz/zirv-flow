@@ -321,6 +321,8 @@ table.
 | `zirv_flow_jobs_total` | counter | `kind`, `outcome` | Job attempts by how they ended |
 | `zirv_flow_job_duration_seconds` | histogram | `kind` | Handler duration |
 | `zirv_flow_job_claim_lag_seconds` | histogram | `kind` | Time from `run_at` to the claim |
+| `zirv_flow_retention_deleted_total` | counter | `table` | Rows a retention job removed; `table` is `messages` |
+| `zirv_flow_retention_last_run_timestamp_seconds` | gauge | `table` | Unix time of the last retention run of `table` |
 | `zirv_flow_egress_denied_total` | counter | `class` | Outbound requests refused by the egress policy |
 | `zirv_flow_ingest_requests_total` | counter | `endpoint`, `status` | Ingestion requests |
 | `zirv_flow_ingest_items_total` | counter | `kind` | Items accepted into the inbox |
