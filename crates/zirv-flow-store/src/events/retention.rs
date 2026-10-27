@@ -73,14 +73,16 @@ pub struct RetentionReport {
 pub async fn apply_event_retention(
     pool: &PgPool,
     settings: &EventRetention,
+    windows: &crate::RetentionSettings,
     now: OffsetDateTime,
 ) -> Result<RetentionReport, StoreError> {
-    apply_event_retention_in_batches(pool, settings, now, RETENTION_BATCH).await
+    apply_event_retention_in_batches(pool, settings, windows, now, RETENTION_BATCH).await
 }
 
 async fn apply_event_retention_in_batches(
     pool: &PgPool,
     settings: &EventRetention,
+    windows: &crate::RetentionSettings,
     now: OffsetDateTime,
     batch_size: i64,
 ) -> Result<RetentionReport, StoreError> {
@@ -126,7 +128,8 @@ async fn apply_event_retention_in_batches(
     )
     .await?;
 
-    report.test_sends_deleted = crate::delete_test_sends_before(pool, now).await?;
+    report.test_sends_deleted =
+        crate::delete_test_sends_before(pool, now, windows.test_send_months).await?;
 
     drop_old_partitions(pool, default_days, now, &mut report).await?;
     Ok(report)
@@ -342,7 +345,9 @@ mod tests {
     }
 
     async fn run(pool: &PgPool) -> RetentionReport {
-        apply_event_retention(pool, &settings(), NOW).await.unwrap()
+        apply_event_retention(pool, &settings(), &Default::default(), NOW)
+            .await
+            .unwrap()
     }
 
     async fn sync_events(pool: &PgPool) -> Uuid {
@@ -382,7 +387,7 @@ mod tests {
     }
 
     async fn run_small_batches(pool: &PgPool) -> Result<RetentionReport, StoreError> {
-        apply_event_retention_in_batches(pool, &settings(), NOW, 1).await
+        apply_event_retention_in_batches(pool, &settings(), &Default::default(), NOW, 1).await
     }
 
     #[sqlx::test]
@@ -800,7 +805,9 @@ mod tests {
             ..settings()
         };
 
-        let report = apply_event_retention(&pool, &settings, NOW).await.unwrap();
+        let report = apply_event_retention(&pool, &settings, &Default::default(), NOW)
+            .await
+            .unwrap();
 
         assert_eq!(report.events_deleted, 2);
         assert_eq!(remaining(&pool, "kept_long").await, 2);

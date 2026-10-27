@@ -28,6 +28,7 @@ mod migrations;
 mod people;
 mod pool;
 mod privacy;
+mod retention;
 pub mod secrets;
 mod segments;
 mod send_limits;
@@ -243,6 +244,12 @@ pub use privacy::{
     idempotency_key, list_erasure_calls, list_erasure_requests, list_privacy_exports,
     lock_person_call_shared, merge_ledger_entries, read_ledger_dir, reconcile_ledger_file,
     replay_erasures, request_erasure, request_export, update_ledger_lists, write_ledger_file,
+};
+pub use retention::{
+    AUDIT_DAYS_BOUNDS, DeploymentRetention, EXPORT_HOURS_BOUNDS, IMPORT_FILE_DAYS_BOUNDS,
+    IMPORT_REJECT_DAYS_BOUNDS, JOB_HISTORY_DAYS_BOUNDS, RetentionRun, RetentionSettings,
+    TEST_SEND_MONTHS_BOUNDS, WorkspaceRetention, WorkspaceWindows, find_workspace_retention,
+    record_retention_run, retention_runs, set_workspace_retention, workspace_windows,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use segments::run_segment_ids;

@@ -34,9 +34,13 @@ pub struct ImportRetention {
     pub uploads: u64,
 }
 
-/// Deletes the files of imports that ended more than [`CHUNK_RETENTION_DAYS`] days ago and the
-/// rejects older than [`REJECT_RETENTION_DAYS`] days, by the database clock.
-pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention, StoreError> {
+/// Deletes the files of imports that ended more than `import_file_days` ago and the rejects older
+/// than `import_reject_days`, by the database clock. [`CHUNK_RETENTION_DAYS`] and
+/// [`REJECT_RETENTION_DAYS`] are the defaults.
+pub async fn delete_expired_import_data(
+    pool: &PgPool,
+    settings: &crate::RetentionSettings,
+) -> Result<ImportRetention, StoreError> {
     let uploads = sqlx::query(
         "DELETE FROM imports WHERE status = 'uploading' \n           AND created_at < now() - make_interval(days => $1)",
     )
@@ -65,7 +69,7 @@ pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention
             WHERE finished_at IS NOT NULL \
               AND finished_at < now() - make_interval(days => $1))",
     )
-    .bind(CHUNK_RETENTION_DAYS)
+    .bind(i32::try_from(settings.import_file_days).unwrap_or(i32::MAX))
     .execute(pool)
     .await
     .map_err(StoreError::query)?
@@ -77,7 +81,7 @@ pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention
                 SELECT ctid FROM import_rejects \
                 WHERE created_at < now() - make_interval(days => $1) LIMIT $2)",
         )
-        .bind(REJECT_RETENTION_DAYS)
+        .bind(i32::try_from(settings.import_reject_days).unwrap_or(i32::MAX))
         .bind(REJECT_BATCH)
         .execute(pool)
         .await

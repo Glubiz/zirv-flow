@@ -284,6 +284,7 @@ pub async fn build_export(
     workspace: WorkspaceId,
     export: Uuid,
     max_bytes: u64,
+    export_hours: u32,
 ) -> Result<BuildOutcome, StoreError> {
     let row: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT person_id, status FROM privacy_exports \
@@ -321,13 +322,14 @@ pub async fn build_export(
     let size_bytes = i64::try_from(compressed.len()).unwrap_or(i64::MAX);
     sqlx::query(
         "UPDATE privacy_exports SET status = 'ready', content = $3, size_bytes = $4, \
-            ready_at = now(), expires_at = now() + interval '24 hours' \
+            ready_at = now(), expires_at = now() + make_interval(hours => $5) \
          WHERE workspace_id = $1 AND id = $2",
     )
     .bind(workspace.as_uuid())
     .bind(export)
     .bind(compressed)
     .bind(size_bytes)
+    .bind(i32::try_from(export_hours).unwrap_or(i32::MAX))
     .execute(&mut *connection)
     .await
     .map_err(StoreError::query)?;
@@ -881,7 +883,9 @@ mod tests {
         max_bytes: u64,
     ) -> BuildOutcome {
         let mut tx = begin(pool).await.unwrap();
-        let outcome = build_export(&mut tx, ws, export, max_bytes).await.unwrap();
+        let outcome = build_export(&mut tx, ws, export, max_bytes, 24)
+            .await
+            .unwrap();
         commit(tx).await.unwrap();
         outcome
     }
