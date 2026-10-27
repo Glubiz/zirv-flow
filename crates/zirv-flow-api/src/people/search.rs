@@ -10,7 +10,7 @@ use uuid::Uuid;
 use zirv_flow_store::{PersonSearch, SearchError, SearchHit, TraitOp};
 
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -166,7 +166,7 @@ pub(crate) async fn search(
 ) -> Result<Json<SearchBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let (search, limit, after) = parse(body)?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let page =
         zirv_flow_store::search_people(&state.pool, workspace.id, &search, limit, after, reveal)
             .await

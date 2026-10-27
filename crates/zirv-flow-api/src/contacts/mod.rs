@@ -29,7 +29,7 @@ use zirv_flow_core::token::sha256;
 use zirv_flow_store::{Contact, StoreError, WriteError};
 
 use crate::AppState;
-use crate::auth::{Principal, may_see_values};
+use crate::auth::{Principal, may_view_pii};
 use crate::problem::{ApiError, ItemProblem};
 
 const MAX_IDEMPOTENCY_KEY_CHARS: usize = 255;
@@ -71,7 +71,7 @@ impl Masking {
         principal: &Principal,
         workspace: WorkspaceId,
     ) -> Result<Self, ApiError> {
-        if may_see_values(state, principal, workspace).await {
+        if may_view_pii(state, principal, workspace).await {
             return Ok(Self { hidden: None });
         }
         let mut hidden: HashSet<String> =
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn a_caller_who_may_see_values_sees_all_of_them() {
+    fn a_caller_who_may_view_pii_sees_all_of_them() {
         let body = Masking { hidden: None }.body(contact());
 
         assert_eq!(body.fields["email"], "a@example.com");

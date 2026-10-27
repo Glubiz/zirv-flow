@@ -15,7 +15,7 @@ use zirv_flow_store::{DataAge, SqlParam, SqlQuery, StoreError};
 
 use super::{catalog_of, issues_error};
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::json::ApiJson;
 use crate::people::search::DisplayBody;
 use crate::problem::{ApiError, Problem};
@@ -173,7 +173,7 @@ pub(crate) async fn preview(
 ) -> Result<Json<PreviewBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let size = sample_size(body.sample_size)?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
 
     let mut tx =
         zirv_flow_store::begin_segment_snapshot(&state.pool, state.segment_preview_timeout)
