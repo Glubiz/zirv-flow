@@ -5277,12 +5277,12 @@ export interface components {
              */
             name: string;
             /**
-             * @description At least one scope.
+             * @description At least one of `ingest`, `read`, `write`, `publish`, `admin`, `pii`.
              * @example [
              *       "read"
              *     ]
              */
-            scopes: components["schemas"]["ApiKeyScope"][];
+            scopes: string[];
         };
         /** @description The body of `POST /contacts`. */
         CreateContactRequest: {

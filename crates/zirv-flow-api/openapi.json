@@ -29522,9 +29522,9 @@
           "scopes": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/ApiKeyScope"
+              "type": "string"
             },
-            "description": "At least one scope.",
+            "description": "At least one of `ingest`, `read`, `write`, `publish`, `admin`, `pii`.",
             "example": [
               "read"
             ]
