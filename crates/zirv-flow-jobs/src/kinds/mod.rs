@@ -43,6 +43,17 @@ mod webhook_call;
 #[cfg(test)]
 mod simulation;
 
+/// The rows removed by the last recorded run of `window`; none before its first run.
+#[cfg(test)]
+pub(crate) async fn recorded_run(pool: &zirv_flow_store::PgPool, window: &str) -> Option<i64> {
+    zirv_flow_store::retention_runs(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|run| run.window == window)
+        .map(|run| run.deleted)
+}
+
 pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &noop::Noop,
     &person_merge_rewrite::PersonMergeRewrite,

@@ -482,6 +482,7 @@ async fn run_roles_reporting(
         worker_config.export_max_bytes = config.export_max_bytes();
         worker_config.message_retention = config.messages_retention();
         worker_config.decision_retention = config.decisions_retention();
+        worker_config.retention_settings = config.retention_settings();
         worker_config.job_history_days = config.job_history_days();
         worker_config.audit_days = config.audit_days();
         worker_config.redaction_key = hmac_root
@@ -519,6 +520,7 @@ async fn run_roles_reporting(
             pool.clone(),
             zirv_flow_jobs::SchedulerConfig {
                 sending_domain_recheck: config.sending_domain_recheck(),
+                retention: config.retention_settings(),
                 ..zirv_flow_jobs::SchedulerConfig::default()
             },
         );
@@ -806,6 +808,7 @@ fn http_state(
         .with_cookie_secure(config.server_cookie_secure())
         .with_local_sign_in(config.auth_local_enabled())
         .with_event_retention(config.events_retention())
+        .with_deployment_retention(config.deployment_retention())
         .with_ingest_limits(config.ingest_limits())
         .with_import_limits(config.import_limits())
         .with_asset_limits(config.asset_limits())

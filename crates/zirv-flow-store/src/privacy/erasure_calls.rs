@@ -1117,10 +1117,15 @@ mod tests {
     /// Runs the event retention as of a time long after everything the tests wrote.
     async fn purge_events(pool: &PgPool) -> u64 {
         let later = OffsetDateTime::now_utc() + time::Duration::days(4000);
-        crate::apply_event_retention(pool, &crate::EventRetention::default(), later)
-            .await
-            .unwrap()
-            .events_deleted
+        crate::apply_event_retention(
+            pool,
+            &crate::EventRetention::default(),
+            &crate::RetentionSettings::default(),
+            later,
+        )
+        .await
+        .unwrap()
+        .events_deleted
     }
 
     async fn purge_outbox(pool: &PgPool, destination: Uuid) -> u64 {

@@ -1,7 +1,7 @@
 //! Person exports (architecture section 16.3): request one, list them, and download the
 //! gzip-compressed JSON document. The download is the one place personal values leave the
-//! system, so it needs the workspace admin role, is audited, and stops working after 24 hours
-//! (410).
+//! system, so it needs the workspace admin role, is audited, and stops working once the
+//! configured window (`retention.export_hours`, default 24 hours) is over (410).
 
 use axum::Json;
 use axum::body::Body;
@@ -41,7 +41,8 @@ pub(crate) struct ExportBody {
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     ready_at: Option<OffsetDateTime>,
-    /// 24 hours after `ready_at`; the download answers 410 from then on.
+    /// The configured window (`retention.export_hours`, default 24 hours) after `ready_at`; the
+    /// download answers 410 from then on.
     #[serde(with = "time::serde::rfc3339::option")]
     #[schema(value_type = Option<String>, format = DateTime)]
     expires_at: Option<OffsetDateTime>,
@@ -152,7 +153,8 @@ pub(crate) async fn download(
 /// and its links, forwarding rows and handled markers, ingest rejects, decision records and saved
 /// template previews, with the data of merged people under the survivor. A document past the
 /// size cap fails with the code `export_too_large`. A background job
-/// builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
+/// builds it; it can be downloaded for the configured window
+/// (`retention.export_hours`, default 24 hours) once it is ready. The request is given as a
 /// `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
 /// Audited as `privacy.export_requested`.
 #[utoipa::path(

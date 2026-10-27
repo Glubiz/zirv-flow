@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
 use tracing::info;
-use zirv_flow_store::{Actor, NewAuditEntry, append_audit, purge_audit};
+use zirv_flow_store::{Actor, NewAuditEntry, append_audit, purge_audit, record_retention_run};
 
 use crate::{JobContext, JobError, JobKind, metrics};
 
@@ -43,6 +43,7 @@ impl JobKind for AuditRetention {
             }
         };
         metrics::record_retention("audit_log", deleted, now.unix_timestamp() as f64);
+        record_retention_run(&pool, "audit", now, deleted).await?;
         // What was purged is recorded even when a later batch failed.
         if deleted > 0 {
             let cutoff_text = cutoff
@@ -166,6 +167,7 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(keys, ["count", "cutoff"]);
         assert_eq!(object["count"], 3);
+        assert_eq!(super::super::recorded_run(&pool, "audit").await, Some(3));
         let cutoff = object["cutoff"].as_str().unwrap();
         assert!(OffsetDateTime::parse(cutoff, &Rfc3339).is_ok(), "{cutoff}");
         assert!(
