@@ -140,13 +140,17 @@ pub(crate) async fn publish_inputs(
 }
 
 /// The issues a publish finds in `doc`: the sample render's checks, run in the render host, and the
-/// resolver's own.
+/// resolver's own. The one check a publish, the stored draft checks and the assistant's template
+/// drafts all make.
 pub(crate) async fn publish_issues(
     render: &RenderPool,
     doc: &TemplateDocument,
     catalog: &FieldCatalog,
     inputs: &Inputs,
 ) -> Result<Vec<Issue>, ApiError> {
+    content_type_of(doc).map_err(|_| ApiError::template_content_unsupported())?;
+    // A template's sample render allocates like any render, so it runs in the render host, never
+    // in this process.
     let mut issues = render
         .validate_with(doc, catalog, &inputs.extras)
         .await
@@ -190,9 +194,6 @@ pub(crate) async fn publish_template(
         (draft, catalog, inputs)
     };
     let doc = stored_document(&draft.document)?;
-    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
-    // A template's sample render allocates like any render, so it runs in the render host, never
-    // in this process.
     let issues = publish_issues(render, &doc, &catalog, &inputs).await?;
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::template_invalid(issue_problems(&issues)));

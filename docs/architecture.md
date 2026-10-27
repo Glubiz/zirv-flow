@@ -2370,6 +2370,25 @@ reports, the keys of a pasted webhook sample and pasted documentation are `Untru
 values are `Personal`, now fenced like `Untrusted` and bringing the same notice. The keys of a
 webhook sample that parse as an email or phone are left out of the context.
 
+As built (#309): the ninth tool, `draft_template`, drafts a change to an email template's draft
+(`kind: "template"` with `template_id` and a `task`: `copy`, `subject_variants`, `block_layout` or
+`translation`; `ai_drafts.template_id`, migration 0065). The model fills in a fragment of the content
+fields its task may set (never the sender, category, theme or mode) or, for subject variants, two to
+five subjects; the fragment is merged onto the draft's document. The result is validated by the same
+two calls a publish makes, `publish_inputs` and `publish_issues` (the field catalog, the
+effective theme, snippets and conditions of #307, through the render pool), and repaired up to
+`ai.max_repair_attempts`; an unknown merge field comes back as `unknown_merge_field` at its place,
+with the field's name shown to the model only. The context is the document, the merge-field, theme
+and snippet names and the task. Under schema-only privacy the literals of every `visible_if` are
+masked with the segment assistant's placeholders and restored in the answer, and a condition the
+mask walk cannot fully cover is refused (`ai_template_unsupported`); with the opt-in the document
+goes as personal data. The row holds no person value.
+The response carries the field diff (`TEMPLATE_KEYS`) and the draft and the result rendered for the
+sample person with inert tracking (`renders.before`, `renders.after`, html and text). Accepting
+validates again, then locks the template and writes only its draft, including `lang`, when the
+draft's revision is the one the assistant draft was made from (else 409 `template_draft_changed`);
+it creates no template and no version and publishes nothing.
+
 ### 13.4 Context, audit and limits
 
 Schema-only context is the default: field and event names, types, descriptions
