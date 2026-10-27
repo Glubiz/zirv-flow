@@ -340,7 +340,7 @@ pub(crate) async fn publish_template(
         Some(workspace),
         "template.published",
         Some(("template", id)),
-        json!({ "name": template.name, "version": version.version, "warnings": issues.len() }),
+        json!({ "version": version.version, "warnings": issues.len() }),
     )
     .await?;
     let used = zirv_flow_store::template_where_used(&mut *tx, workspace, id)

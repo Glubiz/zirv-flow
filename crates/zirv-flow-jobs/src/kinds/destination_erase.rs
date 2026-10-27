@@ -37,7 +37,7 @@ use zirv_flow_store::{
     find_destination, finish_erasure_call, idempotency_key, throttle_bucket,
 };
 
-use crate::delivery::credential::open_credential;
+use crate::delivery::credential::{Usage, open_credential};
 use crate::delivery::{self, Verdict};
 use crate::{JobContext, JobError, JobKind};
 
@@ -142,10 +142,11 @@ impl JobKind for DestinationErase {
             Admission::Gone => return settle(ctx, &job, Err(DESTINATION_UNAVAILABLE)).await,
         }
 
-        let credential = match open_credential(ctx, job.workspace, &destination).await? {
-            Ok(credential) => credential,
-            Err(verdict) => return conclude(ctx, &job, verdict, None).await,
-        };
+        let credential =
+            match open_credential(ctx, job.workspace, &destination, Usage::Erase).await? {
+                Ok(credential) => credential,
+                Err(verdict) => return conclude(ctx, &job, verdict, None).await,
+            };
         // No redirects: a redirect would turn the call into something that was never the erase.
         let limits = HttpLimits {
             max_redirects: 0,

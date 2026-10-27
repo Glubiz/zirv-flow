@@ -8,6 +8,7 @@ mod decisions;
 mod harness;
 mod mail;
 mod privacy;
+mod restore;
 mod trace;
 
 #[cfg(test)]

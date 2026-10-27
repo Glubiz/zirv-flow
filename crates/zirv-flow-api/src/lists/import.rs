@@ -8,6 +8,7 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode};
 use serde::Serialize;
+use serde_json::json;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_core::people::Identifier;
@@ -15,6 +16,7 @@ use zirv_flow_store::{ListSource, MAX_PEOPLE_PER_CALL};
 
 use super::{capped, membership_error};
 use crate::AppState;
+use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
 use crate::problem::{ApiError, Problem};
 
@@ -291,6 +293,15 @@ pub(crate) async fn import(
     if dry {
         drop(tx);
     } else {
+        admin::audit(
+            &mut tx,
+            &principal.context(),
+            Some(workspace.id),
+            "list.members_changed",
+            Some(("list", list)),
+            json!({"change": "imported", "count": added}),
+        )
+        .await?;
         zirv_flow_store::commit(tx).await?;
     }
     let (unmatched, unmatched_count) = capped(unmatched);

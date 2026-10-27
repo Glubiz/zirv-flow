@@ -1207,16 +1207,12 @@ rows' cells (`import_rejects.raw`) after the configured window (`retention.impor
 person can survive in either until then. At the defaults both age out within the one-month window of
 an erasure request; a longer configured window must stay within it; see [CSV import](#csv-import).
 
-**After a restore.** Backups keep erased data until they age out, so after restoring a backup run
-
-```sh
-zirv-flow admin replay-erasures [--workspace <slug>] [--from <ledger_dir>]
-```
-
-before starting the workers. It needs the master key and no password, and prints counts only. For
-each completed ledger entry it re-adds the `erased` suppressions, erases every person id the erased group had (the survivor and the people merged
-into them) that the restore brought back, including a backup from before a merge, and removes pending inbox rows that name an erased identifier. It is safe to
-run again.
+**After a restore.** Backups keep erased data until they age out, so a restore is not finished
+until `zirv-flow admin replay-erasures --from <ledger_dir>` has run and before any role starts. The
+steps, in order, with a check for each, are in the
+[backup and restore guide](docs/operations/backup-restore.md); the drill that proves them is
+`scripts/drill/restore.sh`, with its log in
+[docs/operations/evidence/restore-drill.md](docs/operations/evidence/restore-drill.md).
 
 <a id="privacy-ledger-dir"></a>**The ledger outside the database.** A backup taken before an
 erasure holds neither the deletion nor the ledger row, so the replay above has nothing to replay.
@@ -1236,8 +1232,9 @@ identifier value. Operator duties:
   The hashes are keyed with the deployment HMAC root, so restoring from the files also needs the
   master key and the database's `deployment_keys` row.
 - After restoring a database, run `zirv-flow admin replay-erasures --from <dir>` before it serves
-  traffic or any worker starts. It validates every file first (one corrupt or unknown-format file
-  stops it, naming the file, before anything changes), adds the entries the database lacks as
+  traffic or any worker starts. It reads each file on its own (a corrupt or unknown-format file
+  is named on stderr and makes the command exit non-zero, but the other files are still
+  applied), adds the entries the database lacks as
   completed, upgrades a request the backup still holds as pending or failed to completed (the file
   records a completed erasure and wins; a completed row is left alone), skips and counts files
   whose workspace does not exist, and then runs the replay. The counts include `merged` (added

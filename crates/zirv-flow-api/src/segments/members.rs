@@ -337,7 +337,7 @@ pub(crate) async fn refresh(
         Some(workspace.id),
         "segment.refresh_requested",
         Some(("segment", segment)),
-        json!({ "name": found.name, "queued": queued }),
+        json!({ "queued": queued }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
