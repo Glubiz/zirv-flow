@@ -188,6 +188,10 @@ impl Fields for Rendered<'_> {
             .cloned()
             .ok_or(RenderError::BrokenSnippetReference)
     }
+
+    fn annotate(&self) -> bool {
+        self.extras.annotate
+    }
 }
 
 /// Render the tree and turn it into HTML: fields, MJML, `mrml`, then the caps on the result.
@@ -834,6 +838,38 @@ mod tests {
             assert_eq!(rendered.text, read(&format!("{name}.txt")), "{name}");
             assert!(rendered.hidden.is_empty());
         }
+    }
+
+    #[test]
+    fn annotate_adds_a_class_per_section_and_block_and_only_when_set() {
+        let document = read_doc(&read("newsletter.doc.json"));
+        let plain = render_with(&document, &Default::default()).unwrap();
+        let marked = render_with(
+            &document,
+            &crate::context::RenderExtras {
+                annotate: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!plain.html.contains("zf-block-"));
+        let content = document.blocks.as_ref().unwrap();
+        let mut ids: Vec<&str> = Vec::new();
+        for section in &content.sections {
+            ids.push(&section.id);
+            ids.extend(section.columns.iter().flatten().map(Block::id));
+        }
+        assert!(ids.contains(&"intro_text") && ids.contains(&"features"));
+        for id in ids {
+            assert!(
+                marked.html.contains(&format!("zf-block-{id}")),
+                "{id}\n{}",
+                marked.html
+            );
+        }
+        assert_eq!(marked.subject, plain.subject);
+        assert_eq!(marked.text, plain.text);
     }
 
     #[test]

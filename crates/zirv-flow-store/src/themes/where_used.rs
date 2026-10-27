@@ -8,6 +8,8 @@
 //! or absent; stored schema 1 content migrates to `"none"`, and code-mode content has no theme,
 //! so neither follows.
 
+use std::collections::BTreeMap;
+
 use hashbrown::HashMap;
 use sqlx::prelude::FromRow;
 use sqlx::{Acquire, PgConnection, PgExecutor, Postgres};
@@ -15,7 +17,7 @@ use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
 use crate::StoreError;
-use crate::templates::{TemplateFlowUse, active_flows_using};
+use crate::templates::{LiveTemplate, TemplateFlowUse, active_flows_using};
 
 /// Whether the block document in `$doc` follows the workspace default theme.
 macro_rules! follows_default {
@@ -35,6 +37,8 @@ macro_rules! follows_default {
         )
     };
 }
+
+pub(crate) use follows_default;
 
 /// Whether the document in `$doc` names the theme in `$2`.
 macro_rules! names_theme {
@@ -167,6 +171,27 @@ pub async fn theme_where_used(
         default_templates,
         active_flows,
     })
+}
+
+/// The templates, not archived, whose current published version renders with the theme: those
+/// that name it, and those that follow the default while it is the default. By template id.
+pub async fn theme_live_templates(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    theme: Uuid,
+) -> Result<Vec<LiveTemplate>, StoreError> {
+    let used = theme_where_used(connection, workspace, theme).await?;
+    let live: BTreeMap<Uuid, String> = used
+        .named_templates
+        .into_iter()
+        .chain(used.default_templates)
+        .filter(|template| template.in_current)
+        .map(|template| (template.id, template.name))
+        .collect();
+    Ok(live
+        .into_iter()
+        .map(|(id, name)| LiveTemplate { id, name })
+        .collect())
 }
 
 /// How many templates of the workspace, not archived, use each theme, by the rule of

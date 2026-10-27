@@ -16,8 +16,9 @@ use zirv_flow_segments::{
     evaluate, event_lower_bounds, parse_condition,
 };
 use zirv_flow_store::{
-    CompiledCondition, ExplainEventScope, ExtrasRequest, LoadedInputs, PgConnection, ThemeRequest,
-    evaluate_conditions, load_explain_person, load_render_inputs, segment_catalog,
+    Candidate, CompiledCondition, ExplainEventScope, ExtrasRequest, LoadedInputs, PgConnection,
+    ThemeRequest, evaluate_conditions, load_explain_person, load_render_inputs_with,
+    segment_catalog,
 };
 use zirv_flow_templates::{
     ExtrasNeeds, Issue, Loaded, RenderContext, RenderExtras, TemplateDocument, ThemeNeed, code,
@@ -84,12 +85,26 @@ pub(crate) async fn resolve(
     public_url: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<Inputs, ApiError> {
+    resolve_with(connection, workspace, doc, subject, public_url, now, None).await
+}
+
+/// [`resolve`] with `candidate` in place of the published version of its snippet or theme.
+pub(crate) async fn resolve_with(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    doc: &TemplateDocument,
+    subject: Subject<'_>,
+    public_url: Option<&str>,
+    now: OffsetDateTime,
+    candidate: Option<&Candidate>,
+) -> Result<Inputs, ApiError> {
     let needs = extras_needs(doc);
-    let loaded = load_render_inputs(
+    let loaded = load_render_inputs_with(
         connection,
         workspace,
         &request_of(&needs),
         Some(asset_base(public_url)),
+        candidate,
     )
     .await?;
     let mut inputs = Inputs {

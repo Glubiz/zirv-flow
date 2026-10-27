@@ -5,8 +5,16 @@ function tone(change: DraftChange["change"]): "neutral" | "attention" | "error" 
   return change === "removed" ? "error" : change === "changed" ? "attention" : "neutral";
 }
 
-/** The draft against the saved version, field by field. The kind of change is a word, never only a colour. */
-export function DraftChanges({ changes }: { changes: DraftChange[] }) {
+/** Whether the assistant repaired this field, or something inside it or around it. */
+function wasRepaired(path: string, repaired: readonly string[]): boolean {
+  return repaired.some((place) => place === path || place.startsWith(`${path}/`) || path.startsWith(`${place}/`));
+}
+
+/**
+ * The draft against the saved version, field by field. The kind of change is a word, never only a
+ * colour. A field the assistant repaired before the draft was shown is marked at its place.
+ */
+export function DraftChanges({ changes, repaired = [] }: { changes: DraftChange[]; repaired?: readonly string[] }) {
   if (changes.length === 0) {
     return <p className="faint">Same as the saved version.</p>;
   }
@@ -30,6 +38,7 @@ export function DraftChanges({ changes }: { changes: DraftChange[] }) {
               </th>
               <td>
                 <Pill tone={tone(change.change)}>{changeLabel(change.change)}</Pill>
+                {wasRepaired(change.path, repaired) ? <Pill tone="attention">Repaired</Pill> : null}
               </td>
               <td className="mono">{valueText(change.before)}</td>
               <td className="mono">{valueText(change.after)}</td>

@@ -303,7 +303,7 @@ pub async fn archive_snippet(
         .into_iter()
         .filter(|template| template.in_draft)
         .collect();
-    let themes = themes_using(&mut *connection, workspace, id, true).await?;
+    let themes = themes_using(&mut *connection, workspace, id, true, false).await?;
     if !in_drafts.is_empty() || !themes.is_empty() {
         return Err(SnippetError::InUse {
             templates: in_drafts,

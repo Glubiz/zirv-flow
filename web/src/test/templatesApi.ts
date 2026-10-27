@@ -40,6 +40,20 @@ export function templateBody(overrides: Doc = {}) {
   };
 }
 
+/** An item of the library list: the template and the facts the library shows. */
+export function listItem(overrides: Doc = {}) {
+  return {
+    ...templateBody(),
+    draft_changed: false,
+    checks: null,
+    active_flows: 0,
+    theme: "none",
+    edited_by_email: null,
+    edited_at: "2026-10-10T09:00:00Z",
+    ...overrides,
+  };
+}
+
 export function templateDetail(overrides: Doc = {}, document: Doc = emailDocument()) {
   return {
     ...templateBody(overrides),
@@ -119,7 +133,7 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
   return {
     ...actorRoutes,
     ...catalogRoutes(),
-    [`GET ${WS}/templates`]: () => json([current]),
+    [`GET ${WS}/templates`]: () => json([listItem({ id: current["id"], name: current["name"], current_version: current["current_version"], archived_at: current["archived_at"] })]),
     [`GET ${base}`]: () => json(current),
     [`PUT ${base}`]: async (request) => {
       const body = (await request.json()) as Doc;
@@ -141,10 +155,11 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
     [`POST ${base}/publish`]: () => {
       const next = ((current["current_version"] as number | null) ?? 0) + 1;
       current = { ...current, current_version: next };
-      return json({ template: current, version: { version: next, document: (current["draft"] as Doc)["document"], published_at: "2026-10-11T09:00:00Z", warnings: [] } });
+      return json({ template: current, version: { version: next, document: (current["draft"] as Doc)["document"], published_at: "2026-10-11T09:00:00Z", warnings: [], note: null }, used_by: [] });
     },
     [`GET ${base}/versions`]: () => json(versions),
     [`GET ${base}/where-used`]: () => json(uses),
+    [`GET ${base}/send-volume`]: () => json([]),
     [`GET ${base}/preview-people`]: () => json(saved),
     [`POST ${base}/preview-people`]: async (request) => json(await request.json(), 201),
     [`DELETE ${base}/preview-people/p-1`]: () => new Response(null, { status: 204 }),

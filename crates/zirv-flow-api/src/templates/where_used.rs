@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
-use zirv_flow_store::TemplateUse;
+use zirv_flow_store::{TemplateSendVolume, TemplateUse};
 
 use crate::AppState;
 use crate::auth::{Need, Principal, authorize, path_id};
@@ -70,6 +70,66 @@ pub(crate) async fn where_used(
     Ok(Json(used.iter().map(TemplateUseBody::from).collect()))
 }
 
+/// How much one active flow sends the template.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateSendVolumeBody {
+    flow_id: Uuid,
+    flow_name: String,
+    /// The average non-test messages a day over the last 7 days.
+    per_day: f64,
+}
+
+impl From<&TemplateSendVolume> for TemplateSendVolumeBody {
+    fn from(volume: &TemplateSendVolume) -> Self {
+        Self {
+            flow_id: volume.flow_id,
+            flow_name: volume.flow_name.clone(),
+            per_day: volume.per_day,
+        }
+    }
+}
+
+/// The active flows that send this template, each with the average non-test messages a day over
+/// the last 7 days. A flow is active when it is published and its running version names the
+/// template. By flow name.
+#[utoipa::path(
+    get,
+    operation_id = "template_send_volume",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/send-volume",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id")
+    ),
+    responses(
+        (status = 200, description = "The active flows that send the template, with their daily volume", body = Vec<TemplateSendVolumeBody>),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn send_volume(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id)): Path<(String, String)>,
+) -> Result<Json<Vec<TemplateSendVolumeBody>>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let id = path_id(&id)?;
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    zirv_flow_store::find_template(&mut *connection, workspace.id, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let volume = zirv_flow_store::template_send_volume(&mut connection, workspace.id, id).await?;
+    Ok(Json(
+        volume.iter().map(TemplateSendVolumeBody::from).collect(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +150,19 @@ mod tests {
         assert_eq!(body["versions"], serde_json::json!([3, 1]));
         assert_eq!(body["active"], true);
         assert!(body.get("version").is_none() && body.get("published_at").is_none());
+    }
+
+    #[test]
+    fn a_volume_keeps_the_flow_and_the_daily_average() {
+        let volume = TemplateSendVolume {
+            flow_id: Uuid::nil(),
+            flow_name: "Welcome".into(),
+            per_day: 2.5,
+        };
+
+        let body = serde_json::to_value(TemplateSendVolumeBody::from(&volume)).unwrap();
+
+        assert_eq!(body["flow_name"], "Welcome");
+        assert_eq!(body["per_day"], 2.5);
     }
 }

@@ -2,9 +2,10 @@
 //! needs the workspace admin role (ruling 43163028).
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use utoipa::ToSchema;
@@ -12,19 +13,22 @@ use uuid::Uuid;
 use zirv_flow_core::{AssetId, Cause, TraceContext, UserId, WorkspaceId};
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    AssetOwnerKind, AssetReferenceError, SenderError, Template, TemplateUse, TemplateVersion,
-    TemplateVersionSummary, require_verified_sender,
+    AssetOwnerKind, AssetReferenceError, PgConnection, SenderError, TEMPLATE_NOTE_MAX_CHARS,
+    Template, TemplateUse, TemplateVersion, TemplateVersionStats, TemplateVersionSummary,
+    require_verified_sender,
 };
-use zirv_flow_templates::{Issue, code, content_type_of, extras_needs, migrate_to_current};
+use zirv_flow_templates::{
+    FieldCatalog, Issue, TemplateDocument, code, content_type_of, extras_needs, migrate_to_current,
+};
 
 use super::crud::TemplateBody;
-use super::inputs::{Subject, resolve};
+use super::inputs::{Inputs, Subject, resolve};
 use super::where_used::TemplateUseBody;
 use super::{field_catalog, issue_problems, stored_document, template_error};
 use crate::AppState;
 use crate::admin::{self, Context};
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::problem::{ApiError, Problem, TemplateIssueProblem};
+use crate::problem::{ApiError, ItemProblem, Problem, TemplateIssueProblem};
 use crate::sending::sender_error;
 use crate::trace::request_trace;
 
@@ -38,6 +42,8 @@ pub(crate) struct TemplateVersionBody {
     /// The warnings found when it was published; a blocking issue refuses the publish.
     warnings: Vec<TemplateIssueProblem>,
     published_by: Option<Uuid>,
+    /// The note written when it was published.
+    note: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     published_at: OffsetDateTime,
@@ -52,6 +58,7 @@ impl From<&TemplateVersion> for TemplateVersionBody {
                 .unwrap_or_else(|_| version.document.clone()),
             warnings: stored_warnings(&version.validation),
             published_by: version.published_by,
+            note: version.note.clone(),
             published_at: version.published_at,
         }
     }
@@ -67,6 +74,8 @@ pub(crate) struct TemplateVersionSummaryBody {
     /// The warnings stored with the version.
     warnings: i64,
     published_by: Option<Uuid>,
+    /// The note written when it was published.
+    note: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     published_at: OffsetDateTime,
@@ -79,6 +88,7 @@ impl From<&TemplateVersionSummary> for TemplateVersionSummaryBody {
             blocking: summary.blocking,
             warnings: summary.warnings,
             published_by: summary.published_by,
+            note: summary.note.clone(),
             published_at: summary.published_at,
         }
     }
@@ -104,6 +114,54 @@ fn stored_warnings(validation: &Value) -> Vec<TemplateIssueProblem> {
         .collect()
 }
 
+/// The optional body of a publish.
+#[derive(Default, Deserialize, ToSchema)]
+pub(crate) struct TemplatePublishRequest {
+    /// A note for the version history, at most 500 characters. Blank is no note.
+    note: Option<String>,
+    /// The revision of the draft that was reviewed. When given, a draft saved since is a 409
+    /// `template_draft_changed` and nothing is published.
+    revision: Option<i32>,
+}
+
+/// What a publish request asks for beyond the draft itself.
+pub(crate) struct PublishInput {
+    note: Option<String>,
+    /// The draft revision the caller reviewed.
+    reviewed: Option<i32>,
+}
+
+/// The note and reviewed revision of a publish request: an absent body or a blank note is no note,
+/// and more than [`TEMPLATE_NOTE_MAX_CHARS`] characters is a 400 naming `note`.
+fn input_of(body: &[u8]) -> Result<PublishInput, ApiError> {
+    let request: TemplatePublishRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        TemplatePublishRequest::default()
+    } else {
+        serde_json::from_slice(body)
+            .map_err(|_| ApiError::bad_request("request body is not valid JSON"))?
+    };
+    let revision = request.revision;
+    let note = request.note.map(|note| note.trim().to_owned());
+    match note {
+        Some(note) if note.chars().count() > TEMPLATE_NOTE_MAX_CHARS => Err(ApiError::bad_request(
+            "note is too long",
+        )
+        .with_errors(vec![ItemProblem {
+            index: 0,
+            field: "note".to_owned(),
+            reason: "too_long".to_owned(),
+        }])),
+        Some(note) if !note.is_empty() => Ok(PublishInput {
+            note: Some(note),
+            reviewed: revision,
+        }),
+        _ => Ok(PublishInput {
+            note: None,
+            reviewed: revision,
+        }),
+    }
+}
+
 /// The new version and the template after the publish.
 #[derive(Serialize, ToSchema)]
 pub(crate) struct TemplatePublishedBody {
@@ -111,6 +169,50 @@ pub(crate) struct TemplatePublishedBody {
     version: TemplateVersionBody,
     /// The active flows that send this template, which now send the new version.
     used_by: Vec<TemplateUseBody>,
+}
+
+/// What a publish validates a document against: the workspace's field catalog and the render inputs
+/// (theme, snippets, assets, conditions) the publish would resolve. The stored draft checks read the
+/// same, so a draft that publishes cleanly never shows blocking checks.
+pub(crate) async fn publish_inputs(
+    state: &AppState,
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    doc: &TemplateDocument,
+) -> Result<(FieldCatalog, Inputs), ApiError> {
+    let catalog =
+        field_catalog(zirv_flow_store::read_template_field_catalog(connection, workspace).await?);
+    let now = state.clock.now(connection).await?;
+    let inputs = resolve(
+        connection,
+        workspace,
+        doc,
+        Subject::Nobody,
+        state.public_url(),
+        now,
+    )
+    .await?;
+    Ok((catalog, inputs))
+}
+
+/// The issues a publish finds in `doc`: the sample render's checks, run in the render host, and the
+/// resolver's own. The one check a publish, the stored draft checks and the assistant's template
+/// drafts all make.
+pub(crate) async fn publish_issues(
+    render: &RenderPool,
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+    inputs: &Inputs,
+) -> Result<Vec<Issue>, ApiError> {
+    content_type_of(doc).map_err(|_| ApiError::template_content_unsupported())?;
+    // A template's sample render allocates like any render, so it runs in the render host, never
+    // in this process.
+    let mut issues = render
+        .validate_with(doc, catalog, &inputs.extras)
+        .await
+        .map_err(|failure| ApiError::render_failed(&failure))?;
+    issues.extend(inputs.issues.iter().cloned());
+    Ok(issues)
 }
 
 /// Validates the draft and publishes it as the next version, or changes nothing. Audited as
@@ -127,6 +229,7 @@ pub(crate) async fn publish_template(
     workspace: WorkspaceId,
     id: Uuid,
     published_by: Option<UserId>,
+    input: &PublishInput,
 ) -> Result<(Template, TemplateVersion, Vec<TemplateUse>), ApiError> {
     let (draft, catalog, inputs) = {
         let mut connection = state
@@ -143,31 +246,18 @@ pub(crate) async fn publish_template(
         let draft = zirv_flow_store::find_template_draft(&mut *connection, workspace, id)
             .await?
             .ok_or_else(ApiError::internal)?;
-        let catalog = field_catalog(
-            zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
-        );
+        if input
+            .reviewed
+            .is_some_and(|revision| revision != draft.revision)
+        {
+            return Err(ApiError::template_draft_changed());
+        }
         let doc = stored_document(&draft.document)?;
-        let now = state.clock.now(&mut connection).await?;
-        let inputs = resolve(
-            &mut connection,
-            workspace,
-            &doc,
-            Subject::Nobody,
-            state.public_url(),
-            now,
-        )
-        .await?;
+        let (catalog, inputs) = publish_inputs(state, &mut connection, workspace, &doc).await?;
         (draft, catalog, inputs)
     };
     let doc = stored_document(&draft.document)?;
-    content_type_of(&doc).map_err(|_| ApiError::template_content_unsupported())?;
-    // A template's sample render allocates like any render, so it runs in the render host, never
-    // in this process.
-    let mut issues: Vec<Issue> = render
-        .validate_with(&doc, &catalog, &inputs.extras)
-        .await
-        .map_err(|failure| ApiError::render_failed(&failure))?;
-    issues.extend(inputs.issues.iter().cloned());
+    let issues = publish_issues(render, &doc, &catalog, &inputs).await?;
     if issues.iter().any(Issue::is_blocking) {
         return Err(ApiError::template_invalid(issue_problems(&issues)));
     }
@@ -208,6 +298,7 @@ pub(crate) async fn publish_template(
         &locked,
         &validation,
         published_by,
+        input.note.as_deref(),
         &trace,
     )
     .await
@@ -266,6 +357,8 @@ pub(crate) async fn publish_template(
 /// is a 422 `template_invalid` that lists every issue and writes nothing. The warnings of a
 /// successful publish are in the response and stored with the version. The document's sender must
 /// be a live identity on a verified sending domain, or the publish is a 422 `sender_unverified`.
+/// An optional body `{ "note", "revision" }` adds a note of at most 500 characters to the version and
+/// publishes only if the draft is still `revision`.
 /// Audited as `template.published`.
 #[utoipa::path(
     post,
@@ -276,12 +369,14 @@ pub(crate) async fn publish_template(
         ("ws" = Uuid, Path, description = "Workspace id"),
         ("id" = Uuid, Path, description = "Template id")
     ),
+    request_body = Option<TemplatePublishRequest>,
     responses(
         (status = 201, description = "The template and its new version", body = TemplatePublishedBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "The body is not valid JSON, or the note is longer than 500 characters (`errors` names `note`)", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a key without the admin scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`), or its draft was saved while it was being validated, or after the `revision` the caller reviewed (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft has blocking issues (`code` is `template_invalid`, with `template_issues`), no registered content type handles it (`template_content_unsupported`), or its sender is unknown, archived or on a domain that is not verified (`sender_unverified`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
@@ -290,8 +385,10 @@ pub(crate) async fn publish(
     State(state): State<AppState>,
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
+    body: Bytes,
 ) -> Result<(StatusCode, Json<TemplatePublishedBody>), ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let input = input_of(&body)?;
     let render = state
         .render_pool()
         .ok_or_else(ApiError::render_unavailable)?;
@@ -302,6 +399,7 @@ pub(crate) async fn publish(
         workspace.id,
         path_id(&id)?,
         principal.user_id(),
+        &input,
     )
     .await?;
     Ok((
@@ -387,6 +485,83 @@ pub(crate) async fn version(
     Ok(Json(TemplateVersionBody::from(&version)))
 }
 
+/// One theme and snippet combination recorded on the messages sent with a version.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct VersionRenderBody {
+    /// The theme in effect, or none.
+    theme_id: Option<Uuid>,
+    theme_version: Option<i32>,
+    /// Snippet id to the version number used.
+    #[schema(value_type = Object)]
+    snippet_versions: Value,
+    /// The non-test messages with this combination.
+    count: i64,
+}
+
+/// What one template version sent.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateVersionStatsBody {
+    /// The non-test messages sent with the version.
+    messages: i64,
+    /// The distinct theme and snippet combinations, most used first, at most 20.
+    renders: Vec<VersionRenderBody>,
+    /// Whether more combinations exist than `renders` lists.
+    more: bool,
+}
+
+impl From<&TemplateVersionStats> for TemplateVersionStatsBody {
+    fn from(stats: &TemplateVersionStats) -> Self {
+        Self {
+            messages: stats.messages,
+            renders: stats
+                .renders
+                .iter()
+                .map(|render| VersionRenderBody {
+                    theme_id: render.theme_id,
+                    theme_version: render.theme_version,
+                    snippet_versions: render.snippet_versions.clone(),
+                    count: render.count,
+                })
+                .collect(),
+            more: stats.more,
+        }
+    }
+}
+
+/// What one version sent: its non-test message count and the theme and snippet versions those
+/// messages recorded.
+#[utoipa::path(
+    get,
+    operation_id = "get_template_version_stats",
+    path = "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats",
+    tag = "templates",
+    params(
+        ("ws" = Uuid, Path, description = "Workspace id"),
+        ("id" = Uuid, Path, description = "Template id"),
+        ("n" = i32, Path, description = "Version number")
+    ),
+    responses(
+        (status = 200, description = "The messages sent with the version and their theme and snippet versions", body = TemplateVersionStatsBody),
+        (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "A key without the read scope", body = Problem, content_type = "application/problem+json"),
+        (status = 404, description = "No such workspace, template or version, or no access", body = Problem, content_type = "application/problem+json")
+    ),
+    security(("session" = []), ("api_key" = []))
+)]
+pub(crate) async fn version_stats(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((ws, id, n)): Path<(String, String, String)>,
+) -> Result<Json<TemplateVersionStatsBody>, ApiError> {
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
+    let (id, n): (Uuid, i32) = (path_id(&id)?, path_id(&n)?);
+    zirv_flow_store::find_template_version(&state.pool, workspace.id, id, n)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let stats = zirv_flow_store::template_version_stats(&state.pool, workspace.id, id, n).await?;
+    Ok(Json(TemplateVersionStatsBody::from(&stats)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +597,28 @@ mod tests {
 
         assert_eq!(back.len(), issues.len());
         assert_eq!(back[0].code, issues[0].code);
+    }
+
+    #[test]
+    fn stats_keep_the_counts_and_the_recorded_versions() {
+        let theme = Uuid::now_v7();
+        let stats = TemplateVersionStats {
+            messages: 9,
+            renders: vec![zirv_flow_store::VersionRender {
+                theme_id: Some(theme),
+                theme_version: Some(2),
+                snippet_versions: json!({"s": 3}),
+                count: 7,
+            }],
+            more: true,
+        };
+
+        let body = serde_json::to_value(TemplateVersionStatsBody::from(&stats)).unwrap();
+
+        assert_eq!(body["messages"], 9);
+        assert_eq!(body["more"], true);
+        assert_eq!(body["renders"][0]["theme_id"], json!(theme));
+        assert_eq!(body["renders"][0]["snippet_versions"], json!({"s": 3}));
+        assert_eq!(body["renders"][0]["count"], 7);
     }
 }

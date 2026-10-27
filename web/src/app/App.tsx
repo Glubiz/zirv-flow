@@ -22,7 +22,7 @@ import { ConflictsPage, PeoplePage, ProfilePage, TraitsPage } from "../features/
 import { PrivacyPage } from "../features/privacy";
 import { SnippetPage, SnippetsPage } from "../features/snippets";
 import { ThemePage, ThemesPage } from "../features/themes";
-import { TemplatePage, TemplatesPage, TestSendPage } from "../features/templates";
+import { HistoryPage, PublishPage, TemplatePage, TemplatesPage, TestSendPage } from "../features/templates";
 import { TracesPage } from "../features/traces";
 import { SessionProvider, SignInPage, useSession } from "../features/session";
 import { SetupPage, useSetupStatus } from "../features/setup";
@@ -137,6 +137,8 @@ export function AppRoutes() {
           <Route path="w/:ws/templates" element={<TemplatesPage />} />
           <Route path="w/:ws/templates/:id" element={<TemplatePage />} />
           <Route path="w/:ws/templates/:id/test" element={<TestSendPage />} />
+          <Route path="w/:ws/templates/:id/publish" element={<PublishPage />} />
+          <Route path="w/:ws/templates/:id/history" element={<HistoryPage />} />
           <Route path="w/:ws/images" element={<AssetLibraryPage />} />
           <Route path="w/:ws/themes" element={<ThemesPage />} />
           <Route path="w/:ws/themes/:id" element={<ThemePage />} />

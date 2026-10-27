@@ -21,5 +21,5 @@ export async function signIn(page: Page): Promise<void> {
 /** Opens the templates page of the seeded workspace. */
 export async function openTemplates(page: Page): Promise<void> {
   await page.getByRole("link", { name: "Templates" }).first().click();
-  await expect(page.getByRole("heading", { name: "Templates", level: 1 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Template library", level: 1 })).toBeVisible();
 }

@@ -1,5 +1,5 @@
-//! Drafting a mapping, a manifest, a segment or a flow with the assistant (architecture 13.2,
-//! 13.3), and accepting the result.
+//! Drafting a mapping, a manifest, a segment, a flow or a template with the assistant
+//! (architecture 13.2, 13.3), and accepting the result.
 //!
 //! `POST .../ai/drafts` runs one synchronous draft: the server reads what the model may know
 //! through the `read_source` tool, asks the model to call the kind's one draft tool, checks each
@@ -14,6 +14,9 @@
 //! A flow draft is accepted into the flow's ordinary draft (the same write as `PATCH .../flows/{id}`,
 //! under the flow's lock, after the publish validation passes again). It never publishes and never
 //! creates a version: publishing stays a separate human action under its own permission.
+//!
+//! A template draft is accepted into the template's ordinary draft the same way (the template's
+//! lock, the draft's revision checked, the publish validation passed again) and never publishes.
 //!
 //! Every attempt and every tool call runs as the signed-in user. Nothing here puts a prompt, a
 //! document, a sample, a draft or a dry run in a log, a metric label or the audit trail.
@@ -30,7 +33,8 @@ use time::Duration;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zirv_flow_ai::{
-    BoxFuture, ChatResponse, RepairError, RepairOutcome, ToolError, ToolOutput, Verdict,
+    BoxFuture, ChatResponse, Content, Privacy, RepairError, RepairOutcome, ToolError, ToolOutput,
+    Verdict,
 };
 use zirv_flow_connectors::manifest;
 use zirv_flow_core::mapping::Mapping;
@@ -38,15 +42,22 @@ use zirv_flow_core::token::sha256;
 use zirv_flow_core::{UserId, WorkspaceId};
 use zirv_flow_store::{
     AiDraft, CatalogDetails, DraftKind, DraftStatus, Flow, FlowPatch, FlowState, NewAiDraft,
-    PgConnection, Segment, SegmentVersion, Source, Stream,
+    PgConnection, Segment, SegmentVersion, Source, Stream, Template, TemplateDraft,
+};
+use zirv_flow_templates::{
+    FieldCatalog, Issue, Mode, RenderContext, TemplateDocument, content_type_of, migrate_to_current,
 };
 
-use super::diff::{self, Change, FLOW_KEYS, MANIFEST_KEYS, MAPPING_KEYS, SEGMENT_KEYS};
+use super::diff::{
+    self, Change, FLOW_KEYS, MANIFEST_KEYS, MAPPING_KEYS, SEGMENT_KEYS, TEMPLATE_KEYS,
+};
 use super::dispatch::{DispatchError, Dispatcher};
 use super::flow_context;
 use super::prompt::{self, ManifestContext, render_manifest_context};
-use super::segment_context::{self, Placeholders};
+use super::segment_context::{self, ClearKeys, Placeholders};
+use super::template_context::{self, TemplateContext};
 use super::tools::draft_segment::check_definition;
+use super::tools::draft_template::TemplateTask;
 use super::tools::{self, DraftTarget, ToolContext};
 use crate::AppState;
 use crate::admin;
@@ -61,6 +72,13 @@ use crate::segments::catalog_of;
 use crate::sources::{
     MappingIssue, PreviewBody, SampleBody, check_sample, is_push, keeps_connection,
     mapping_check_of, preview_mapping, problems, sample_manifest, saved_mapping_body,
+};
+use crate::templates::crud::{TemplateDetailBody, check_draft};
+use crate::templates::inputs::{Inputs, Subject, resolve};
+use crate::templates::preview::render;
+use crate::templates::publish::{publish_inputs, publish_issues};
+use crate::templates::{
+    field_catalog, issue_problems as template_issue_problems, stored_document, template_error,
 };
 
 /// The longest prompt, in characters.
@@ -82,6 +100,7 @@ pub(crate) enum DraftKindBody {
     Manifest,
     Segment,
     Flow,
+    Template,
 }
 
 impl DraftKindBody {
@@ -91,6 +110,7 @@ impl DraftKindBody {
             Self::Manifest => DraftKind::Manifest,
             Self::Segment => DraftKind::Segment,
             Self::Flow => DraftKind::Flow,
+            Self::Template => DraftKind::Template,
         }
     }
 }
@@ -113,6 +133,13 @@ pub(crate) struct DraftRequest {
     /// For a flow: the flow whose draft is edited. Required for a flow, refused for the others.
     #[serde(default)]
     flow_id: Option<Uuid>,
+    /// For a template: the template whose draft is changed. Required for a template, refused for
+    /// the others.
+    #[serde(default)]
+    template_id: Option<Uuid>,
+    /// For a template: what to do. Required for a template, refused for the others.
+    #[serde(default)]
+    task: Option<TemplateTask>,
     /// What the user wants, 1 to 2000 characters. It is sent as written: do not paste personal
     /// data into it.
     prompt: String,
@@ -140,6 +167,12 @@ fn check_request(request: &DraftRequest) -> Result<(), ApiError> {
     }
     if request.flow_id.is_some() && request.kind != DraftKindBody::Flow {
         return Err(invalid("flow_id", "belongs to a flow only"));
+    }
+    if request.template_id.is_some() && request.kind != DraftKindBody::Template {
+        return Err(invalid("template_id", "belongs to a template only"));
+    }
+    if request.task.is_some() && request.kind != DraftKindBody::Template {
+        return Err(invalid("task", "belongs to a template only"));
     }
     match request.kind {
         DraftKindBody::Mapping => {
@@ -172,6 +205,32 @@ fn check_request(request: &DraftRequest) -> Result<(), ApiError> {
             }
         }
         DraftKindBody::Segment => {
+            if request.source_id.is_some() {
+                return Err(invalid(
+                    "source_id",
+                    "belongs to a mapping or manifest only",
+                ));
+            }
+            if request.stream.is_some() {
+                return Err(invalid("stream", "belongs to a mapping only"));
+            }
+            if request.documentation.is_some() {
+                return Err(invalid("documentation", "belongs to a manifest only"));
+            }
+            if request.sample.is_some() {
+                return Err(ApiError::unprocessable(
+                    "sample: only a webhook stream takes a sample payload",
+                )
+                .with_code("sample_not_supported"));
+            }
+        }
+        DraftKindBody::Template => {
+            if request.template_id.is_none() {
+                return Err(invalid("template_id", "is required for a template"));
+            }
+            if request.task.is_none() {
+                return Err(invalid("task", "is required for a template"));
+            }
             if request.source_id.is_some() {
                 return Err(invalid(
                     "source_id",
@@ -229,6 +288,8 @@ pub(crate) enum Restore {
     Segment(Placeholders),
     /// The literals of a flow's saved draft that were masked.
     Flow(flow_context::FlowTable),
+    /// The literals of a template document's conditions that were masked.
+    Template(Placeholders),
 }
 
 /// One problem of a draft, as a code and where it is: a column of a mapping or a JSON pointer in
@@ -239,6 +300,10 @@ pub(crate) struct DraftIssue {
     code: String,
     /// A column name or a JSON pointer; absent when the problem is on the whole draft.
     at: Option<String>,
+    /// For `unknown_merge_field`: the merge field the document names, a key of the schema and
+    /// never a person's value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    field: Option<String>,
     /// The line shown to the model as feedback.
     #[serde(skip)]
     line: String,
@@ -255,18 +320,26 @@ impl DraftIssue {
         self.at.as_deref()
     }
 
-    /// From a tool's feedback line: `code (column "x")`, `code at /pointer` or `code`.
+    /// From a tool's feedback line: `code (column "x")`, `code at /pointer` or `code`. A line may
+    /// carry a hint for the model after ` | `, such as the merge field a template issue is about;
+    /// the hint is part of the feedback and not of the code or the place.
     pub(crate) fn from_line(line: &str) -> Self {
-        let (code, at) = if let Some((code, rest)) = line.split_once(" (column \"") {
+        let head = line.split_once(" | ").map_or(line, |(head, _)| head);
+        let (code, at) = if let Some((code, rest)) = head.split_once(" (column \"") {
             (code, rest.strip_suffix("\")").map(str::to_owned))
-        } else if let Some((code, rest)) = line.split_once(" at ") {
+        } else if let Some((code, rest)) = head.split_once(" at ") {
             (code, Some(rest.to_owned()))
         } else {
-            (line, None)
+            (head, None)
         };
+        let field = (code == "unknown_merge_field")
+            .then(|| line.split_once(" | field "))
+            .flatten()
+            .map(|(_, name)| name.to_owned());
         Self {
             code: code.to_owned(),
             at,
+            field,
             line: line.to_owned(),
         }
     }
@@ -360,6 +433,34 @@ pub(crate) struct DraftBody {
     /// For a flow: what a few synthetic people do in the candidate (test-mode walks, nothing
     /// executed or written). Absent for the other kinds and for an invalid draft.
     simulation: Option<SimulationBody>,
+    /// For the template task `subject_variants`: the subjects offered, the first of which is in
+    /// the document. Empty for every other draft.
+    subject_variants: Vec<String>,
+    /// For a template: the draft and the result rendered for the sample person with inert
+    /// tracking, so the client can show them at desktop and mobile widths. Absent for the other
+    /// kinds and for an invalid draft.
+    renders: Option<TemplateRendersBody>,
+    /// For a template draft that needed more than one attempt: the places in the document that an
+    /// earlier attempt got wrong and a later one fixed, as JSON pointers. Absent otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    repaired: Vec<String>,
+}
+
+/// One rendered email: the parts of a preview.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RenderedEmailBody {
+    subject: Option<String>,
+    html: Option<String>,
+    text: Option<String>,
+}
+
+/// A template draft before and after the change, both rendered for the sample person.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TemplateRendersBody {
+    /// The template's draft as it is now; absent when it has blocking issues and does not render.
+    before: Option<RenderedEmailBody>,
+    /// The drafted document.
+    after: Option<RenderedEmailBody>,
 }
 
 /// An accepted draft, for the editor to load.
@@ -371,11 +472,15 @@ pub(crate) struct AcceptedDraftBody {
     stream: Option<String>,
     segment_id: Option<Uuid>,
     flow_id: Option<Uuid>,
+    template_id: Option<Uuid>,
     #[schema(value_type = Object)]
     content: Value,
     /// For a flow: the flow after the draft was copied into its ordinary draft. Nothing was
     /// published and no version was created.
     flow: Option<FlowDetailBody>,
+    /// For a template: the template and its draft after the document was copied into the draft,
+    /// with `lang` and the revision as they are now. Nothing was published or sent.
+    template: Option<TemplateDetailBody>,
 }
 
 fn kind_body(kind: DraftKind) -> DraftKindBody {
@@ -384,6 +489,7 @@ fn kind_body(kind: DraftKind) -> DraftKindBody {
         DraftKind::Manifest => DraftKindBody::Manifest,
         DraftKind::Segment => DraftKindBody::Segment,
         DraftKind::Flow => DraftKindBody::Flow,
+        DraftKind::Template => DraftKindBody::Template,
     }
 }
 
@@ -394,6 +500,7 @@ pub(crate) fn tool_name(kind: DraftKind) -> &'static str {
         DraftKind::Manifest => "draft_manifest",
         DraftKind::Segment => "draft_segment",
         DraftKind::Flow => "draft_flow",
+        DraftKind::Template => "draft_template",
     }
 }
 
@@ -452,6 +559,12 @@ async fn validate_turn(
             return Verdict::Invalid(DraftIssue::from_lines(&left));
         }
     }
+    if let Restore::Template(table) = restore {
+        let left = template_context::restore_fragment(table, &mut restored);
+        if !left.is_empty() {
+            return Verdict::Invalid(DraftIssue::from_lines(&left));
+        }
+    }
     if let Some(draft) = restored.get("manifest") {
         let left = prompt::leftover_placeholders(draft);
         if !left.is_empty() {
@@ -477,6 +590,21 @@ fn turn<'a>(
     Box::pin(async move { validate_turn(&context, kind, &restore, response).await })
 }
 
+/// Adds the places of `issues` to `noted`, once each, in the order they came.
+fn note_places(noted: &std::sync::Mutex<Vec<String>>, issues: &[DraftIssue]) {
+    let Ok(mut noted) = noted.lock() else { return };
+    for at in issues.iter().filter_map(DraftIssue::at) {
+        if !noted.iter().any(|seen| seen == at) {
+            noted.push(at.to_owned());
+        }
+    }
+}
+
+/// The places noted so far.
+fn places(noted: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+    noted.lock().map(|noted| noted.clone()).unwrap_or_default()
+}
+
 /// The SHA-256 of a saved artifact's JSON.
 fn digest(value: &Value) -> [u8; 32] {
     sha256(&value.to_string())
@@ -489,6 +617,7 @@ fn saved_artifact(
     source: Option<&Source>,
     version: Option<&SegmentVersion>,
     flow: Option<&Flow>,
+    template: Option<&Value>,
 ) -> Option<Value> {
     match kind {
         DraftKind::Mapping => stream
@@ -499,7 +628,14 @@ fn saved_artifact(
             .and_then(|source| source.config.get("manifest").cloned()),
         DraftKind::Segment => version.map(|version| version.definition.clone()),
         DraftKind::Flow => flow.map(flow_document),
+        DraftKind::Template => template.cloned(),
     }
+}
+
+/// What a template draft is made from: the document and the revision it had. The digest of this
+/// is what accepting checks, so a draft that was saved since, even to the same text, is outdated.
+fn template_stamp(draft: &TemplateDraft) -> Value {
+    json!({"revision": draft.revision, "document": draft.document})
 }
 
 /// A flow's draft as the document a flow draft holds: `{"graph", "settings"}`.
@@ -513,6 +649,7 @@ fn keys(kind: DraftKind) -> &'static [(&'static str, &'static str)] {
         DraftKind::Manifest => MANIFEST_KEYS,
         DraftKind::Segment => SEGMENT_KEYS,
         DraftKind::Flow => FLOW_KEYS,
+        DraftKind::Template => TEMPLATE_KEYS,
     }
 }
 
@@ -599,9 +736,12 @@ async fn dry_run_manifest(
     }
 }
 
-/// Drafts a mapping, a manifest, a segment or a flow (`kind`: `mapping`, `manifest`, `segment` or
-/// `flow`; a flow draft names its flow in `flow_id` and also returns a `simulation` of a few
-/// synthetic people) with the assistant: the model is asked, its answer validated
+/// Drafts a mapping, a manifest, a segment, a flow or a template (`kind`: `mapping`, `manifest`,
+/// `segment`, `flow` or `template`; a flow draft names its flow in `flow_id` and also returns a
+/// `simulation` of a few synthetic people; a template draft names its template in `template_id`
+/// and its `task` (`copy`, `subject_variants`, `block_layout` or `translation`) and also returns
+/// `renders`, the template's draft and the result rendered for the sample person) with the
+/// assistant: the model is asked, its answer validated
 /// with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
 /// repairs. The answer is the validated draft with its diff against the saved version and a dry
 /// run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
@@ -621,12 +761,12 @@ async fn dry_run_manifest(
         (status = 402, description = "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The assistant is off (`ai_disabled`), or the source does not use a manifest", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over 160 KiB", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Too many AI calls (`ai_rate_limited`); try again in a minute", body = Problem, content_type = "application/problem+json"),
-        (status = 502, description = "The model provider failed (`ai_provider_error`), or the source did", body = Problem, content_type = "application/problem+json"),
-        (status = 503, description = "The server has no master key to open the provider key", body = Problem, content_type = "application/problem+json")
+        (status = 502, description = "The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`)", body = Problem, content_type = "application/problem+json"),
+        (status = 503, description = "The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -685,6 +825,13 @@ pub(crate) async fn create(
         }
         _ => None,
     };
+    // The template being edited, within the workspace, with the document the model starts from.
+    let template = match (kind, request.template_id, request.task) {
+        (DraftKind::Template, Some(template_id), Some(task)) => {
+            Some(current_template(&state, workspace.id, template_id, task).await?)
+        }
+        _ => None,
+    };
     let sample = match (&source, &request.sample) {
         (Some(source), sample) if kind == DraftKind::Mapping => {
             match (is_push(&source.kind), sample) {
@@ -717,6 +864,14 @@ pub(crate) async fn create(
             segment_id: request.segment_id,
         },
         DraftKind::Flow => DraftTarget::Flow,
+        DraftKind::Template => {
+            let held = template.as_ref().ok_or_else(ApiError::internal)?;
+            DraftTarget::Template {
+                template: Box::new(held.template.clone()),
+                task: held.task,
+                base: held.base.clone(),
+            }
+        }
     };
     let context = Arc::new(ToolContext {
         state: state.clone(),
@@ -733,6 +888,7 @@ pub(crate) async fn create(
         source.as_ref(),
         segment.as_ref().map(|(_, version)| version),
         flow.as_ref(),
+        template.as_ref().map(|held| &held.base),
     );
     // What the model may know, read by the server: through the registered tool for a source, from
     // the workspace's catalog for a segment.
@@ -761,6 +917,14 @@ pub(crate) async fn create(
             )
             .map_err(|_| ApiError::ai_flow_too_large())?;
             flow_table = table;
+            parts
+        }
+        (DraftKind::Template, _) => {
+            let held = template.as_ref().ok_or_else(ApiError::internal)?;
+            let details = segment_details(&state, workspace.id).await?;
+            let (parts, table) =
+                template_known(&state, workspace.id, held, &details, context.privacy).await?;
+            placeholders = table;
             parts
         }
         (DraftKind::Manifest, None) => render_manifest_context(&ManifestContext::default()),
@@ -799,13 +963,28 @@ pub(crate) async fn create(
         (DraftKind::Manifest, Some(saved)) => Restore::Manifest(saved.clone()),
         (DraftKind::Segment, _) => Restore::Segment(placeholders),
         (DraftKind::Flow, _) => Restore::Flow(flow_table),
+        (DraftKind::Template, _) => Restore::Template(placeholders),
         _ => Restore::Nothing,
     });
+    // The places of a template that earlier attempts got wrong, for the ones that fixed them.
+    let earlier: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let noted = Arc::clone(&earlier);
     let outcome = zirv_flow_ai::repair(
         state.ai.config.max_repair_attempts,
         &chat,
         &dispatcher,
-        move |response| turn(Arc::clone(&owned), kind, Arc::clone(&restorable), response),
+        move |response| {
+            let verdict = turn(Arc::clone(&owned), kind, Arc::clone(&restorable), response);
+            let noted = Arc::clone(&noted);
+            let track = kind == DraftKind::Template;
+            Box::pin(async move {
+                let verdict = verdict.await;
+                if let (true, Verdict::Invalid(issues)) = (track, &verdict) {
+                    note_places(&noted, issues);
+                }
+                verdict
+            }) as BoxFuture<'_, Verdict<Value, DraftIssue, ApiError>>
+        },
     )
     .await;
 
@@ -814,9 +993,24 @@ pub(crate) async fn create(
     let (source_id, stream_name) = (request.source_id, request.stream.as_deref());
     let segment_id = request.segment_id;
     let flow_id = request.flow_id;
+    let template_id = request.template_id;
     let body = match outcome {
         Ok(RepairOutcome::Valid(content, attempts)) => {
+            // A template answer carries the document and the subjects it offered; the draft that
+            // is stored and diffed is the document.
+            let (content, subject_variants) = if kind == DraftKind::Template {
+                split_template_answer(&content)?
+            } else {
+                (content, Vec::new())
+            };
             let changes = diff::changes(saved.as_ref(), &content, keys(kind));
+            // Both renders are made before the draft is stored, so a failure leaves no draft.
+            let renders = match (&template, kind) {
+                (Some(held), DraftKind::Template) => {
+                    Some(template_renders(&state, workspace.id, &held.base, &content).await?)
+                }
+                _ => None,
+            };
             // A flow has the walks of a few synthetic people: test mode, nothing written. They are
             // computed before the draft is stored, so a failure leaves no draft behind.
             let simulation = match (kind, flow_id) {
@@ -838,9 +1032,13 @@ pub(crate) async fn create(
                     stream_name,
                     segment_id,
                     flow_id,
+                    template_id,
                     status: DraftStatus::Valid,
                     content: Some(&content),
-                    base_digest: saved.as_ref().map(digest),
+                    base_digest: match &template {
+                        Some(held) => Some(digest(&template_stamp(&held.draft))),
+                        None => saved.as_ref().map(digest),
+                    },
                     expires_at,
                 },
             )
@@ -855,6 +1053,11 @@ pub(crate) async fn create(
                 _ => Some(dry_run_manifest(&context, source.as_ref(), &content).await),
             };
             run_outcome(kind, "valid");
+            let repaired = if attempts > 1 {
+                places(&earlier)
+            } else {
+                Vec::new()
+            };
             DraftBody {
                 id,
                 kind: request.kind,
@@ -865,6 +1068,9 @@ pub(crate) async fn create(
                 changes,
                 dry_run,
                 simulation,
+                subject_variants,
+                renders,
+                repaired,
             }
         }
         Ok(RepairOutcome::Exhausted(issues, attempts)) => {
@@ -880,6 +1086,7 @@ pub(crate) async fn create(
                     stream_name,
                     segment_id,
                     flow_id,
+                    template_id,
                     status: DraftStatus::Invalid,
                     content: None,
                     base_digest: None,
@@ -899,6 +1106,9 @@ pub(crate) async fn create(
                 changes: Vec::new(),
                 dry_run: None,
                 simulation: None,
+                subject_variants: Vec::new(),
+                renders: None,
+                repaired: Vec::new(),
             }
         }
         Err(RepairError::Dispatch(error)) => {
@@ -928,8 +1138,9 @@ async fn recheck(
     if draft.kind == DraftKind::Segment {
         return recheck_segment(tx, draft, content).await;
     }
-    if draft.kind == DraftKind::Flow {
-        // A flow draft is applied, not only re-checked: see `apply_flow`.
+    if matches!(draft.kind, DraftKind::Flow | DraftKind::Template) {
+        // A flow or template draft is applied, not only re-checked: see `apply_flow` and
+        // `apply_template`.
         return Err(ApiError::internal());
     }
     let Some(source_id) = draft.source_id else {
@@ -954,10 +1165,12 @@ async fn recheck(
                 .ok_or_else(ApiError::not_found)?;
             (source, None)
         }
-        // A segment or flow draft was handled above.
-        DraftKind::Segment | DraftKind::Flow => return Err(ApiError::internal()),
+        // A segment, flow or template draft was handled above.
+        DraftKind::Segment | DraftKind::Flow | DraftKind::Template => {
+            return Err(ApiError::internal());
+        }
     };
-    let saved = saved_artifact(draft.kind, stream.as_ref(), Some(&source), None, None);
+    let saved = saved_artifact(draft.kind, stream.as_ref(), Some(&source), None, None, None);
     if saved.as_ref().map(digest) != draft.base_digest {
         return Err(ApiError::ai_draft_outdated());
     }
@@ -973,7 +1186,7 @@ async fn recheck(
                 .map_err(|issue: MappingIssue| ApiError::from(issue))
         }
         DraftKind::Manifest => recheck_manifest(content),
-        DraftKind::Segment | DraftKind::Flow => Err(ApiError::internal()),
+        DraftKind::Segment | DraftKind::Flow | DraftKind::Template => Err(ApiError::internal()),
     }
 }
 
@@ -1016,6 +1229,282 @@ async fn simulation_of(
         flow_id,
         now,
     ))
+}
+
+/// What a template draft run edits: the template, its draft as the run began, that draft's
+/// document at the current schema (what the model starts from and what the diff is against), and
+/// the task.
+struct TemplateTarget {
+    template: Template,
+    draft: TemplateDraft,
+    base: Value,
+    task: TemplateTask,
+}
+
+/// The template being edited, within the workspace. An archived template takes no draft, and the
+/// assistant drafts email only; the task must fit the document (a block layout is for a block
+/// email).
+async fn current_template(
+    state: &AppState,
+    workspace: WorkspaceId,
+    template_id: Uuid,
+    task: TemplateTask,
+) -> Result<TemplateTarget, ApiError> {
+    let template = zirv_flow_store::find_template(&state.pool, workspace, template_id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if template.archived_at.is_some() {
+        return Err(ApiError::template_archived());
+    }
+    if template.channel != "email" {
+        return Err(ApiError::ai_template_unsupported(
+            "the assistant drafts email templates only",
+        ));
+    }
+    let draft = zirv_flow_store::find_template_draft(&state.pool, workspace, template_id)
+        .await?
+        .ok_or_else(ApiError::internal)?;
+    let base = migrate_to_current(draft.document.clone())
+        .map_err(|_| ApiError::template_unsupported_schema())?;
+    if task == TemplateTask::BlockLayout && stored_document(&base)?.mode != Mode::Blocks {
+        return Err(ApiError::ai_template_unsupported(
+            "a block layout is for a template in blocks mode",
+        ));
+    }
+    Ok(TemplateTarget {
+        template,
+        draft,
+        base,
+        task,
+    })
+}
+
+/// What the model may know of a template: its document, the names of the merge fields, themes and
+/// snippets of the workspace, and the task. No person and no value of a trait.
+async fn template_known(
+    state: &AppState,
+    workspace: WorkspaceId,
+    held: &TemplateTarget,
+    details: &CatalogDetails,
+    privacy: Privacy,
+) -> Result<(Vec<Content>, Placeholders), ApiError> {
+    let mut connection = state
+        .pool
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let read = zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?;
+    let themes = zirv_flow_store::list_themes(&mut *connection, workspace, false).await?;
+    let snippets = zirv_flow_store::list_snippets(&mut *connection, workspace, false).await?;
+    drop(connection);
+    template_context::render_template_context(
+        &TemplateContext {
+            name: &held.template.name,
+            channel: &held.template.channel,
+            category: &held.template.category,
+            document: &held.base,
+            traits: read
+                .traits
+                .iter()
+                .map(|(key, kind)| (key.clone(), kind.as_str().to_owned()))
+                .collect(),
+            event_properties: read
+                .event_properties
+                .iter()
+                .map(|(name, kind)| (name.clone(), kind.as_str().to_owned()))
+                .collect(),
+            themes: themes
+                .into_iter()
+                .map(|theme| (theme.id, theme.name))
+                .collect(),
+            snippets: snippets
+                .into_iter()
+                .map(|snippet| (snippet.id, snippet.name))
+                .collect(),
+            task: held.task,
+        },
+        &ClearKeys::of(details),
+        privacy,
+    )
+}
+
+/// The document and the subjects offered, from the one answer `draft_template` accepted.
+fn split_template_answer(answer: &Value) -> Result<(Value, Vec<String>), ApiError> {
+    let document = answer
+        .get("document")
+        .cloned()
+        .ok_or_else(ApiError::internal)?;
+    let variants = answer
+        .get("subject_variants")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((document, variants))
+}
+
+/// `doc` rendered for the sample person with inert tracking: the preview pipeline, through the
+/// render pool. A document with blocking issues does not render.
+async fn render_sample(
+    pool: &zirv_flow_render::RenderPool,
+    doc: &TemplateDocument,
+    catalog: &FieldCatalog,
+    context: &RenderContext,
+    inputs: &Inputs,
+) -> Result<Option<RenderedEmailBody>, ApiError> {
+    let content = content_type_of(doc).map_err(|_| ApiError::template_content_unsupported())?;
+    let mut issues: Vec<Issue> = pool
+        .validate_with(doc, catalog, &inputs.extras)
+        .await
+        .map_err(|failure| ApiError::render_failed(&failure))?;
+    issues.extend(inputs.issues.iter().cloned());
+    if issues.iter().any(Issue::is_blocking) {
+        return Ok(None);
+    }
+    let rendered = render(
+        pool,
+        content.render_kind(),
+        doc,
+        context,
+        &inputs.extras,
+        None,
+    )
+    .await?;
+    Ok(Some(RenderedEmailBody {
+        subject: rendered.subject,
+        html: rendered.html,
+        text: rendered.text,
+    }))
+}
+
+/// The template's draft and the drafted document, rendered for the sample person.
+async fn template_renders(
+    state: &AppState,
+    workspace: WorkspaceId,
+    before: &Value,
+    after: &Value,
+) -> Result<TemplateRendersBody, ApiError> {
+    let pool = state
+        .render_pool()
+        .ok_or_else(ApiError::render_unavailable)?;
+    let (before_doc, after_doc) = (stored_document(before)?, stored_document(after)?);
+    let (catalog, context, before_inputs, after_inputs) = {
+        let mut connection = state
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal())?;
+        let catalog = field_catalog(
+            zirv_flow_store::read_template_field_catalog(&mut connection, workspace).await?,
+        );
+        let context = RenderContext::sample_person(&catalog);
+        let now = state.clock.now(&mut connection).await?;
+        let subject = Subject::Sample(&context);
+        let before_inputs = resolve(
+            &mut connection,
+            workspace,
+            &before_doc,
+            subject,
+            state.public_url(),
+            now,
+        )
+        .await?;
+        let after_inputs = resolve(
+            &mut connection,
+            workspace,
+            &after_doc,
+            subject,
+            state.public_url(),
+            now,
+        )
+        .await?;
+        (catalog, context, before_inputs, after_inputs)
+    };
+    Ok(TemplateRendersBody {
+        before: render_sample(pool, &before_doc, &catalog, &context, &before_inputs).await?,
+        after: render_sample(pool, &after_doc, &catalog, &context, &after_inputs).await?,
+    })
+}
+
+/// Checks a template draft's document against the publish validation as it is now, with no lock
+/// and no connection held, because the check waits on the render host. A blocking issue is the
+/// publish's `template_invalid` with the issues.
+async fn recheck_template(
+    state: &AppState,
+    draft: &AiDraft,
+    content: &Value,
+) -> Result<(), ApiError> {
+    let doc = stored_document(content)?;
+    let render = state
+        .render_pool()
+        .ok_or_else(ApiError::render_unavailable)?;
+    let (catalog, inputs) = {
+        let mut connection = state
+            .pool
+            .acquire()
+            .await
+            .map_err(|_| ApiError::internal())?;
+        publish_inputs(state, &mut connection, draft.workspace_id, &doc).await?
+    };
+    let issues = publish_issues(render, &doc, &catalog, &inputs).await?;
+    if issues.iter().any(Issue::is_blocking) {
+        return Err(ApiError::template_invalid(template_issue_problems(&issues)));
+    }
+    Ok(())
+}
+
+/// Copies a template draft's document into the template's ordinary draft, in the transaction that
+/// marks it accepted.
+///
+/// The template is locked first, as a draft save or a publish locks it: the template's draft is
+/// the revision the assistant's draft was made from (else 409 `template_draft_changed`), the
+/// template is not archived, and the document is one of the template's channel and category.
+/// Only then is the draft replaced, the same write as `PUT .../templates/{id}/draft`, which sets
+/// `lang` with the rest of the document. No version is created and nothing is published; the
+/// published version, the flows and the sends are not touched.
+async fn apply_template(
+    tx: &mut PgConnection,
+    principal: &Principal,
+    draft: &AiDraft,
+    content: &Value,
+) -> Result<(Template, TemplateDraft), ApiError> {
+    let template_id = draft.template_id.ok_or_else(ApiError::internal)?;
+    let workspace = draft.workspace_id;
+    let locked = zirv_flow_store::lock_template(tx, workspace, template_id)
+        .await
+        .map_err(template_error)?;
+    if Some(digest(&template_stamp(locked.draft()))) != draft.base_digest {
+        return Err(ApiError::template_draft_changed_since_assistant_draft());
+    }
+    let document = check_draft(locked.template(), content)?;
+    let saved = zirv_flow_store::save_template_draft(
+        tx,
+        workspace,
+        template_id,
+        &document,
+        principal.user_id(),
+    )
+    .await
+    .map_err(template_error)?;
+    admin::audit(
+        tx,
+        &principal.context(),
+        Some(workspace),
+        "template.draft_saved",
+        Some(("template", template_id)),
+        json!({
+            "name": locked.template().name,
+            "revision": saved.revision,
+            "via": "ai_draft",
+        }),
+    )
+    .await?;
+    Ok((locked.template().clone(), saved))
 }
 
 /// Copies a flow draft into the flow's ordinary draft, in the transaction that marks it accepted.
@@ -1161,6 +1650,9 @@ fn audit_summary(draft: &AiDraft) -> Value {
     match draft.kind {
         DraftKind::Segment => json!({"kind": draft.kind.as_str(), "segment_id": draft.segment_id}),
         DraftKind::Flow => json!({"kind": draft.kind.as_str(), "flow_id": draft.flow_id}),
+        DraftKind::Template => {
+            json!({"kind": draft.kind.as_str(), "template_id": draft.template_id})
+        }
         DraftKind::Mapping | DraftKind::Manifest => json!({
             "kind": draft.kind.as_str(),
             "source_id": draft.source_id,
@@ -1212,8 +1704,8 @@ fn recheck_manifest(content: &Value) -> Result<(), ApiError> {
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such draft of this user in this workspace, or it expired", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), or the flow of a flow draft is archived (`flow_archived`)", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -1237,12 +1729,23 @@ pub(crate) async fn accept(
         .clone()
         .ok_or_else(ApiError::ai_draft_invalid)?;
 
+    if draft.kind == DraftKind::Template {
+        recheck_template(&state, &draft, &content).await?;
+    }
     let mut tx = zirv_flow_store::begin(&state.pool).await?;
-    let flow = if draft.kind == DraftKind::Flow {
-        Some(apply_flow(&state, &mut tx, &principal, &draft, &content).await?)
-    } else {
-        recheck(&state, &mut tx, &draft, &content).await?;
-        None
+    let (flow, template) = match draft.kind {
+        DraftKind::Flow => (
+            Some(apply_flow(&state, &mut tx, &principal, &draft, &content).await?),
+            None,
+        ),
+        DraftKind::Template => (
+            None,
+            Some(apply_template(&mut tx, &principal, &draft, &content).await?),
+        ),
+        _ => {
+            recheck(&state, &mut tx, &draft, &content).await?;
+            (None, None)
+        }
     };
     if !zirv_flow_store::mark_ai_draft_accepted(&mut tx, workspace.id, user, id, now).await? {
         return Err(ApiError::not_found());
@@ -1266,8 +1769,12 @@ pub(crate) async fn accept(
         stream: draft.stream_name,
         segment_id: draft.segment_id,
         flow_id: draft.flow_id,
+        template_id: draft.template_id,
         content,
         flow: flow.as_ref().map(FlowDetailBody::from),
+        template: template
+            .as_ref()
+            .map(|(template, saved)| TemplateDetailBody::new(template, saved)),
     }))
 }
 
@@ -1359,11 +1866,112 @@ mod tests {
         );
         let plain = DraftIssue::from_line("no_identifier");
         assert_eq!((plain.code.as_str(), plain.at), ("no_identifier", None));
-        // Only the code and the place reach the response.
+        // Only the code and the place reach the response, and for a merge field its name.
         assert_eq!(
             serde_json::to_value(&column).unwrap(),
             json!({"code": "unknown_column", "at": "Ghost"})
         );
+    }
+
+    #[test]
+    fn a_hint_after_the_bar_is_feedback_and_not_the_code_or_the_place() {
+        let issue = DraftIssue::from_line("unknown_merge_field at /email/html | field person.nope");
+
+        assert_eq!(
+            (issue.code(), issue.at()),
+            ("unknown_merge_field", Some("/email/html"))
+        );
+        assert_eq!(
+            issue.to_string(),
+            "unknown_merge_field at /email/html | field person.nope"
+        );
+        assert_eq!(
+            serde_json::to_value(&issue).unwrap(),
+            json!({"code": "unknown_merge_field", "at": "/email/html", "field": "person.nope"})
+        );
+        let other = DraftIssue::from_line("unknown_column (column \"x\") | field y");
+        assert_eq!(
+            serde_json::to_value(&other).unwrap(),
+            json!({"code": "unknown_column", "at": "x"})
+        );
+    }
+
+    #[test]
+    fn a_template_request_names_its_template_and_task_and_nothing_of_another_kind() {
+        let template = Uuid::now_v7();
+
+        assert_eq!(
+            refused(json!({"kind": "template", "prompt": "x", "task": "copy"})),
+            "template_id is required for a template"
+        );
+        assert_eq!(
+            refused(json!({"kind": "template", "prompt": "x", "template_id": template})),
+            "task is required for a template"
+        );
+        assert_eq!(
+            refused(
+                json!({"kind": "template", "prompt": "x", "template_id": template,
+                    "task": "copy", "documentation": "docs"})
+            ),
+            "documentation belongs to a manifest only"
+        );
+        assert_eq!(
+            refused(json!({"kind": "flow", "prompt": "x", "flow_id": template, "task": "copy"})),
+            "task belongs to a template only"
+        );
+        assert_eq!(
+            refused(json!({"kind": "segment", "prompt": "x", "template_id": template})),
+            "template_id belongs to a template only"
+        );
+        for task in ["copy", "subject_variants", "block_layout", "translation"] {
+            assert!(
+                check_request(&request(json!({"kind": "template", "prompt": "x",
+                    "template_id": template, "task": task})))
+                .is_ok(),
+                "{task}"
+            );
+        }
+        // A task the assistant does not have is refused outright.
+        assert!(
+            serde_json::from_value::<DraftRequest>(json!({"kind": "template", "prompt": "x",
+                "template_id": template, "task": "publish"}))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_template_stamp_follows_the_revision_as_well_as_the_document() {
+        let draft = |revision| TemplateDraft {
+            template_id: Uuid::nil(),
+            document: json!({"email": {"subject": "Hi"}}),
+            revision,
+            updated_by: None,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert_eq!(
+            digest(&template_stamp(&draft(1))),
+            digest(&template_stamp(&draft(1)))
+        );
+        assert_ne!(
+            digest(&template_stamp(&draft(1))),
+            digest(&template_stamp(&draft(2)))
+        );
+    }
+
+    #[test]
+    fn a_template_answer_splits_into_the_document_and_the_subjects() {
+        let answer = json!({"document": {"email": {}}, "subject_variants": ["a", "b"]});
+
+        let (document, variants) = split_template_answer(&answer).unwrap();
+
+        assert_eq!(document, json!({"email": {}}));
+        assert_eq!(variants, ["a", "b"]);
+        assert_eq!(
+            split_template_answer(&json!({"document": {}})).unwrap().1,
+            Vec::<String>::new()
+        );
+        assert!(split_template_answer(&json!({})).is_err());
     }
 
     #[test]
@@ -1395,6 +2003,7 @@ mod tests {
     fn each_kind_offers_its_own_tool() {
         assert_eq!(tool_name(DraftKind::Mapping), "draft_mapping");
         assert_eq!(tool_name(DraftKind::Manifest), "draft_manifest");
+        assert_eq!(tool_name(DraftKind::Template), "draft_template");
         assert!(
             keys(DraftKind::Mapping)
                 .iter()

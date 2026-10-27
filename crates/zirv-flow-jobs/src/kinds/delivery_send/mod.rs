@@ -1186,6 +1186,7 @@ mod tests {
                 &locked,
                 &json!([]),
                 None,
+                None,
                 &TraceContext::root(Cause::api("publish")),
             )
             .await
