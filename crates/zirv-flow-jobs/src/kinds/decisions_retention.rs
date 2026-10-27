@@ -50,6 +50,15 @@ impl JobKind for DecisionsRetention {
             partitions_skipped = report.skipped_partitions.len(),
             "decision retention ran"
         );
+        ctx.audit_retention(
+            Self::KIND,
+            now - time::Duration::days(i64::from(settings.days)),
+            &[
+                ("records_deleted", report.records_deleted),
+                ("partitions_dropped", report.partitions_dropped),
+            ],
+        )
+        .await?;
         Ok(())
     }
 }
@@ -131,7 +140,12 @@ mod tests {
             .await
             .unwrap();
         drop(guard);
-        tx.rollback().await.unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let audit = zirv_flow_store::list_audit(&pool, 10).await.unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].action, "retention.ran");
+        assert_eq!(audit[0].actor_kind, "system");
+        assert_eq!(audit[0].summary["job"], "decisions.retention");
 
         let left: Vec<String> = sqlx::query_scalar("SELECT action FROM decision_records")
             .fetch_all(&pool)

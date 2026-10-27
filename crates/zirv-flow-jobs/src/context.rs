@@ -12,8 +12,8 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 use zirv_flow_render::RenderPool;
 
 use zirv_flow_store::{
-    ClaimedJob, Clock, DecisionRetention, EventRetention, HmacKey, Keyring, MessageRetention,
-    NewDecision, NewJob, PgConnection, PgPool,
+    Actor, ClaimedJob, Clock, DecisionRetention, EventRetention, HmacKey, Keyring,
+    MessageRetention, NewAuditEntry, NewDecision, NewJob, PgConnection, PgPool,
 };
 
 use crate::JobError;
@@ -327,6 +327,92 @@ impl<'a> JobContext<'a> {
         Ok(zirv_flow_store::append_decision(&mut *self.connection, &decision).await?)
     }
 
+    /// Appends an audit row for a system action, in the handler's transaction, under this job's
+    /// trace. The actor is the system; the summary holds ids and counts only, and the store refuses
+    /// one that does not. A failed job rolls the row back with everything else it wrote.
+    pub async fn audit_system(
+        &mut self,
+        workspace: Option<WorkspaceId>,
+        action: &'static str,
+        object: Option<(&'static str, Uuid)>,
+        summary: Value,
+    ) -> Result<(), JobError> {
+        let entry = NewAuditEntry {
+            workspace_id: workspace,
+            actor: Actor::system(),
+            action,
+            object_kind: object.map(|(kind, _)| kind),
+            object_id: object.map(|(_, id)| id),
+            request_id: None,
+            trace_id: Some(self.job.trace.trace_id.as_uuid()),
+            summary,
+        };
+        zirv_flow_store::append_audit(&mut *self.connection, &entry)
+            .await
+            .map_err(|error| {
+                if error.is_audit_summary() {
+                    JobError::new("the audit summary was refused")
+                } else {
+                    error.into()
+                }
+            })
+    }
+
+    /// Appends `credential.used` for a workspace credential this job run opened: the credential id
+    /// and the use (`send`, `sync`, `forward` or `erase`) and nothing else. `once_per` collapses a use
+    /// that repeats per message into one row per window.
+    pub async fn audit_credential_used(
+        &mut self,
+        workspace: WorkspaceId,
+        credential: Uuid,
+        usage: &'static str,
+        once_per: Option<std::time::Duration>,
+    ) -> Result<(), JobError> {
+        let entry = NewAuditEntry {
+            workspace_id: Some(workspace),
+            actor: Actor::system(),
+            action: "credential.used",
+            object_kind: Some("credential"),
+            object_id: Some(credential),
+            request_id: None,
+            trace_id: Some(self.job.trace.trace_id.as_uuid()),
+            summary: serde_json::json!({"use": usage}),
+        };
+        match once_per {
+            Some(window) => {
+                zirv_flow_store::append_audit_once_in(&mut *self.connection, &entry, window)
+                    .await?;
+            }
+            None => zirv_flow_store::append_audit(&mut *self.connection, &entry).await?,
+        }
+        Ok(())
+    }
+
+    /// Appends the `retention.ran` row of a retention job: the job kind, the default cutoff (Unix
+    /// seconds) and what it deleted, by name. Counts only; no workspace, as the job is instance-level.
+    pub async fn audit_retention(
+        &mut self,
+        job_kind: &'static str,
+        cutoff: time::OffsetDateTime,
+        counts: &[(&'static str, u64)],
+    ) -> Result<(), JobError> {
+        let counts: serde_json::Map<String, Value> = counts
+            .iter()
+            .map(|(name, count)| ((*name).to_owned(), Value::from(*count)))
+            .collect();
+        self.audit_system(
+            None,
+            "retention.ran",
+            None,
+            serde_json::json!({
+                "job": job_kind,
+                "cutoff": cutoff.unix_timestamp(),
+                "counts": counts,
+            }),
+        )
+        .await
+    }
+
     /// Enqueues a follow-up job in the handler's transaction. False when its unique key is
     /// already held.
     pub async fn enqueue(&mut self, job: &NewJob) -> Result<bool, JobError> {
@@ -433,6 +519,60 @@ mod tests {
             records[0].subject_ids,
             serde_json::json!({"segment_id": subject.to_string()})
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_system_audit_row_carries_the_system_actor_and_the_jobs_trace_and_rolls_back(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        let (claimed, mut tx) = claimed_in_transaction(&pool, None).await;
+        let object = Uuid::new_v4();
+
+        let mut ctx = JobContext::new(&mut tx, &claimed);
+        ctx.audit_system(
+            None,
+            "retention.ran",
+            Some(("job", object)),
+            serde_json::json!({"deleted": 3}),
+        )
+        .await
+        .unwrap();
+        let refused = ctx
+            .audit_system(
+                None,
+                "retention.ran",
+                None,
+                serde_json::json!({"email": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.message().contains("audit"), "{}", refused.message());
+        drop(tx);
+        assert!(
+            zirv_flow_store::list_audit(&pool, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+        let mut ctx = JobContext::new(&mut tx, &claimed);
+        ctx.audit_system(
+            None,
+            "retention.ran",
+            Some(("job", object)),
+            serde_json::json!({"deleted": 3}),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::commit(tx).await.unwrap();
+        let rows = zirv_flow_store::list_audit(&pool, 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].actor_kind, "system");
+        assert_eq!(rows[0].object_id, Some(object));
+        assert_eq!(rows[0].trace_id, Some(claimed.trace.trace_id.as_uuid()));
     }
 
     #[sqlx::test]
