@@ -24,7 +24,9 @@ const WRITE_MARKERS: &str = "INSERT INTO erasure_handled_markers \
     JOIN destinations d ON d.workspace_id = g.workspace_id AND d.id::text = g.destination \
     WHERE g.destination IS NOT NULL \
     GROUP BY g.workspace_id, g.person_id, d.id \
-    ON CONFLICT DO NOTHING";
+    ON CONFLICT (workspace_id, person_id, destination_id) DO UPDATE \
+    SET first_handled_at = LEAST(erasure_handled_markers.first_handled_at, \
+        EXCLUDED.first_handled_at)";
 
 /// `gone` is a `DELETE ... RETURNING` that yields the columns [`WRITE_MARKERS`] reads. The result
 /// is one statement that deletes and writes the markers, and returns the number of rows deleted
@@ -60,7 +62,7 @@ mod tests {
 
         assert!(sql.starts_with("WITH gone AS (DELETE FROM t RETURNING a), marked AS ("));
         assert!(sql.ends_with("SELECT count(*) FROM gone"));
-        assert!(sql.contains("ON CONFLICT DO NOTHING"));
+        assert!(sql.contains("first_handled_at = LEAST("));
     }
 
     #[test]

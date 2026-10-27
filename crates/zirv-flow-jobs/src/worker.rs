@@ -14,8 +14,9 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, PgPool, begin, claim_job,
-    complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
+    ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, MessageRetention, PgPool,
+    begin, claim_job, complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease,
+    observe_pool, sized_like,
 };
 
 use crate::context::{IngestSettings, JobContext};
@@ -46,6 +47,8 @@ pub struct WorkerConfig {
     pub backoff_cap: Duration,
     /// What the `events.retention` job keeps and for how long.
     pub event_retention: EventRetention,
+    /// What the `messages.retention` job keeps and for how long.
+    pub message_retention: MessageRetention,
     /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
@@ -90,6 +93,7 @@ impl WorkerConfig {
             backoff_base: Duration::from_secs(5),
             backoff_cap: Duration::from_secs(3600),
             event_retention: EventRetention::default(),
+            message_retention: MessageRetention::default(),
             redaction_key: None,
             identifier_key: None,
             ledger_dir: None,
@@ -406,6 +410,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
     let result = {
         let mut ctx = JobContext::new(&mut tx, &job)
             .with_event_retention(shared.config.event_retention)
+            .with_message_retention(shared.config.message_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_ledger_dir(shared.config.ledger_dir.clone())
             .with_clock(shared.config.clock.clone())
@@ -665,6 +670,7 @@ mod tests {
             backoff_base: Duration::from_millis(1),
             backoff_cap: Duration::from_millis(5),
             event_retention: EventRetention::default(),
+            message_retention: MessageRetention::default(),
             redaction_key: None,
             identifier_key: None,
             ledger_dir: None,

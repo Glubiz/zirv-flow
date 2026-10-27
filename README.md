@@ -100,6 +100,9 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `events.min_retention_days` | u32 | 30 | at least 1; the shortest per-name override a workspace may set |
 | `events.max_retention_days` | u32 | 1095 | at least 1; the longest per-name override; not below the minimum |
 | `events.reject_retention_days` | u32 | 30 | at least 1; how long ingest rejects are kept |
+| `retention.messages_days` | u32 | 395 | at least 1; how long ended messages are kept (about 13 months); within the two bounds below; the purge writes the erasure handled markers |
+| `retention.messages_min_days` | u32 | 30 | at least 1; the shortest per-workspace message window |
+| `retention.messages_max_days` | u32 | 1095 | at least 1; the longest per-workspace message window; not below the minimum |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
@@ -154,7 +157,8 @@ Each secret gets its own random data key (XChaCha20-Poly1305), and the master
 key wraps that data key; the database holds only ciphertext, the wrapped key and
 the id of the wrapping master key. A database dump without the master key
 reveals no credential, and the API never returns one. A lost master key means
-the stored credentials must be entered again.
+the stored secrets must be created again, and every hash and tracking token made
+before is dead; see [Secrets and the master key](docs/operations/secrets.md).
 
 #### Workspace credentials
 
@@ -988,6 +992,15 @@ only). The `destination.erase` job makes those calls after the erasure commits, 
 destination, with an idempotency key that is stable across retries; a failing destination is retried
 and then shown as `failed`, and never blocks the erasure. The ledger is the one place that keeps the
 person id of an erased person, by design.
+
+The logs hold no identifier values: no email, phone, external id, name or trait value, in the
+message or in a span field, and no keyed hash of one. The end-to-end test
+`default_level_logs_hold_no_identifier_value_through_the_whole_privacy_scenario`
+(`crates/zirv-flow/src/e2e/privacy.rs`) captures the real JSON log layer at the default `info`
+level through ingest (including a refused batch and a rejected event), a profile read, 4xx and 5xx
+answers, an export and its download, a failing send, an erasure whose destination fails its erase
+call, and a replay. It then scans every line for each seeded value raw, lowercase, percent-encoded
+and as a prefix of its identifier hash. A control line proves the scan can fail.
 
 Erasure removes what was held or pending when it ran. Data that arrives while it runs, or after it,
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.

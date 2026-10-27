@@ -194,7 +194,8 @@ pub use lists::{
 };
 pub use messages::{
     GateRecord, LoggedMessage, Message, MessageLogCursor, MessageLogFilter, MessageLogPage,
-    MessageStatus, NewMessage, WaitFilter, WaitReason, clear_message_in_flight, find_message,
+    MessageRetention, MessageRetentionReport, MessageStatus, NewMessage, WaitFilter, WaitReason,
+    apply_message_retention, apply_message_retention_for, clear_message_in_flight, find_message,
     insert_message, list_person_messages, load_person_message_log, mark_message_sending,
     mark_message_unconfirmed, message_address_hash, message_in_flight, message_status,
     message_unconfirmed, read_send_address,

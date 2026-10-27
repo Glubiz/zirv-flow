@@ -1584,6 +1584,439 @@ mod tests {
         assert_eq!(rotations[0].summary["rows"], 0);
     }
 
+    const ALLOWED_ADDRESS: &str = "rot@example.com";
+
+    /// A legacy source or destination credential: the sealed row and the `credentials` row that
+    /// points at it, which is how `open_credential` reaches it. Returns the credential id.
+    async fn seed_legacy(
+        pool: &PgPool,
+        keys: &Keyring,
+        ws: WorkspaceId,
+        purpose: SecretPurpose,
+    ) -> Uuid {
+        let secret = create_secret(
+            pool,
+            &Context::system(),
+            keys,
+            ws,
+            purpose,
+            &SecretBytes::new(br#"{"password":"legacy-value"}"#.to_vec()),
+        )
+        .await
+        .unwrap();
+        zirv_flow_store::create_credential(
+            pool,
+            ws,
+            &zirv_flow_store::NewWorkspaceCredential {
+                id: Uuid::now_v7(),
+                key: purpose.as_str(),
+                name: purpose.as_str(),
+                kind: "basic",
+                schema: None,
+                fields: &json!({"username": "u"}),
+                secret_id: secret,
+                hints: &json!({"password": ""}),
+                fingerprint: None,
+                created_by: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    /// Stores one secret of `purpose` through the writer its feature uses and returns the id of
+    /// the row that refers to it (the source, hook, domain or credential), or nil when the
+    /// secret is found some other way. The match has no wildcard, so a new purpose does not
+    /// compile until it is seeded here and read back in `read_back`.
+    async fn seed_purpose(
+        purpose: SecretPurpose,
+        state: &crate::AppState,
+        keys: &Keyring,
+        ws: WorkspaceId,
+    ) -> Uuid {
+        let context = Context::system();
+        let pool = &state.pool;
+        match purpose {
+            SecretPurpose::ConnectorCredential | SecretPurpose::DestinationCredential => {
+                seed_legacy(pool, keys, ws, purpose).await
+            }
+            SecretPurpose::WorkspaceCredential => {
+                let request = serde_json::from_value(json!({
+                    "kind": "api_key",
+                    "name": "Rotation",
+                    "secret": {"api_key": "rotation-value"},
+                }))
+                .unwrap();
+                crate::workspace_credentials::crud::create_credential(
+                    state, &context, ws, None, &request,
+                )
+                .await
+                .unwrap()
+                .id
+            }
+            SecretPurpose::OAuthToken => {
+                let tokens = zirv_flow_store::StoredTokens {
+                    access_token: zirv_flow_core::SecretString::new("oauth-access".into()),
+                    refresh_token: zirv_flow_core::SecretString::new("oauth-refresh".into()),
+                    expires_at: None,
+                    binding: "binding".into(),
+                };
+                let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+                let source = zirv_flow_store::create_source(
+                    &mut *tx,
+                    ws,
+                    &zirv_flow_store::NewSource {
+                        id: Uuid::now_v7(),
+                        kind: "http",
+                        name: "Rotation source",
+                        config: &json!({}),
+                        credential_id: None,
+                        schedule: None,
+                        created_by: None,
+                    },
+                )
+                .await
+                .unwrap();
+                let secret = create_secret_in(
+                    &mut tx,
+                    &context,
+                    keys,
+                    ws,
+                    purpose,
+                    &tokens.to_plaintext().unwrap(),
+                )
+                .await
+                .unwrap();
+                zirv_flow_store::link_tokens(&mut tx, ws, source.id, Some(secret))
+                    .await
+                    .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+                source.id
+            }
+            SecretPurpose::AiProviderKey => {
+                save_ai_settings(pool, &context, Some(keys), ws, &ai_change())
+                    .await
+                    .unwrap();
+                Uuid::nil()
+            }
+            SecretPurpose::WebhookSecret => {
+                let request = serde_json::from_value(json!({
+                    "name": "Rotation hook",
+                    "dedupe_field": "id",
+                }))
+                .unwrap();
+                let (hook, _) =
+                    crate::webhooks::ops::create_webhook(state, &context, ws, None, &request)
+                        .await
+                        .unwrap();
+                hook.id
+            }
+            SecretPurpose::WebhookSigning => {
+                let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+                let id = create_secret_in(
+                    &mut tx,
+                    &context,
+                    keys,
+                    ws,
+                    purpose,
+                    &SecretBytes::new(b"signing-value".to_vec()),
+                )
+                .await
+                .unwrap();
+                let created = zirv_flow_store::create_signing_key(
+                    &mut tx,
+                    ws,
+                    id,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await
+                .unwrap();
+                assert!(created);
+                zirv_flow_store::commit(tx).await.unwrap();
+                Uuid::nil()
+            }
+            SecretPurpose::DkimKey => {
+                let request =
+                    serde_json::from_value(json!({"domain": "rotation-test.com"})).unwrap();
+                let trace = TraceContext::root(Cause::api("test.rotation"));
+                let (domain, _) = crate::sending::domains::create_sending_domain(
+                    state, &context, ws, None, trace, &request,
+                )
+                .await
+                .unwrap();
+                domain.id
+            }
+            SecretPurpose::TestSendAddress => {
+                let identifier =
+                    zirv_flow_core::people::Identifier::parse("email", ALLOWED_ADDRESS).unwrap();
+                let hash = zirv_flow_core::people::identifier_hash(
+                    state.identifier_key.as_deref().unwrap(),
+                    &identifier,
+                );
+                let id = Uuid::now_v7();
+                let sealed = seal(
+                    keys,
+                    identifier.value().as_bytes(),
+                    &secret_aad(ws, SecretId::from_uuid(id), purpose),
+                );
+                let mut tx = zirv_flow_store::begin(pool).await.unwrap();
+                let entry = zirv_flow_store::add_allowlist_entry(
+                    &mut tx,
+                    &keys.key_ids(),
+                    ws,
+                    id,
+                    &hash,
+                    &zirv_flow_store::masked_hint(identifier.value()),
+                    &sealed,
+                )
+                .await
+                .unwrap();
+                assert!(entry.is_some());
+                zirv_flow_store::commit(tx).await.unwrap();
+                id
+            }
+        }
+    }
+
+    /// Reads the secret of `purpose` back the way production does, with the state's keyring, and
+    /// returns its plaintext. `parent` is what `seed_purpose` returned. Nothing here prints a
+    /// value; a failure names the purpose.
+    async fn read_back(
+        purpose: SecretPurpose,
+        state: &crate::AppState,
+        ws: WorkspaceId,
+        parent: Uuid,
+    ) -> Vec<u8> {
+        let name = purpose.as_str();
+        let pool = &state.pool;
+        let keys = state.keyring().unwrap();
+        match purpose {
+            SecretPurpose::ConnectorCredential
+            | SecretPurpose::DestinationCredential
+            | SecretPurpose::WorkspaceCredential => {
+                // The one opener every credential read goes through (the legacy purposes
+                // included): sources, destinations and the credential test call it.
+                let opened = zirv_flow_store::open_credential(pool, keys, ws, parent)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not open"));
+                opened.secret.expose().to_vec()
+            }
+            SecretPurpose::OAuthToken => {
+                let tokens = zirv_flow_store::load_tokens(pool, keys, ws, parent)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not load"))
+                    .unwrap_or_else(|| panic!("{name} has no tokens"));
+                tokens
+                    .to_plaintext()
+                    .unwrap_or_else(|_| panic!("{name} did not encode"))
+                    .expose()
+                    .to_vec()
+            }
+            SecretPurpose::AiProviderKey => {
+                let settings = zirv_flow_store::find_ai_settings(pool, ws)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{name} has no settings"));
+                let secret = settings
+                    .provider_key_secret_id
+                    .unwrap_or_else(|| panic!("{name} is not linked"));
+                let key = crate::assistant::dispatch::open_provider_key(state, ws, secret)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not open"));
+                key.expose().as_bytes().to_vec()
+            }
+            SecretPurpose::WebhookSecret => {
+                let hook = zirv_flow_store::find_for_receive(pool, parent)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{name} has no hook"));
+                zirv_flow_store::secrets::open_json(
+                    pool,
+                    keys,
+                    ws,
+                    SecretId::from_uuid(hook.secret_id),
+                    purpose,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not open"))
+                .expose()
+                .to_vec()
+            }
+            SecretPurpose::WebhookSigning => {
+                let mut connection = pool.acquire().await.unwrap();
+                let live = zirv_flow_store::live_signing_keys(
+                    &mut connection,
+                    ws,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name} has no key"));
+                zirv_flow_store::secrets::open_json(
+                    &mut *connection,
+                    keys,
+                    ws,
+                    live.current.secret_id,
+                    purpose,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not open"))
+                .expose()
+                .to_vec()
+            }
+            SecretPurpose::DkimKey => {
+                let domain = zirv_flow_store::find_sending_domain(pool, ws, parent)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|| panic!("{name} has no domain"));
+                let key = zirv_flow_store::secrets::open_json(
+                    pool,
+                    keys,
+                    ws,
+                    SecretId::from_uuid(domain.dkim_secret_id),
+                    purpose,
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} did not open"));
+                let signer = zirv_flow_connectors::destinations::DkimSigner::from_pkcs8(
+                    &domain.domain,
+                    &domain.selector,
+                    key.expose(),
+                );
+                assert!(signer.is_ok(), "{name} is not a usable key");
+                key.expose().to_vec()
+            }
+            SecretPurpose::TestSendAddress => {
+                let identifier =
+                    zirv_flow_core::people::Identifier::parse("email", ALLOWED_ADDRESS).unwrap();
+                let hash = zirv_flow_core::people::identifier_hash(
+                    state.identifier_key.as_deref().unwrap(),
+                    &identifier,
+                );
+                let mut connection = pool.acquire().await.unwrap();
+                zirv_flow_store::open_allowlist_address(&mut connection, keys, ws, &hash)
+                    .await
+                    .unwrap_or_else(|_| panic!("{name} did not open"))
+                    .unwrap_or_else(|| panic!("{name} has no entry"))
+                    .expose()
+                    .to_vec()
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn rotation_keeps_a_secret_of_every_purpose_and_every_hash_valid(pool: PgPool) {
+        use zirv_flow_core::people::{Identifier, identifier_hash};
+        use zirv_flow_core::tracking::{self, TokenKind};
+
+        migrated(&pool).await;
+        let context = Context::system();
+        let ws = create_workspace(&pool, &context, "Acme", None)
+            .await
+            .unwrap();
+        let old = MasterKey::generate();
+        let new = MasterKey::generate();
+        let before = keyring(&old, None);
+        seed_root(&pool, &before).await;
+        let root = HmacRoot::bootstrap_from(&old);
+        let state = crate::AppState::new(pool.clone(), std::sync::Arc::new(String::new))
+            .with_keyring(std::sync::Arc::new(keyring(&old, None)))
+            .with_hmac_root(&root);
+        let mut parents = Vec::new();
+        for purpose in SecretPurpose::ALL {
+            parents.push((purpose, seed_purpose(purpose, &state, &before, ws.id).await));
+        }
+        let rows: Vec<(Uuid, String)> =
+            sqlx::query_as("SELECT id, purpose FROM encrypted_secrets ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for purpose in SecretPurpose::ALL {
+            let count = rows
+                .iter()
+                .filter(|(_, stored)| stored == purpose.as_str())
+                .count();
+            assert_eq!(
+                count,
+                1,
+                "{} should have exactly one secret",
+                purpose.as_str()
+            );
+        }
+        // What each purpose reads as before the rotation, through the same reader.
+        let mut expected = Vec::new();
+        for (purpose, parent) in &parents {
+            expected.push(read_back(*purpose, &state, ws.id, *parent).await);
+        }
+        let identifier = Identifier::parse("email", "hash@example.com").unwrap();
+        let identifier_before =
+            identifier_hash(&root.hmac_key(HmacPurpose::Identifier), &identifier);
+        let redaction_before = zirv_flow_core::credentials::fingerprint(
+            &root.hmac_key(HmacPurpose::Redaction),
+            b"redacted",
+        );
+        let message = Uuid::now_v7();
+        let token = tracking::sign(
+            &root.hmac_key(HmacPurpose::Tracking),
+            TokenKind::Click,
+            message,
+            3,
+        );
+
+        let report = rotate_master_key(&pool, &context, &keyring(&new, Some(&old)))
+            .await
+            .unwrap();
+
+        assert_eq!(report.rows, rows.len() + 1);
+        // The old key is gone: everything below reads with a keyring that holds only the new one.
+        let only_new = keyring(&new, None);
+        let after = crate::AppState::new(pool.clone(), std::sync::Arc::new(String::new))
+            .with_keyring(std::sync::Arc::new(keyring(&new, None)))
+            .with_hmac_root(&root);
+        for ((purpose, parent), expected) in parents.iter().zip(&expected) {
+            let name = purpose.as_str();
+            let read = read_back(*purpose, &after, ws.id, *parent).await;
+            assert!(read == *expected, "{name} changed in rotation");
+        }
+        for (id, _) in &rows {
+            let id = SecretId::from_uuid(*id);
+            let stored = secrets::get(&pool, ws.id, id).await.unwrap().unwrap();
+            assert_eq!(
+                stored.sealed.key_id,
+                new.key_id(),
+                "{}",
+                stored.purpose.as_str()
+            );
+        }
+        let sealed_root = secrets::hmac_root(&pool).await.unwrap().unwrap();
+        let aad = deployment_key_aad(secrets::HMAC_ROOT);
+        let rotated = HmacRoot::from_bytes(&open(&only_new, &sealed_root, &aad).unwrap()).unwrap();
+        assert!(
+            identifier_hash(&rotated.hmac_key(HmacPurpose::Identifier), &identifier)
+                == identifier_before,
+            "the identifier hash changed"
+        );
+        assert_eq!(
+            zirv_flow_core::credentials::fingerprint(
+                &rotated.hmac_key(HmacPurpose::Redaction),
+                b"redacted"
+            ),
+            redaction_before,
+            "the redaction hash changed"
+        );
+        let claims = tracking::verify(
+            &rotated.hmac_key(HmacPurpose::Tracking),
+            TokenKind::Click,
+            &token,
+        );
+        assert_eq!(
+            claims.map(|claims| (claims.message, claims.link)),
+            Some((message, 3))
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_row_wrapped_by_an_unknown_key_aborts_the_whole_rotation(pool: PgPool) {

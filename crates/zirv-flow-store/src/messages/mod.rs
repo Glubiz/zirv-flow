@@ -9,6 +9,7 @@
 mod address;
 mod log;
 mod person_log;
+mod retention;
 
 pub use address::read_send_address;
 pub(crate) use log::{COLUMNS, insert_message_keeping_gates};
@@ -20,4 +21,7 @@ pub use log::{
 pub use person_log::{
     LoggedMessage, MessageLogCursor, MessageLogFilter, MessageLogPage, WaitFilter, WaitReason,
     load_person_message_log,
+};
+pub use retention::{
+    MessageRetention, MessageRetentionReport, apply_message_retention, apply_message_retention_for,
 };
