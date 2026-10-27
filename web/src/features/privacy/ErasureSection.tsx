@@ -50,7 +50,7 @@ export function ErasureSection({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <Panel title="Erase a person">
+      <Panel>
         <p className="muted">
           Use this for a data-subject request. It deletes the person and all their data. Their email and phone stay
           suppressed so they are never contacted again, and a ledger keeps only one-way hashes so the erasure can be applied
