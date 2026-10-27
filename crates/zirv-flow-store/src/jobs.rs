@@ -2241,8 +2241,11 @@ mod tests {
         let Some(rounds) = std::env::var("ZIRV_FLOW_BENCH_NOTIFY_ROUNDS")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&rounds| rounds > 0)
         else {
-            eprintln!("ZIRV_FLOW_BENCH_NOTIFY_ROUNDS is not set: skipping the comparison");
+            eprintln!(
+                "ZIRV_FLOW_BENCH_NOTIFY_ROUNDS is not a positive count: skipping the comparison"
+            );
             return;
         };
         let run_for = Duration::from_secs(6);
