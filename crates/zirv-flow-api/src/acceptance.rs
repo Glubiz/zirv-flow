@@ -9860,6 +9860,78 @@ email,b@example.com,
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_resume_after_rows_below_it_were_purged_has_no_holes(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        for _ in 0..5 {
+            feed_row(&pool, &ws, "old").await;
+        }
+        sqlx::query("DELETE FROM debugger_feed")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        let resume = format!("{epoch}:5");
+
+        let mut viewer = open_stream(
+            &router,
+            &stream_uri(&ws, ""),
+            Auth::Session(&owner),
+            Some(&resume),
+        )
+        .await;
+        feed_row(&pool, &ws, "new").await;
+        notify_feed(&pool, &ws).await;
+        let frames = viewer.take(1).await;
+
+        assert_eq!(names(&frames), ["new"]);
+        assert_eq!(
+            frames[0].id,
+            Some(format!("{epoch}:6")),
+            "numbers 1 to 5 are not holes: the id is not pulled below the resume point"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_another_workspace_fills_settles_the_position_without_a_frame(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let mine = workspace(&router, &owner, "Mine").await;
+        let theirs = workspace(&router, &owner, "Theirs").await;
+        let mut viewer =
+            open_stream(&router, &stream_uri(&mine, ""), Auth::Session(&owner), None).await;
+        // Another workspace's writer takes seq 1 and stays open; mine commits seq 2.
+        let mut writer = pool.begin().await.unwrap();
+        feed_row(&mut *writer, &theirs, "theirs").await;
+        feed_row(&pool, &mine, "first").await;
+        notify_feed(&pool, &mine).await;
+        let first = viewer.take(1).await;
+        writer.commit().await.unwrap();
+        feed_row(&pool, &mine, "second").await;
+        notify_feed(&pool, &mine).await;
+        let second = viewer.take(1).await;
+
+        let epoch = zirv_flow_store::debugger_epoch(&pool).await.unwrap();
+        assert_eq!(first[0].id, Some(format!("{epoch}:0")), "seq 1 is a hole");
+        assert_eq!(names(&second), ["second"]);
+        assert_eq!(
+            second[0].id,
+            Some(format!("{epoch}:3")),
+            "the other workspace's row settled the hole"
+        );
+        assert!(
+            viewer
+                .next(std::time::Duration::from_millis(500))
+                .await
+                .is_none(),
+            "the other workspace's row is not delivered"
+        );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_resume_position_beyond_the_feed_is_clamped_and_announced(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;

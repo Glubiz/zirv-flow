@@ -249,6 +249,43 @@ impl From<FeedRow> for FeedItem {
     }
 }
 
+/// The read of the rows above a position; `$1` workspace, `$2` after, `$3` to `$5` the
+/// filter, `$6` limit. The tests explain this statement itself.
+const READ_AFTER_SQL: &str = "\
+    SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties, \
+           v.properties AS schema, f.event_id, f.reject_id, f.trace_id \
+    FROM debugger_feed f LEFT JOIN event_schema_versions v \
+       ON v.workspace_id = f.workspace_id AND v.name = f.name \
+      AND v.version = f.schema_version \
+    WHERE f.workspace_id = $1 AND f.seq > $2 \
+      AND ($3::text IS NULL OR f.source = $3) \
+      AND ($4::text IS NULL OR f.name = $4) \
+      AND ($5::text IS NULL OR f.outcome = $5) \
+    ORDER BY f.seq LIMIT $6";
+
+/// The point lookups of the rows of given numbers; `$1` workspace, `$2` the numbers, `$3` to
+/// `$5` the filter.
+const READ_AT_SQL: &str = "\
+    SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties, \
+           v.properties AS schema, f.event_id, f.reject_id, f.trace_id \
+    FROM debugger_feed f LEFT JOIN event_schema_versions v \
+       ON v.workspace_id = f.workspace_id AND v.name = f.name \
+      AND v.version = f.schema_version \
+    WHERE f.seq = ANY($2) AND f.workspace_id = $1 \
+      AND ($3::text IS NULL OR f.source = $3) \
+      AND ($4::text IS NULL OR f.name = $4) \
+      AND ($5::text IS NULL OR f.outcome = $5) \
+    ORDER BY f.seq";
+
+/// Which of the numbers `$1` any workspace's row holds.
+const SETTLED_SQL: &str = "SELECT f.seq FROM debugger_feed f WHERE f.seq = ANY($1) ORDER BY f.seq";
+
+/// The numbers from `$1 + 1` to `$2`, at most `$3` of them, that no row holds.
+const MISSING_SQL: &str = "\
+    SELECT n FROM generate_series(GREATEST($1 + 1, $2 - $3 + 1), $2) AS n \
+    WHERE NOT EXISTS (SELECT 1 FROM debugger_feed f WHERE f.seq = n) \
+    ORDER BY n";
+
 /// The workspace's feed rows after `after`, oldest first, at most `limit`, that match
 /// `filter`. An index range scan on `seq`.
 pub async fn read_debugger_feed<'e>(
@@ -258,18 +295,16 @@ pub async fn read_debugger_feed<'e>(
     filter: FeedFilter<'_>,
     limit: i64,
 ) -> Result<Vec<FeedItem>, StoreError> {
-    let rows: Vec<FeedRow> = sqlx::query_as(
-        "SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties,                 v.properties AS schema, f.event_id, f.reject_id, f.trace_id          FROM debugger_feed f LEFT JOIN event_schema_versions v             ON v.workspace_id = f.workspace_id AND v.name = f.name            AND v.version = f.schema_version          WHERE f.workspace_id = $1 AND f.seq > $2            AND ($3::text IS NULL OR f.source = $3)            AND ($4::text IS NULL OR f.name = $4)            AND ($5::text IS NULL OR f.outcome = $5)          ORDER BY f.seq LIMIT $6",
-    )
-    .bind(workspace.as_uuid())
-    .bind(after)
-    .bind(filter.source)
-    .bind(filter.name)
-    .bind(filter.outcome)
-    .bind(limit)
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)?;
+    let rows: Vec<FeedRow> = sqlx::query_as(READ_AFTER_SQL)
+        .bind(workspace.as_uuid())
+        .bind(after)
+        .bind(filter.source)
+        .bind(filter.name)
+        .bind(filter.outcome)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
+        .map_err(StoreError::query)?;
     Ok(rows.into_iter().map(FeedItem::from).collect())
 }
 
@@ -281,18 +316,29 @@ pub async fn read_debugger_feed_at<'e>(
     seqs: &[i64],
     filter: FeedFilter<'_>,
 ) -> Result<Vec<FeedItem>, StoreError> {
-    let rows: Vec<FeedRow> = sqlx::query_as(
-        "SELECT f.seq, f.at, f.source, f.name, f.outcome, f.reasons, f.reason, f.properties,                 v.properties AS schema, f.event_id, f.reject_id, f.trace_id          FROM debugger_feed f LEFT JOIN event_schema_versions v             ON v.workspace_id = f.workspace_id AND v.name = f.name            AND v.version = f.schema_version          WHERE f.seq = ANY($2) AND f.workspace_id = $1            AND ($3::text IS NULL OR f.source = $3)            AND ($4::text IS NULL OR f.name = $4)            AND ($5::text IS NULL OR f.outcome = $5)          ORDER BY f.seq",
-    )
-    .bind(workspace.as_uuid())
-    .bind(seqs)
-    .bind(filter.source)
-    .bind(filter.name)
-    .bind(filter.outcome)
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)?;
+    let rows: Vec<FeedRow> = sqlx::query_as(READ_AT_SQL)
+        .bind(workspace.as_uuid())
+        .bind(seqs)
+        .bind(filter.source)
+        .bind(filter.name)
+        .bind(filter.outcome)
+        .fetch_all(executor)
+        .await
+        .map_err(StoreError::query)?;
     Ok(rows.into_iter().map(FeedItem::from).collect())
+}
+
+/// Which of `seqs` any workspace's row holds, whatever the viewer's workspace and filter.
+/// Only numbers leave this query.
+async fn settled_seqs<'e>(
+    executor: impl PgExecutor<'e>,
+    seqs: &[i64],
+) -> Result<Vec<i64>, StoreError> {
+    sqlx::query_scalar(SETTLED_SQL)
+        .bind(seqs)
+        .fetch_all(executor)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// The numbers in `(after, upto]` that no row of any workspace holds, oldest first, looking
@@ -305,21 +351,22 @@ pub async fn debugger_feed_missing<'e>(
     upto: i64,
     limit: i64,
 ) -> Result<Vec<i64>, StoreError> {
-    sqlx::query_scalar(
-        "SELECT n FROM generate_series(GREATEST($1 + 1, $2 - $3 + 1), $2) AS n          WHERE NOT EXISTS (SELECT 1 FROM debugger_feed f WHERE f.seq = n)          ORDER BY n",
-    )
-    .bind(after)
-    .bind(upto)
-    .bind(limit)
-    .fetch_all(executor)
-    .await
-    .map_err(StoreError::query)
+    sqlx::query_scalar(MISSING_SQL)
+        .bind(after)
+        .bind(upto)
+        .bind(limit)
+        .fetch_all(executor)
+        .await
+        .map_err(StoreError::query)
 }
 
 /// What one read of a viewer found, taken in one snapshot.
 pub struct FeedBatch {
-    /// The rows of the `holes` asked about that have committed.
+    /// The rows of the `holes` asked about that have committed and match the viewer.
     pub filled: Vec<FeedItem>,
+    /// Every one of the `holes` that some row now holds, whoever's it is and whatever the
+    /// filter: all of them are settled, though only `filled` is delivered.
+    pub settled: Vec<i64>,
     /// The next rows above `after`.
     pub rows: Vec<FeedItem>,
     /// The numbers no row of any workspace holds between `after` and the last of `rows`.
@@ -345,10 +392,13 @@ pub async fn read_debugger_batch(
         .execute(&mut *snapshot)
         .await
         .map_err(StoreError::query)?;
-    let filled = if holes.is_empty() {
-        Vec::new()
+    let (filled, settled) = if holes.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
-        read_debugger_feed_at(&mut *snapshot, workspace, holes, filter).await?
+        (
+            read_debugger_feed_at(&mut *snapshot, workspace, holes, filter).await?,
+            settled_seqs(&mut *snapshot, holes).await?,
+        )
     };
     let rows = read_debugger_feed(&mut *snapshot, workspace, after, filter, limit).await?;
     let missing = match rows.last() {
@@ -357,6 +407,7 @@ pub async fn read_debugger_batch(
     };
     Ok(FeedBatch {
         filled,
+        settled,
         rows,
         missing,
     })
@@ -672,39 +723,54 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn both_parts_of_a_viewers_read_are_index_scans(pool: PgPool) {
+    async fn every_read_of_a_viewer_is_index_backed(pool: PgPool) {
         let ws = workspace(&pool, "one").await;
         feed(&pool, ws, "a", "accepted").await;
         // The tables are tiny, so the planner would scan them; forbidding a sequential scan
-        // shows the indexes serve the reads.
+        // shows the indexes serve the very statements the reads run.
         let mut tx = pool.begin().await.unwrap();
         sqlx::query("SET LOCAL enable_seqscan = off")
             .execute(&mut *tx)
             .await
             .unwrap();
-        let range: Vec<String> = sqlx::query_scalar(
-            "EXPLAIN SELECT f.seq FROM debugger_feed f              WHERE f.workspace_id = $1 AND f.seq > 10 ORDER BY f.seq LIMIT 200",
-        )
-        .bind(ws.as_uuid())
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
-        let points: Vec<String> = sqlx::query_scalar(
-            "EXPLAIN SELECT f.seq FROM debugger_feed f              WHERE f.seq = ANY($2) AND f.workspace_id = $1",
-        )
-        .bind(ws.as_uuid())
-        .bind(vec![1_i64, 2, 3])
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
-        let missing: Vec<String> = sqlx::query_scalar(
-            "EXPLAIN SELECT n FROM generate_series(1::bigint, 100::bigint) AS n              WHERE NOT EXISTS (SELECT 1 FROM debugger_feed f WHERE f.seq = n)",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap();
+        let filter = Some("web");
+        let range: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {READ_AFTER_SQL}")))
+                .bind(ws.as_uuid())
+                .bind(10_i64)
+                .bind(filter)
+                .bind(Some("a"))
+                .bind(None::<&str>)
+                .bind(200_i64)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        let points: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {READ_AT_SQL}")))
+                .bind(ws.as_uuid())
+                .bind(vec![1_i64, 2, 3])
+                .bind(filter)
+                .bind(Some("a"))
+                .bind(None::<&str>)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        let settled: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {SETTLED_SQL}")))
+                .bind(vec![1_i64, 2, 3])
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        let missing: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {MISSING_SQL}")))
+                .bind(0_i64)
+                .bind(100_i64)
+                .bind(5000_i64)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
 
-        for plan in [range, points, missing] {
+        for plan in [range, points, settled, missing] {
             let plan = plan.join(
                 "
 ",
@@ -712,6 +778,50 @@ mod tests {
             assert!(plan.contains("Index"), "{plan}");
             assert!(!plan.contains("Seq Scan on debugger_feed"), "{plan}");
         }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_hole_filled_by_another_workspace_or_a_filter_is_settled_not_delivered(pool: PgPool) {
+        let (one, two) = (workspace(&pool, "one").await, workspace(&pool, "two").await);
+        // Three writers stay open: seq 1 (mine, matches), 2 (another workspace), 3 (mine,
+        // hidden by the filter); a row of mine commits after them.
+        let mut writers = Vec::new();
+        for (ws, name) in [(one, "match"), (two, "other"), (one, "hidden")] {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query(
+                "INSERT INTO debugger_feed (workspace_id, source, name, outcome, trace_id)                  VALUES ($1, 'web', $2, 'accepted', gen_random_uuid())",
+            )
+            .bind(ws.as_uuid())
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            writers.push(tx);
+        }
+        feed(&pool, one, "match", "accepted").await;
+        for tx in writers {
+            tx.commit().await.unwrap();
+        }
+        let named = FeedFilter {
+            name: Some("match"),
+            ..FeedFilter::default()
+        };
+
+        let batch = read_debugger_batch(&pool, one, 3, &[1, 2, 3], named, 10, 5000)
+            .await
+            .unwrap();
+
+        assert_eq!(batch.settled, [1, 2, 3]);
+        assert_eq!(
+            batch.filled.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            [1],
+            "only the row the viewer matches is delivered"
+        );
+        assert_eq!(
+            batch.rows.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            [4]
+        );
     }
 
     #[sqlx::test]

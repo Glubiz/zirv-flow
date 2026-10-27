@@ -722,6 +722,12 @@ async fn read_batch(viewer: &Viewer, cursor: &Cursor) -> Result<FeedBatch, Store
     .await
 }
 
+enum Step {
+    Fill(FeedItem),
+    Settle,
+    Pass(FeedItem),
+}
+
 /// Sends every row the viewer has not sent: the holes that filled, then the rows above the
 /// watermark, in batches. False when the client is gone.
 async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -> bool {
@@ -736,17 +742,32 @@ async fn read_new(viewer: &mut Viewer, cursor: &mut Cursor, skipped: &mut u64) -
         };
         let count = batch.rows.len();
         let now = Instant::now();
-        let ordered = batch
+        // The holes that filled come first, then every hole some row now holds is settled
+        // (those of other workspaces or hidden by the filter are not delivered), then the
+        // rows above the watermark.
+        let steps = batch
             .filled
             .into_iter()
-            .map(|item| (true, item))
-            .chain(batch.rows.into_iter().map(|item| (false, item)));
-        for (was_hole, item) in ordered {
-            if was_hole {
-                cursor.fill(item.seq);
-            } else {
-                cursor.pass(item.seq, &batch.missing, now);
-            }
+            .map(Step::Fill)
+            .chain(std::iter::once(Step::Settle))
+            .chain(batch.rows.into_iter().map(Step::Pass));
+        for step in steps {
+            let item = match step {
+                Step::Fill(item) => {
+                    cursor.fill(item.seq);
+                    item
+                }
+                Step::Settle => {
+                    for seq in &batch.settled {
+                        cursor.fill(*seq);
+                    }
+                    continue;
+                }
+                Step::Pass(item) => {
+                    cursor.pass(item.seq, &batch.missing, now);
+                    item
+                }
+            };
             match viewer.frames.try_send(item_frame(
                 item,
                 viewer.reveal,
@@ -847,7 +868,9 @@ pub(crate) async fn stream(
     let patience = state.debugger.patience();
     let fresh = debugger_feed_start(&state.pool, patience).await?;
     let epoch = debugger_epoch(&state.pool).await?;
-    let (start, reset) = match resume_from(&headers, &epoch) {
+    let resume = resume_from(&headers, &epoch);
+    let resumed = matches!(resume, Resume::At(at) if at <= position);
+    let (start, reset) = match resume {
         Resume::At(resumed) if resumed <= position => (resumed, false),
         Resume::At(_) | Resume::Stale => (fresh, true),
         Resume::Absent => (fresh, false),
@@ -866,8 +889,13 @@ pub(crate) async fn stream(
         stop: state.stop.clone(),
     };
     // Seeded here, before the stream is returned, so a row that commits after this call is a
-    // late row to deliver and not history to skip.
-    let cursor = seeded_cursor(&viewer, start).await;
+    // late row to deliver and not history to skip. A resume has no holes below its point: it
+    // never recovers a late row from while the client was away.
+    let cursor = if resumed {
+        Cursor::new(start)
+    } else {
+        seeded_cursor(&viewer, start).await
+    };
     tokio::spawn(pump(viewer, cursor, reset));
     let body = stream::unfold(received, |mut received| async {
         received
