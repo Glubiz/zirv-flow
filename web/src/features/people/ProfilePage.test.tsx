@@ -187,7 +187,7 @@ describe("a person's profile", () => {
     expect(screen.getByText(/Email address, hidden from you/)).toBeInTheDocument();
     const crm = await screen.findByRole("region", { name: "Identities from crm" });
     expect(within(crm).getByText("Hidden")).toBeInTheDocument();
-    expect(within(crm).getByText(/only workspace admins can see it/)).toBeInTheDocument();
+    expect(within(crm).getByText(/needs the personal data permission/)).toBeInTheDocument();
     const table = screen.getByRole("table", { name: "Field values with the source and time of each" });
     const city = within(table).getByRole("row", { name: /city/ });
     expect(within(city).getByText("Hidden")).toBeInTheDocument();

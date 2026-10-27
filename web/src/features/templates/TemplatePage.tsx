@@ -14,7 +14,7 @@ export function TemplatePage() {
   );
   return (
     <ResourceView resource={access.ready ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the template">
-      {(data) => <TemplateEditor key={`${ws}:${id}`} workspaceId={ws} initial={data} canWrite={access.canWrite} canAdmin={access.canAdmin} />}
+      {(data) => <TemplateEditor key={`${ws}:${id}`} workspaceId={ws} initial={data} canWrite={access.canWrite} canAdmin={access.canAdmin} canPublish={access.canPublish} canRealPerson={access.canRealPerson} />}
     </ResourceView>
   );
 }

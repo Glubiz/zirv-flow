@@ -37,7 +37,7 @@ export function ImportPage({ pollMs = POLL_MS }: { pollMs?: number }) {
 }
 
 function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; importId: string; pollMs: number }) {
-  const { canWrite } = useImportAccess(workspaceId);
+  const { canWrite, canPublish } = useImportAccess(workspaceId);
   const resource = useResource(
     () =>
       unwrap(
@@ -88,6 +88,7 @@ function ImportView({ workspaceId, importId, pollMs }: { workspaceId: string; im
                     workspaceId={workspaceId}
                     item={item}
                     canWrite={canWrite}
+                    canPublish={canPublish}
                     onChanged={changed}
                     onEditMapping={() => setView("map")}
                   />

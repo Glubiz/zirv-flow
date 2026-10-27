@@ -31,7 +31,7 @@ export function ApiKeysPage() {
       />
       <ResourceView resource={access} loadingLabel="Checking your access">
         {(data) =>
-          data.canManage ? (
+          data.canAdmin ? (
             <KeyList key={ws} workspaceId={ws} />
           ) : (
             <Panel flush>

@@ -12,5 +12,5 @@ export function useSegmentAccess(workspaceId: string): SegmentAccess {
   if (access.status !== "ready") {
     return { canWrite: false, canUseAssistant: false };
   }
-  return { canWrite: access.data.canManage || access.data.role !== null, canUseAssistant: access.data.canManage };
+  return { canWrite: access.data.canEdit, canUseAssistant: access.data.canAdmin };
 }

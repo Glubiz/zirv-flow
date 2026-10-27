@@ -25,7 +25,7 @@ import { UtmSection } from "./UtmSection";
 export function SendingSettingsPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
-  const canManage = access.status === "ready" && access.data.canManage;
+  const canManage = access.status === "ready" && access.data.canAdmin;
   const settings = useResource(
     () => unwrap(client.GET("/api/v1/workspaces/{ws}/sending/settings", { params: { path: { ws } } })),
     [ws],
@@ -65,7 +65,7 @@ export function SendingSettingsPage() {
           onSaved={workspace.reload}
         />
       ) : null}
-      {access.status === "ready" ? <TestInboxesSection key={`inboxes:${ws}`} workspaceId={ws} canManage={canManage} canRead={access.data.role !== null} /> : null}
+      {access.status === "ready" ? <TestInboxesSection key={`inboxes:${ws}`} workspaceId={ws} canManage={canManage} canRead={access.data.canEdit} /> : null}
     </div>
   );
 }

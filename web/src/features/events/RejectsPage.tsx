@@ -14,7 +14,7 @@ type Reject = components["schemas"]["IngestRejectBody"];
 export function RejectsPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
-  const canReplay = access.status === "ready" && access.data.canManage;
+  const canReplay = access.status === "ready" && access.data.canAdmin;
 
   return (
     <div className="page">

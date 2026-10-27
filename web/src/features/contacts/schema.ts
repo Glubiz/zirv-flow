@@ -67,8 +67,8 @@ export function useContactAccess(workspaceId: string): ContactAccess {
     return { canWrite: false, canDefine: false };
   }
   return {
-    canWrite: access.data.canManage || access.data.role !== null,
-    canDefine: access.data.canManage,
+    canWrite: access.data.canEdit,
+    canDefine: access.data.canAdmin,
   };
 }
 

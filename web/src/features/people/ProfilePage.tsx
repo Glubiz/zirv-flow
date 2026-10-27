@@ -30,7 +30,7 @@ function ProfileView({ workspaceId, requestedId }: { workspaceId: string; reques
   const tab: PersonTab = params.get("tab") === "messages" ? "messages" : "profile";
   const tabsId = useId();
   const access = useWorkspaceAccess(workspaceId);
-  const canWrite = access.status === "ready" && (access.data.canManage || access.data.role !== null);
+  const canWrite = access.status === "ready" && access.data.canEdit;
 
   const back = (
     <p>

@@ -139,7 +139,7 @@ export function previewBody(count = 4, overrides: Record<string, unknown> = {}) 
   };
 }
 
-export function members(role: "admin" | "editor" | null) {
+export function members(role: "admin" | "publisher" | "editor" | "viewer" | null) {
   return role === null ? [] : [{ user_id: MEMBER.id, email: MEMBER.email, role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -152,7 +152,7 @@ export function actor(kind: "writer" | "reader"): Record<string, Handler> {
       }
     : {
         "GET /api/v1/session": () => json(session(MEMBER)),
-        "GET /api/v1/workspaces/ws1/members": () => json(members(null)),
+        "GET /api/v1/workspaces/ws1/members": () => json(members("viewer")),
       };
 }
 

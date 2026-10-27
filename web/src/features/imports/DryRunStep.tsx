@@ -9,6 +9,7 @@ interface DryRunStepProps {
   workspaceId: string;
   item: CsvImport;
   canWrite: boolean;
+  canPublish: boolean;
   /** The import changed on the server; load it again. */
   onChanged: () => void;
   onEditMapping: () => void;
@@ -19,7 +20,7 @@ function overThreshold(item: CsvImport): boolean {
   return item.rows_total > 1000 && item.rows_rejected / Math.max(item.rows_done, 1) > item.reject_threshold;
 }
 
-export function DryRunStep({ workspaceId, item, canWrite, onChanged, onEditMapping }: DryRunStepProps) {
+export function DryRunStep({ workspaceId, item, canWrite, canPublish, onChanged, onEditMapping }: DryRunStepProps) {
   const action = useAction();
   const path = { ws: workspaceId, id: item.id };
 
@@ -56,9 +57,11 @@ export function DryRunStep({ workspaceId, item, canWrite, onChanged, onEditMappi
               <Button variant="primary" onClick={() => void start("dry-run")} disabled={action.busy}>
                 Run the dry run
               </Button>
-              <Button onClick={() => void start("run")} disabled={action.busy}>
-                Skip it and start the import
-              </Button>
+              {canPublish ? (
+                <Button onClick={() => void start("run")} disabled={action.busy}>
+                  Skip it and start the import
+                </Button>
+              ) : null}
               <Button onClick={onEditMapping} disabled={action.busy}>
                 Edit the mapping
               </Button>
@@ -107,9 +110,11 @@ export function DryRunStep({ workspaceId, item, canWrite, onChanged, onEditMappi
           ) : null}
           {canWrite ? (
             <div className="row">
-              <Button variant="primary" onClick={() => void start("run")} disabled={action.busy}>
-                {action.busy ? "Starting" : "Start the import"}
-              </Button>
+              {canPublish ? (
+                <Button variant="primary" onClick={() => void start("run")} disabled={action.busy}>
+                  {action.busy ? "Starting" : "Start the import"}
+                </Button>
+              ) : null}
               <Button onClick={onEditMapping} disabled={action.busy}>
                 Back to the mapping
               </Button>
