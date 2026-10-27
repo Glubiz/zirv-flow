@@ -22,6 +22,8 @@ pub const NOTIFY_CHANNEL: &str = "zirv_flow_jobs";
 pub const DEFAULT_MAX_ATTEMPTS: i32 = 5;
 /// The longest `last_error` kept, in bytes.
 const MAX_ERROR_BYTES: usize = 2048;
+/// The `last_error` of a job whose lease ran out. Its decision stores the code of it.
+const LEASE_EXPIRED_ERROR: &str = "lease expired";
 /// The advisory-lock key of the scheduler leader.
 const LEADER_LOCK_KEY: i64 = 0x7a69_7276_6a6f_6273;
 /// Serialises claims while a per-workspace cap is on, so the cap cannot be overshot.
@@ -395,7 +397,8 @@ pub async fn complete_job<'e>(
 /// are used up. `None` means the lease was lost and nothing changed.
 ///
 /// `error` is truncated to 2 KB and must never contain payload values. For a workspace
-/// job the same statement appends a `job.attempt` decision, `failed` or `exhausted`.
+/// job the same statement appends a `job.attempt` decision, `failed` or `exhausted`, whose reason
+/// is the code of `error` ([`decision_actions::reason_code_of`]), never the text.
 ///
 /// The `locked` CTE takes the row first: when an erasure's `purge_on_release` mark commits while
 /// this waits, the lock rechecks against the newest row version, so the flag it returns (not the
@@ -441,7 +444,7 @@ pub async fn fail_job<'e>(
                  job_id, attempt) \
              SELECT gen_random_uuid(), workspace_id, trace_id, $5::text, \
                     CASE WHEN state = 'dead' THEN $6::text ELSE $7::text END, \
-                    $4, cause_kind, cause_id, id, attempts \
+                    $8::text, cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
@@ -452,6 +455,7 @@ pub async fn fail_job<'e>(
     .bind(decision_actions::JOB_ATTEMPT_FAILED.action())
     .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome())
     .bind(decision_actions::JOB_ATTEMPT_FAILED.outcome())
+    .bind(decision_actions::reason_code_of(error))
     .fetch_optional(executor)
     .await
     .map_err(StoreError::query)?;
@@ -534,13 +538,14 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
                  job_id, attempt) \
              SELECT gen_random_uuid(), workspace_id, trace_id, $1::text, \
                     CASE WHEN state = 'dead' THEN $2::text ELSE $3::text END, \
-                    'lease expired', cause_kind, cause_id, id, attempts \
+                    $4::text, cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
     .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.action())
     .bind(decision_actions::JOB_ATTEMPT_EXHAUSTED.outcome())
     .bind(decision_actions::JOB_ATTEMPT_LEASE_EXPIRED.outcome())
+    .bind(decision_actions::reason_code_of(LEASE_EXPIRED_ERROR))
     .fetch_all(executor)
     .await
     .map_err(StoreError::query)?;
@@ -1166,6 +1171,36 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_failure_sentence_is_stored_as_a_code_in_the_decision_and_as_text_in_the_job(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "ours").await;
+        let mut owned = job("a.kind");
+        owned.workspace_id = Some(ws);
+        let trace = owned.trace.clone();
+        enqueue(&pool, &owned).await.unwrap();
+        let claimed = claim(&pool, &["a.kind"]).await.unwrap();
+
+        fail_job(
+            &pool,
+            claimed.id,
+            claimed.lease_token,
+            Duration::ZERO,
+            "database query failed",
+        )
+        .await
+        .unwrap();
+
+        let (records, _) = crate::list_trace(&pool, ws, trace.trace_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(records[0].reason.as_deref(), Some("database_query_failed"));
+        let stored = find_job(&pool, claimed.id).await.unwrap().unwrap();
+        assert_eq!(stored.last_error.as_deref(), Some("database query failed"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reaped_workspace_job_leaves_a_lease_expired_or_exhausted_decision(pool: PgPool) {
         let ws = workspace(&pool, "ours").await;
         let mut retried = job("a.kind");
@@ -1196,7 +1231,7 @@ mod tests {
                 .unwrap();
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].action, "job.attempt");
-            assert_eq!(records[0].reason.as_deref(), Some("lease expired"));
+            assert_eq!(records[0].reason.as_deref(), Some("lease_expired"));
             outcomes.push(records[0].outcome.clone());
         }
         assert_eq!(outcomes, ["lease_expired", "exhausted"]);

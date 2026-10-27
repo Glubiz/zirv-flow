@@ -119,6 +119,19 @@ const MESSAGE: &[&str] = &[
     "event",
     "flow",
 ];
+/// A gate decision also names the id its finding rests on: the rule that stopped the send or the
+/// consent change that decided it.
+const GATE: &[&str] = &[
+    "message",
+    "enrollment",
+    "person",
+    "template",
+    "destination",
+    "event",
+    "flow",
+    "rule",
+    "change",
+];
 const CALL: &[&str] = &["enrollment", "person", "event", "flow", "destination"];
 const FORWARD: &[&str] = &["destination", "rule", "event", "outbox"];
 
@@ -215,8 +228,8 @@ registry! {
     FLOW_BRANCH_CONDITION_MATCHED: "flow.branch.condition", "matched", Reason::Detail("the case"), ANY, FLOW;
     FLOW_BRANCH_CONDITION_UNMATCHED: "flow.branch.condition", "unmatched", Reason::Detail("the case"), ANY, FLOW;
 
-    SEND_GATE_PASSED: "send.gate", "passed", Reason::Detail("the gate"), ANY, MESSAGE;
-    SEND_GATE_BLOCKED: "send.gate", "blocked", Reason::Detail("the gate"), ANY, MESSAGE;
+    SEND_GATE_PASSED: "send.gate", "passed", Reason::Detail("the gate"), ANY, GATE;
+    SEND_GATE_BLOCKED: "send.gate", "blocked", Reason::Detail("the gate"), ANY, GATE;
     MESSAGE_SEND_SENT: "message.send", "sent", Reason::Detail("the send code"), ANY, MESSAGE;
     MESSAGE_SEND_SKIPPED: "message.send", "skipped", Reason::Detail("the gate that stopped it"), ANY, MESSAGE;
     MESSAGE_SEND_FAILED: "message.send", "failed", Reason::Detail("the failure code"), ANY, MESSAGE;
@@ -242,7 +255,7 @@ registry! {
 
     SYNC_RECORD_APPLIED: "sync.record", "applied", Reason::None, SYNC, &["person", "source_record", "event"];
     SYNC_RECORD_DELETED: "sync.record", "deleted", Reason::Detail("why the record was deleted"), SYNC, &["source_record"];
-    SYNC_RECORD_REJECTED: "sync.record", "rejected", Reason::Detail("the refusal code"), SYNC, &["source_record", "reject", "person"];
+    SYNC_RECORD_REJECTED: "sync.record", "rejected", Reason::Detail("the refusal code"), SYNC, &["source_record", "ingest_reject", "person"];
     SEGMENT_ENTERED: "segment.entered", "entered", Reason::Detail("the cause of the membership change"), ANY, &["segment", "person"];
     SEGMENT_EXITED: "segment.exited", "exited", Reason::Detail("the cause of the membership change"), ANY, &["segment", "person"];
     SEGMENT_REFRESH_SKIPPED: "segment.refresh", "skipped", Reason::Fixed("archived_or_gone"), ANY, &["segment"];
@@ -269,6 +282,46 @@ pub const BRANCH_CASES: [&DecisionSpec; 10] = [
     &FLOW_BRANCH_CASE_8,
     &FLOW_BRANCH_CASE_9,
 ];
+
+/// The longest reason code [`reason_code_of`] makes.
+const MAX_CODE: usize = 64;
+
+/// A stored reason is a code (snake_case, no spaces), never a sentence: a failure text from a
+/// system outside this one can echo an address or an id, so it is never stored as a reason. This
+/// maps a fixed description such as `database query failed` to its stable code
+/// (`database_query_failed`): lower case, every run of other characters one underscore, at most
+/// 64 characters.
+pub fn reason_code_of(text: &str) -> String {
+    let mut code = String::new();
+    for character in text.chars() {
+        if code.len() >= MAX_CODE {
+            break;
+        }
+        if character.is_ascii_alphanumeric() {
+            code.push(character.to_ascii_lowercase());
+        } else if !code.is_empty() && !code.ends_with('_') {
+            code.push('_');
+        }
+    }
+    while code.ends_with('_') {
+        code.pop();
+    }
+    code
+}
+
+/// [`reason_code_of`] for a fixed description, as the `&'static str` a decision's detail takes.
+/// Each distinct description is made once and kept; the set is the descriptions in the source.
+pub fn reason_code(text: &'static str) -> &'static str {
+    static CODES: std::sync::Mutex<Option<hashbrown::HashMap<&'static str, &'static str>>> =
+        std::sync::Mutex::new(None);
+    let mut codes = CODES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    codes
+        .get_or_insert_with(hashbrown::HashMap::new)
+        .entry(text)
+        .or_insert_with(|| Box::leak(reason_code_of(text).into_boxed_str()))
+}
 
 /// The distinct actions, in table order.
 pub fn actions() -> Vec<&'static str> {
@@ -376,6 +429,36 @@ mod tests {
         for (index, spec) in BRANCH_CASES.iter().enumerate() {
             assert_eq!(spec.outcome, format!("case_{index}"));
         }
+    }
+
+    #[test]
+    fn a_description_becomes_a_snake_case_code() {
+        assert_eq!(
+            reason_code_of("database query failed"),
+            "database_query_failed"
+        );
+        assert_eq!(
+            reason_code_of("the sync attempt lost its lease"),
+            "the_sync_attempt_lost_its_lease"
+        );
+        assert_eq!(reason_code_of("  Odd -- text! "), "odd_text");
+        assert_eq!(reason_code_of("lease expired"), "lease_expired");
+        assert_eq!(reason_code_of(""), "");
+    }
+
+    #[test]
+    fn a_code_is_at_most_64_characters_and_never_ends_in_an_underscore() {
+        let long = "word ".repeat(40);
+        let code = reason_code_of(&long);
+        assert!(code.len() <= MAX_CODE, "{code}");
+        assert!(snake_case(&code), "{code}");
+    }
+
+    #[test]
+    fn the_static_code_is_the_same_text_every_time() {
+        let first = reason_code("the enrollment has ended");
+        assert_eq!(first, "the_enrollment_has_ended");
+        assert!(std::ptr::eq(first, reason_code("the enrollment has ended")));
     }
 
     #[test]

@@ -148,7 +148,8 @@ pub fn validate_settings(settings: &FlowSettings) -> Vec<Issue> {
     issues
 }
 
-fn valid_id(id: &str) -> bool {
+/// Whether `id` is a node or edge id: 1 to `MAX_ID_CHARS` letters, digits, `_` or `-`.
+pub fn valid_id(id: &str) -> bool {
     (1..=MAX_ID_CHARS).contains(&id.chars().count())
         && id
             .chars()
@@ -1009,6 +1010,15 @@ mod tests {
                 .iter()
                 .any(|i| { i.code == code::INVALID_ID && (i.node.is_some() || i.edge.is_some()) })
         );
+    }
+
+    #[test]
+    fn a_node_id_is_letters_digits_underscore_and_dash() {
+        assert!(valid_id("welcome-1_a"));
+        assert!(!valid_id(""));
+        assert!(!valid_id("a b"));
+        assert!(!valid_id("a@b.c"));
+        assert!(!valid_id(&"a".repeat(MAX_ID_CHARS + 1)));
     }
 
     #[test]

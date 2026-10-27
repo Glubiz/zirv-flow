@@ -632,9 +632,10 @@ async fn apply(
         let ends_here = visit.node == transition.state.node;
         let (spec, reason) = match (enqueued.get(&visit.node), &transition.outcome) {
             (Some(label), _) => (&decision_actions::FLOW_STEP_ENQUEUED, Some(*label)),
-            (None, Outcome::Failed { .. }) if ends_here => {
-                (&decision_actions::FLOW_STEP_FAILED, failure_text)
-            }
+            (None, Outcome::Failed { .. }) if ends_here => (
+                &decision_actions::FLOW_STEP_FAILED,
+                failure_text.map(decision_actions::reason_code),
+            ),
             (None, Outcome::Waiting) if ends_here => (
                 &decision_actions::FLOW_STEP_WAITING,
                 Some(if transition.zone_fallback.is_some() {
@@ -1057,7 +1058,7 @@ async fn finish(
         ),
         _ => walk.decision(
             &decision_actions::FLOW_ENROLLMENT_FAILED,
-            error,
+            error.map(decision_actions::reason_code),
             step,
             Some(&state.node),
         ),
@@ -1112,7 +1113,7 @@ async fn fail_enrollment(
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         spec: &decision_actions::FLOW_ENROLLMENT_FAILED,
-        detail: Some(message),
+        detail: Some(decision_actions::reason_code(message)),
         subject_ids: vec![
             ("flow", enrollment.flow_id),
             ("enrollment", enrollment.id),
@@ -1918,6 +1919,8 @@ pub(super) mod tests {
         );
         let late = sample("zirv_flow_timer_wake_lateness_seconds_sum").unwrap();
         assert!((39.0..41.0).contains(&late), "{output}");
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
     }
 
     #[sqlx::test]
@@ -2364,6 +2367,19 @@ pub(super) mod tests {
         assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
         let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
         assert!(decisions.contains(&("flow.enrollment".into(), "failed".into())));
+        let reason: Option<String> = sqlx::query_scalar(
+            "SELECT reason FROM decision_records WHERE action = 'flow.enrollment' AND outcome = 'failed'",
+        )
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            reason.as_deref(),
+            Some("an_increment_needs_a_trait_whose_value_is_a_number"),
+            "the decision holds the code, the enrollment the sentence"
+        );
+        zirv_flow_store::decisions_testing::seed_personal_values(&env.pool, env.ws).await;
+        zirv_flow_store::decisions_testing::assert_decisions_hold_no_personal_data(&env.pool).await;
         assert_eq!(
             env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
                 .await,

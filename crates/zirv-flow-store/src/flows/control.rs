@@ -420,7 +420,7 @@ pub async fn resume_batch(
             workspace_id: workspace,
             trace: trace.clone(),
             spec: &decision_actions::FLOW_ENROLLMENT_FAILED,
-            detail: Some(UNRESUMABLE),
+            detail: Some(decision_actions::reason_code(UNRESUMABLE)),
             subject_ids: vec![
                 ("flow", flow),
                 ("enrollment", row.id),
@@ -1453,6 +1453,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(decisions, 2);
+        crate::decisions_testing::seed_personal_values(&pool, ws).await;
+        crate::decisions_testing::assert_decisions_hold_no_personal_data(&pool).await;
     }
 
     #[sqlx::test]
