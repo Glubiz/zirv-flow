@@ -19,6 +19,11 @@ use zirv_flow_store::{
 use crate::JobError;
 use crate::delivery::rate::RateGates;
 
+/// How many days `jobs.retention` keeps dead jobs unless the operator says otherwise.
+pub(crate) const DEFAULT_JOB_HISTORY_DAYS: u32 = 14;
+/// How many days `audit.retention` keeps audit rows unless the operator says otherwise.
+pub(crate) const DEFAULT_AUDIT_DAYS: u32 = 730;
+
 /// What the ingest drain needs beyond the handler's transaction: a pool for its own
 /// transaction per batch (the job's transaction only holds the lease), the redaction key,
 /// the batch size and the number of concurrent drain shards.
@@ -42,6 +47,8 @@ pub struct JobContext<'a> {
     export_max_bytes: u64,
     message_retention: MessageRetention,
     decision_retention: DecisionRetention,
+    job_history_days: u32,
+    audit_days: u32,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
     ledger_dir: Option<Arc<PathBuf>>,
@@ -65,6 +72,8 @@ impl<'a> JobContext<'a> {
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
+            job_history_days: DEFAULT_JOB_HISTORY_DAYS,
+            audit_days: DEFAULT_AUDIT_DAYS,
             ingest: None,
             identifier_key: None,
             ledger_dir: None,
@@ -175,6 +184,27 @@ impl<'a> JobContext<'a> {
     /// The operator's decision-log retention settings.
     pub fn decision_retention(&self) -> &DecisionRetention {
         &self.decision_retention
+    }
+
+    /// Gives the handler how long dead jobs and audit rows are kept, in days.
+    pub(crate) fn with_log_retention_days(
+        mut self,
+        job_history_days: u32,
+        audit_days: u32,
+    ) -> Self {
+        self.job_history_days = job_history_days;
+        self.audit_days = audit_days;
+        self
+    }
+
+    /// How many days dead jobs are kept.
+    pub fn job_history_days(&self) -> u32 {
+        self.job_history_days
+    }
+
+    /// How many days audit rows are kept.
+    pub fn audit_days(&self) -> u32 {
+        self.audit_days
     }
 
     /// Gives the handler what the ingest drain needs.

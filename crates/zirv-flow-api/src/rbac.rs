@@ -122,6 +122,12 @@ pub(crate) const ROUTES: &[Route] = table! {
     // setup
     Get    "/api/v1/setup" => INSTANCE, "no principal";
     Post   "/api/v1/setup" => INSTANCE, "no principal; the setup token authorises";
+    // audit
+    Get    "/api/v1/audit" => OWNER;
+    Get    "/api/v1/audit/export" => OWNER;
+    Get    "/api/v1/workspaces/{ws}/audit" => ADMIN;
+    Get    "/api/v1/workspaces/{ws}/audit/actions" => ADMIN;
+    Get    "/api/v1/workspaces/{ws}/audit/export" => ADMIN;
     // jobs_admin
     Get    "/api/v1/admin/jobs" => OWNER;
     Get    "/api/v1/admin/jobs/dead" => OWNER;

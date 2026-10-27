@@ -32,10 +32,11 @@ pub const FRAMING_TOKENS_PER_UNIT: u64 = 32;
 pub enum Content {
     /// Fixed system text written by the product.
     Instruction(Cow<'static, str>),
-    /// Names, types, descriptions and aggregate counts; no values from people.
+    /// Task text, product-authored structure, types and aggregate counts; no catalog text or
+    /// values from people.
     Schema(String),
-    /// Pasted documents, source field names and samples without identifiers: data from outside
-    /// the product, fenced and never an instruction.
+    /// Catalog names, descriptions, documents and samples without identifiers: data supplied by
+    /// users or outside systems, fenced and never an instruction.
     Untrusted(String),
     /// Anything holding identifier or property values. It comes from outside systems too, so it
     /// is fenced like [`Content::Untrusted`], and it needs the workspace's opt-in.

@@ -732,6 +732,28 @@ pub async fn retry_dead_job(
     row.map(JobSummaryRow::into_summary).transpose()
 }
 
+/// Deletes up to `batch` dead jobs whose `dead_at` is before `cutoff`, oldest first, in one
+/// committed statement, and returns how many it deleted. `ready` and `running` jobs are never
+/// touched. A caller loops until a batch comes back short.
+pub async fn purge_dead_jobs<'e>(
+    executor: impl PgExecutor<'e>,
+    cutoff: OffsetDateTime,
+    batch: i64,
+) -> Result<i64, StoreError> {
+    let deleted = sqlx::query(
+        "DELETE FROM jobs WHERE id IN ( \
+             SELECT id FROM jobs WHERE state = 'dead' AND dead_at < $1 \
+             ORDER BY dead_at, id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+    )
+    .bind(cutoff)
+    .bind(batch)
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?
+    .rows_affected();
+    Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+}
+
 /// The database's clock; due times are compared against it, never the host's.
 pub async fn database_now<'e>(executor: impl PgExecutor<'e>) -> Result<OffsetDateTime, StoreError> {
     sqlx::query_scalar("SELECT now()")
@@ -940,6 +962,44 @@ mod tests {
             .await
             .unwrap();
         find_job(pool, id).await.unwrap().unwrap()
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn purging_dead_jobs_removes_only_old_dead_rows_in_batches(pool: PgPool) {
+        for (state, age_days, kind) in [
+            ("dead", 20_i32, "old.dead.1"),
+            ("dead", 30, "old.dead.2"),
+            ("dead", 40, "old.dead.3"),
+            ("dead", 2, "young.dead"),
+            ("ready", 40, "old.ready"),
+            ("running", 40, "old.running"),
+        ] {
+            sqlx::query(
+                "INSERT INTO jobs (id, kind, state, payload, trace_id, cause_kind, cause_id, \
+                    dead_at, run_at) \
+                 VALUES (gen_random_uuid(), $1, $2, '{}', gen_random_uuid(), 'manual', '', \
+                         CASE WHEN $2 = 'dead' THEN now() - make_interval(days => $3) END, now())",
+            )
+            .bind(kind)
+            .bind(state)
+            .bind(age_days)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(14);
+
+        assert_eq!(purge_dead_jobs(&pool, cutoff, 2).await.unwrap(), 2);
+        assert_eq!(purge_dead_jobs(&pool, cutoff, 2).await.unwrap(), 1);
+        assert_eq!(purge_dead_jobs(&pool, cutoff, 2).await.unwrap(), 0);
+
+        let mut left: Vec<String> = sqlx::query_scalar("SELECT kind FROM jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        left.sort();
+        assert_eq!(left, ["old.ready", "old.running", "young.dead"]);
     }
 
     #[test]

@@ -591,7 +591,7 @@ pub(crate) fn nodes_to_cite(graph: &Value) -> Vec<String> {
 }
 
 /// The flow document as request content. Under [`Privacy::SchemaOnly`] its personal literals are
-/// placeholders and the content is plain schema; with the workspace's opt-in the document is sent
+/// placeholders and the content is untrusted; with the workspace's opt-in the document is sent
 /// as it is, as personal data, fenced like any other.
 pub(crate) fn render_document(
     label: &str,
@@ -606,7 +606,7 @@ pub(crate) fn render_document(
     match privacy {
         Privacy::SchemaOnly => {
             let (masked, table) = mask_document(doc, &ClearKeys::of(details))?;
-            Ok((Content::Schema(format!("{label}: {masked}\n")), table))
+            Ok((Content::Untrusted(format!("{label}: {masked}\n")), table))
         }
         // The literals follow the workspace's opt-in. A webhook URL may carry a credential that no
         // opt-in covers, so it is masked all the same.
@@ -632,7 +632,9 @@ pub(crate) fn flow_context(
     privacy: Privacy,
 ) -> Result<(Vec<Content>, FlowTable), TooLarge> {
     let (rendered, table) = render_document(label, doc, details, privacy)?;
-    Ok((vec![render_catalog(details, None), rendered], table))
+    let mut parts = render_catalog(details, None);
+    parts.push(rendered);
+    Ok((parts, table))
 }
 
 /// The request for an explanation of a flow.

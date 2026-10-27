@@ -99,3 +99,85 @@ Do not include `Co-Authored-By` or `Generated with Claude Code` lines in commits
 
 Open a PR targeting `main` with one logical change and explain what changed and
 why. CI runs on pull requests to `main` and is the merge gate.
+
+## API compatibility gate
+
+For a PR changing the HTTP API, `OpenAPI Breaking Changes` (`openapi-breaking`)
+compares the committed OpenAPI document with the base branch using the pinned
+[oasdiff v1.34.0 release](https://github.com/oasdiff/oasdiff/releases/tag/v1.34.0).
+CI verifies the archive against both the pinned SHA-256 and that release's
+`checksums.txt` before running it. Required merge checks include **OpenAPI Breaking
+Changes**, **Release Script Tests**, **Version Bump Check** (for `main`), and the
+existing Rust, database, dependency, container and **Web UI** checks. The Web UI
+job keeps `npm run gen:api:check`; regenerate the client whenever the schema changes.
+
+Removing paths, methods or response fields, narrowing accepted types, requiring new
+request fields, removing request enum values, or breaking status/security contracts
+fails the gate. New paths and optional fields pass. Clients must tolerate new response
+enum values (#406); `scripts/openapi-gate/severity.txt` lowers the
+[property enum](https://github.com/oasdiff/oasdiff/blob/v1.34.0/checker/rules.go#L570)
+and [body enum](https://github.com/oasdiff/oasdiff/blob/v1.34.0/checker/rules.go#L649)
+rules from their default ERR to info. The document's `info.version` stays `"1"`,
+and paths stay under `/api/v1/`, with exactly three documented exceptions:
+
+- `/hooks/{id}`: public inbound webhook, documenting HMAC signing and WebhookPanel types.
+- `/healthz`: unversioned liveness probe.
+- `/readyz`: unversioned readiness probe.
+
+The test rejects stale allowlist entries. `/t` tracking, `/u` unsubscribe pages,
+`/a` assets and `/__test` helpers are outside this OpenAPI contract.
+
+For an intentional break before the freeze, apply the `api-breaking-approved` label
+and link the decision in the PR body. The label alone fails. Accepted links name this
+repository and a full 40-character commit SHA: either `/commit/<sha>` changing
+`docs/architecture.md`, `docs/roadmap.md` or a Markdown decision under `.zirv/work/`,
+or `/blob/<sha>/<path>` pointing to one of those files. Commit the decision so CI can
+resolve it. An unrelated URL is not a decision record. The gate reruns when labels or
+the PR body change. After the rc1 freeze, the operator must approve this exceptional
+label; the check validates the record, while label permissions and review enforce
+who may approve it. Routine API-breaking changes stop at rc1. CI also compares against
+`v1.0.0-rc.1` once present and `v1.0.0` once present, preventing incremental drift
+past either frozen contract.
+
+To reproduce locally, install the pinned release for your OS and verify its archive
+with the release's `checksums.txt`, then run from the repository root:
+
+```sh
+git fetch origin main --tags
+git show origin/main:crates/zirv-flow-api/openapi.json > /tmp/zirv-flow-base-openapi.json
+oasdiff breaking /tmp/zirv-flow-base-openapi.json crates/zirv-flow-api/openapi.json \
+  --fail-on ERR --severity-levels scripts/openapi-gate/severity.txt
+bash scripts/openapi-gate/self-test.sh
+```
+
+After tagging rc1 or 1.0.0, repeat the comparison using that tag's document as the
+base. Re-blessing a changed schema does not bypass compatibility checks. Run
+`ZIRV_FLOW_BLESS=1 cargo nextest run -p zirv-flow-api openapi` to update the committed
+schema and `npm run gen:api` in `web/` to update its client.
+
+## Release candidates
+
+Land the prerelease CD changes before the first rc. Cut `1.0.0-rc.N` versions on
+`main`, increasing N for each candidate; `1.0.0` follows the last rc. Follow the
+release branch policy in [the roadmap](docs/roadmap.md). No routine API-breaking
+changes are allowed after rc1; an exceptional override requires the operator and
+decision record described above.
+
+CD publishes a GitHub prerelease and image tags `:<version>` and `:rc` for a candidate.
+It leaves GitHub Latest and the image's `:latest` on the last stable release. A stable
+release publishes `:<version>` and `:latest`, leaves `:rc` alone, and becomes GitHub
+Latest. The OCI version label always contains the full version. Rerunning CD for a
+published candidate keeps the existing release and can retry its image build.
+
+CI compares SemVer precedence, ignoring build metadata: `rc.9 < rc.10 < final`.
+A lower version always fails; equal precedence fails when shipped code changed.
+An rc changelog section starts at the previous reachable SemVer tag; a final section
+includes all rc changes since the previous stable tag. Non-release tags are ignored.
+For a section generated before tagging, pass `--version`, as CD does. Check the
+release logic without building or publishing anything:
+
+```sh
+bash scripts/semver-compare.sh --self-test
+bash scripts/generate-changelog.sh --self-test
+bash scripts/release-flags.sh --self-test
+```

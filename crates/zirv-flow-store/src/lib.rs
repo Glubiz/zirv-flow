@@ -73,7 +73,10 @@ pub use assets::{
     find_asset, find_served_asset, list_assets, parse_sha256_hex, record_references, sha256_hex,
     store_asset, workspace_asset_bytes,
 };
-pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
+pub use audit::{
+    AUDIT_BATCH, Actor, ActorKind, AuditEntry, AuditFilter, AuditPage, NewAuditEntry, append_audit,
+    count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
+};
 pub use changes::{
     DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, claim_dirty, dirty_backlog, dirty_heads,
     enqueue_reevaluate,
@@ -190,8 +193,8 @@ pub use jobs::{
     KindDepth, Leadership, NOTIFY_CHANNEL, NewJob, NewSchedule, QueueCounts, QueueDepth, Reaped,
     Schedule, advance_schedule, claim_job, complete_job, create_schedule, database_now,
     disable_schedule, due_schedules, enqueue, enqueue_many, fail_job, find_job, heartbeat_job,
-    kind_depths, list_dead_jobs, listen_for_jobs, lock_lease, queue_counts, queue_depths,
-    reap_expired, retry_dead_job, try_lead,
+    kind_depths, list_dead_jobs, listen_for_jobs, lock_lease, purge_dead_jobs, queue_counts,
+    queue_depths, reap_expired, retry_dead_job, try_lead,
 };
 pub use lists::{
     List, ListMember, ListSource, MAX_PEOPLE_PER_CALL, MemberIdentifier, MembershipChange,

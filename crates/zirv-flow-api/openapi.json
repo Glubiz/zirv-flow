@@ -217,6 +217,299 @@
         ]
       }
     },
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "The instance audit rows (sign-ins, user creation, key rotation), newest first, with the\nsame filters and paging as the workspace log. Instance owner only.",
+        "operationId": "list_instance_audit",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The next_cursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "A listed action, or an area followed by a dot",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_kind",
+            "in": "query",
+            "description": "user, api_key, system or anonymous",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The acting user or key",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "object_kind",
+            "in": "query",
+            "description": "The kind of object acted on",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "object_id",
+            "in": "query",
+            "description": "The object acted on",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "RFC 3339; rows at or after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "RFC 3339; rows before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "description": "The request that caused the row",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of instance audit rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPageBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the instance owner, or an API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/audit/export": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Exports the instance audit rows like the workspace export. Instance owner only. Audited as\n`audit.exported`.",
+        "operationId": "export_instance_audit",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "description": "ndjson (default) or csv",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "A listed action, or an area followed by a dot",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_kind",
+            "in": "query",
+            "description": "user, api_key, system or anonymous",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The acting user or key",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "object_kind",
+            "in": "query",
+            "description": "The kind of object acted on",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "object_id",
+            "in": "query",
+            "description": "The object acted on",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "RFC 3339; rows at or after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "RFC 3339; rows before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "description": "The request that caused the row",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rows, newest first, one per line",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not the instance owner, or an API key",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/destination-kinds": {
       "get": {
         "tags": [
@@ -2783,6 +3076,416 @@
           },
           "409": {
             "description": "asset_in_use: published versions use the asset",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "The workspace's audit log, newest first, filtered and keyset-paged. Needs the workspace admin\nrole. Filters: `action` (a listed action, or an area such as `flow.`), `actor_kind`,\n`actor_id`, `object_kind`, `object_id`, `from` (inclusive) and `to` (exclusive) on the time\nof the row, and `request_id`.",
+        "operationId": "list_audit",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows per page, 1 to 200; default 50",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The next_cursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "A listed action, or an area followed by a dot",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_kind",
+            "in": "query",
+            "description": "user, api_key, system or anonymous",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The acting user or key",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "object_kind",
+            "in": "query",
+            "description": "The kind of object acted on",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "object_id",
+            "in": "query",
+            "description": "The object acted on",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "RFC 3339; rows at or after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "RFC 3339; rows before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "description": "The request that caused the row",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of audit rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPageBody"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/audit/actions": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "The audit actions, grouped by area, for a filter menu. Needs the workspace admin role.",
+        "operationId": "list_audit_actions",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every action an audit row may carry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditActionsBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/audit/export": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Exports the workspace's audit log, newest first, as `format=ndjson` (default) or `csv`, with\nthe filters of the list. The body is streamed in batches, so the size is unbounded. A CSV cell\nthat starts with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'`. Needs\nthe workspace admin role. Audited as `audit.exported`.",
+        "operationId": "export_audit",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "ndjson (default) or csv",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "A listed action, or an area followed by a dot",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_kind",
+            "in": "query",
+            "description": "user, api_key, system or anonymous",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "description": "The acting user or key",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "object_kind",
+            "in": "query",
+            "description": "The kind of object acted on",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "object_id",
+            "in": "query",
+            "description": "The object acted on",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "RFC 3339; rows at or after it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "RFC 3339; rows before it",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "query",
+            "description": "The request that caused the row",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rows, newest first, one per line",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is malformed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a key without the admin scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -6562,7 +7265,7 @@
         "tags": [
           "destinations"
         ],
-        "summary": "Checks the destination's settings and stored credential without delivering anything. A failed\ncheck is a 200 with `ok` false and the reason. Workspace admins only. Audited as\n`destination.checked`.",
+        "summary": "Checks the destination's settings and stored credential without delivering anything. A failed\ncheck is a 200 with `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as\n`destination.checked`.",
         "operationId": "check_destination",
         "parameters": [
           {
@@ -6629,6 +7332,16 @@
           },
           "409": {
             "description": "The destination is archived (`code` is `destination_archived`), or its type is not in this build (`destination_kind_unavailable`)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The egress policy refused the destination (`egress_denied`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -10565,7 +11278,7 @@
             }
           },
           "422": {
-            "description": "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events",
+            "description": "An invalid field; `too_many_rules` when 20 rules are active; `destination_unsupported` when the destination cannot carry events; `egress_denied` when its address is refused",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -20627,7 +21340,7 @@
         "tags": [
           "sources"
         ],
-        "summary": "Tests the connection to the source with its stored credential. A failed test is a 200 with\n`ok` false and the reason. Workspace admins only. Audited as `source.tested`.",
+        "summary": "Tests the connection to the source with its stored credential. A failed test is a 200 with\n`ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as `source.tested`.",
         "operationId": "test_source",
         "parameters": [
           {
@@ -20694,6 +21407,16 @@
           },
           "409": {
             "description": "The source type is not in this build",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The egress policy refused the source (`egress_denied`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -27748,6 +28471,137 @@
           "segment_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "AuditActionsBody": {
+        "type": "object",
+        "required": [
+          "areas"
+        ],
+        "properties": {
+          "areas": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditAreaBody"
+            }
+          }
+        }
+      },
+      "AuditAreaBody": {
+        "type": "object",
+        "required": [
+          "area",
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "area": {
+            "type": "string",
+            "description": "The text before the dot; pass `<area>.` as `action` to filter by area.",
+            "example": "flow"
+          }
+        }
+      },
+      "AuditEntryBody": {
+        "type": "object",
+        "description": "One audit row.",
+        "required": [
+          "id",
+          "actor_kind",
+          "action",
+          "summary",
+          "occurred_at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "example": "flow.published"
+          },
+          "actor_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "actor_kind": {
+            "type": "string",
+            "description": "`user`, `api_key`, `system` or `anonymous`.",
+            "example": "user"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "object_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "object_kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "object",
+            "description": "Ids and counts only; never an email, a name or a secret."
+          },
+          "trace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The trace of the request, which opens at the trace page: 32 lowercase hex characters.\nNull on rows from before traces were recorded and on rows written outside a request."
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Null for an instance row such as a sign-in."
+          }
+        }
+      },
+      "AuditPageBody": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEntryBody"
+            },
+            "description": "Newest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null when there is none."
           }
         }
       },
