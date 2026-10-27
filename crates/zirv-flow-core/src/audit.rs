@@ -245,9 +245,8 @@ fn check_text(text: &str, path: &str) -> Result<(), SummaryIssue> {
 /// `local@domain.tld` with no whitespace, anywhere in the text.
 fn looks_like_email(text: &str) -> bool {
     text.split_whitespace().any(|word| {
-        word.split_once('@').is_some_and(|(local, domain)| {
+        word.rsplit_once('@').is_some_and(|(local, domain)| {
             !local.is_empty()
-                && !domain.contains('@')
                 && domain.contains('.')
                 && !domain.starts_with('.')
                 && !domain.ends_with('.')
@@ -397,6 +396,10 @@ mod tests {
         ));
         assert!(matches!(
             refused(serde_json::json!({"note": "mail ada@example.com now"})),
+            SummaryIssue::Email(_)
+        ));
+        assert!(matches!(
+            refused(serde_json::json!({"note": "a@b@example.com"})),
             SummaryIssue::Email(_)
         ));
         for phone in ["+4512345678", "12 34 56 78", "(555) 123-4567"] {
