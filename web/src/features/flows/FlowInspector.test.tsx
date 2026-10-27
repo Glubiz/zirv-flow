@@ -66,12 +66,12 @@ function counts(version: number) {
 
 /** The decisions the #165 fixture writes for the enrollment: fail, retry, fail, skip, complete. */
 const DECISIONS = [
-  decision("d1", "flow.enrollment", "enrolled", { kind: "trait_change", id: "segment-change-1" }, null),
-  decision("d2", "flow.enrollment", "failed", { kind: "trait_change", id: "segment-change-1" }, MESSAGE, "bump"),
+  decision("d1", "flow.enrollment", "enrolled", { kind: "event", id: "segment-change-1" }, null),
+  decision("d2", "flow.enrollment", "failed", { kind: "event", id: "segment-change-1" }, MESSAGE, "bump"),
   decision("d3", "flow.enrollment", "retried", { kind: "manual", id: "operator-1" }, "operator", "bump"),
-  decision("d4", "flow.enrollment", "failed", { kind: "trait_change", id: "segment-change-1" }, MESSAGE, "bump"),
+  decision("d4", "flow.enrollment", "failed", { kind: "event", id: "segment-change-1" }, MESSAGE, "bump"),
   decision("d5", "flow.enrollment", "skipped", { kind: "manual", id: "operator-1" }, "operator", "bump"),
-  decision("d6", "flow.enrollment", "completed", { kind: "trait_change", id: "segment-change-1" }, null, "end"),
+  decision("d6", "flow.enrollment", "completed", { kind: "event", id: "segment-change-1" }, null, "end"),
 ];
 
 function decision(id: string, action: string, outcome: string, cause: { kind: string; id: string }, reason: string | null, node?: string) {
@@ -226,7 +226,7 @@ describe("the enrollment inspector", () => {
     expect(DECISIONS.filter((record) => record.outcome === "failed")).toHaveLength(2);
     // Under the segment change: the enrollment and its first failure; each operator decision opens a branch.
     const root = tree.firstElementChild as HTMLElement;
-    expect(root).toHaveTextContent("trait_change");
+    expect(root).toHaveTextContent("event");
     const items = Array.from((root.lastElementChild as HTMLElement).children) as HTMLElement[];
     expect(items.map((item) => item.firstElementChild?.textContent)).toEqual(["flow.enrollment", "flow.enrollment", "flow.enrollment", "flow.enrollment"]);
     const [enrolled, failedFirst, retried, skipped] = items;

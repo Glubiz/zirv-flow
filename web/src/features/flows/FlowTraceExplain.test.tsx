@@ -17,7 +17,7 @@ const EXPLAIN = `POST ${WS}/traces/${TRACE}/ai/explain`;
 const E1 = "99999999-0000-4000-8000-000000000001";
 const PERSON = "88888888-0000-4000-8000-0000000000aa";
 
-const CAUSE = { kind: "trait_change", id: "change-1" };
+const CAUSE = { kind: "event", id: "change-1" };
 
 function decision(id: string, outcome: string, node?: string) {
   return {

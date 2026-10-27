@@ -4962,7 +4962,7 @@ export interface components {
          *     and not here.
          * @enum {string}
          */
-        CauseKindBody: "event" | "trait_change" | "schedule" | "manual" | "api" | "definition_change" | "sync_run";
+        CauseKindBody: "event" | "schedule" | "manual" | "api" | "definition_change" | "sync_run";
         /** @description One difference. */
         Change: {
             /** @description The drafted value; absent for a removed field. */
@@ -5926,7 +5926,7 @@ export interface components {
              * @description When the decision was recorded.
              */
             at: string;
-            /** @description `event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`. */
+            /** @description `event`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`. */
             cause_kind: string;
             /** Format: uuid */
             id: string;

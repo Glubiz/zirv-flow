@@ -2084,8 +2084,15 @@ delivery feedback; and forwarding attempts. Each record has `trace_id`, time,
 action type, outcome, durable domain ids and one typed cause: `event`,
 `schedule`, `manual`, `api`, `definition_change` or `sync_run`, with the cause id.
 The M8 trace-completeness matrix covers these six active causes, including failure
-and skip paths. The `trait_change` cause returns when computed traits produce it
-(ruling 67953328). A decision never stores identifier, trait or event-property values.
+and skip paths. The `trait_change` cause is removed from the code, the API and the four
+`cause_kind` CHECKs (migration 0082), because v1 has no producer; it returns when computed
+traits produce it (ruling 67953328). Every decision is a row of the registry in
+`zirv-flow-core` (`decision_actions`): the action, the outcome, a fixed reason or a detail the
+deciding code picks, the cause kinds and the subject names. The decision log is written
+only from a registry row, so a triple outside it does not compile; a source scan fails on
+an action string or row that the code does not use, a fixture table maps each row to the
+test that produces it, and the web trace labels must name every action. A decision never
+stores identifier, trait or event-property values.
 For enrollments a segment trigger keeps the cause of the membership change; an event
 trigger is cause `event` with the event id; a schedule trigger is cause `schedule`, the
 API trigger cause `api`, and operator actions (retry, skip, bulk exit, manual audience

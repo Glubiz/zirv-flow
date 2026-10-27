@@ -28819,7 +28819,6 @@
         "description": "What kind of thing caused the work (architecture 12.4). Mirrors the core `CauseKind`, which is\npure and has no schema derive; the unit test below fails to compile if a kind is added there\nand not here.",
         "enum": [
           "event",
-          "trait_change",
           "schedule",
           "manual",
           "api",
@@ -30907,7 +30906,7 @@
           },
           "cause_kind": {
             "type": "string",
-            "description": "`event`, `trait_change`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`."
+            "description": "`event`, `schedule`, `manual`, `api`, `definition_change` or `sync_run`."
           },
           "id": {
             "type": "string",
