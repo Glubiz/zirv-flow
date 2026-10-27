@@ -18,8 +18,9 @@ use zirv_flow_core::{
 };
 use zirv_flow_store::secrets;
 use zirv_flow_store::{
-    Actor, ActorKind, AiSettings, AiSettingsUpdate, ApiKey, Membership, NewAuditEntry,
-    PgConnection, PgPool, ReplayReport, StoreError, User, UtmSettings, Workspace,
+    Actor, ActorKind, AiSettings, AiSettingsUpdate, ApiKey, DeploymentRetention, Membership,
+    NewAuditEntry, PgConnection, PgPool, ReplayReport, StoreError, User, UtmSettings, Workspace,
+    WorkspaceRetention,
 };
 
 use crate::{credentials, passwords};
@@ -115,6 +116,9 @@ pub enum AdminError {
         code: &'static str,
         detail: String,
     },
+    /// A retention window outside the deployment bounds; the problem carries the code
+    /// `retention_out_of_bounds` and the detail names the field and the bounds.
+    RetentionBounds(String),
 }
 
 impl fmt::Display for AdminError {
@@ -129,7 +133,7 @@ impl fmt::Display for AdminError {
             Self::Merge(message) => formatter.write_str(message),
             Self::Slot(error) => write!(formatter, "{error:?}"),
             Self::Secret(error) => error.fmt(formatter),
-            Self::Utm { detail, .. } => formatter.write_str(detail),
+            Self::Utm { detail, .. } | Self::RetentionBounds(detail) => formatter.write_str(detail),
         }
     }
 }
@@ -146,7 +150,8 @@ impl Error for AdminError {
             | Self::LastAdmin
             | Self::Merge(_)
             | Self::Slot(_)
-            | Self::Utm { .. } => None,
+            | Self::Utm { .. }
+            | Self::RetentionBounds(_) => None,
         }
     }
 }
@@ -1098,6 +1103,75 @@ pub async fn update_workspace(
     saved.ok_or(AdminError::NotFound("workspace"))
 }
 
+/// Checks one window a workspace may shorten: not below the deployment minimum and not above the
+/// deployment window. A null returns to the deployment value. The refusal names the bounds.
+fn check_window(
+    field: &'static str,
+    days: Option<i64>,
+    min: u32,
+    max: u32,
+    deployment: u32,
+) -> Result<Option<i32>, AdminError> {
+    let Some(days) = days else {
+        return Ok(None);
+    };
+    let longest = deployment.min(max);
+    if days < i64::from(min) || days > i64::from(longest) {
+        return Err(AdminError::RetentionBounds(format!(
+            "{field}: must be between {min} and {longest} days (the deployment window is {deployment} days and its bounds are {min} to {max})"
+        )));
+    }
+    Ok(i32::try_from(days).ok())
+}
+
+/// Replaces a workspace's own message and decision-log windows (ruling d732a27c). Each is in days
+/// and must lie within the deployment bounds and not exceed the deployment window; null returns
+/// to the deployment value. The other windows are the deployment's alone. Audited as
+/// `retention.updated` with the window names and day counts only.
+pub async fn set_workspace_retention(
+    pool: &PgPool,
+    context: &Context,
+    deployment: &DeploymentRetention,
+    workspace: WorkspaceId,
+    messages_days: Option<i64>,
+    decision_days: Option<i64>,
+) -> Result<WorkspaceRetention, AdminError> {
+    let messages = check_window(
+        "messages_days",
+        messages_days,
+        deployment.messages.min_days,
+        deployment.messages.max_days,
+        deployment.messages.days,
+    )?;
+    let decisions = check_window(
+        "decision_days",
+        decision_days,
+        deployment.decisions.min_days,
+        deployment.decisions.max_days,
+        deployment.decisions.days,
+    )?;
+    let updated_by = (context.actor.kind == ActorKind::User)
+        .then_some(context.actor.id)
+        .flatten();
+    let mut tx = zirv_flow_store::begin(pool).await?;
+    let saved = zirv_flow_store::set_workspace_retention(
+        &mut tx, workspace, messages, decisions, updated_by,
+    )
+    .await?
+    .ok_or(AdminError::NotFound("workspace"))?;
+    audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "retention.updated",
+        Some(("workspace", workspace.as_uuid())),
+        json!({ "messages_days": saved.messages_days, "decision_days": saved.decision_days }),
+    )
+    .await?;
+    zirv_flow_store::commit(tx).await?;
+    Ok(saved)
+}
+
 #[cfg(test)]
 mod tests {
     use sqlx::PgPool;
@@ -1106,6 +1180,34 @@ mod tests {
     use super::*;
 
     const PASSWORD: &str = "correct horse battery";
+
+    #[test]
+    fn a_window_must_lie_between_the_minimum_and_the_deployment_window() {
+        assert_eq!(check_window("w", None, 30, 1095, 395).unwrap(), None);
+        assert_eq!(
+            check_window("w", Some(30), 30, 1095, 395).unwrap(),
+            Some(30)
+        );
+        assert_eq!(
+            check_window("w", Some(395), 30, 1095, 395).unwrap(),
+            Some(395)
+        );
+        for refused in [29, 0, -5, 396, 1000] {
+            let error = check_window("w", Some(refused), 30, 1095, 395).unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("w: must be between 30 and 395"), "{text}");
+            assert!(text.contains("1095"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_window_never_exceeds_the_maximum_even_when_the_deployment_window_does() {
+        assert!(check_window("w", Some(800), 30, 760, 900).is_err());
+        assert_eq!(
+            check_window("w", Some(760), 30, 760, 900).unwrap(),
+            Some(760)
+        );
+    }
 
     #[test]
     fn contexts_record_the_kind_of_actor() {

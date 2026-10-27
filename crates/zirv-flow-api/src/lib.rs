@@ -33,6 +33,7 @@ mod problem;
 #[cfg(test)]
 mod rbac;
 mod request_id;
+mod retention;
 mod segments;
 mod sending;
 mod session;
@@ -882,6 +883,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/workspaces/{ws}/privacy/settings",
             get(privacy::settings::get).put(privacy::settings::put),
+        )
+        .route(
+            "/api/v1/workspaces/{ws}/retention",
+            get(retention::get).put(retention::put),
         )
         .route(
             "/api/v1/workspaces/{ws}/assets",

@@ -16181,6 +16181,166 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/retention": {
+      "get": {
+        "tags": [
+          "retention"
+        ],
+        "summary": "Every retention window in force for the workspace, with its source, bounds, whether it can be\nchanged here, and the last run of the job that enforces it. Admins, the owner and `admin` keys\nonly.",
+        "operationId": "get_retention",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The eight windows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "retention"
+        ],
+        "summary": "Replaces the workspace's own message and decision-log windows. A value must be at least the\ndeployment minimum and at most the deployment window; null (or a missing field) returns the\nwindow to the deployment value. Audit, ingest rejects, import files, job history and events are\nthe deployment's alone, and assistant transcripts stay under the AI settings: any other field\nis a 422. Audited as `retention.updated`, with window names and day counts only.",
+        "operationId": "put_retention",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutRetentionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The windows after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a workspace admin, or a missing CSRF token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, or no access to it",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "An unknown field, or a window outside the deployment bounds or longer than the deployment window (code retention_out_of_bounds, with the bounds in the detail)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/segments": {
       "get": {
         "tags": [
@@ -35543,6 +35703,25 @@
           }
         }
       },
+      "LastRunBody": {
+        "type": "object",
+        "description": "The last time a window's job finished.",
+        "required": [
+          "ran_at",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows the run removed."
+          },
+          "ran_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "ListBody": {
         "type": "object",
         "required": [
@@ -37441,6 +37620,29 @@
           }
         }
       },
+      "PutRetentionRequest": {
+        "type": "object",
+        "description": "The windows a workspace admin may set. A PUT replaces both; a field that is null or left out\nreturns that window to the deployment value.",
+        "properties": {
+          "decision_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Days decision records are kept, within the same rule."
+          },
+          "messages_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Days messages are kept; at least the deployment minimum and at most the deployment window."
+          }
+        },
+        "additionalProperties": false
+      },
       "QueueStatusBody": {
         "type": "object",
         "required": [
@@ -37967,6 +38169,21 @@
           }
         ],
         "description": "How to close a conflict."
+      },
+      "RetentionBody": {
+        "type": "object",
+        "required": [
+          "windows"
+        ],
+        "properties": {
+          "windows": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WindowBody"
+            },
+            "description": "The eight windows, in a fixed order."
+          }
+        }
       },
       "RoleBody": {
         "type": "object",
@@ -44166,6 +44383,69 @@
           "tolerance_seconds": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "WindowBody": {
+        "type": "object",
+        "description": "One retention window.",
+        "required": [
+          "key",
+          "unit",
+          "source",
+          "editable"
+        ],
+        "properties": {
+          "editable": {
+            "type": "boolean",
+            "description": "Whether this API changes the window for a workspace admin."
+          },
+          "key": {
+            "type": "string",
+            "description": "`events`, `messages`, `decision_log`, `audit`, `ingest_rejects`, `import_files`,\n`job_history` or `assistant_transcripts`."
+          },
+          "last_run": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/LastRunBody",
+                "description": "The last run of the job that enforces the window; null before its first run."
+              }
+            ]
+          },
+          "max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The longest window allowed; null when there is no upper bound."
+          },
+          "min": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The shortest window allowed; null when there is no lower bound."
+          },
+          "source": {
+            "type": "string",
+            "description": "`workspace` when this workspace's own setting applies, else `deployment`."
+          },
+          "unit": {
+            "type": "string",
+            "description": "`days`."
+          },
+          "value": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The effective window; null when the assistant stores no transcripts."
           }
         }
       },

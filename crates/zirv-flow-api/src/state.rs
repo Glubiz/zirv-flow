@@ -8,7 +8,9 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{HmacKey, HmacPurpose, HmacRoot, Keyring};
 use zirv_flow_identity::{IdentityError, OidcSettings, Provider};
 use zirv_flow_render::RenderPool;
-use zirv_flow_store::{Clock, EventRetention, PgPool, SchemaState, StoreError};
+use zirv_flow_store::{
+    Clock, DeploymentRetention, EventRetention, PgPool, SchemaState, StoreError,
+};
 
 use crate::assets::AssetLimits;
 use crate::assistant::{AiConfig, runtime::AiRuntime};
@@ -35,6 +37,8 @@ pub struct AppState {
     pub(crate) oidc: Option<OidcState>,
     /// The bounds a per-name event retention override must respect.
     pub(crate) event_retention: EventRetention,
+    /// Every deployment retention window, for the retention API.
+    pub(crate) retention: DeploymentRetention,
     /// The ingestion limits and the per-key rate-limit buckets.
     pub(crate) ingest: IngestState,
     /// The largest CSV file an upload takes.
@@ -105,6 +109,7 @@ impl AppState {
             local_sign_in: true,
             oidc: None,
             event_retention: EventRetention::default(),
+            retention: DeploymentRetention::default(),
             ingest: IngestState::new(IngestLimits::default()),
             imports: ImportLimits::default(),
             assets: AssetLimits::default(),
@@ -152,6 +157,15 @@ impl AppState {
     /// The operator's event retention settings; their bounds limit per-name overrides.
     pub fn with_event_retention(mut self, settings: EventRetention) -> Self {
         self.event_retention = settings;
+        self.retention.events = settings;
+        self
+    }
+
+    /// The operator's retention windows, which the retention API lists and bounds a workspace's
+    /// own windows by. Also sets the event retention settings.
+    pub fn with_deployment_retention(mut self, settings: DeploymentRetention) -> Self {
+        self.event_retention = settings.events;
+        self.retention = settings;
         self
     }
 
@@ -398,6 +412,33 @@ mod tests {
             state()
                 .with_event_retention(settings)
                 .event_retention
+                .min_days,
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_retention_defaults_and_carries_the_event_settings() {
+        let settings = DeploymentRetention {
+            audit_days: 91,
+            events: EventRetention {
+                min_days: 5,
+                ..EventRetention::default()
+            },
+            ..DeploymentRetention::default()
+        };
+
+        assert_eq!(state().retention, DeploymentRetention::default());
+        let set = state().with_deployment_retention(settings);
+        assert_eq!(
+            (set.retention.audit_days, set.event_retention.min_days),
+            (91, 5)
+        );
+        assert_eq!(
+            state()
+                .with_event_retention(settings.events)
+                .retention
+                .events
                 .min_days,
             5
         );

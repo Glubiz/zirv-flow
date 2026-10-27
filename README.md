@@ -96,18 +96,22 @@ Pass an optional TOML file with `zirv-flow --config <path>`, or set
 | `worker.concurrency` | u32 | 4 | at least 1 |
 | `worker.lease_seconds` | u32 | 30 | at least 1 |
 | `worker.max_running_per_workspace` | u32 | unlimited | at least 1 when set |
-| `events.retention_days` | u32 | 760 | at least 1; how long events are kept unless their name has an override; within the two bounds below |
+| `events.retention_days` | u32 | 760 | at least 1; within the two bounds below; see [Retention windows](#retention-windows) |
 | `events.min_retention_days` | u32 | 30 | at least 1; the shortest per-name override a workspace may set |
 | `events.max_retention_days` | u32 | 1095 | at least 1; the longest per-name override; not below the minimum |
 | `events.reject_retention_days` | u32 | 30 | at least 1; how long ingest rejects are kept |
-| `retention.messages_days` | u32 | 395 | at least 1; how long ended messages are kept (about 13 months); within the two bounds below; the purge writes the erasure handled markers |
+| `retention.messages_days` | u32 | 395 | at least 1; within the two bounds below |
 | `retention.messages_min_days` | u32 | 30 | at least 1; the shortest per-workspace message window |
 | `retention.messages_max_days` | u32 | 1095 | at least 1; the longest per-workspace message window; not below the minimum |
-| `retention.decision_days` | u32 | 395 | at least 1; how long decision-log records are kept (about 13 months); within the two bounds below |
+| `retention.decision_days` | u32 | 395 | at least 1; within the two bounds below |
 | `retention.decision_min_days` | u32 | 30 | at least 1; the shortest per-workspace decision-log window |
-| `retention.decision_max_days` | u32 | 760 | at least 1; the longest per-workspace decision-log window (25 months); not below the minimum |
-| `retention.job_history_days` | u32 | 14 | 1 to 90; how long dead jobs are kept; `jobs.retention` deletes older ones daily |
-| `retention.audit_days` | u32 | 730 | 90 to 3650; how long audit rows are kept (2 years); `audit.retention` purges older ones daily and records an `audit.purged` row |
+| `retention.decision_max_days` | u32 | 760 | at least 1; the longest per-workspace decision-log window; not below the minimum |
+| `retention.job_history_days` | u32 | 14 | 1 to 90 |
+| `retention.audit_days` | u32 | 730 | 90 to 3650 |
+| `retention.import_file_days` | u32 | 7 | 1 to 90 |
+| `retention.import_reject_days` | u32 | 30 | 1 to 365 |
+| `retention.export_hours` | u32 | 24 | 1 to 168 |
+| `retention.test_send_months` | u32 | 13 | 1 to 36 |
 | `ingest.max_request_bytes` | u64 | 1048576 | at least 1; a larger ingestion body is refused with 413 |
 | `ingest.max_batch_items` | u32 | 500 | at least 1; more items in one `batch` request is a 400 |
 | `ingest.rate_per_key` | u32 | 10000 | at least 1; items per second each API key may send, per `serve` process |
@@ -761,7 +765,7 @@ sample: only the values of properties the published schema marks as not personal
 shown, and every value of an event without a published schema is hidden. The stored payload
 is kept for a later replay and is never returned.
 
-**Retention.** Events are kept for `events.retention_days`, or a per-name number of days an
+**Retention.** (All windows: [Retention windows](#retention-windows).) Events are kept for `events.retention_days`, or a per-name number of days an
 admin sets within `events.min_retention_days` and `events.max_retention_days`; rejects for
 `events.reject_retention_days`. A daily job (03:17 UTC) deletes what is past its limit in
 batches, drops whole monthly partitions older than the longest limit and removes the repeat
@@ -795,6 +799,37 @@ delete the append-only guard allows, and appends one `audit.purged` row (system 
 `count` and `cutoff` only) when it deleted anything. Both delete in batches of 5,000 that commit
 separately, so a failed run keeps its completed batches and the next run continues; the deletes are
 counted in `zirv_flow_retention_deleted_total{table="jobs"}` and `{table="audit_log"}`.
+
+### Retention windows
+
+Every window the deployment enforces, in one place. A window is set by the operator in the
+configuration; a workspace admin may only shorten the message and decision-log windows, through
+`PUT /api/v1/workspaces/{ws}/retention` (admin only, audited as `retention.updated` with the
+window names and day counts). Events are shortened per event name through the event schemas, and
+assistant transcripts stay under the AI settings.
+
+| Window | Key | Default | Bounds | Who may change it | Job |
+|---|---|---|---|---|---|
+| Events | `events.retention_days` | 760 days | per-name overrides 30 to 1095 (`events.min_retention_days`, `events.max_retention_days`) | operator; a workspace admin per event name | `events.retention` |
+| Ingest rejects | `events.reject_retention_days` | 30 days | at least 1 | operator | `events.retention` |
+| Messages | `retention.messages_days` | 395 days | workspace window 30 to 1095 (`retention.messages_min_days`, `retention.messages_max_days`), never above the deployment window | operator; a workspace admin may shorten it | `messages.retention` |
+| Decision log | `retention.decision_days` | 395 days | workspace window 30 to 760 (`retention.decision_min_days`, `retention.decision_max_days`), never above the deployment window | operator; a workspace admin may shorten it | `decisions.retention` |
+| Audit log | `retention.audit_days` | 730 days | 90 to 3650 | operator | `audit.retention` |
+| Job history | `retention.job_history_days` | 14 days | 1 to 90 | operator | `jobs.retention` |
+| Import files | `retention.import_file_days` | 7 days | 1 to 90 | operator | scheduler leader, hourly |
+| Import rejects | `retention.import_reject_days` | 30 days | 1 to 365 | operator | scheduler leader, hourly |
+| Person exports | `retention.export_hours` | 24 hours | 1 to 168 | operator | `privacy.export` sets the expiry; scheduler leader expires hourly |
+| Test sends | `retention.test_send_months` | 13 months | 1 to 36 | operator | `events.retention` |
+| Assistant transcripts | `transcript_days` in the AI settings | none stored | 1 to 30 | workspace admin | `maintenance.ai_transcripts` |
+
+`GET /api/v1/workspaces/{ws}/retention` (admin only) lists eight of these as `windows`, each with
+`key` (`events`, `messages`, `decision_log`, `audit`, `ingest_rejects`, `import_files`,
+`job_history`, `assistant_transcripts`), `value`, `unit`, `source` (`deployment` or `workspace`),
+`min`, `max`, `editable` and `last_run` (`ran_at` and `deleted`, from the last run of its job; null
+before the first). `PUT` takes `messages_days` and `decision_days`, each a number of days or null
+for the deployment value; a value below the minimum or above the deployment window is a 422
+(`retention_out_of_bounds`) naming the bounds, and any other field is a 422. A workspace's shorter
+window deletes that workspace's rows only.
 
 ## Event debugger and explorer
 
@@ -1164,7 +1199,7 @@ Erasure removes what was held or pending when it ran. Data that arrives while it
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
 
 **CSV imports.** The import tables hold no person id, so erasure and deletion do not reach them.
-The stored file (`import_chunks`) is deleted 7 days after its import ends, and the rejected
+The stored file (`import_chunks`) is deleted 7 days (`retention.import_file_days`) after its import ends, and the rejected
 rows' cells (`import_rejects.raw`) 30 days after they were written, so the cells of an erased
 person can survive in either until then. Both age out within the one-month window of an erasure
 request; see [CSV import](#csv-import).
