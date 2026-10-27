@@ -1251,23 +1251,22 @@ mod tests {
         assert_eq!(seen, expected);
     }
 
-    fn index_names(plan: &Value, out: &mut Vec<String>, scans: &mut Vec<String>) {
+    /// Every scan in `plan` as (relation, node type, index name).
+    fn scans(plan: &Value, out: &mut Vec<(String, String, Option<String>)>) {
         if let Some(object) = plan.as_object() {
             if let Some(kind) = object.get("Node Type").and_then(Value::as_str)
                 && kind.ends_with("Scan")
             {
-                scans.push(kind.to_owned());
+                let text = |key| object.get(key).and_then(Value::as_str).map(str::to_owned);
+                out.push((
+                    text("Relation Name").unwrap_or_default(),
+                    kind.to_owned(),
+                    text("Index Name"),
+                ));
             }
-            if let Some(index) = object.get("Index Name").and_then(Value::as_str) {
-                out.push(index.to_owned());
-            }
-            object
-                .values()
-                .for_each(|child| index_names(child, out, scans));
+            object.values().for_each(|child| scans(child, out));
         } else if let Some(array) = plan.as_array() {
-            array
-                .iter()
-                .for_each(|child| index_names(child, out, scans));
+            array.iter().for_each(|child| scans(child, out));
         }
     }
 
@@ -1311,16 +1310,33 @@ mod tests {
         .await
         .unwrap();
 
-        let (mut indexes, mut scans) = (Vec::new(), Vec::new());
-        index_names(&plan, &mut indexes, &mut scans);
-        assert!(!indexes.is_empty(), "{plan}");
+        // An empty partition costs the same under either index, and PostgreSQL 18 breaks that
+        // tie the other way, so only the partitions holding the rows must use the id index.
+        let populated: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT tableoid::regclass::text FROM events WHERE workspace_id = $1",
+        )
+        .bind(ws.as_uuid())
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let mut found = Vec::new();
+        scans(&plan, &mut found);
         assert!(
-            indexes
-                .iter()
-                .all(|index| index.ends_with("workspace_id_id_idx")),
+            found.iter().all(|(_, kind, _)| kind == "Index Scan"),
             "{plan}"
         );
-        assert!(scans.iter().all(|scan| scan == "Index Scan"), "{plan}");
+        for partition in &populated {
+            assert!(
+                found
+                    .iter()
+                    .any(|(relation, _, index)| relation == partition
+                        && index
+                            .as_deref()
+                            .is_some_and(|index| index.ends_with("workspace_id_id_idx"))),
+                "{partition}: {plan}"
+            );
+        }
+        assert!(!populated.is_empty());
     }
 
     #[sqlx::test]
