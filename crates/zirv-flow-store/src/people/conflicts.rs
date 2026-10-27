@@ -10,6 +10,7 @@ use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::apply::record_decision;
+use super::lock::{PersonLock, lock_people_in_order};
 use super::merge::current_person;
 use super::profiles::{IdentityConflict, conflict_columns};
 use crate::StoreError;
@@ -184,17 +185,10 @@ async fn move_identifier(
     to_lock.push(to_person_id);
     to_lock.sort();
     to_lock.dedup();
-    let locked: Vec<Option<Uuid>> = sqlx::query_scalar(
-        "SELECT merged_into FROM people \
-         WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
-    )
-    .bind(workspace.as_uuid())
-    .bind(&to_lock)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?;
+    let locked =
+        lock_people_in_order(&mut *connection, workspace, &to_lock, PersonLock::Update).await?;
     // Merged away after the caller looked, or between reading the parties and locking them.
-    if locked.iter().any(Option::is_some) {
+    if locked.iter().any(|(_, merged_into)| merged_into.is_some()) {
         return Err(ResolveError::Changed);
     }
 
