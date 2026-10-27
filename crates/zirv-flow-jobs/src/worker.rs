@@ -14,9 +14,9 @@ use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
-    ClaimedJob, Clock, EventRetention, FailOutcome, HmacKey, Keyring, MessageRetention, PgPool,
-    begin, claim_job, complete_job, fail_job, heartbeat_job, listen_for_jobs, lock_lease,
-    observe_pool, sized_like,
+    ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
+    MessageRetention, PgPool, begin, claim_job, complete_job, fail_job, heartbeat_job,
+    listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
 use crate::context::{IngestSettings, JobContext};
@@ -51,6 +51,8 @@ pub struct WorkerConfig {
     pub export_max_bytes: u64,
     /// What the `messages.retention` job keeps and for how long.
     pub message_retention: MessageRetention,
+    /// What the `decisions.retention` job keeps and for how long.
+    pub decision_retention: DecisionRetention,
     /// The key `ingest.drain` redacts rejected payloads with; without it that kind fails.
     pub redaction_key: Option<Arc<HmacKey>>,
     /// The key `privacy.erase` hashes identifiers with; without it that kind fails.
@@ -97,6 +99,7 @@ impl WorkerConfig {
             event_retention: EventRetention::default(),
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
+            decision_retention: DecisionRetention::default(),
             redaction_key: None,
             identifier_key: None,
             ledger_dir: None,
@@ -415,6 +418,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_event_retention(shared.config.event_retention)
             .with_export_max_bytes(shared.config.export_max_bytes)
             .with_message_retention(shared.config.message_retention)
+            .with_decision_retention(shared.config.decision_retention)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_ledger_dir(shared.config.ledger_dir.clone())
             .with_clock(shared.config.clock.clone())
@@ -676,6 +680,7 @@ mod tests {
             event_retention: EventRetention::default(),
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
+            decision_retention: DecisionRetention::default(),
             redaction_key: None,
             identifier_key: None,
             ledger_dir: None,

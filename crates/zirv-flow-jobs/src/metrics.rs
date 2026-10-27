@@ -450,11 +450,39 @@ pub(crate) fn record_retention(table: &'static str, deleted: u64, ran_at_unix: f
         .set(ran_at_unix);
 }
 
+/// Sets the decision-log size gauges: `zirv_flow_decision_log_bytes` is what the partitions of
+/// `decision_records` take on disk and `zirv_flow_decision_log_partitions` how many there are.
+pub(crate) fn record_decision_log_size(bytes: u64, partitions: u64) {
+    metrics::gauge!("zirv_flow_decision_log_bytes").set(bytes as f64);
+    metrics::gauge!("zirv_flow_decision_log_partitions").set(partitions as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
+
+    #[test]
+    fn the_decision_log_size_sets_two_gauges_that_the_next_run_replaces() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        metrics::with_local_recorder(&recorder, || {
+            record_decision_log_size(9_000, 4);
+            record_decision_log_size(8_192, 3);
+        });
+        let output = handle.render();
+
+        assert!(
+            output.contains("zirv_flow_decision_log_bytes 8192"),
+            "{output}"
+        );
+        assert!(
+            output.contains("zirv_flow_decision_log_partitions 3"),
+            "{output}"
+        );
+    }
 
     #[test]
     fn a_retention_run_counts_its_rows_and_stamps_its_time_by_table() {
