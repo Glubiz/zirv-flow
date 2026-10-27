@@ -5096,6 +5096,15 @@ export interface components {
             /** @description Pass as `after` for the next page; null on the last page. */
             next_after?: string | null;
         };
+        ConvertTemplateDraftRequest: {
+            /**
+             * Format: int32
+             * @description The draft revision the caller read. When given and the draft has been saved since, the
+             *     conversion is a 409 `template_draft_revision_mismatch` and writes nothing. Absent converts
+             *     unconditionally.
+             */
+            revision?: number | null;
+        };
         CreateApiKeyRequest: {
             /**
              * @description 1 to 100 characters.
@@ -8108,6 +8117,11 @@ export interface components {
              *     `search_timeout`; absent for the rest.
              */
             code?: string | null;
+            /**
+             * Format: int32
+             * @description The draft's current revision (`template_draft_revision_mismatch`), to load it with.
+             */
+            current_revision?: number | null;
             /**
              * @description The segments of a reference cycle (`segment_cycle`) in path order, the first one
              *     repeated at the end.
@@ -25786,7 +25800,12 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        /** @description Optional: an empty body or `null` converts unconditionally; otherwise an object naming the draft revision the caller read */
+        requestBody?: {
+            content: {
+                "application/json": null | components["schemas"]["ConvertTemplateDraftRequest"];
+            };
+        };
         responses: {
             /** @description The template with its converted draft */
             200: {
@@ -25824,7 +25843,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The template is archived (`code` is `template_archived`) */
+            /** @description The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`, with `current_revision`) */
             409: {
                 headers: {
                     [name: string]: unknown;

@@ -3,8 +3,9 @@
 //! The rejection text of the stock extractor can quote the offending input, which for
 //! these endpoints may be a password, so the detail here is fixed text.
 
+use axum::body::Bytes;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, OptionalFromRequest, Request};
 use axum::http::StatusCode;
 use serde::de::DeserializeOwned;
 
@@ -20,9 +21,46 @@ where
     type Rejection = ApiError;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::Json::<T>::from_request(request, state).await {
+        match <axum::Json<T> as FromRequest<S>>::from_request(request, state).await {
             Ok(axum::Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(reject(&rejection)),
+        }
+    }
+}
+
+/// A body that may be left out: an empty body, whatever its headers say, and a literal `null`
+/// are `None`. Any other body must be JSON of `T`, whatever its content type.
+impl<T, S> OptionalFromRequest<S> for ApiJson<T>
+where
+    T: DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request(request: Request, state: &S) -> Result<Option<Self>, Self::Rejection> {
+        let bytes = <Bytes as FromRequest<S>>::from_request(request, state)
+            .await
+            .map_err(|rejection| {
+                let detail = if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                    "request body is too large"
+                } else {
+                    "request body could not be read"
+                };
+                ApiError::new(rejection.status(), detail)
+            })?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        match serde_json::from_slice::<Option<T>>(&bytes) {
+            Ok(value) => Ok(value.map(Self)),
+            Err(error) if error.is_data() => Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "request body is missing a field or has a field of the wrong type",
+            )),
+            Err(_) => Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "request body is not valid JSON",
+            )),
         }
     }
 }
@@ -61,7 +99,7 @@ mod tests {
             request = request.header(header::CONTENT_TYPE, content_type);
         }
         let request = request.body(Body::from(body.to_owned())).unwrap();
-        ApiJson::<Named>::from_request(request, &())
+        <ApiJson<Named> as FromRequest<()>>::from_request(request, &())
             .await
             .map(|ApiJson(body)| body.name)
     }
@@ -71,6 +109,50 @@ mod tests {
         let name = extract(Some("application/json"), r#"{"name":"x"}"#).await;
 
         assert_eq!(name.unwrap(), "x");
+    }
+
+    async fn optional(
+        content_type: Option<&'static str>,
+        body: &'static str,
+    ) -> Result<Option<String>, ApiError> {
+        let mut request = Request::post("/");
+        if let Some(content_type) = content_type {
+            request = request.header(header::CONTENT_TYPE, content_type);
+        }
+        let request = request.body(Body::from(body)).unwrap();
+        <ApiJson<Named> as OptionalFromRequest<()>>::from_request(request, &())
+            .await
+            .map(|read| read.map(|ApiJson(body)| body.name))
+    }
+
+    #[tokio::test]
+    async fn an_empty_optional_body_is_none_whatever_the_headers_say() {
+        assert_eq!(optional(None, "").await.unwrap(), None);
+        assert_eq!(optional(Some("application/json"), "").await.unwrap(), None);
+        assert_eq!(
+            optional(Some("application/json"), "null").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_empty_optional_body_must_be_valid_json_with_or_without_a_header() {
+        let read = optional(None, r#"{"name":"x"}"#).await.unwrap();
+        assert_eq!(read.as_deref(), Some("x"));
+        let read = optional(Some("application/json"), r#"{"name":"y"}"#).await;
+        assert_eq!(read.unwrap().as_deref(), Some("y"));
+        for (content_type, body, status) in [
+            (None, "{not json", StatusCode::BAD_REQUEST),
+            (
+                Some("application/json"),
+                "{not json",
+                StatusCode::BAD_REQUEST,
+            ),
+            (None, "{}", StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            let error = optional(content_type, body).await.err().unwrap();
+            assert_eq!(error.status(), status, "{body}");
+        }
     }
 
     #[tokio::test]
