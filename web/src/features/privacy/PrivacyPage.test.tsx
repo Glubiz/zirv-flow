@@ -48,6 +48,7 @@ function adminRoutes(extra: Parameters<typeof mockApi>[0] = {}) {
     [`GET ${BASE}/erasures`]: () => json({ erasures: [], next_before: null }),
     [`GET ${BASE}/exports`]: () => json({ exports: [], next_before: null }),
     [`GET ${BASE}/settings`]: () => json({ orphan_policy: "keep" }),
+    "GET /api/v1/workspaces/ws1/retention": () => json({ windows: [] }),
     ...extra,
   };
 }
@@ -73,6 +74,7 @@ describe("privacy", () => {
     renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
 
     expect(await screen.findByText("No erasure has been requested")).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByText("Export a person"));
     expect(await screen.findByRole("button", { name: /try again/i })).toBeInTheDocument();
   });
 

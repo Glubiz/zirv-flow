@@ -4678,3 +4678,60 @@ main:focus {
     min-height: 44px;
   }
 }
+
+.fold-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 24px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.fold-summary::-webkit-details-marker {
+  display: none;
+}
+
+.fold-summary:hover {
+  background: var(--ground);
+}
+
+.fold-summary .panel-title {
+  font-size: 17px;
+}
+
+.fold-chevron {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--ink-2);
+  border-bottom: 2px solid var(--ink-2);
+  transform: rotate(45deg);
+  transition: transform 120ms;
+}
+
+.fold[open] > .fold-summary .fold-chevron {
+  transform: rotate(-135deg);
+}
+
+.fold-body .panel {
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+
+.fold-body {
+  gap: 0;
+}
+
+.retention-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.window-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 12px;
+}
