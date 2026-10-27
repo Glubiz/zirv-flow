@@ -2696,7 +2696,7 @@ data key per secret (XChaCha20-Poly1305), wrapped by an operator-held master
 key (`secrets.master_key_file` or env, identified by key id).
 `zirv-flow admin rotate-master-key` re-wraps data keys in one transaction
 without decrypting payloads. The API never returns plaintext. A lost master key means
-credentials must be re-entered (documented).
+credentials must be re-entered (documented in [`docs/operations/secrets.md`](operations/secrets.md)).
 
 **Workspace credentials (M6, ruling 20303fa3).** A source or destination does not seal a
 credential of its own: it references a named workspace credential by `credential_id`. A

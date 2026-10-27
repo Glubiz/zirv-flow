@@ -299,6 +299,19 @@ pub enum SecretPurpose {
 }
 
 impl SecretPurpose {
+    /// Every purpose, once. A purpose missing here is never found by `parse`.
+    pub const ALL: [Self; 9] = [
+        Self::ConnectorCredential,
+        Self::OAuthToken,
+        Self::AiProviderKey,
+        Self::WebhookSecret,
+        Self::WebhookSigning,
+        Self::DestinationCredential,
+        Self::DkimKey,
+        Self::WorkspaceCredential,
+        Self::TestSendAddress,
+    ];
+
     /// The stored text.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -316,19 +329,9 @@ impl SecretPurpose {
 
     /// The purpose with this stored text.
     pub fn parse(text: &str) -> Option<Self> {
-        [
-            Self::ConnectorCredential,
-            Self::OAuthToken,
-            Self::AiProviderKey,
-            Self::WebhookSecret,
-            Self::WebhookSigning,
-            Self::DestinationCredential,
-            Self::DkimKey,
-            Self::WorkspaceCredential,
-            Self::TestSendAddress,
-        ]
-        .into_iter()
-        .find(|purpose| purpose.as_str() == text)
+        Self::ALL
+            .into_iter()
+            .find(|purpose| purpose.as_str() == text)
     }
 }
 
@@ -930,19 +933,43 @@ mod tests {
 
     #[test]
     fn purposes_round_trip_through_their_stored_text() {
-        for purpose in [
-            SecretPurpose::ConnectorCredential,
-            SecretPurpose::OAuthToken,
-            SecretPurpose::AiProviderKey,
-            SecretPurpose::WebhookSecret,
-            SecretPurpose::WebhookSigning,
-            SecretPurpose::DestinationCredential,
-            SecretPurpose::DkimKey,
-            SecretPurpose::WorkspaceCredential,
-            SecretPurpose::TestSendAddress,
-        ] {
+        for purpose in SecretPurpose::ALL {
             assert_eq!(SecretPurpose::parse(purpose.as_str()), Some(purpose));
         }
         assert_eq!(SecretPurpose::parse("other"), None);
+    }
+
+    #[test]
+    fn the_purpose_list_has_no_repeats() {
+        let names: std::collections::BTreeSet<_> = SecretPurpose::ALL
+            .iter()
+            .map(|purpose| purpose.as_str())
+            .collect();
+
+        assert_eq!(names.len(), SecretPurpose::ALL.len());
+    }
+
+    #[test]
+    fn the_secrets_guide_lists_exactly_the_purposes() {
+        let guide = include_str!("../../../docs/operations/secrets.md");
+        let mut in_section = false;
+        let mut listed = Vec::new();
+        for line in guide.lines() {
+            if let Some(heading) = line.strip_prefix("### ") {
+                in_section = heading == "Secret purposes";
+            } else if line.starts_with("## ") {
+                in_section = false;
+            } else if in_section && let Some(row) = line.strip_prefix("| `") {
+                listed.extend(row.split_once('`').map(|(name, _)| name.to_owned()));
+            }
+        }
+        let mut stored: Vec<String> = SecretPurpose::ALL
+            .iter()
+            .map(|purpose| purpose.as_str().to_owned())
+            .collect();
+        stored.sort();
+        listed.sort();
+
+        assert_eq!(listed, stored);
     }
 }
