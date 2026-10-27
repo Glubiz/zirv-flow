@@ -1418,4 +1418,40 @@ mod tests {
         kept.sort();
         assert_eq!(kept, ["retry-grace-9", "retry-zed.quill@example.com-1"]);
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_short_id_deletes_only_the_key_that_is_that_id(pool: PgPool) {
+        let ws = defined(&pool, "one").await;
+        let hash = [1_u8; 32];
+        let keys = ["42", "1427", "x42y", "2026-10-27T11:42", "42-retry"];
+        for (n, key) in keys.into_iter().enumerate() {
+            let idem = Idempotency {
+                key,
+                request_hash: &hash,
+            };
+            write(
+                &pool,
+                ws,
+                &format!("c-{n}"),
+                ContactChange::Create(object(json!({"email": format!("a{n}@example.com")}))),
+                Some(&idem),
+            )
+            .await
+            .unwrap();
+        }
+        let mut connection = pool.acquire().await.unwrap();
+
+        let deleted = erase_contact_idempotency(&mut connection, ws, &["42".into()])
+            .await
+            .unwrap();
+
+        assert_eq!(deleted, 1);
+        let mut kept: Vec<String> = sqlx::query_scalar("SELECT key FROM contact_idempotency")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        kept.sort();
+        assert_eq!(kept, ["1427", "2026-10-27T11:42", "42-retry", "x42y"]);
+    }
 }

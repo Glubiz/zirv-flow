@@ -2848,13 +2848,19 @@ them (raw, lowercase, percent-encoded, form-encoded), reporting table, column an
 never a value. A drift guard fails on a table that is not person-scoped, a survivor, closed by
 value or declared value-free. Data with no person column is deleted by value in the erase
 transaction, beside the transcript delete and outside `DELETIONS`: rejects with no person
-(payload, sample), import chunks (the whole file of an import with a matching chunk; a running
-import ends `failed` with `file_missing`), import reject cells and contact idempotency keys,
-each bounded by the workspace. Limits: matching is by substring, so a changed spelling is
-missed and a short value can over-delete; replay holds only hashes and cannot reach these
-value-keyed classes, so the live erase is the control and the retention windows (30 days,
-7 days, 24 hours) bound the rest; the ledger file under `privacy.ledger_dir` is outside the
-database and the scan does not cover it.
+(payload, sample), import chunks (the whole file of an import with a matching chunk; every such
+import that has not ended is set `failed` with `erased` first, in the same transaction, and the
+batch checkpoint locks the import row and requires `running`, so a worker that already read rows
+cannot commit them), import reject cells and contact idempotency keys, each bounded by the
+workspace. Matching: an identifier matches only as a whole field, ignoring case (a CSV cell, a
+JSON scalar, the message id, the whole idempotency key); an email also as a substring; transcripts
+keep substring matching. A non-email identifier embedded in free text is not found. The chunk scan
+reads the workspace's import files of the last 7 days once per erase, each decoded once and tested
+against one combined pattern. The scan also reads the survivor tables (their rows may stay, a
+plaintext value may not). Limits: a changed spelling is missed; replay holds only hashes and
+cannot reach these value-keyed classes, so the live erase is the control and the retention
+windows (30 days, 7 days, 24 hours) bound the rest; the ledger file under `privacy.ledger_dir` is
+outside the database and the scan does not cover it.
 
 **Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
 names the directory holding one JSON file per completed erasure entry.

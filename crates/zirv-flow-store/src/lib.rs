@@ -6,6 +6,7 @@ mod api_keys;
 mod assets;
 mod audit;
 mod bounded;
+mod by_value;
 mod changes;
 mod clock;
 mod consent;
