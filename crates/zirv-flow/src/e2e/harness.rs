@@ -217,7 +217,11 @@ impl World {
                     .plaintext
             }
         };
-        let admin_key = key("e2e", &[Scope::Admin, Scope::Write, Scope::Read]).await;
+        let admin_key = key(
+            "e2e",
+            &[Scope::Admin, Scope::Publish, Scope::Write, Scope::Read],
+        )
+        .await;
         #[cfg(test)]
         let ingest = key("e2e ingest", &[Scope::Ingest]).await;
 

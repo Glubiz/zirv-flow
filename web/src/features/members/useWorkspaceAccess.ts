@@ -2,7 +2,7 @@ import { client, unwrap, useResource, type components, type Resource } from "../
 import { useSignedInUser } from "../session";
 
 export type Member = components["schemas"]["MemberBody"];
-export type MemberRole = "admin" | "member";
+export type MemberRole = "admin" | "publisher" | "editor";
 
 export function useMembers(workspaceId: string): Resource<Member[]> {
   return useResource(
@@ -18,7 +18,8 @@ export interface WorkspaceAccess {
 
 export function accessFor(members: Member[], userId: string, isOwner: boolean): WorkspaceAccess {
   const mine = members.find((member) => member.user_id === userId)?.role;
-  const role = mine === "admin" || mine === "member" ? mine : null;
+  // A viewer reads only, so it has no write role here; the role UI comes with #368.
+  const role = mine === "admin" || mine === "publisher" || mine === "editor" ? mine : null;
   return { role, canManage: isOwner || role === "admin" };
 }
 

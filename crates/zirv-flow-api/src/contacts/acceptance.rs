@@ -515,7 +515,7 @@ mod tests {
             json!({"email": "a@example.com", "age": 5, "ssn": "123"}),
         )
         .await;
-        let member = member_login(&pool, &fx.router, fx.ws, Role::Member).await;
+        let member = member_login(&pool, &fx.router, fx.ws, Role::Editor).await;
         let admin_login = member_login(&pool, &fx.router, fx.ws, Role::Admin).await;
         let path = fx.path("/contacts/c-1");
 
@@ -553,7 +553,7 @@ mod tests {
     async fn scopes_roles_and_csrf_gate_the_endpoints(pool: PgPool) {
         let fx = fixture(&pool).await;
         let ingest = key(&pool, fx.ws, &[Scope::Ingest]).await;
-        let member = member_login(&pool, &fx.router, fx.ws, Role::Member).await;
+        let member = member_login(&pool, &fx.router, fx.ws, Role::Editor).await;
         let path = fx.path("/contacts");
         let post = |auth| {
             call(
@@ -840,7 +840,7 @@ mod tests {
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_session_may_bulk_upsert_with_csrf(pool: PgPool) {
         let fx = fixture(&pool).await;
-        let member = member_login(&pool, &fx.router, fx.ws, Role::Member).await;
+        let member = member_login(&pool, &fx.router, fx.ws, Role::Editor).await;
         let body = json!({"contacts": [{"key": "a"}]});
 
         let accepted = call(

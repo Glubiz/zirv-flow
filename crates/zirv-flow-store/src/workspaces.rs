@@ -201,6 +201,25 @@ pub async fn set_membership<'e>(
     })
 }
 
+/// Locks every membership of the workspace until the transaction ends and returns the roles, so
+/// two changes to the same workspace's members cannot both count the same last admin.
+pub async fn lock_memberships(
+    executor: &mut sqlx::PgConnection,
+    workspace: WorkspaceId,
+) -> Result<Vec<(UserId, Role)>, StoreError> {
+    let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT user_id, role FROM memberships WHERE workspace_id = $1 ORDER BY user_id FOR UPDATE",
+    )
+    .bind(workspace.as_uuid())
+    .fetch_all(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(user, role)| Some((UserId::from_uuid(user), role.parse().ok()?)))
+        .collect())
+}
+
 /// Removes a member. Returns whether they were one.
 pub async fn remove_membership<'e>(
     executor: impl PgExecutor<'e>,
@@ -443,12 +462,12 @@ mod tests {
         let ws = workspace(&pool, "Acme").await;
         let jane = user(&pool, "jane@example.com").await;
 
-        set_membership(&pool, ws.id, jane, Role::Member)
+        set_membership(&pool, ws.id, jane, Role::Editor)
             .await
             .unwrap();
         assert_eq!(
             membership_role(&pool, ws.id, jane).await.unwrap(),
-            Some(Role::Member)
+            Some(Role::Editor)
         );
         set_membership(&pool, ws.id, jane, Role::Admin)
             .await
@@ -465,6 +484,32 @@ mod tests {
         assert!(remove_membership(&pool, ws.id, jane).await.unwrap());
         assert!(!remove_membership(&pool, ws.id, jane).await.unwrap());
         assert_eq!(membership_role(&pool, ws.id, jane).await.unwrap(), None);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn locking_memberships_returns_the_roles_of_that_workspace_only(pool: PgPool) {
+        let a = workspace(&pool, "A").await;
+        let b = workspace(&pool, "B").await;
+        let jane = user(&pool, "jane@example.com").await;
+        let joe = user(&pool, "joe@example.com").await;
+        set_membership(&pool, a.id, jane, Role::Admin)
+            .await
+            .unwrap();
+        set_membership(&pool, a.id, joe, Role::Viewer)
+            .await
+            .unwrap();
+        set_membership(&pool, b.id, jane, Role::Publisher)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        let mut locked = lock_memberships(&mut tx, a.id).await.unwrap();
+        locked.sort_by_key(|(user, _)| user.as_uuid());
+
+        let mut expected = vec![(jane, Role::Admin), (joe, Role::Viewer)];
+        expected.sort_by_key(|(user, _)| user.as_uuid());
+        assert_eq!(locked, expected);
     }
 
     #[sqlx::test]
@@ -487,7 +532,7 @@ mod tests {
         let a = workspace(&pool, "A").await;
         workspace(&pool, "B").await;
         let jane = user(&pool, "jane@example.com").await;
-        set_membership(&pool, a.id, jane, Role::Member)
+        set_membership(&pool, a.id, jane, Role::Editor)
             .await
             .unwrap();
 
@@ -510,7 +555,7 @@ mod tests {
     async fn a_membership_for_an_unknown_user_is_refused(pool: PgPool) {
         let ws = workspace(&pool, "Acme").await;
 
-        let result = set_membership(&pool, ws.id, UserId::new(), Role::Member).await;
+        let result = set_membership(&pool, ws.id, UserId::new(), Role::Editor).await;
 
         assert!(result.is_err());
     }

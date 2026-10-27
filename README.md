@@ -526,17 +526,37 @@ Passwords are 12 to 1024 characters.
   DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
   needs none.
 - **API keys.** A workspace admin creates a key with scopes (`ingest`, `read`,
-  `write`, `admin`); the response shows the `zfk_...` key once, and only a hash
-  is stored. Send it as `Authorization: Bearer <key>`. A key works only in its
-  own workspace and never on instance-level endpoints (`/users`, creating
-  workspaces, `/session`). `read` allows GETs, `admin` allows members and keys;
-  scopes do not imply one another.
+  `write`, `publish`, `admin`); the response shows the `zfk_...` key once, and
+  only a hash is stored. Send it as `Authorization: Bearer <key>`. A key works
+  only in its own workspace and never on instance-level endpoints (`/users`,
+  creating workspaces, `/session`). `read` allows GETs, `write` the editor-level
+  drafts, `publish` the publisher actions and `admin` members, keys and the
+  rest of the admin routes; scopes do not imply one another, so a `write` key
+  cannot publish and a `publish` key cannot edit.
+- **Roles.** A workspace membership is `admin`, `publisher`, `editor` or
+  `viewer`; the instance owner is a flag on the user, not a role. A viewer
+  reads. An editor also changes drafts (segments, flows, templates, snippets,
+  themes, lists, contacts), previews, test mode and test sends. A publisher
+  also publishes, pauses, resumes and archives flows, retries, skips and exits
+  enrollments, starts a flow for an audience, publishes templates, snippets and
+  themes, and runs imports. An admin also manages sources, destinations,
+  credentials, keys, members, retention, privacy, consent policy, event
+  schemas, suppressions, forwarding, sending domains and webhooks. A refused
+  request is a 403 that names the role the route needs. Older `member` rows
+  became `editor`. Removing or demoting a workspace's last admin is refused
+  with a 409 (`last_admin`) unless the caller is the instance owner. Where a
+  section below says "any member", read editor or above; "admin" on a publish
+  route reads publisher or above.
+- **Upgrading to roles.** Migration 0073 gives every existing `admin` key the
+  `publish` scope, so deployed admin keys keep publishing. A `write` key that
+  runs imports (`POST .../imports/{id}/run`) needs `publish` added by hand.
+  Former members are now editors, who may also create assistant drafts.
 - **Sign-in throttling.** Five failures in a row lock the account for
   `min(2^(failures-5) seconds, 15 minutes)`. An unknown e-mail, a wrong password
   and a locked account give the same 401.
 - **Isolation.** A caller with no access to a workspace gets 404 for it, never
-  403. Workspace members can read the workspace and its member list; admins and
-  the owner also manage members and keys.
+  403. Workspace members of any role can read the workspace and its member list;
+  admins and the owner also manage members and keys.
 - **Audit log.** Sign-ins (including failures), sign-outs, user, workspace,
   membership and key events and password resets are appended to `audit_log`.
   Rows hold ids, the request id and a small summary, never e-mails, passwords,

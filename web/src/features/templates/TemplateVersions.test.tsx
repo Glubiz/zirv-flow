@@ -31,7 +31,7 @@ describe("publishing", () => {
   });
 
   it("hides publishing from a member who is not an admin, and offers the test send", async () => {
-    mockApi(templateRoutes({ role: "member" }));
+    mockApi(templateRoutes({ role: "editor" }));
     mount();
 
     await screen.findByTitle("Preview of the message");

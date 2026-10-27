@@ -328,7 +328,7 @@ pub(crate) async fn upload(
     RawQuery(query): RawQuery,
     request: Request,
 ) -> Result<(StatusCode, Json<CsvImportDetailBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Write).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
     let params = UploadParams::parse(&query.unwrap_or_default())?;
     if !is_csv(request.headers()) {
         return Err(ApiError::new(

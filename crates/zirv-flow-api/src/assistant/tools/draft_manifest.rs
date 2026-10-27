@@ -11,6 +11,7 @@ use zirv_flow_connectors::manifest;
 
 use super::{ToolContext, arguments_invalid_lines, authorize_again};
 use crate::assistant::schema::tool_parameters;
+use crate::auth::Need;
 use crate::problem::ApiError;
 use crate::sources::ValidateRequest;
 
@@ -79,7 +80,7 @@ impl AiTool<ToolContext> for DraftManifest {
         arguments: &'a Value,
     ) -> BoxFuture<'a, Result<ToolOutput, ToolError<ApiError>>> {
         Box::pin(async move {
-            authorize_again(context).await?;
+            authorize_again(context, Need::Admin).await?;
             check_draft(arguments)
                 .map(ToolOutput::Draft)
                 .map_err(ToolError::Invalid)

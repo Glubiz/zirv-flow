@@ -401,7 +401,7 @@ mod tests {
             &router,
             "PUT",
             &format!("/api/v1/workspaces/{ws}/members/{user_id}"),
-            Some(json!({"role": "member"})),
+            Some(json!({"role": "editor"})),
             Auth::SessionWithoutCsrf(&owner),
         )
         .await;
@@ -582,7 +582,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Acme").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (key_id, _) = make_key(&router, &owner, &ws, &["read"]).await;
 
         let read = call(
@@ -644,7 +644,7 @@ mod tests {
 
         assert_eq!(read.status, StatusCode::OK);
         assert_eq!(members.status, StatusCode::OK);
-        assert_eq!(members.body[0]["role"], "member");
+        assert_eq!(members.body[0]["role"], "editor");
         for (name, reply) in [
             ("list keys", list_keys),
             ("create key", create_key),
@@ -1110,7 +1110,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Acme").await;
         let (jane_id, jane) = user(&pool, &router, "jane@example.com").await;
-        add_member(&router, &owner, &ws, jane_id, "member").await;
+        add_member(&router, &owner, &ws, jane_id, "editor").await;
         let (key_id, key) = make_key(&router, &owner, &ws, &["read"]).await;
         call(
             &router,
@@ -1351,7 +1351,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let other = workspace(&router, &owner, "Beta").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, outsider) = user(&pool, &router, "outsider@example.com").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
@@ -2002,7 +2002,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         make_trait(&router, &owner, &ws, "plan", "string").await;
         make_trait(&router, &owner, &ws, "tags", "string_list").await;
@@ -2301,7 +2301,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         call(
             &router,
             "POST",
@@ -2728,7 +2728,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let (_, _, id) = seed_conflict(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let uri = format!("{}/{id}", conflicts_uri(&ws));
@@ -2949,7 +2949,7 @@ mod tests {
         let theirs = workspace(&router, &owner, "Beta").await;
         let (_, _, id) = seed_conflict(&pool, &mine).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &mine, member_id, "member").await;
+        add_member(&router, &owner, &mine, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &mine, &["read"]).await;
         let (_, theirs_key) = make_key(&router, &owner, &theirs, &["admin"]).await;
         let uri = format!("{}/{id}/resolve", conflicts_uri(&mine));
@@ -3282,7 +3282,7 @@ mod tests {
         let mine = workspace(&router, &owner, "Mine").await;
         let theirs = workspace(&router, &owner, "Theirs").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &mine, member_id, "member").await;
+        add_member(&router, &owner, &mine, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &mine, &["read"]).await;
         make_schema(&router, &owner, &mine, "order").await;
         make_schema(&router, &owner, &theirs, "other").await;
@@ -3617,7 +3617,7 @@ mod tests {
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let id = make_list(&router, Auth::Session(&member), &ws, "Newsletter").await;
         let duplicate = call(
@@ -3897,7 +3897,7 @@ mod tests {
             .await;
         }
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin", "read"]).await;
 
@@ -4548,7 +4548,7 @@ mod tests {
         let other = workspace(&router, &owner, "Beta").await;
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let body = json!({"key": "x", "name": "x", "channel": "email", "policy": "opt_in"});
@@ -4652,7 +4652,7 @@ mod tests {
         let other = workspace(&router, &owner, "Beta").await;
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, stranger) = user(&pool, &router, "stranger@example.com").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
@@ -5413,7 +5413,7 @@ mod tests {
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let put = |body: serde_json::Value| {
             let router = router.clone();
@@ -5663,7 +5663,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let other = workspace(&router, &owner, "Beta").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let identifier = json!({"kind": "email", "value": "ada@example.com"});
@@ -6057,7 +6057,7 @@ mod tests {
         let ws = workspace(&router, &owner, "Alpha").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
         let put = call(
@@ -6309,7 +6309,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["read", "admin"]).await;
         let (survivor, merged) = seed_profile(&pool, &ws).await;
@@ -6433,7 +6433,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (survivor, _) = seed_profile(&pool, &ws).await;
         let uri = people_uri(&ws, "/search");
@@ -6547,7 +6547,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (survivor, merged) = seed_profile(&pool, &ws).await;
         let uri = people_uri(&ws, &format!("/{merged}/timeline"));
 
@@ -6699,7 +6699,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (survivor, _) = seed_profile(&pool, &ws).await;
         let uri = people_uri(&ws, "/search");
@@ -6777,7 +6777,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
@@ -7036,7 +7036,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let (_, write_key) = make_key(&router, &owner, &ws, &["write"]).await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
@@ -7155,7 +7155,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let uri = privacy_uri(&ws, "/exports");
@@ -7262,7 +7262,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let uri = privacy_uri(&ws, "/exports");
 
@@ -7306,7 +7306,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let uri = privacy_uri(&ws, "/settings");
 
         let default = call(&router, "GET", &uri, None, Auth::Session(&member)).await;
@@ -7496,7 +7496,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let (status, body) = upload_csv(
             &router,
@@ -8030,7 +8030,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let id = mapped_import(&router, &owner, &ws).await;
         seed_rejects(&pool, &ws, &id).await;
 
@@ -8662,7 +8662,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         publish_order(&router, &owner, &ws, "warn").await;
         put_policy(
             &router,
@@ -9012,7 +9012,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         seed_explorer(&pool, &router, &owner, &ws).await;
         let scope = with_range(json!({
             "name": "order",
@@ -9160,7 +9160,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         seed_explorer(&pool, &router, &owner, &ws).await;
         let by_email = with_range(json!({"name": "order", "property": "email"}));
         let prefix = with_range(json!({"name": "order", "bucket": "day",
@@ -9353,7 +9353,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         publish_order(&router, &owner, &ws, "block").await;
         inv_store(
@@ -10161,7 +10161,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let defaults = call(
             &router,
@@ -11672,7 +11672,7 @@ email,b@example.com,
         let ws = workspace(&router, &owner, "Alpha").await;
         define_plan(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
 
         let created =
             make_segment(&router, Auth::Session(&member), &ws, "Pro", plan_is("pro")).await;
@@ -12056,7 +12056,7 @@ email,b@example.com,
         .await
         .unwrap();
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let uri = format!("{}/preview", segments_uri(&ws));
         let body = json!({"definition": plan_is("pro"), "sample_size": 1});
@@ -12234,7 +12234,7 @@ email,b@example.com,
         let ws = workspace(&router, &owner, "Alpha").await;
         define_plan(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let id = make_segment(&router, Auth::Session(&owner), &ws, "Pros", plan_is("pro"))
             .await
@@ -12812,7 +12812,7 @@ email,b@example.com,
         define_trait(&pool, &ws, "plan", false).await;
         define_order(&pool, &ws).await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (admin_id, admin) = user(&pool, &router, "admin@example.com").await;
         add_member(&router, &owner, &ws, admin_id, "admin").await;
         let definition = json!({"v": 1, "all": [
@@ -13174,7 +13174,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, admin_key) = make_key(&router, &owner, &ws, &["admin"]).await;
         let draft = json!({"revision": 0, "rules": [
@@ -13356,7 +13356,7 @@ email,b@example.com,
         let ws = workspace(&router, &owner, "Alpha").await;
         create_topic(&router, &owner, &ws, "news", "opt_out").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let person = seed_person(&pool, &ws, "ada@example.com").await;
         let unpublished = evaluate_policy_as(
             &router,
@@ -13679,7 +13679,7 @@ email,b@example.com,
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
         let (member_id, member) = user(&pool, &router, "member@example.com").await;
-        add_member(&router, &owner, &ws, member_id, "member").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
         let (_, outsider) = user(&pool, &router, "outsider@example.com").await;
         let (_, read_key) = make_key(&router, &owner, &ws, &["read"]).await;
         let (_, ingest_key) = make_key(&router, &owner, &ws, &["ingest"]).await;
@@ -13903,5 +13903,289 @@ email,b@example.com,
 
         assert_eq!(foreign.status, StatusCode::NOT_FOUND);
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    }
+
+    /// One workspace with a viewer, an editor, a publisher and an admin, in that order.
+    async fn four_roles(pool: &PgPool, router: &Router, owner: &Login, ws: &str) -> [Login; 4] {
+        let mut logins = Vec::new();
+        for role in ["viewer", "editor", "publisher", "admin"] {
+            let (id, login) = user(pool, router, &format!("{role}@example.com")).await;
+            add_member(router, owner, ws, id, role).await;
+            logins.push(login);
+        }
+        logins.try_into().ok().unwrap()
+    }
+
+    /// The statuses of `method uri` for each login, in order.
+    async fn statuses(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        logins: &[Login; 4],
+    ) -> Vec<StatusCode> {
+        let mut out = Vec::new();
+        for login in logins {
+            out.push(
+                call(router, method, uri, body.clone(), Auth::Session(login))
+                    .await
+                    .status,
+            );
+        }
+        out
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_role_is_refused_the_routes_above_its_level(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let roles = four_roles(&pool, &router, &owner, &ws).await;
+        let missing = Uuid::now_v7();
+
+        // An edit route: a list.
+        let mut edit = Vec::new();
+        for (index, login) in roles.iter().enumerate() {
+            let reply = call(
+                &router,
+                "POST",
+                &format!("/api/v1/workspaces/{ws}/lists"),
+                Some(json!({"name": format!("Newsletter {index}")})),
+                Auth::Session(login),
+            )
+            .await;
+            edit.push(reply.status);
+        }
+        // A publish route: pausing a flow that does not exist is a 404 once the role passes.
+        let publish = statuses(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/flows/{missing}/pause"),
+            None,
+            &roles,
+        )
+        .await;
+        // An admin route: the key list.
+        let admin = statuses(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            None,
+            &roles,
+        )
+        .await;
+
+        let forbidden = StatusCode::FORBIDDEN;
+        assert_eq!(edit[0], forbidden, "viewer edits");
+        assert_eq!(edit[1], StatusCode::CREATED, "editor edits");
+        assert_eq!(edit[2], StatusCode::CREATED, "publisher edits");
+        assert_eq!(edit[3], StatusCode::CREATED, "admin edits");
+        assert_eq!(publish[0], forbidden, "viewer publishes");
+        assert_eq!(publish[1], forbidden, "editor publishes");
+        assert_eq!(publish[2], StatusCode::NOT_FOUND, "publisher publishes");
+        assert_eq!(publish[3], StatusCode::NOT_FOUND, "admin publishes");
+        assert_eq!(admin[0], forbidden, "viewer administers");
+        assert_eq!(admin[1], forbidden, "editor administers");
+        assert_eq!(admin[2], forbidden, "publisher administers");
+        assert_eq!(admin[3], StatusCode::OK, "admin administers");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_refusal_names_the_role_the_route_needs_under_one_stable_problem(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let [viewer, editor, publisher, _] = four_roles(&pool, &router, &owner, &ws).await;
+        let missing = Uuid::now_v7();
+
+        let edit = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/lists"),
+            Some(json!({"name": "Newsletter"})),
+            Auth::Session(&viewer),
+        )
+        .await;
+        let publish = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/flows/{missing}/pause"),
+            None,
+            Auth::Session(&editor),
+        )
+        .await;
+        let admin = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            None,
+            Auth::Session(&publisher),
+        )
+        .await;
+
+        for (reply, role) in [
+            (&edit, "editor"),
+            (&publish, "publisher"),
+            (&admin, "admin"),
+        ] {
+            assert_eq!(reply.status, StatusCode::FORBIDDEN);
+            assert_eq!(reply.body["title"], "Forbidden");
+            assert_eq!(
+                reply.body["detail"],
+                format!("this needs the {role} role in the workspace")
+            );
+            assert!(reply.body.get("code").is_none_or(Value::is_null));
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_write_key_cannot_publish_and_a_publish_key_cannot_edit(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (_, write) = make_key(&router, &owner, &ws, &["write"]).await;
+        let (_, publish) = make_key(&router, &owner, &ws, &["publish"]).await;
+        let missing = Uuid::now_v7();
+        let lists = format!("/api/v1/workspaces/{ws}/lists");
+        let pause = format!("/api/v1/workspaces/{ws}/flows/{missing}/pause");
+
+        let write_edits = call(
+            &router,
+            "POST",
+            &lists,
+            Some(json!({"name": "A"})),
+            Auth::Key(&write),
+        )
+        .await;
+        let write_publishes = call(&router, "POST", &pause, None, Auth::Key(&write)).await;
+        let publish_edits = call(
+            &router,
+            "POST",
+            &lists,
+            Some(json!({"name": "B"})),
+            Auth::Key(&publish),
+        )
+        .await;
+        let publish_publishes = call(&router, "POST", &pause, None, Auth::Key(&publish)).await;
+
+        assert_eq!(write_edits.status, StatusCode::CREATED);
+        assert_eq!(write_publishes.status, StatusCode::FORBIDDEN);
+        assert_eq!(publish_edits.status, StatusCode::FORBIDDEN);
+        assert_eq!(publish_publishes.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_key_is_created_with_the_publish_scope_and_a_member_role_is_no_longer_accepted(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (id, _) = user(&pool, &router, "jane@example.com").await;
+
+        let key = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            Some(json!({"name": "release", "scopes": ["publish", "read"]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let member = call(
+            &router,
+            "PUT",
+            &format!("/api/v1/workspaces/{ws}/members/{id}"),
+            Some(json!({"role": "member"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(key.status, StatusCode::CREATED, "{:?}", key.body);
+        assert_eq!(key.body["scopes"], json!(["publish", "read"]));
+        assert_eq!(member.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_last_admin_cannot_be_demoted_or_removed_by_an_admin_but_can_by_the_owner(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (lone_id, lone) = user(&pool, &router, "lone@example.com").await;
+        add_member(&router, &owner, &ws, lone_id, "admin").await;
+        let member_uri = format!("/api/v1/workspaces/{ws}/members/{lone_id}");
+
+        let demote = call(
+            &router,
+            "PUT",
+            &member_uri,
+            Some(json!({"role": "viewer"})),
+            Auth::Session(&lone),
+        )
+        .await;
+        let remove = call(&router, "DELETE", &member_uri, None, Auth::Session(&lone)).await;
+        let role_after_refusals = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/members"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+        let owner_demotes = call(
+            &router,
+            "PUT",
+            &member_uri,
+            Some(json!({"role": "viewer"})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        for refused in [&demote, &remove] {
+            assert_eq!(refused.status, StatusCode::CONFLICT, "{:?}", refused.body);
+            assert_eq!(refused.body["code"], "last_admin");
+        }
+        assert_eq!(role_after_refusals.body[0]["role"], "admin");
+        assert_eq!(owner_demotes.status, StatusCode::OK);
+        assert_eq!(owner_demotes.body["role"], "viewer");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_second_admin_frees_the_first_and_the_owner_may_remove_the_last(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let (first_id, first) = user(&pool, &router, "first@example.com").await;
+        let (second_id, _) = user(&pool, &router, "second@example.com").await;
+        add_member(&router, &owner, &ws, first_id, "admin").await;
+        add_member(&router, &owner, &ws, second_id, "admin").await;
+        let first_uri = format!("/api/v1/workspaces/{ws}/members/{first_id}");
+        let second_uri = format!("/api/v1/workspaces/{ws}/members/{second_id}");
+
+        let demote_with_two = call(
+            &router,
+            "PUT",
+            &first_uri,
+            Some(json!({"role": "editor"})),
+            Auth::Session(&first),
+        )
+        .await;
+        // The second admin is now the last one; the owner removes them anyway.
+        let owner_removes = call(&router, "DELETE", &second_uri, None, Auth::Session(&owner)).await;
+
+        assert_eq!(
+            demote_with_two.status,
+            StatusCode::OK,
+            "{:?}",
+            demote_with_two.body
+        );
+        assert_eq!(owner_removes.status, StatusCode::NO_CONTENT);
     }
 }

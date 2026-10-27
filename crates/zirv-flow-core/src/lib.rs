@@ -34,7 +34,7 @@ mod workspace;
 pub use email::Email;
 pub use freshness::{Freshness, FreshnessInput, Threshold, effective_threshold, freshness};
 pub use ids::{ApiKeyId, AssetId, SecretId, UserId, WorkspaceId};
-pub use role::Role;
+pub use role::{Capability, Role};
 pub use scope::Scope;
 pub use secrets::{
     HmacKey, HmacPurpose, HmacRoot, Keyring, KeyringError, MasterKey, MasterKeyError, Sealed,

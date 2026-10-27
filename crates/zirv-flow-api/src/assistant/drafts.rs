@@ -744,8 +744,9 @@ async fn dry_run_manifest(
 /// assistant: the model is asked, its answer validated
 /// with the rules a save applies, and problems are fed back for at most `ai.max_repair_attempts`
 /// repairs. The answer is the validated draft with its diff against the saved version and a dry
-/// run, or the last problems. Only a validated draft can be accepted. Workspace admins who are
-/// signed in; an API key is refused. Every attempt is a gated model call: it counts against the
+/// run, or the last problems. Only a validated draft can be accepted. Editors and above who are
+/// signed in (a mapping or manifest draft reads a source, so it takes an admin); an API key is
+/// refused. Every attempt is a gated model call: it counts against the
 /// budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
 /// proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
 #[utoipa::path(
@@ -759,7 +760,7 @@ async fn dry_run_manifest(
         (status = 201, description = "The draft run: a validated draft with its changes and dry run, or the problems of the last attempt", body = DraftBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 402, description = "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = Problem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over 160 KiB", body = Problem, content_type = "application/problem+json"),
@@ -776,10 +777,15 @@ pub(crate) async fn create(
     Path(ws): Path<String>,
     ApiJson(request): ApiJson<DraftRequest>,
 ) -> Result<(StatusCode, Json<DraftBody>), ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, draft_need(&principal)).await?;
     let user = session_user(&principal)?;
     check_request(&request)?;
     let kind = request.kind.store();
+    // A mapping or manifest draft reads a source and sends a sample of it, which is the
+    // admin's to see; the other kinds draft the editor's own work.
+    if matches!(kind, DraftKind::Mapping | DraftKind::Manifest) {
+        authorize(&state, &principal, workspace.id, Need::Admin).await?;
+    }
     // The assistant being off is the first answer, before anything is read.
     let dispatcher = Dispatcher::open(&state, Some(user), workspace.id, kind.as_str())
         .await
@@ -1689,7 +1695,7 @@ fn recheck_manifest(content: &Value) -> Result<(), ApiError> {
 /// Accepts a draft of the signed-in user: checks that it is valid, that the saved version has not
 /// changed since and that it still passes the rules a save applies, then returns it for the
 /// editor to load as its unsaved draft. Nothing is written to the stream or the source; saving
-/// stays a separate action. Audited as `ai.draft.accepted`. Workspace admins who are signed in.
+/// stays a separate action. Audited as `ai.draft.accepted`. Editors and above who are signed in.
 #[utoipa::path(
     post,
     operation_id = "accept_ai_draft",
@@ -1702,7 +1708,7 @@ fn recheck_manifest(content: &Value) -> Result<(), ApiError> {
     responses(
         (status = 200, description = "The draft, to load into the editor", body = AcceptedDraftBody),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
-        (status = 403, description = "Not a workspace admin, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
+        (status = 403, description = "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such draft of this user in this workspace, or it expired", body = Problem, content_type = "application/problem+json"),
         (status = 409, description = "The draft never validated (`ai_draft_invalid`), the saved version changed since (`ai_draft_outdated`), the flow of a flow draft is archived (`flow_archived`), the template of a template draft is archived (`template_archived`), or its draft changed or was replaced since this draft was made (`template_draft_changed`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "The draft no longer passes the rules a save applies, such as a trait archived since (the same codes as a save; for a flow draft `flow_invalid` with the publish validation issues; for a template draft `template_invalid` with the publish validation issues)", body = Problem, content_type = "application/problem+json")
@@ -1714,7 +1720,7 @@ pub(crate) async fn accept(
     principal: Principal,
     Path((ws, id)): Path<(String, String)>,
 ) -> Result<Json<AcceptedDraftBody>, ApiError> {
-    let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Admin).await?;
+    let workspace = authorize(&state, &principal, path_id(&ws)?, draft_need(&principal)).await?;
     let user = session_user(&principal)?;
     let id = path_id::<Uuid>(&id)?;
     let now = zirv_flow_store::database_now(&state.pool).await?;
@@ -1776,6 +1782,15 @@ pub(crate) async fn accept(
             .as_ref()
             .map(|(template, saved)| TemplateDetailBody::new(template, saved)),
     }))
+}
+
+/// An API key never drafts: it is refused with `ai_user_required` once it passes the scope
+/// check, which stays the admin scope so that answer does not change. A session needs Edit.
+fn draft_need(principal: &Principal) -> Need {
+    match principal {
+        Principal::Key(_) => Need::Admin,
+        Principal::Session(_) => Need::Edit,
+    }
 }
 
 #[cfg(test)]

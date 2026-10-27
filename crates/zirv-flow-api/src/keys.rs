@@ -21,7 +21,7 @@ use crate::problem::{ApiError, Problem};
 pub(crate) struct ApiKeyBody {
     id: Uuid,
     name: String,
-    /// Any of `ingest`, `read`, `write`, `admin`.
+    /// Any of `ingest`, `read`, `write`, `publish`, `admin`.
     #[schema(value_type = Vec<String>, example = json!(["read"]))]
     scopes: Vec<Scope>,
     created_by: Option<Uuid>,
@@ -64,7 +64,7 @@ pub(crate) struct CreateApiKeyRequest {
     /// 1 to 100 characters.
     #[schema(example = "ingest worker")]
     name: String,
-    /// At least one of `ingest`, `read`, `write`, `admin`.
+    /// At least one of `ingest`, `read`, `write`, `publish`, `admin`.
     #[schema(value_type = Vec<String>, example = json!(["read"]))]
     scopes: Vec<String>,
 }

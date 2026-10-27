@@ -144,7 +144,7 @@ mod tests {
         .plaintext;
         let other_admin = key(other_ws, Scope::Admin).await;
         for (email, role) in [
-            ("member@example.com", Role::Member),
+            ("member@example.com", Role::Editor),
             ("lead@example.com", Role::Admin),
         ] {
             let user = admin::create_user(pool, &Context::system(), email, PASSWORD)

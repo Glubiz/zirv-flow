@@ -105,7 +105,7 @@ describe("rejects", () => {
 describe("replay", () => {
   const REPLAY_URI = "/api/v1/workspaces/ws1/ingest-rejects/replay";
 
-  function admin(user: typeof OWNER, role: "admin" | "member", replay: (request: Request) => Response) {
+  function admin(user: typeof OWNER, role: "admin" | "editor", replay: (request: Request) => Response) {
     return mockApi({
       "GET /api/v1/session": () => json(session(user)),
       "GET /api/v1/workspaces/ws1/members": () =>
@@ -136,7 +136,7 @@ describe("replay", () => {
   };
 
   it("offers no replay to a member who is not an admin", async () => {
-    admin(MEMBER, "member", () => json(PREVIEW));
+    admin(MEMBER, "editor", () => json(PREVIEW));
     open();
 
     await screen.findByRole("table", { name: "Rejected events" });

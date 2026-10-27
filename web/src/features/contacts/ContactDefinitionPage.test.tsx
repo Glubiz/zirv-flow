@@ -49,7 +49,7 @@ function mount(routes: Parameters<typeof mockApi>[0] = {}, user = OWNER) {
         {
           user_id: user.id,
           email: user.email,
-          role: user === OWNER ? "admin" : "member",
+          role: user === OWNER ? "admin" : "editor",
           added_at: "2026-10-01T09:00:00Z",
         },
       ]),

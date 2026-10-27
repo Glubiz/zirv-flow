@@ -46,7 +46,7 @@ export const heading = (id: string, text: string) => ({ type: "heading", id, lev
 
 interface Options {
   /** `admin` publishes and archives; `member` edits; `reader` only looks. */
-  role?: "admin" | "member" | "reader";
+  role?: "admin" | "editor" | "reader";
   detail?: Record<string, unknown>;
   preview?: (content: Doc, asked: number) => Record<string, unknown> | Response;
   uses?: Record<string, unknown>;
@@ -64,7 +64,7 @@ export function snippetRoutes({ role = "admin", detail, preview, uses = usedBy()
       ? { "GET /api/v1/session": () => json(session(OWNER)), "GET /api/v1/workspaces/ws1/members": () => json(members("admin")) }
       : {
           "GET /api/v1/session": () => json(session(MEMBER)),
-          "GET /api/v1/workspaces/ws1/members": () => json(members(role === "member" ? "member" : null)),
+          "GET /api/v1/workspaces/ws1/members": () => json(members(role === "editor" ? "editor" : null)),
         };
   return {
     ...actorRoutes,
