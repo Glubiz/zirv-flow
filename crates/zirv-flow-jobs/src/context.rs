@@ -11,8 +11,8 @@ use zirv_flow_core::{TraceContext, WorkspaceId};
 use zirv_flow_render::RenderPool;
 
 use zirv_flow_store::{
-    ClaimedJob, Clock, EventRetention, HmacKey, Keyring, MessageRetention, NewDecision, NewJob,
-    PgConnection, PgPool,
+    ClaimedJob, Clock, DecisionRetention, EventRetention, HmacKey, Keyring, MessageRetention,
+    NewDecision, NewJob, PgConnection, PgPool,
 };
 
 use crate::JobError;
@@ -39,6 +39,7 @@ pub struct JobContext<'a> {
     job: &'a ClaimedJob,
     event_retention: EventRetention,
     message_retention: MessageRetention,
+    decision_retention: DecisionRetention,
     ingest: Option<IngestSettings>,
     identifier_key: Option<Arc<HmacKey>>,
     keyring: Option<Arc<Keyring>>,
@@ -59,6 +60,7 @@ impl<'a> JobContext<'a> {
             job,
             event_retention: EventRetention::default(),
             message_retention: MessageRetention::default(),
+            decision_retention: DecisionRetention::default(),
             ingest: None,
             identifier_key: None,
             keyring: None,
@@ -146,6 +148,17 @@ impl<'a> JobContext<'a> {
     /// The operator's message retention settings.
     pub fn message_retention(&self) -> &MessageRetention {
         &self.message_retention
+    }
+
+    /// Gives the handler the operator's decision-log retention settings.
+    pub(crate) fn with_decision_retention(mut self, settings: DecisionRetention) -> Self {
+        self.decision_retention = settings;
+        self
+    }
+
+    /// The operator's decision-log retention settings.
+    pub fn decision_retention(&self) -> &DecisionRetention {
+        &self.decision_retention
     }
 
     /// Gives the handler what the ingest drain needs.
