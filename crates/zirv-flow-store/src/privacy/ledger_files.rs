@@ -344,6 +344,7 @@ pub fn read_ledger_dir_each(
         }
         names.push(name);
     }
+    names.sort();
     Ok(names
         .into_iter()
         .map(|name| read_ledger_file(dir, name))

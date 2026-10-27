@@ -114,19 +114,24 @@ wait_port_free() {
 # Stops the server this script started and no other process, then checks that its port is free.
 # Under MSYS and Cygwin the background job is an MSYS process whose native image has another
 # (Windows) PID, read from /proc/<pid>/winpid; it is stopped with its own children only when the
-# image name is the drill binary's.
+# image name is the drill binary's. Nothing is signalled once the job has exited (its PIDs may be
+# reused) or when the Windows PID cannot be read.
 stop_server() {
+  if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN*)
+        local winpid image
+        if winpid="$(cat "/proc/$SERVER_PID/winpid" 2>/dev/null)" && [[ -n "$winpid" ]]; then
+          image="$(basename "$BIN")"
+          if tasklist //FI "PID eq $winpid" //FO CSV //NH 2>/dev/null | grep -qiF "\"$image\""; then
+            taskkill //PID "$winpid" //T //F >/dev/null 2>&1 || true
+          fi
+        fi
+        ;;
+      *) kill "$SERVER_PID" 2>/dev/null || true ;;
+    esac
+  fi
   if [[ -n "$SERVER_PID" ]]; then
-    if [[ -r "/proc/$SERVER_PID/winpid" ]]; then
-      local winpid image
-      winpid="$(<"/proc/$SERVER_PID/winpid")"
-      image="$(basename "$BIN")"
-      if tasklist //FI "PID eq $winpid" //FO CSV //NH 2>/dev/null | grep -qiF "\"$image\""; then
-        taskkill //PID "$winpid" //T //F >/dev/null 2>&1 || true
-      fi
-    else
-      kill "$SERVER_PID" 2>/dev/null || true
-    fi
     wait "$SERVER_PID" 2>/dev/null || true
     SERVER_PID=""
   fi
