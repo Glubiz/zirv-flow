@@ -1,0 +1,126 @@
+import { Pill } from "../../ui";
+import { formatDate, formatTime, shortId } from "../../ui/format";
+import { actionLabel } from "./areas";
+import type { AuditEntry } from "./model";
+
+export function actorKindLabel(kind: string): string {
+  switch (kind) {
+    case "user":
+      return "User";
+    case "api_key":
+      return "API key";
+    case "system":
+      return "System";
+    case "anonymous":
+      return "Anonymous";
+    default:
+      return kind;
+  }
+}
+
+function UserIcon() {
+  return (
+    <svg role="img" aria-label="User" className="audit-user-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="5.5" r="2.6" />
+      <path d="M2.8 14c.5-2.6 2.5-4 5.2-4s4.7 1.4 5.2 4" />
+    </svg>
+  );
+}
+
+function Actor({ entry }: { entry: AuditEntry }) {
+  const id = entry.actor_id ? (
+    <span className="mono" title={entry.actor_id}>
+      {shortId(entry.actor_id)}
+    </span>
+  ) : null;
+  if (entry.actor_kind === "api_key") {
+    return (
+      <span className="audit-actor">
+        <Pill>API key</Pill> {id}
+      </span>
+    );
+  }
+  if (entry.actor_kind === "user") {
+    return (
+      <span className="audit-actor">
+        <UserIcon /> {id}
+      </span>
+    );
+  }
+  return (
+    <span className="audit-actor">
+      {actorKindLabel(entry.actor_kind)} {id}
+    </span>
+  );
+}
+
+interface Props {
+  entries: AuditEntry[];
+  selectedId: number | null;
+  onSelect: (entry: AuditEntry) => void;
+}
+
+export function AuditTable({ entries, selectedId, onSelect }: Props) {
+  return (
+    <div className="table-scroll">
+      <table className="table audit-table">
+        <caption>Audit log, newest first</caption>
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Actor</th>
+            <th scope="col">Action</th>
+            <th scope="col">Object</th>
+            <th scope="col">Request</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((entry) => (
+            <tr key={entry.id} className={entry.id === selectedId ? "audit-row audit-row-selected" : "audit-row"}>
+              <td className="audit-cell-time">
+                <button
+                  type="button"
+                  className="audit-open"
+                  aria-label={`Open entry ${entry.action}`}
+                  aria-pressed={entry.id === selectedId}
+                  onClick={() => onSelect(entry)}
+                >
+                  {formatTime(entry.occurred_at)}
+                </button>
+                <span className="faint audit-date">{formatDate(entry.occurred_at)}</span>
+              </td>
+              <td className="audit-cell-actor">
+                <Actor entry={entry} />
+              </td>
+              <td className="audit-cell-action">
+                <span className="audit-label">{actionLabel(entry.action)}</span>
+                <span className="mono faint audit-code">{entry.action}</span>
+              </td>
+              <td className="audit-cell-extra">
+                {entry.object_id ? (
+                  <>
+                    {entry.object_kind && entry.object_kind !== "person" ? `${entry.object_kind} ` : null}
+                    <span className="mono" title={entry.object_id}>
+                      {shortId(entry.object_id)}
+                    </span>
+                  </>
+                ) : (
+                  <span className="faint">None</span>
+                )}
+              </td>
+              <td className="audit-cell-extra">
+                {entry.request_id ? (
+                  <span className="mono" title={entry.request_id}>
+                    {shortId(entry.request_id)}
+                  </span>
+                ) : (
+                  <span className="faint">None</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

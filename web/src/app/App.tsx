@@ -15,6 +15,7 @@ import { FlowPage, FlowsPage, NewFlowPage } from "../features/flows";
 import { NewSegmentPage, SegmentPage, SegmentsPage } from "../features/segments";
 import { SendingDomainPage, SendingDomainsPage } from "../features/sending";
 import { NewSourcePage, SourcePage, SourcesPage } from "../features/sources";
+import { AuditPage } from "../features/audit";
 import { MembersPage } from "../features/members";
 import { DimensionsPage, PolicyPage, SuppressionsPage, TopicsPage } from "../features/consent";
 import { SendingSettingsPage } from "../features/sending-settings";
@@ -167,6 +168,7 @@ export function AppRoutes() {
           <Route path="w/:ws/consent/dimensions" element={<DimensionsPage />} />
           <Route path="w/:ws/consent/policy" element={<PolicyPage />} />
           <Route path="w/:ws/settings/sending" element={<SendingSettingsPage />} />
+          <Route path="w/:ws/settings/audit" element={<AuditPage />} />
           <Route path="w/:ws/privacy" element={<PrivacyPage />} />
           <Route path="w/:ws/ai" element={<AiSettingsPage />} />
           <Route path="w/:ws/api-keys" element={<ApiKeysPage />} />
