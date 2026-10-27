@@ -382,6 +382,7 @@ pub async fn erase_person(
             object_kind: Some("erasure_request"),
             object_id: Some(request),
             request_id: None,
+            trace_id: Some(trace.trace_id.as_uuid()),
             summary: json!({}),
         },
     )

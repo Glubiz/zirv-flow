@@ -73,7 +73,10 @@ pub use assets::{
     find_asset, find_served_asset, list_assets, parse_sha256_hex, record_references, sha256_hex,
     store_asset, workspace_asset_bytes,
 };
-pub use audit::{Actor, ActorKind, AuditEntry, NewAuditEntry, append_audit, list_audit};
+pub use audit::{
+    AUDIT_BATCH, Actor, ActorKind, AuditEntry, AuditFilter, AuditPage, NewAuditEntry, append_audit,
+    count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
+};
 pub use changes::{
     DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, claim_dirty, dirty_backlog, dirty_heads,
     enqueue_reevaluate,

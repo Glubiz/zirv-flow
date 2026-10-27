@@ -3,6 +3,7 @@
 pub mod admin;
 mod assets;
 mod assistant;
+mod audit;
 mod auth;
 mod consent;
 mod contacts;
@@ -139,6 +140,14 @@ fn routes() -> Router<AppState> {
             post(webhooks::ops::rotate),
         )
         .route("/api/v1/setup", get(setup::status).post(setup::complete))
+        .route("/api/v1/audit", get(audit::list_instance))
+        .route("/api/v1/audit/export", get(audit::export::instance))
+        .route("/api/v1/workspaces/{ws}/audit", get(audit::list))
+        .route("/api/v1/workspaces/{ws}/audit/actions", get(audit::actions))
+        .route(
+            "/api/v1/workspaces/{ws}/audit/export",
+            get(audit::export::workspace),
+        )
         .route("/api/v1/admin/jobs", get(jobs_admin::depth))
         .route("/api/v1/admin/jobs/dead", get(jobs_admin::dead))
         .route(
