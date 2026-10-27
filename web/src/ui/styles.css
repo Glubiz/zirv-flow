@@ -4679,6 +4679,139 @@ main:focus {
   }
 }
 
+.fold-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 24px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.fold-summary::-webkit-details-marker {
+  display: none;
+}
+
+.fold-summary:hover {
+  background: var(--ground);
+}
+
+.fold-summary .panel-title {
+  font-size: 17px;
+}
+
+.fold-chevron {
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--ink-2);
+  border-bottom: 2px solid var(--ink-2);
+  transform: rotate(45deg);
+  transition: transform 120ms;
+}
+
+.fold[open] > .fold-summary .fold-chevron {
+  transform: rotate(-135deg);
+}
+
+.fold-body .panel {
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+
+.fold-body {
+  gap: 0;
+}
+
+.retention-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.retention-table .retention-label {
+  background: transparent;
+  border-top: 1px solid var(--line);
+  padding: 12px;
+  font-size: inherit;
+  font-weight: 600;
+  color: var(--ink);
+  vertical-align: middle;
+}
+
+.retention-table .retention-label:first-child {
+  padding-left: 24px;
+}
+
+@media (max-width: 640px) {
+  .retention-table,
+  .retention-table tbody,
+  .retention-table tr,
+  .retention-table td,
+  .retention-table .retention-label {
+    display: block;
+  }
+
+  .retention-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .retention-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--line);
+  }
+
+  .retention-table tbody tr:first-child {
+    border-top: 0;
+  }
+
+  .retention-table td,
+  .retention-table td:first-child,
+  .retention-table td:last-child,
+  .retention-table .retention-label,
+  .retention-table .retention-label:first-child {
+    padding: 0;
+    border-top: 0;
+  }
+
+  .retention-table .retention-value {
+    justify-self: end;
+  }
+
+  .retention-table .retention-change {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .retention-table .retention-change > a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .retention-table .retention-menu {
+    justify-self: end;
+  }
+}
+
+.window-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 12px;
+}
+
 /* Audit log */
 .audit-layout {
   display: flex;
