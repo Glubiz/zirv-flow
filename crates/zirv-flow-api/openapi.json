@@ -21936,7 +21936,7 @@
             }
           },
           "409": {
-            "description": "The template is archived (`code` is `template_archived`)",
+            "description": "The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -22937,6 +22937,97 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/TemplateVersionBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key without the read scope",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such workspace, template or version, or no access",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "api_key": []
+          }
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "What one version sent: its non-test message count and the theme and snippet versions those\nmessages recorded.",
+        "operationId": "get_template_version_stats",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "description": "Workspace id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Template id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "Version number",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The messages sent with the version and their theme and snippet versions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateVersionStatsBody"
                 }
               }
             }
@@ -37425,6 +37516,14 @@
           "document": {
             "type": "object",
             "description": "The content document."
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The draft revision the caller read. When given and the draft has been saved since, the save\nis a 409 `template_draft_revision_mismatch` and writes nothing. Absent saves unconditionally."
           }
         }
       },
@@ -40977,6 +41076,33 @@
           }
         }
       },
+      "TemplateVersionStatsBody": {
+        "type": "object",
+        "description": "What one template version sent.",
+        "required": [
+          "messages",
+          "renders",
+          "more"
+        ],
+        "properties": {
+          "messages": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The non-test messages sent with the version."
+          },
+          "more": {
+            "type": "boolean",
+            "description": "Whether more combinations exist than `renders` lists."
+          },
+          "renders": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VersionRenderBody"
+            },
+            "description": "The distinct theme and snippet combinations, most used first, at most 20."
+          }
+        }
+      },
       "TemplateVersionSummaryBody": {
         "type": "object",
         "description": "One published version in the history list: no document, which `GET .../versions/{n}` returns.",
@@ -42928,6 +43054,40 @@
           },
           "version": {
             "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "VersionRenderBody": {
+        "type": "object",
+        "description": "One theme and snippet combination recorded on the messages sent with a version.",
+        "required": [
+          "snippet_versions",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The non-test messages with this combination."
+          },
+          "snippet_versions": {
+            "type": "object",
+            "description": "Snippet id to the version number used."
+          },
+          "theme_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "The theme in effect, or none."
+          },
+          "theme_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32"
           }
         }

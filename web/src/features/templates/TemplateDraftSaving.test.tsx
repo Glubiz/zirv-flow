@@ -2,7 +2,7 @@ import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
-import { mockApi, type Handler } from "../../test/mockApi";
+import { mockApi, problem, type Handler } from "../../test/mockApi";
 import { renderRoute } from "../../test/renderFeature";
 import { drafts, templateDetail, templateRoutes, TEMPLATE_ID, WS, type Doc } from "../../test/templatesApi";
 import { TemplatePage } from "./TemplatePage";
@@ -126,6 +126,49 @@ describe("the other template fixes", () => {
     expect(drafts(calls).map(htmlOf).join()).toContain("fresh");
   });
 
+  it("opens the history only after the draft save has finished", async () => {
+    const base = templateRoutes();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls = mockApi({
+      ...base,
+      [PUT]: async (request) => {
+        await gate;
+        return (base[PUT] as Handler)(request);
+      },
+    });
+    const user = userEvent.setup();
+    const view = mount();
+    const history = `/w/ws1/templates/${TEMPLATE_ID}/history`;
+
+    await user.click(await screen.findByRole("textbox", { name: /source/ }));
+    await user.paste("<b>fresh</b>");
+    expect(screen.queryByRole("tab", { name: "Versions" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("link", { name: "Versions" }));
+
+    await waitFor(() => expect(calls.some((call) => call.method === "PUT")).toBe(true), WAIT);
+    expect(view.router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}`);
+    release();
+    await waitFor(() => expect(view.router.state.location.pathname).toBe(history), WAIT);
+    expect(drafts(calls).map(htmlOf).join()).toContain("fresh");
+  });
+
+  it("stays in the editor and shows the error when the save before the history fails", async () => {
+    const base = templateRoutes();
+    mockApi({ ...base, [PUT]: () => problem(500, "Could not save", "The draft was not saved") });
+    const user = userEvent.setup();
+    const view = mount();
+
+    await user.click(await screen.findByRole("textbox", { name: /source/ }));
+    await user.paste("<b>fresh</b>");
+    await user.click(await screen.findByRole("link", { name: "Versions" }));
+
+    expect(await screen.findByText("The draft was not saved", {}, WAIT)).toBeInTheDocument();
+    expect(view.router.state.location.pathname).toBe(`/w/ws1/templates/${TEMPLATE_ID}`);
+  });
+
   it("moves between the view tabs with the arrow keys", async () => {
     mockApi(templateRoutes());
     const user = userEvent.setup();
@@ -135,9 +178,9 @@ describe("the other template fixes", () => {
     editor.focus();
     await user.keyboard("{ArrowRight}");
 
-    const versions = screen.getByRole("tab", { name: "Versions" });
-    expect(versions).toHaveAttribute("aria-selected", "true");
-    expect(versions).toHaveFocus();
+    const used = screen.getByRole("tab", { name: "Where used" });
+    expect(used).toHaveAttribute("aria-selected", "true");
+    expect(used).toHaveFocus();
     await user.keyboard("{ArrowLeft}");
     expect(screen.getByRole("tab", { name: "Editor" })).toHaveFocus();
   });

@@ -654,7 +654,7 @@ mod tests {
         // The levels each credential holds: 1 read, 2 write, 3 admin. A key holds one scope; a
         // member reads and writes; a workspace admin does all three.
         let held = |code: u16, need: u16| code.to_string().contains(&need.to_string());
-        let requests: [(&str, &str, String, Option<Value>, u16); 13] = [
+        let requests: [(&str, &str, String, Option<Value>, u16); 14] = [
             ("list", "GET", String::new(), None, 1),
             ("get", "GET", id(""), None, 1),
             ("versions", "GET", id("/versions"), None, 1),
@@ -692,6 +692,7 @@ mod tests {
             ("publish", "POST", id("/publish"), None, 3),
             ("archive", "DELETE", id(""), None, 3),
             ("get version", "GET", id("/versions/1"), None, 1),
+            ("version stats", "GET", id("/versions/1/stats"), None, 1),
         ];
 
         for (label, method, tail, body, need) in requests {
@@ -710,7 +711,7 @@ mod tests {
                     (_, true) => {
                         // Allowed: whatever the route answers, it is not a refusal. (The version
                         // read answers 404 until the publish above it has run, so it is last.)
-                        if label != "get version" {
+                        if !matches!(label, "get version" | "version stats") {
                             assert!(
                                 !matches!(
                                     reply.status,
@@ -3278,6 +3279,67 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn version_stats_count_a_versions_sends_and_are_a_404_for_the_unknown(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("Hi", "x")).await;
+        f.lead("POST", &format!("/{id}/publish"), None).await;
+        let person = f.person(json!({}), None).await;
+        let theme = Uuid::now_v7();
+        let message = |test: bool, snippets: Value| {
+            let (ws, pool) = (f.ws, f.pool.clone());
+            let template: Uuid = id.parse().unwrap();
+            async move {
+                sqlx::query(
+                    "INSERT INTO messages (id, workspace_id, person_id, enrollment_id, flow_id, \
+                        node_id, template_id, template_version, destination_id, status, test, \
+                        theme_id, theme_version, snippet_versions, created_at, completed_at) \
+                     VALUES (gen_random_uuid(), $1, $2, gen_random_uuid(), gen_random_uuid(), 'n', \
+                        $3, 1, gen_random_uuid(), 'sent', $4, $5, 2, $6, now(), now())",
+                )
+                .bind(ws.as_uuid())
+                .bind(person)
+                .bind(template)
+                .bind(test)
+                .bind(theme)
+                .bind(snippets)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        };
+        message(false, json!({})).await;
+        message(false, json!({})).await;
+        message(true, json!({})).await;
+
+        let stats = f
+            .lead("GET", &format!("/{id}/versions/1/stats"), None)
+            .await;
+        let unknown = f
+            .lead("GET", &format!("/{id}/versions/2/stats"), None)
+            .await;
+        let stranger = f
+            .call(
+                "GET",
+                &format!(
+                    "/api/v1/workspaces/{}/templates/{id}/versions/1/stats",
+                    f.other_ws.as_uuid()
+                ),
+                None,
+                Auth::Key(&f.read),
+            )
+            .await;
+
+        assert_eq!(stats.status, StatusCode::OK, "{:?}", stats.body);
+        assert_eq!(stats.body["messages"], 2);
+        assert_eq!(stats.body["more"], false);
+        assert_eq!(stats.body["renders"][0]["count"], 2);
+        assert_eq!(stats.body["renders"][0]["theme_id"], json!(theme));
+        assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+        assert_eq!(stranger.status, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_stale_reviewed_revision_is_a_409_and_writes_no_version(pool: PgPool) {
         let f = fixture(&pool).await;
         let id = f.create("Welcome", email_doc("Hi", "x")).await;
@@ -3304,6 +3366,37 @@ mod tests {
         assert_eq!(stale.status, StatusCode::CONFLICT, "{:?}", stale.body);
         assert_eq!(stale.body["code"], "template_draft_changed");
         assert_eq!(versions.body, json!([]));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_save_that_names_a_stale_revision_is_a_409_and_writes_nothing(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let id = f.create("Welcome", email_doc("First", "one")).await;
+        let uri = format!("/{id}/draft");
+
+        let current = f
+            .lead(
+                "PUT",
+                &uri,
+                Some(json!({"document": email_doc("Second", "two"), "revision": 1})),
+            )
+            .await;
+        let stale = f
+            .lead(
+                "PUT",
+                &uri,
+                Some(json!({"document": email_doc("Third", "three"), "revision": 1})),
+            )
+            .await;
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+
+        assert_eq!(current.status, StatusCode::OK, "{:?}", current.body);
+        assert_eq!(current.body["draft"]["revision"], 2);
+        assert_eq!(stale.status, StatusCode::CONFLICT);
+        assert_eq!(stale.body["code"], "template_draft_revision_mismatch");
+        assert_eq!(read.body["draft"]["revision"], 2);
+        assert_eq!(read.body["draft"]["document"], email_doc("Second", "two"));
     }
 
     #[sqlx::test]

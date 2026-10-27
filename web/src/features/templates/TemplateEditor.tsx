@@ -9,7 +9,6 @@ import { PreviewPane, type PersonChoice, type PreviewState } from "./PreviewPane
 import { SourcePane } from "./SourcePane";
 import { TabBar } from "./TabBar";
 import { SenderOptionsProvider } from "./senderOptions";
-import { VersionsView } from "./VersionsView";
 import { WhereUsedView } from "./WhereUsed";
 import {
   asBody,
@@ -28,11 +27,10 @@ import {
 export const DEBOUNCE_MS = 400;
 
 type SaveState = "saved" | "pending" | "saving" | "error";
-type Tab = "editor" | "versions" | "used";
+type Tab = "editor" | "used";
 
 const TABS: readonly { id: Tab; label: string }[] = [
   { id: "editor", label: "Editor" },
-  { id: "versions", label: "Versions" },
   { id: "used", label: "Where used" },
 ];
 
@@ -47,13 +45,13 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   const [template, setTemplate] = useState<Template>(initial);
   const [doc, setDoc] = useState<Editable>(() => readDocument(initial.draft.document));
   const [query] = useSearchParams();
-  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "versions" ? "versions" : query.get("tab") === "used" ? "used" : "editor"));
+  const [tab, setTab] = useState<Tab>(() => (query.get("tab") === "used" ? "used" : "editor"));
   const [save, setSave] = useState<SaveState>("saved");
   const [saveFailure, setSaveFailure] = useState<ErrorSummary | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ status: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const [person, setPerson] = useState<PersonChoice | null>(null);
-  const [leaveFor, setLeaveFor] = useState<"test" | "publish" | null>(null);
+  const [leaveFor, setLeaveFor] = useState<"test" | "publish" | "history" | null>(null);
   const [goTo, setGoTo] = useState<{ id: string; n: number } | undefined>(undefined);
   const navigate = useNavigate();
   const [converting, setConverting] = useState(false);
@@ -191,7 +189,7 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
   }
 
   /** Saves the draft first, so the page it opens works on what the editor shows. */
-  async function openPage(page: "test" | "publish") {
+  async function openPage(page: "test" | "publish" | "history") {
     if (await flush()) setLeaveFor(page);
   }
 
@@ -223,6 +221,16 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           <span className="faint">{modeLabel(doc)}</span>
         </span>
         <TabBar label="Template views" variant="page" tabs={TABS} tab={tab} onTab={setTab} />
+        <Link
+          className="fl-tab"
+          to={`/w/${workspaceId}/templates/${template.id}/history`}
+          onClick={(event) => {
+            event.preventDefault();
+            void openPage("history");
+          }}
+        >
+          Versions
+        </Link>
         <div className="fl-status" role="status">
           {!editable ? (
             <span className="muted">{archived ? "This template is archived. You can look at it but not change it." : "You can look at this template but not change it."}</span>
@@ -287,7 +295,6 @@ export function TemplateEditor({ workspaceId, initial, canWrite, canAdmin }: Pro
           )}
         </div>
       ) : null}
-      {tab === "versions" ? <VersionsView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {tab === "used" ? <WhereUsedView workspaceId={workspaceId} templateId={template.id} reloadKey={0} /> : null}
       {converting ? (
         <ConvertDialog workspaceId={workspaceId} templateId={template.id} flush={flush} onClose={() => setConverting(false)} onConverted={converted} />

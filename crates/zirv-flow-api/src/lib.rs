@@ -403,6 +403,10 @@ fn routes() -> Router<AppState> {
             get(templates::publish::version),
         )
         .route(
+            "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats",
+            get(templates::publish::version_stats),
+        )
+        .route(
             "/api/v1/workspaces/{ws}/templates/{id}/where-used",
             get(templates::where_used::where_used),
         )

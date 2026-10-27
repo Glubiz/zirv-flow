@@ -299,6 +299,9 @@ pub(crate) struct SaveTemplateDraftRequest {
     /// The content document.
     #[schema(value_type = Object)]
     document: Value,
+    /// The draft revision the caller read. When given and the draft has been saved since, the save
+    /// is a 409 `template_draft_revision_mismatch` and writes nothing. Absent saves unconditionally.
+    revision: Option<i32>,
 }
 
 fn invalid(field: &'static str, message: &'static str) -> ApiError {
@@ -449,6 +452,12 @@ pub(crate) async fn save_draft(
     let locked = zirv_flow_store::lock_template(&mut tx, workspace, id)
         .await
         .map_err(template_error)?;
+    if request
+        .revision
+        .is_some_and(|revision| revision != locked.draft().revision)
+    {
+        return Err(ApiError::template_draft_revision_mismatch());
+    }
     let document = check_draft(locked.template(), &request.document)?;
     let draft = zirv_flow_store::save_template_draft(&mut tx, workspace, id, &document, updated_by)
         .await
@@ -881,7 +890,7 @@ pub(crate) async fn archive(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or template, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The template is archived (`code` is `template_archived`)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The template is archived (`code` is `template_archived`), or `revision` is not the draft's current revision (`template_draft_revision_mismatch`)", body = Problem, content_type = "application/problem+json"),
         (status = 422, description = "A document that is not a template document (`template_malformed`), has an unsupported `schema` (`template_unsupported_schema`), an unknown block (`template_unknown_block`) or field (`template_unknown_field`), is for another channel or category (`template_mismatch`) or has no registered content type (`template_content_unsupported`)", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))

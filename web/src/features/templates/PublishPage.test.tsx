@@ -141,7 +141,7 @@ describe("the Review and publish page", () => {
     const done = await screen.findByRole("status", { name: "Published" });
     expect(within(done).getByRole("heading", { name: "Version 1 is live" })).toBeInTheDocument();
     expect(within(done).getByRole("link", { name: "Welcome series" })).toBeInTheDocument();
-    expect(within(done).getByRole("link", { name: "View history" })).toHaveAttribute("href", `/w/ws1/templates/${TEMPLATE_ID}?tab=versions`);
+    expect(within(done).getByRole("link", { name: "View history" })).toHaveAttribute("href", `/w/ws1/templates/${TEMPLATE_ID}/history`);
     expect(within(done).getByRole("link", { name: "Back to the library" })).toBeInTheDocument();
     expect(calls.find((call) => call.method === "POST" && call.path.endsWith("/publish"))?.body).toEqual({ revision: 1, note: "First cut" });
   });

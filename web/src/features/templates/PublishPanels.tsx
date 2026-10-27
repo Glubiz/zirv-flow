@@ -227,7 +227,7 @@ interface RenderProps {
   onRetry: () => void;
 }
 
-function Frame({ title, check, marks, onRetry }: { title: string; check: Check | undefined; marks: readonly Change[]; onRetry: () => void }) {
+export function Frame({ title, check, marks, onRetry }: { title: string; check: Check | undefined; marks: readonly Change[]; onRetry: () => void }) {
   if (check === undefined || check.status === "running") return <LoadingState label="Rendering" />;
   if (check.status === "failed") return <ErrorState title="The render failed" detail={check.error.detail || check.error.title} traceId={check.error.traceId} onRetry={onRetry} />;
   const { preview } = check;
