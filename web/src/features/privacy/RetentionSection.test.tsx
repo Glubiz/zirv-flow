@@ -141,6 +141,92 @@ describe("retention section", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
+  it.each([
+    ["empty", ""],
+    ["zero", "0"],
+    ["negative", "-5"],
+    ["decimal", "2.5"],
+    ["very large", "99999999999999999999"],
+  ])("refuses %s input before sending", async (_name, value) => {
+    const calls = mockApi(routes("admin", { [`PUT ${RETENTION}`]: () => json({ windows: windows() }) }));
+    const { user, table } = await open();
+    await user.click(within(table).getByRole("button", { name: "Shorten Messages" }));
+    const dialog = await screen.findByRole("dialog");
+    const amount = within(dialog).getByLabelText("Keep for");
+    await user.clear(amount);
+    if (value !== "") await user.type(amount, value);
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await within(dialog).findByText(/Enter a whole number|Out of range/)).toBeInTheDocument();
+    expect(calls.some((call) => call.method === "PUT")).toBe(false);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("keeps the entered value and unit after a 422", async () => {
+    mockApi(
+      routes("admin", {
+        [`PUT ${RETENTION}`]: () => problem(422, "Unprocessable", "messages days must be within 30 to 395", undefined, "retention_out_of_bounds"),
+      }),
+    );
+    const { user, table } = await open();
+    await user.click(within(table).getByRole("button", { name: "Shorten Messages" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.selectOptions(within(dialog).getByLabelText("Unit"), "days");
+    const amount = within(dialog).getByLabelText("Keep for");
+    await user.clear(amount);
+    await user.type(amount, "90");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await within(dialog).findByText(/must be within 30 to 395/)).toBeInTheDocument();
+    expect(amount).toHaveValue(90);
+    expect(within(dialog).getByLabelText("Unit")).toHaveValue("days");
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it.each([
+    ["403", () => problem(403, "Forbidden", "admin role required"), /admin role required/],
+    ["500", () => problem(500, "Internal error", "the store is down"), /the store is down/],
+    [
+      "network",
+      () => {
+        throw new TypeError("Failed to fetch");
+      },
+      /Could not reach the server/,
+    ],
+  ])("shows a %s failure inline and keeps the dialog open", async (_name, handler, expected) => {
+    mockApi(routes("admin", { [`PUT ${RETENTION}`]: handler }));
+    const { user, table } = await open();
+    await user.click(within(table).getByRole("button", { name: "Shorten Messages" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+    expect(await within(dialog).findByText(expected)).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("disables Save while the request is in flight so a double click sends one PUT", async () => {
+    let release: (response: Response) => void = () => undefined;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const calls = mockApi(routes("admin", { [`PUT ${RETENTION}`]: () => pending }));
+    const { user, table } = await open();
+    await user.click(within(table).getByRole("button", { name: "Shorten Messages" }));
+    const dialog = await screen.findByRole("dialog");
+    const save = within(dialog).getByRole("button", { name: "Save" });
+    await user.dblClick(save);
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Saving" })).toBeDisabled());
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+    release(json({ windows: windows(395) }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
+  });
+
+  it("uses a row header for each window name", async () => {
+    mockApi(routes("admin"));
+    const { table } = await open();
+    expect(within(table).getByRole("rowheader", { name: "Messages" })).toBeInTheDocument();
+    expect(within(table).getAllByRole("rowheader")).toHaveLength(8);
+  });
+
   it("keeps focus in the dialog and returns it to the opener on close", async () => {
     mockApi(routes("admin"));
     const { user, table } = await open();

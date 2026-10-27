@@ -1,4 +1,4 @@
-import { useState, type SyntheticEvent } from "react";
+import { useRef, useState, type SyntheticEvent } from "react";
 
 import { client, describeError, unwrap, type ErrorSummary } from "../../api";
 import { Button, Dialog, InlineError, SelectField, TextField } from "../../ui";
@@ -23,7 +23,7 @@ function bounds(window: EditableWindow): string {
 /** The check that runs before anything is sent: a whole, positive number of days within the bounds. */
 function problemWith(window: EditableWindow, amount: string, unit: WindowUnit): string | null {
   const number = Number(amount);
-  if (amount.trim() === "" || !Number.isInteger(number) || number < 1) {
+  if (amount.trim() === "" || !Number.isSafeInteger(number) || number < 1) {
     return "Enter a whole number of 1 or more.";
   }
   const days = toDays(number, unit);
@@ -50,14 +50,17 @@ export function ShortenWindowDialog({
   const [invalid, setInvalid] = useState<string | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
   const [busy, setBusy] = useState(false);
+  const sending = useRef(false);
 
   async function submit(event: SyntheticEvent) {
     event.preventDefault();
+    if (sending.current) return;
     setFailure(null);
     const problem = problemWith(window, amount, unit);
     setInvalid(problem);
     if (problem) return;
     const days = toDays(Number(amount), unit);
+    sending.current = true;
     setBusy(true);
     try {
       await unwrap(
@@ -69,6 +72,7 @@ export function ShortenWindowDialog({
       onSaved();
     } catch (error) {
       setFailure(describeError(error));
+      sending.current = false;
       setBusy(false);
     }
   }
