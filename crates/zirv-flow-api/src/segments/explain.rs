@@ -23,7 +23,7 @@ use zirv_flow_store::{
 
 use super::{catalog_of, issues_error};
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::problem::{ApiError, Problem};
 
 /// How a node came out.
@@ -339,7 +339,7 @@ pub(crate) async fn explain(
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let requested: Uuid = path_id(&id)?;
     let (segment_id, asked) = parse_query(query.as_deref().unwrap_or_default())?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
 
     let mut tx =
         zirv_flow_store::begin_segment_snapshot(&state.pool, state.segment_preview_timeout)

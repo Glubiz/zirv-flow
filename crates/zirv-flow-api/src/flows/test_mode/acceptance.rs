@@ -375,6 +375,51 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_editor_with_the_view_pii_grant_may_test_with_a_real_person(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let flow = f.create_flow("Journey", journey(false)).await;
+        let person = json!({"person_id": uuid::Uuid::now_v7()});
+        let editor = zirv_flow_core::UserId::from_uuid(
+            sqlx::query_scalar("SELECT id FROM users WHERE email = 'member@example.com'")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+        );
+        let before = send(
+            &f.router,
+            "POST",
+            &f.uri(&flow),
+            Some(person.clone()),
+            Auth::Session(&f.member),
+        )
+        .await;
+
+        admin::set_member_grant(
+            &pool,
+            &Context::system(),
+            f.ws,
+            editor,
+            Role::Editor,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let granted = send(
+            &f.router,
+            "POST",
+            &f.uri(&flow),
+            Some(person),
+            Auth::Session(&f.member),
+        )
+        .await;
+
+        assert_eq!(before.body["code"], "flow_test_values_forbidden");
+        // The grant gets the editor as far as the person, who does not exist.
+        assert_eq!(granted.status, StatusCode::NOT_FOUND, "{:?}", granted.body);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_draft_is_walked_through_waits_a_branch_a_split_an_event_and_a_timeout(pool: PgPool) {
         let f = fixture(&pool).await;
         let flow = f.create_flow("Journey", journey(true)).await;

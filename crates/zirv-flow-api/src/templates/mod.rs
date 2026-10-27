@@ -25,11 +25,12 @@ use zirv_flow_templates::{
 };
 
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize};
+use crate::auth::{Need, Principal, authorize, may_view_pii};
 use crate::problem::{ApiError, TemplateIssueProblem};
 
-/// Authorizes a render of a template: the write role for a sample person, the admin role for a
-/// real one (their values are shown), whose refusal is `template_preview_values_forbidden`.
+/// Authorizes a render of a template: the write role for a sample person; for a real one (their
+/// values are shown) also the `view_pii` grant, whose refusal is `template_preview_values_forbidden`.
+/// A workspace admin or an `admin` key keeps the real-person render it had before the grant existed.
 pub(crate) async fn authorize_render(
     state: &AppState,
     principal: &Principal,
@@ -39,8 +40,10 @@ pub(crate) async fn authorize_render(
     if !real_person {
         return authorize(state, principal, ws, Need::Edit).await;
     }
-    // Until the `view_pii` grant exists, a real person's values are for admins.
-    authorize(state, principal, ws, Need::Admin)
+    if let Ok(workspace) = authorize(state, principal, ws, Need::Admin).await {
+        return Ok(workspace);
+    }
+    let workspace = authorize(state, principal, ws, Need::Edit)
         .await
         .map_err(|error| {
             if error.status_code() == axum::http::StatusCode::FORBIDDEN {
@@ -48,7 +51,12 @@ pub(crate) async fn authorize_render(
             } else {
                 error
             }
-        })
+        })?;
+    if may_view_pii(state, principal, ws).await {
+        Ok(workspace)
+    } else {
+        Err(ApiError::template_preview_values_forbidden())
+    }
 }
 
 /// The problem for a refused template write.

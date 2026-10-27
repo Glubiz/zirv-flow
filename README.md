@@ -531,13 +531,14 @@ Passwords are 12 to 1024 characters.
   DELETE must send the token in an `x-csrf-token` header, or it gets 403. Sign-in
   needs none.
 - **API keys.** A workspace admin creates a key with scopes (`ingest`, `read`,
-  `write`, `publish`, `admin`); the response shows the `zfk_...` key once, and
+  `write`, `publish`, `admin`, `pii`); the response shows the `zfk_...` key once, and
   only a hash is stored. Send it as `Authorization: Bearer <key>`. A key works
   only in its own workspace and never on instance-level endpoints (`/users`,
   creating workspaces, `/session`). `read` allows GETs, `write` the editor-level
   drafts, `publish` the publisher actions and `admin` members, keys and the
   rest of the admin routes; scopes do not imply one another, so a `write` key
-  cannot publish and a `publish` key cannot edit.
+  cannot publish and a `publish` key cannot edit. `pii` shows personal values
+  unmasked and reads nothing alone: a key needs `read` as well.
 - **Roles.** A workspace membership is `admin`, `publisher`, `editor` or
   `viewer`; the instance owner is a flag on the user, not a role. A viewer
   reads. An editor also changes drafts (segments, flows, templates, snippets,
@@ -552,6 +553,13 @@ Passwords are 12 to 1024 characters.
   with a 409 (`last_admin`) unless the caller is the instance owner. Where a
   section below says "any member", read editor or above; "admin" on a publish
   route reads publisher or above.
+- **Personal values.** The instance owner, a workspace admin and an `admin` key see
+  identifiers, trait values, event properties and consent evidence unmasked. A
+  publisher, editor or viewer sees them masked unless the admin sets `view_pii` on
+  their membership (`PUT .../members/{user_id}` with `"view_pii": true`; leaving it
+  out keeps the stored value; `GET .../members` shows it). A key sees them with the
+  `pii` scope. The grant is also what an editor needs to preview, test-send or test a
+  flow as a real person. Migration 0078 starts every membership at false.
 - **Upgrading to roles.** Migration 0073 gives every existing `admin` key the
   `publish` scope, so deployed admin keys keep publishing. A `write` key that
   runs imports (`POST .../imports/{id}/run`) needs `publish` added by hand.
