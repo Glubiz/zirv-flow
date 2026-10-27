@@ -1781,7 +1781,14 @@ endpoint = \"http://collector:4318/\""
         zirv_flow_store::write_ledger_file(&dir.0, &entry).unwrap();
         // An older backup: the same workspace and person, and no ledger row.
         let (restored, name) = scratch_database(&pool, ws).await;
-        let back = seed_ada(&restored, ws).await;
+        // The restore brings back the same person id.
+        let back = person;
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(back)
+            .bind(ws.as_uuid())
+            .execute(&restored)
+            .await
+            .unwrap();
         let hash = zirv_flow_core::people::identifier_hash(
             &key,
             &zirv_flow_core::people::Identifier::parse("email", "ada@example.com").unwrap(),
