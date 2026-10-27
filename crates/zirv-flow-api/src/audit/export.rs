@@ -65,11 +65,11 @@ fn cell(value: &str) -> String {
 }
 
 fn csv_line(body: &AuditEntryBody) -> String {
-    let id = |value: Option<Uuid>| value.map(|id| id.to_string()).unwrap_or_default();
+    let id = |value: Option<Uuid>| cell(&value.map(|id| id.to_string()).unwrap_or_default());
     let text = |value: &Option<String>| cell(value.as_deref().unwrap_or_default());
     let cells = [
-        body.id.to_string(),
-        body.occurred_at.format(&Rfc3339).unwrap_or_default(),
+        cell(&body.id.to_string()),
+        cell(&body.occurred_at.format(&Rfc3339).unwrap_or_default()),
         id(body.workspace_id),
         cell(&body.actor_kind),
         id(body.actor_id),
@@ -301,6 +301,16 @@ mod tests {
             line.matches(',').count(),
             "one cell per header column"
         );
+    }
+
+    #[test]
+    fn a_cell_of_a_non_text_column_goes_through_the_guard() {
+        let mut entry = body(None);
+        entry.id = -9;
+
+        let line = csv_line(&entry);
+
+        assert!(line.starts_with("'-9,"), "{line:?}");
     }
 
     #[test]

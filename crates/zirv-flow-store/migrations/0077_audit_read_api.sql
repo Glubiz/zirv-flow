@@ -61,7 +61,11 @@ CREATE TRIGGER audit_log_no_truncate
 
 -- The only deleter: removes up to `batch` of the oldest rows before `cutoff` and returns how many.
 -- SECURITY DEFINER with a pinned search path, so a role that is later denied DELETE on the table
--- can still be granted EXECUTE on this function alone.
+-- can still be granted EXECUTE on this function alone. `batch` is at most 10000.
+--
+-- PostgreSQL grants EXECUTE on a new function to PUBLIC, so it is revoked right after the
+-- definition: only the owner (the migrating role, which the application uses) can run it. An
+-- operator who runs the application under a separate role grants EXECUTE to that role.
 CREATE FUNCTION audit_purge(cutoff timestamptz, batch int) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
@@ -69,6 +73,9 @@ DECLARE
 BEGIN
     IF batch IS NULL OR batch < 1 THEN
         RAISE EXCEPTION 'audit_purge batch must be at least 1';
+    END IF;
+    IF batch > 10000 THEN
+        RAISE EXCEPTION 'audit_purge batch must be at most 10000';
     END IF;
     PERFORM set_config('zirv_flow.audit_purge', 'on', true);
     DELETE FROM audit_log
@@ -78,3 +85,5 @@ BEGIN
     RETURN purged;
 END;
 $$;
+
+REVOKE ALL ON FUNCTION audit_purge(timestamptz, int) FROM PUBLIC;

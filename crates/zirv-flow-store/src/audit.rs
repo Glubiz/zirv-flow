@@ -226,6 +226,9 @@ fn select(head: &str, filter: &AuditFilter, before: Option<i64>) -> QueryBuilder
 
 /// Up to `limit` rows matching `filter`, newest first, starting below the row id `cursor`. Rows
 /// appended while a caller pages have higher ids than any cursor, so they never shift a page.
+///
+/// Ids are not commit-ordered: a transaction that took a lower id and commits after a walk has
+/// read past it is missing from that walk. An entry committed during a walk may be absent.
 pub async fn list_audit_page<'e>(
     executor: impl PgExecutor<'e>,
     filter: &AuditFilter,
@@ -262,7 +265,8 @@ pub async fn count_audit<'e>(
 
 /// The rows matching `filter` with an id up to `through`, newest first, as batches of at most
 /// [`AUDIT_BATCH`] rows read by keyset. One batch is in memory at a time, so an export of any
-/// size streams.
+/// size streams. Like [`list_audit_page`], the stream can miss an entry whose transaction took a
+/// lower id and committed after the stream read past it.
 pub fn stream_audit(
     pool: PgPool,
     filter: AuditFilter,
@@ -285,7 +289,8 @@ pub fn stream_audit(
 }
 
 /// Deletes up to `batch` of the oldest rows before `cutoff` through `audit_purge`, the only
-/// deleter the database allows. Returns how many it deleted.
+/// deleter the database allows. Returns how many it deleted. `batch` is 1 to 10000: the function
+/// refuses anything else and deletes nothing. Only the owning role may execute `audit_purge`.
 pub async fn purge_audit<'e>(
     executor: impl PgExecutor<'e>,
     cutoff: OffsetDateTime,
@@ -571,6 +576,44 @@ mod tests {
         assert_eq!(purge_audit(&pool, cutoff, 2).await.unwrap(), 0);
         assert_eq!(list_audit(&pool, 10).await.unwrap().len(), 1);
         assert!(purge_audit(&pool, cutoff, 0).await.is_err());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_purge_batch_above_the_limit_is_refused_and_deletes_nothing(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO audit_log (actor_kind, action, occurred_at) \
+             VALUES ('system', 'session.signed_in', now() - interval '10 days')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cutoff = OffsetDateTime::now_utc() - Duration::days(5);
+
+        assert!(purge_audit(&pool, cutoff, 10_001).await.is_err());
+
+        assert_eq!(list_audit(&pool, 10).await.unwrap().len(), 1);
+        assert_eq!(purge_audit(&pool, cutoff, 10_000).await.unwrap(), 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn audit_purge_is_not_executable_by_public(pool: PgPool) {
+        let public: bool = sqlx::query_scalar(
+            "SELECT has_function_privilege('public', 'audit_purge(timestamptz,int)', 'EXECUTE')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert!(!public);
+        assert_eq!(
+            purge_audit(&pool, OffsetDateTime::now_utc(), 1)
+                .await
+                .unwrap(),
+            0,
+            "the owner keeps EXECUTE"
+        );
     }
 
     #[sqlx::test]
