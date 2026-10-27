@@ -187,7 +187,7 @@ pub(crate) async fn create_dimension(
         Some(workspace),
         "consent_dimension.created",
         Some(("consent_dimension", id)),
-        json!({ "key": dimension.key, "values": dimension.values.len() }),
+        json!({ "key": crate::admin::audit_text(&dimension.key), "value_count": dimension.values.len() }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -263,7 +263,7 @@ pub(crate) async fn add_value(
         Some(workspace),
         "consent_dimension.value_added",
         Some(("consent_dimension", parent.id.unwrap_or_else(Uuid::nil))),
-        json!({ "dimension": dimension, "key": value.key }),
+        json!({ "dimension": dimension, "key": crate::admin::audit_text(&value.key) }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

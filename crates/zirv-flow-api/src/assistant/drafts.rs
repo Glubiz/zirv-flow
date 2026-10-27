@@ -1561,7 +1561,7 @@ async fn apply_flow(
         Some(workspace),
         "flow.updated",
         Some(("flow", flow.id)),
-        json!({ "name": flow.name, "fields": ["graph", "settings"], "via": "ai_draft" }),
+        json!({ "name": crate::admin::audit_text(&flow.name), "fields": ["graph", "settings"], "via": "ai_draft" }),
     )
     .await?;
     Ok(flow)

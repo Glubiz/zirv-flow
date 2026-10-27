@@ -250,7 +250,7 @@ pub(crate) async fn create_schema(
         Some(workspace),
         "event_schema.created",
         None,
-        json!({ "name": schema.name, "mode": schema.mode.as_str() }),
+        json!({ "name": crate::admin::audit_text(&schema.name), "mode": schema.mode.as_str() }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -276,7 +276,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "event_schema.draft_saved",
         None,
-        json!({ "name": schema.name, "fields": property_names(&properties) }),
+        json!({ "name": crate::admin::audit_text(&schema.name), "fields": property_names(&properties) }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -307,7 +307,7 @@ pub(crate) async fn publish_draft(
         Some(workspace),
         "event_schema.published",
         None,
-        json!({ "name": schema.name, "version": schema.current_version }),
+        json!({ "name": crate::admin::audit_text(&schema.name), "version": schema.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -363,7 +363,7 @@ pub(crate) async fn update_schema(
         Some(workspace),
         "event_schema.updated",
         None,
-        json!({ "name": schema.name, "fields": fields }),
+        json!({ "name": crate::admin::audit_text(&schema.name), "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

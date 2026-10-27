@@ -147,7 +147,7 @@ pub(crate) async fn create_topic(
         Some(workspace),
         "topic.created",
         Some(("topic", topic.id)),
-        json!({ "key": topic.key }),
+        json!({ "key": crate::admin::audit_text(&topic.key) }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -196,7 +196,7 @@ pub(crate) async fn update_topic(
         Some(workspace),
         "topic.updated",
         Some(("topic", topic.id)),
-        json!({ "key": topic.key, "fields": fields }),
+        json!({ "key": crate::admin::audit_text(&topic.key), "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

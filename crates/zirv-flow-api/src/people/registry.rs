@@ -192,7 +192,7 @@ pub(crate) async fn create_trait(
         Some(workspace),
         "trait.created",
         None,
-        json!({ "key": definition.key }),
+        json!({ "key": crate::admin::audit_text(&definition.key) }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -265,7 +265,7 @@ pub(crate) async fn update_trait(
         Some(workspace),
         "trait.updated",
         None,
-        json!({ "key": definition.key, "fields": fields }),
+        json!({ "key": crate::admin::audit_text(&definition.key), "fields": fields }),
     )
     .await?;
     // Materialized values follow the registry: a rule change reaches existing people through

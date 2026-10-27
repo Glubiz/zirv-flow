@@ -264,7 +264,7 @@ pub(crate) async fn create_segment(
         Some(workspace),
         "segment.created",
         Some(("segment", segment.id)),
-        json!({ "name": segment.name, "version": version.version }),
+        json!({ "name": crate::admin::audit_text(&segment.name), "version": version.version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -335,7 +335,7 @@ pub(crate) async fn update_segment(
                 .ok_or_else(ApiError::internal)?
         }
     };
-    let mut summary = json!({ "name": segment.name, "fields": fields });
+    let mut summary = json!({ "name": crate::admin::audit_text(&segment.name), "fields": fields });
     if patch.version.is_some() {
         summary["version"] = json!(segment.current_version);
     }
@@ -374,7 +374,7 @@ pub(crate) async fn archive_segment(
         Some(workspace),
         "segment.archived",
         Some(("segment", segment.id)),
-        json!({ "name": segment.name, "version": segment.current_version }),
+        json!({ "name": crate::admin::audit_text(&segment.name), "version": segment.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

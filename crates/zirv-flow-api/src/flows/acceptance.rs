@@ -569,6 +569,7 @@ mod tests {
                 .await;
             assert_eq!(n, count, "{action}");
         }
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -1909,6 +1910,7 @@ mod tests {
         let after = f.lead("POST", &exit_older(1), None).await;
         assert_eq!(after.status, StatusCode::CONFLICT);
         assert_eq!(after.body["code"], "flow_archived");
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]

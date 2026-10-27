@@ -152,7 +152,7 @@ pub(crate) async fn remove(
         Some(workspace.id),
         "asset.deleted",
         Some(("asset", asset.id)),
-        json!({ "id": asset.id, "name": asset.name }),
+        json!({ "id": asset.id, "name": crate::admin::audit_text(&asset.name) }),
     )
     .await?;
     commit(tx).await?;

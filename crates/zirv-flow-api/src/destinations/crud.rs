@@ -252,7 +252,7 @@ pub(crate) async fn create_destination(
         Some(workspace),
         "destination.created",
         Some(("destination", destination.id)),
-        json!({"kind": destination.kind, "name": destination.name,
+        json!({"kind": destination.kind, "name": crate::admin::audit_text(&destination.name),
                "rate": rate, "burst": burst, "credential_id": destination.credential_id,
                "credential_fields": destination.credential_fields}),
     )
@@ -367,7 +367,7 @@ pub(crate) async fn update_destination(
         Some(workspace),
         "destination.updated",
         Some(("destination", destination.id)),
-        json!({"name": destination.name, "fields": fields}),
+        json!({"name": crate::admin::audit_text(&destination.name), "fields": fields}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -400,7 +400,7 @@ pub(crate) async fn archive_destination(
         Some(workspace),
         "destination.archived",
         Some(("destination", destination.id)),
-        json!({"kind": destination.kind, "name": destination.name}),
+        json!({"kind": destination.kind, "name": crate::admin::audit_text(&destination.name)}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

@@ -164,7 +164,7 @@ pub(crate) async fn create_snippet(
         Some(workspace),
         "snippet.created",
         Some(("snippet", snippet.id)),
-        json!({ "name": snippet.name }),
+        json!({ "name": crate::admin::audit_text(&snippet.name) }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -175,6 +175,7 @@ pub(crate) async fn create_snippet(
 /// next publish carries, and the name is in every later audit row.
 async fn rename_snippet(
     pool: &PgPool,
+    context: &Context,
     workspace: WorkspaceId,
     id: Uuid,
     request: UpdateSnippetRequest,
@@ -189,6 +190,15 @@ async fn rename_snippet(
     let draft = zirv_flow_store::find_snippet_draft(&mut *tx, workspace, id)
         .await?
         .ok_or_else(ApiError::internal)?;
+    admin::audit(
+        &mut tx,
+        context,
+        Some(workspace),
+        "snippet.updated",
+        Some(("snippet", id)),
+        json!({ "name": crate::admin::audit_text(&snippet.name) }),
+    )
+    .await?;
     zirv_flow_store::commit(tx).await?;
     Ok((snippet, draft))
 }
@@ -224,7 +234,7 @@ pub(crate) async fn save_draft(
         Some(workspace),
         "snippet.draft_saved",
         Some(("snippet", id)),
-        json!({ "name": snippet.name, "revision": draft.revision }),
+        json!({ "name": crate::admin::audit_text(&snippet.name), "revision": draft.revision }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -251,7 +261,7 @@ pub(crate) async fn archive_snippet(
         Some(workspace),
         "snippet.archived",
         Some(("snippet", id)),
-        json!({ "name": snippet.name, "version": snippet.current_version }),
+        json!({ "name": crate::admin::audit_text(&snippet.name), "version": snippet.current_version }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -399,7 +409,14 @@ pub(crate) async fn update(
     ApiJson(body): ApiJson<UpdateSnippetRequest>,
 ) -> Result<Json<SnippetDetailBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Edit).await?;
-    let (snippet, draft) = rename_snippet(&state.pool, workspace.id, path_id(&id)?, body).await?;
+    let (snippet, draft) = rename_snippet(
+        &state.pool,
+        &principal.context(),
+        workspace.id,
+        path_id(&id)?,
+        body,
+    )
+    .await?;
     Ok(Json(SnippetDetailBody::new(&snippet, &draft)))
 }
 

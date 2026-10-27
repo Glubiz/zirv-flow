@@ -13,6 +13,11 @@
 //! `the_router_and_the_table_list_the_same_routes` also holds each row to a registered method.
 //! Where a handler's need depends on the request, the row holds the strictest need and says why.
 //!
+//! Every route that is not a `GET` also has an audit class: `audited("action")` (the handler appends
+//! that action to the audit log in the write's transaction) or `not_audited("reason")` (a short
+//! phrase naming where the record lives instead). `every_mutating_route_is_audited_or_has_a_recorded_reason`
+//! fails a row with neither, and `rbac/audit_acceptance.rs` calls each row to check it.
+//!
 //! The table is read by tests only: `authorize` takes its need from the call, and the 403 text
 //! from the need, so lib.rs compiles this module for tests only.
 
@@ -46,7 +51,7 @@ pub(crate) enum Method {
 }
 
 impl Method {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Method::Get => "get",
             Method::Post => "post",
@@ -57,14 +62,32 @@ impl Method {
     }
 }
 
-/// One endpoint: its method, its path template as the router registers it, its class and a note
-/// (empty when there is nothing to add).
+/// Whether a route leaves an audit row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Audit {
+    /// The handler appends one audit row with this action, in the write's transaction.
+    Audited(&'static str),
+    /// The route writes no audit row, for this short reason.
+    NotAudited(&'static str),
+}
+
+const fn audited(action: &'static str) -> Audit {
+    Audit::Audited(action)
+}
+
+const fn not_audited(reason: &'static str) -> Audit {
+    Audit::NotAudited(reason)
+}
+
+/// One endpoint: its method, its path template as the router registers it, its class, a note
+/// (empty when there is nothing to add) and, for every route that is not a `GET`, its audit class.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Route {
     pub(crate) method: Method,
     pub(crate) path: &'static str,
     pub(crate) class: Class,
     pub(crate) note: &'static str,
+    pub(crate) audit: Option<Audit>,
 }
 
 const PUBLIC: Class = Class::Public;
@@ -79,13 +102,23 @@ const ADMIN: Class = Class::Need(Need::Admin);
 #[cfg(test)]
 const UNCHECKED: Class = Class::Unchecked;
 
+macro_rules! audit_of {
+    () => {
+        None
+    };
+    ($audit:expr) => {
+        Some($audit)
+    };
+}
+
 macro_rules! table {
-    ($($method:ident $path:literal => $class:ident $(, $note:literal)?;)*) => {
+    ($($method:ident $path:literal => $class:ident $(, $note:literal)? $(@ $audit:expr)?;)*) => {
         &[$(Route {
             method: Method::$method,
             path: $path,
             class: $class,
             note: concat!("" $(, $note)?),
+            audit: audit_of!($($audit)?),
         }),*]
     };
 }
@@ -97,328 +130,328 @@ pub(crate) const ROUTES: &[Route] = table! {
     Get    "/healthz" => PUBLIC;
     Get    "/readyz" => PUBLIC;
     Get    "/metrics" => PUBLIC;
-    Post   "/hooks/{id}" => PUBLIC;
-    Post   "/api/v1/destinations/{id}/feedback" => PUBLIC;
+    Post   "/hooks/{id}" => PUBLIC @ not_audited("the event is the record");
+    Post   "/api/v1/destinations/{id}/feedback" => PUBLIC @ not_audited("the delivery record is the record");
     Get    "/a/{file}" => PUBLIC;
     Get    "/t/o/{token}" => PUBLIC;
     Get    "/t/c/{token}" => PUBLIC;
     Get    "/u/{token}" => PUBLIC;
-    Post   "/u/{token}" => PUBLIC;
+    Post   "/u/{token}" => PUBLIC @ not_audited("consent history is the record");
     Get    "/u/{token}/preferences" => PUBLIC;
-    Post   "/u/{token}/preferences" => PUBLIC;
+    Post   "/u/{token}/preferences" => PUBLIC @ not_audited("consent history is the record");
     // version
     Get    "/api/v1/version" => INSTANCE, "no principal";
     // ingest
-    Post   "/api/v1/ingest/identify" => INGEST;
-    Post   "/api/v1/ingest/track" => INGEST;
-    Post   "/api/v1/ingest/batch" => INGEST;
+    Post   "/api/v1/ingest/identify" => INGEST @ not_audited("the event is the record");
+    Post   "/api/v1/ingest/track" => INGEST @ not_audited("the event is the record");
+    Post   "/api/v1/ingest/batch" => INGEST @ not_audited("the event is the record");
     // webhooks
     Get    "/api/v1/workspaces/{ws}/webhooks" => READ;
-    Post   "/api/v1/workspaces/{ws}/webhooks" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/webhooks" => ADMIN @ audited("webhook.created");
     Get    "/api/v1/workspaces/{ws}/webhooks/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/webhooks/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/webhooks/{id}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/webhooks/{id}/rotate-secret" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/webhooks/{id}" => ADMIN @ audited("webhook.updated");
+    Delete "/api/v1/workspaces/{ws}/webhooks/{id}" => ADMIN @ audited("webhook.deleted");
+    Post   "/api/v1/workspaces/{ws}/webhooks/{id}/rotate-secret" => ADMIN @ audited("webhook.secret_rotated");
     // setup
     Get    "/api/v1/setup" => INSTANCE, "no principal";
-    Post   "/api/v1/setup" => INSTANCE, "no principal; the setup token authorises";
+    Post   "/api/v1/setup" => INSTANCE, "no principal; the setup token authorises" @ audited("user.created");
     // audit
     Get    "/api/v1/audit" => OWNER;
-    Get    "/api/v1/audit/export" => OWNER;
+    Get    "/api/v1/audit/export" => OWNER @ audited("audit.exported");
     Get    "/api/v1/workspaces/{ws}/audit" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/audit/actions" => ADMIN;
-    Get    "/api/v1/workspaces/{ws}/audit/export" => ADMIN;
+    Get    "/api/v1/workspaces/{ws}/audit/export" => ADMIN @ audited("audit.exported");
     // jobs_admin
     Get    "/api/v1/admin/jobs" => OWNER;
     Get    "/api/v1/admin/jobs/dead" => OWNER;
-    Post   "/api/v1/admin/jobs/{id}/retry" => OWNER;
+    Post   "/api/v1/admin/jobs/{id}/retry" => OWNER @ audited("job.retried");
     // session
     Get    "/api/v1/session" => INSTANCE;
-    Post   "/api/v1/session" => INSTANCE, "no principal; email and password";
-    Delete "/api/v1/session" => INSTANCE;
+    Post   "/api/v1/session" => INSTANCE, "no principal; email and password" @ audited("session.signed_in");
+    Delete "/api/v1/session" => INSTANCE @ audited("session.signed_out");
     Get    "/api/v1/session/methods" => INSTANCE, "no principal";
     // oidc
     Get    "/api/v1/session/oidc/start" => INSTANCE, "no principal";
     Get    "/api/v1/session/oidc/callback" => INSTANCE, "no principal; the login state authorises";
     // users
     Get    "/api/v1/users" => OWNER;
-    Post   "/api/v1/users" => OWNER;
+    Post   "/api/v1/users" => OWNER @ audited("user.created");
     // workspaces
     Get    "/api/v1/workspaces" => INSTANCE, "lists the caller's workspaces";
-    Post   "/api/v1/workspaces" => OWNER;
+    Post   "/api/v1/workspaces" => OWNER @ audited("workspace.created");
     Get    "/api/v1/workspaces/{ws}" => READ;
-    Patch  "/api/v1/workspaces/{ws}" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}" => ADMIN @ audited("workspace.updated");
     // members
     Get    "/api/v1/workspaces/{ws}/members" => READ_MEMBERS;
-    Put    "/api/v1/workspaces/{ws}/members/{user_id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/members/{user_id}" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/members/{user_id}" => ADMIN @ audited("membership.set");
+    Delete "/api/v1/workspaces/{ws}/members/{user_id}" => ADMIN @ audited("membership.removed");
     // keys
     Get    "/api/v1/workspaces/{ws}/api-keys" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/api-keys" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/api-keys/{id}" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/api-keys" => ADMIN @ audited("api_key.created");
+    Delete "/api/v1/workspaces/{ws}/api-keys/{id}" => ADMIN @ audited("api_key.revoked");
     // assistant
     Get    "/api/v1/workspaces/{ws}/ai/settings" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/ai/settings" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/ai/settings" => ADMIN @ audited("ai.settings.updated");
     Get    "/api/v1/workspaces/{ws}/ai/models" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/ai/usage" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/ai/drafts" => ADMIN, "Admin for a mapping or manifest draft (it reads a source), else Edit";
-    Post   "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/segments/{id}/ai/explain" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/ai/explain" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/ai/drafts" => ADMIN, "Admin for a mapping or manifest draft (it reads a source), else Edit" @ not_audited("the call log is the record (13.4)");
+    Post   "/api/v1/workspaces/{ws}/ai/drafts/{id}/accept" => EDIT @ audited("ai.draft.accepted");
+    Post   "/api/v1/workspaces/{ws}/segments/{id}/ai/explain" => ADMIN @ not_audited("the call log is the record (13.4)");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/ai/explain" => ADMIN @ not_audited("the call log is the record (13.4)");
+    Post   "/api/v1/workspaces/{ws}/traces/{trace_id}/ai/explain" => ADMIN @ not_audited("the call log is the record (13.4)");
     // people
     Get    "/api/v1/workspaces/{ws}/traits" => READ;
-    Post   "/api/v1/workspaces/{ws}/traits" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/traits/{key}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/traits/{key}/index" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/traits/{key}/index" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/traits" => ADMIN @ audited("trait.created");
+    Patch  "/api/v1/workspaces/{ws}/traits/{key}" => ADMIN @ audited("trait.updated");
+    Post   "/api/v1/workspaces/{ws}/traits/{key}/index" => ADMIN @ audited("trait.indexed");
+    Delete "/api/v1/workspaces/{ws}/traits/{key}/index" => ADMIN @ audited("trait.unindexed");
     Get    "/api/v1/workspaces/{ws}/identity-conflicts" => READ_MEMBERS;
     Get    "/api/v1/workspaces/{ws}/identity-conflicts/{id}" => READ_MEMBERS, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/people/search" => READ, "values masked unless view_pii";
+    Post   "/api/v1/workspaces/{ws}/identity-conflicts/{id}/resolve" => ADMIN @ audited("identity_conflict.kept_separate");
+    Post   "/api/v1/workspaces/{ws}/people/search" => READ, "values masked unless view_pii" @ not_audited("read-only search");
     Get    "/api/v1/workspaces/{ws}/people/{id}" => READ, "values masked unless view_pii";
     Get    "/api/v1/workspaces/{ws}/people/{id}/timeline" => READ, "values masked unless view_pii";
     Get    "/api/v1/workspaces/{ws}/people/{id}/messages" => READ;
     // flows
     Get    "/api/v1/workspaces/{ws}/flows" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/flows" => EDIT @ audited("flow.created");
     Get    "/api/v1/workspaces/{ws}/flows/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/flows/{id}" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/validate" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/publish" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/pause" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/resume" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/archive" => PUBLISH;
+    Patch  "/api/v1/workspaces/{ws}/flows/{id}" => EDIT @ audited("flow.updated");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/validate" => EDIT @ not_audited("read-only check");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/publish" => PUBLISH @ audited("flow.published");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/pause" => PUBLISH @ audited("flow.paused");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/resume" => PUBLISH @ audited("flow.resumed");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/archive" => PUBLISH @ audited("flow.archived");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments" => EDIT @ not_audited("the enrollment is the record");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip" => PUBLISH;
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/retry" => PUBLISH @ audited("flow.enrollment_retried");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/enrollments/{enrollment_id}/skip" => PUBLISH @ audited("flow.enrollment_skipped");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/counts" => READ;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/start" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii";
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}/exit-enrollments" => PUBLISH @ audited("flow.enrollments_exited");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/start" => PUBLISH @ audited("flow.started");
+    Post   "/api/v1/workspaces/{ws}/flows/{id}/test" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii" @ audited("flow.test_run");
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/flows/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/webhook-signing-secret" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/webhook-signing-secret" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/webhook-signing-secret" => ADMIN @ audited("webhook_signing.created");
+    Post   "/api/v1/workspaces/{ws}/webhook-signing-secret/rotate" => ADMIN @ audited("webhook_signing.rotated");
     // snippets
     Get    "/api/v1/workspaces/{ws}/snippets" => READ;
-    Post   "/api/v1/workspaces/{ws}/snippets" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/snippets" => EDIT @ audited("snippet.created");
     Get    "/api/v1/workspaces/{ws}/snippets/{id}" => READ;
-    Put    "/api/v1/workspaces/{ws}/snippets/{id}" => EDIT;
-    Delete "/api/v1/workspaces/{ws}/snippets/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/snippets/{id}/draft" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/snippets/{id}/preview" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/snippets/{id}/publish" => PUBLISH;
+    Put    "/api/v1/workspaces/{ws}/snippets/{id}" => EDIT @ audited("snippet.updated");
+    Delete "/api/v1/workspaces/{ws}/snippets/{id}" => ADMIN @ audited("snippet.archived");
+    Put    "/api/v1/workspaces/{ws}/snippets/{id}/draft" => EDIT @ audited("snippet.draft_saved");
+    Post   "/api/v1/workspaces/{ws}/snippets/{id}/preview" => EDIT @ not_audited("read-only render");
+    Post   "/api/v1/workspaces/{ws}/snippets/{id}/publish" => PUBLISH @ audited("snippet.published");
     Get    "/api/v1/workspaces/{ws}/snippets/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/snippets/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/snippets/{id}/where-used" => READ;
     // themes
     Get    "/api/v1/workspaces/{ws}/themes" => READ;
-    Post   "/api/v1/workspaces/{ws}/themes" => EDIT;
-    Put    "/api/v1/workspaces/{ws}/themes/default" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/themes" => EDIT @ audited("theme.created");
+    Put    "/api/v1/workspaces/{ws}/themes/default" => ADMIN @ audited("theme.default_set");
     Get    "/api/v1/workspaces/{ws}/themes/{id}" => READ;
-    Put    "/api/v1/workspaces/{ws}/themes/{id}" => EDIT;
-    Delete "/api/v1/workspaces/{ws}/themes/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/themes/{id}/draft" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/themes/{id}/preview" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/themes/{id}/publish" => PUBLISH;
+    Put    "/api/v1/workspaces/{ws}/themes/{id}" => EDIT @ audited("theme.updated");
+    Delete "/api/v1/workspaces/{ws}/themes/{id}" => ADMIN @ audited("theme.archived");
+    Put    "/api/v1/workspaces/{ws}/themes/{id}/draft" => EDIT @ audited("theme.draft_saved");
+    Post   "/api/v1/workspaces/{ws}/themes/{id}/preview" => EDIT @ not_audited("read-only render");
+    Post   "/api/v1/workspaces/{ws}/themes/{id}/publish" => PUBLISH @ audited("theme.published");
     Get    "/api/v1/workspaces/{ws}/themes/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/themes/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/themes/{id}/where-used" => READ;
     // templates
     Get    "/api/v1/workspaces/{ws}/templates" => READ;
-    Post   "/api/v1/workspaces/{ws}/templates" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/templates" => EDIT @ audited("template.created");
     Get    "/api/v1/workspaces/{ws}/templates/{id}" => READ;
-    Put    "/api/v1/workspaces/{ws}/templates/{id}" => EDIT;
-    Delete "/api/v1/workspaces/{ws}/templates/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/templates/{id}/draft" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/publish" => PUBLISH;
+    Put    "/api/v1/workspaces/{ws}/templates/{id}" => EDIT @ audited("template.updated");
+    Delete "/api/v1/workspaces/{ws}/templates/{id}" => ADMIN @ audited("template.archived");
+    Put    "/api/v1/workspaces/{ws}/templates/{id}/draft" => EDIT @ audited("template.draft_saved");
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/draft/convert-to-mjml" => EDIT @ audited("template.draft_converted");
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/publish" => PUBLISH @ audited("template.published");
     Get    "/api/v1/workspaces/{ws}/templates/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/versions/{n}/stats" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/where-used" => READ;
     Get    "/api/v1/workspaces/{ws}/templates/{id}/send-volume" => READ;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/preview" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii";
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/preview" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii" @ not_audited("read-only render; a real person is audited as template.previewed");
     Get    "/api/v1/workspaces/{ws}/templates/{id}/preview-people" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/preview-people" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/preview-people" => ADMIN @ audited("template.preview_person_added");
+    Delete "/api/v1/workspaces/{ws}/templates/{id}/preview-people/{person_id}" => ADMIN @ audited("template.preview_person_removed");
     // test_sends
-    Post   "/api/v1/workspaces/{ws}/templates/{id}/test-send" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii";
+    Post   "/api/v1/workspaces/{ws}/templates/{id}/test-send" => ADMIN, "Edit; a request naming a real person (person_id) also needs view_pii" @ audited("template.test_sent");
     Get    "/api/v1/workspaces/{ws}/test-sends" => READ;
     Get    "/api/v1/workspaces/{ws}/test-sends/quota" => READ;
     Get    "/api/v1/workspaces/{ws}/test-send-allowlist" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/test-send-allowlist" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/test-send-allowlist" => ADMIN @ audited("test_send.allowlist_added");
     Get    "/api/v1/workspaces/{ws}/test-send-allowlist/options" => EDIT;
-    Delete "/api/v1/workspaces/{ws}/test-send-allowlist/{id}" => ADMIN;
+    Delete "/api/v1/workspaces/{ws}/test-send-allowlist/{id}" => ADMIN @ audited("test_send.allowlist_removed");
     // segments
     Get    "/api/v1/workspaces/{ws}/segments" => READ;
-    Post   "/api/v1/workspaces/{ws}/segments" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/segments/preview" => READ, "values masked unless view_pii";
+    Post   "/api/v1/workspaces/{ws}/segments" => EDIT @ audited("segment.created");
+    Post   "/api/v1/workspaces/{ws}/segments/preview" => READ, "values masked unless view_pii" @ not_audited("read-only preview");
     Get    "/api/v1/workspaces/{ws}/segments/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/segments/{id}" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/segments/{id}/archive" => EDIT;
+    Patch  "/api/v1/workspaces/{ws}/segments/{id}" => EDIT @ audited("segment.updated");
+    Post   "/api/v1/workspaces/{ws}/segments/{id}/archive" => EDIT @ audited("segment.archived");
     Get    "/api/v1/workspaces/{ws}/segments/{id}/versions" => READ;
     Get    "/api/v1/workspaces/{ws}/segments/{id}/versions/{n}" => READ;
     Get    "/api/v1/workspaces/{ws}/segments/{id}/members" => READ, "values masked unless view_pii";
     Get    "/api/v1/workspaces/{ws}/segments/{id}/history" => READ, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/segments/{id}/refresh" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/segments/{id}/refresh" => EDIT @ audited("segment.refresh_requested");
     Get    "/api/v1/workspaces/{ws}/people/{id}/explain" => READ, "values masked unless view_pii";
     // events
     Get    "/api/v1/workspaces/{ws}/event-schemas" => READ;
-    Post   "/api/v1/workspaces/{ws}/event-schemas" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/event-schemas" => ADMIN @ audited("event_schema.created");
     Get    "/api/v1/workspaces/{ws}/event-schemas/{name}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/event-schemas/{name}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/event-schemas/{name}/draft" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/event-schemas/{name}/versions" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/event-schemas/{name}" => ADMIN @ audited("event_schema.updated");
+    Put    "/api/v1/workspaces/{ws}/event-schemas/{name}/draft" => ADMIN @ audited("event_schema.draft_saved");
+    Post   "/api/v1/workspaces/{ws}/event-schemas/{name}/versions" => ADMIN @ audited("event_schema.published");
     Get    "/api/v1/workspaces/{ws}/event-policy" => READ;
-    Put    "/api/v1/workspaces/{ws}/event-policy" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/event-policy" => ADMIN @ audited("event_policy.updated");
     Get    "/api/v1/workspaces/{ws}/ingest-rejects" => READ;
-    Post   "/api/v1/workspaces/{ws}/ingest-rejects/replay" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/ingest-rejects/replay" => ADMIN @ audited("ingest_rejects.replayed");
     Get    "/api/v1/workspaces/{ws}/debugger/stream" => READ, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/events/explore/count" => READ, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/events/explore/breakdown" => READ, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/events/explore/list" => READ, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/events/explore/export" => READ;
+    Post   "/api/v1/workspaces/{ws}/events/explore/count" => READ, "values masked unless view_pii" @ not_audited("read-only query");
+    Post   "/api/v1/workspaces/{ws}/events/explore/breakdown" => READ, "values masked unless view_pii" @ not_audited("read-only query");
+    Post   "/api/v1/workspaces/{ws}/events/explore/list" => READ, "values masked unless view_pii" @ not_audited("read-only query");
+    Post   "/api/v1/workspaces/{ws}/events/explore/export" => READ @ audited("events.exported");
     // consent
     Get    "/api/v1/workspaces/{ws}/topics" => READ;
-    Post   "/api/v1/workspaces/{ws}/topics" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/topics/{id}" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/topics" => ADMIN @ audited("topic.created");
+    Patch  "/api/v1/workspaces/{ws}/topics/{id}" => ADMIN @ audited("topic.updated");
     Get    "/api/v1/workspaces/{ws}/consent/dimensions" => READ;
-    Post   "/api/v1/workspaces/{ws}/consent/dimensions" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/consent/dimensions/{key}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values/{value}" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/consent/dimensions" => ADMIN @ audited("consent_dimension.created");
+    Patch  "/api/v1/workspaces/{ws}/consent/dimensions/{key}" => ADMIN @ audited("consent_dimension.updated");
+    Post   "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values" => ADMIN @ audited("consent_dimension.value_added");
+    Patch  "/api/v1/workspaces/{ws}/consent/dimensions/{key}/values/{value}" => ADMIN @ audited("consent_dimension.value_updated");
     Get    "/api/v1/workspaces/{ws}/consent/policy/draft" => READ;
-    Put    "/api/v1/workspaces/{ws}/consent/policy/draft" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/consent/policy/publish" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/consent/policy/draft" => EDIT @ audited("consent_policy.saved");
+    Post   "/api/v1/workspaces/{ws}/consent/policy/publish" => ADMIN @ audited("consent_policy.published");
     Get    "/api/v1/workspaces/{ws}/consent/policy/versions" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/consent/policy/evaluate" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/consent/import" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/consent/policy/evaluate" => ADMIN @ not_audited("read-only evaluation");
+    Post   "/api/v1/workspaces/{ws}/consent/import" => ADMIN @ audited("consent.imported");
     Get    "/api/v1/workspaces/{ws}/consent/export" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/people/{id}/consent" => READ;
-    Put    "/api/v1/workspaces/{ws}/people/{id}/consent" => EDIT;
+    Put    "/api/v1/workspaces/{ws}/people/{id}/consent" => EDIT @ audited("consent.person_set");
     Get    "/api/v1/workspaces/{ws}/people/{id}/consent/history" => READ, "values masked unless view_pii";
     Get    "/api/v1/workspaces/{ws}/suppressions" => READ;
-    Post   "/api/v1/workspaces/{ws}/suppressions" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/suppressions/check" => READ;
-    Post   "/api/v1/workspaces/{ws}/suppressions/remove" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/suppressions/import" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/suppressions" => ADMIN @ audited("suppression.added");
+    Post   "/api/v1/workspaces/{ws}/suppressions/check" => READ @ not_audited("read-only check");
+    Post   "/api/v1/workspaces/{ws}/suppressions/remove" => ADMIN @ audited("suppression.removed");
+    Post   "/api/v1/workspaces/{ws}/suppressions/import" => ADMIN @ audited("suppression.imported");
     Get    "/api/v1/workspaces/{ws}/suppressions/export" => ADMIN;
     // contacts
     Get    "/api/v1/workspaces/{ws}/contact-definition" => READ;
-    Put    "/api/v1/workspaces/{ws}/contact-definition" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/contact-definition" => ADMIN @ audited("contact_definition.updated");
     Get    "/api/v1/workspaces/{ws}/contacts" => READ;
-    Post   "/api/v1/workspaces/{ws}/contacts" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/contacts/bulk" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/contacts" => EDIT @ audited("contact.created");
+    Post   "/api/v1/workspaces/{ws}/contacts/bulk" => EDIT @ audited("contact.bulk_upserted");
     Get    "/api/v1/workspaces/{ws}/contacts/search" => READ;
-    Post   "/api/v1/workspaces/{ws}/contacts/search" => READ;
+    Post   "/api/v1/workspaces/{ws}/contacts/search" => READ @ not_audited("read-only search");
     Get    "/api/v1/workspaces/{ws}/contacts/{key}" => READ;
-    Put    "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT;
-    Patch  "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT;
-    Delete "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT;
+    Put    "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT @ audited("contact.updated");
+    Patch  "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT @ audited("contact.updated");
+    Delete "/api/v1/workspaces/{ws}/contacts/{key}" => EDIT @ audited("contact.deleted");
     // destinations
     Get    "/api/v1/workspaces/{ws}/destinations/options" => EDIT;
     Get    "/api/v1/workspaces/{ws}/destinations" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/destinations" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/destinations" => ADMIN @ audited("destination.created");
     Get    "/api/v1/workspaces/{ws}/destinations/{id}" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/destinations/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/destinations/{id}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/destinations/{id}/check" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/destinations/{id}" => ADMIN @ audited("destination.updated");
+    Delete "/api/v1/workspaces/{ws}/destinations/{id}" => ADMIN @ audited("destination.archived");
+    Post   "/api/v1/workspaces/{ws}/destinations/{id}/check" => ADMIN @ audited("destination.checked");
     Get    "/api/v1/workspaces/{ws}/destinations/{id}/domain-status" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/destinations/{id}/stats" => ADMIN;
     Get    "/api/v1/destination-kinds" => INSTANCE;
     // forwarding
     Get    "/api/v1/workspaces/{ws}/forwarding/rules" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/forwarding/rules" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/forwarding/rules" => ADMIN @ audited("forwarding.rule_created");
     Get    "/api/v1/workspaces/{ws}/forwarding/rules/{id}" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/forwarding/rules/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/forwarding/rules/{id}" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/forwarding/rules/{id}" => ADMIN @ audited("forwarding.rule_updated");
+    Delete "/api/v1/workspaces/{ws}/forwarding/rules/{id}" => ADMIN @ audited("forwarding.rule_deleted");
     Get    "/api/v1/workspaces/{ws}/forwarding/dead-letters" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/forwarding/status" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/forwarding/re-drive" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/forwarding/re-drive" => ADMIN @ audited("forwarding.redriven");
     // workspace_credentials
     Get    "/api/v1/workspaces/{ws}/credential-kinds" => ADMIN;
     Get    "/api/v1/workspaces/{ws}/credentials" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/credentials" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/credentials" => ADMIN @ audited("credential.created");
     Get    "/api/v1/workspaces/{ws}/credentials/{id}" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/credentials/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/credentials/{id}" => ADMIN;
-    Put    "/api/v1/workspaces/{ws}/credentials/{id}/secret" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/credentials/{id}/test" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/credentials/{id}" => ADMIN @ audited("credential.updated");
+    Delete "/api/v1/workspaces/{ws}/credentials/{id}" => ADMIN @ audited("credential.archived");
+    Put    "/api/v1/workspaces/{ws}/credentials/{id}/secret" => ADMIN @ audited("credential.rotated");
+    Post   "/api/v1/workspaces/{ws}/credentials/{id}/test" => ADMIN @ audited("credential.tested");
     // sending
     Get    "/api/v1/workspaces/{ws}/sending-domains" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sending-domains" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/sending-domains" => ADMIN @ audited("sending_domain.created");
     Get    "/api/v1/workspaces/{ws}/sending-domains/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/sending-domains/{id}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sending-domains/{id}/verify" => ADMIN;
+    Delete "/api/v1/workspaces/{ws}/sending-domains/{id}" => ADMIN @ audited("sending_domain.deleted");
+    Post   "/api/v1/workspaces/{ws}/sending-domains/{id}/verify" => ADMIN @ audited("sending_domain.verification_requested");
     Get    "/api/v1/workspaces/{ws}/sender-identities/options" => EDIT;
     Get    "/api/v1/workspaces/{ws}/sender-identities" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sender-identities" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/sender-identities" => ADMIN @ audited("sender_identity.created");
     Get    "/api/v1/workspaces/{ws}/sender-identities/{id}" => ADMIN;
-    Patch  "/api/v1/workspaces/{ws}/sender-identities/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/sender-identities/{id}" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/sender-identities/{id}" => ADMIN @ audited("sender_identity.updated");
+    Delete "/api/v1/workspaces/{ws}/sender-identities/{id}" => ADMIN @ audited("sender_identity.archived");
     Get    "/api/v1/workspaces/{ws}/sending/settings" => READ;
-    Put    "/api/v1/workspaces/{ws}/sending/settings" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/sending/settings" => ADMIN @ audited("send_settings.updated");
     // sources
     Get    "/api/v1/source-kinds" => INSTANCE;
     Get    "/api/v1/workspaces/{ws}/sources" => READ;
-    Post   "/api/v1/workspaces/{ws}/sources" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/sources" => ADMIN @ audited("source.created");
     Get    "/api/v1/workspaces/{ws}/sources/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/sources/{id}" => ADMIN;
-    Delete "/api/v1/workspaces/{ws}/sources/{id}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/test" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/discover" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/oauth/start" => ADMIN;
+    Patch  "/api/v1/workspaces/{ws}/sources/{id}" => ADMIN @ audited("source.updated");
+    Delete "/api/v1/workspaces/{ws}/sources/{id}" => ADMIN @ audited("source.deleted");
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/test" => ADMIN @ audited("source.tested");
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/discover" => ADMIN @ audited("source.discovered");
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/oauth/start" => ADMIN @ audited("source.oauth_started");
     Get    "/api/v1/oauth/callback" => ADMIN, "outside /workspaces/{ws}: needs the signed-in session of the user who started the consent, Admin on the consent's workspace, and the state token";
-    Post   "/api/v1/workspaces/{ws}/source-manifests/validate" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/source-manifests/validate" => ADMIN @ not_audited("read-only check");
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/manifest/sample" => ADMIN @ not_audited("read-only sample");
     Get    "/api/v1/workspaces/{ws}/sources/{id}/streams" => READ, "values masked unless view_pii";
-    Put    "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}" => ADMIN @ audited("stream.configured");
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/streams/{name}/preview" => ADMIN @ not_audited("read-only preview");
     Get    "/api/v1/workspaces/{ws}/sources/{id}/runs" => READ;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/runs" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/runs" => ADMIN @ audited("sync_run.started");
     Get    "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}" => READ;
-    Post   "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/sources/{id}/runs/{run_id}/cancel" => ADMIN @ audited("sync_run.cancelled");
     // lists
     Get    "/api/v1/workspaces/{ws}/lists" => READ;
-    Post   "/api/v1/workspaces/{ws}/lists" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/lists" => EDIT @ audited("list.created");
     Get    "/api/v1/workspaces/{ws}/lists/{id}" => READ;
-    Patch  "/api/v1/workspaces/{ws}/lists/{id}" => EDIT;
-    Delete "/api/v1/workspaces/{ws}/lists/{id}" => EDIT;
+    Patch  "/api/v1/workspaces/{ws}/lists/{id}" => EDIT @ audited("list.updated");
+    Delete "/api/v1/workspaces/{ws}/lists/{id}" => EDIT @ audited("list.deleted");
     Get    "/api/v1/workspaces/{ws}/lists/{id}/members" => READ, "values masked unless view_pii";
-    Post   "/api/v1/workspaces/{ws}/lists/{id}/members" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/remove" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/import" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/lists/{id}/members" => EDIT @ audited("list.members_changed");
+    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/remove" => EDIT @ audited("list.members_changed");
+    Post   "/api/v1/workspaces/{ws}/lists/{id}/members/import" => EDIT @ audited("list.members_changed");
     Get    "/api/v1/workspaces/{ws}/people/{id}/lists" => READ;
     Get    "/api/v1/workspaces/{ws}/people/{id}/lists/history" => READ;
     // privacy
-    Delete "/api/v1/workspaces/{ws}/people/{id}" => ADMIN;
+    Delete "/api/v1/workspaces/{ws}/people/{id}" => ADMIN @ audited("person.deleted");
     Get    "/api/v1/workspaces/{ws}/privacy/erasures" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/privacy/erasures" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/privacy/erasures" => ADMIN @ audited("privacy.erasure_requested");
     Get    "/api/v1/workspaces/{ws}/privacy/exports" => ADMIN;
-    Post   "/api/v1/workspaces/{ws}/privacy/exports" => ADMIN;
-    Get    "/api/v1/workspaces/{ws}/privacy/exports/{id}/download" => ADMIN;
+    Post   "/api/v1/workspaces/{ws}/privacy/exports" => ADMIN @ audited("privacy.export_requested");
+    Get    "/api/v1/workspaces/{ws}/privacy/exports/{id}/download" => ADMIN @ audited("privacy.export_downloaded");
     Get    "/api/v1/workspaces/{ws}/privacy/settings" => READ;
-    Put    "/api/v1/workspaces/{ws}/privacy/settings" => ADMIN;
+    Put    "/api/v1/workspaces/{ws}/privacy/settings" => ADMIN @ audited("workspace.privacy_settings_updated");
     // assets
     Get    "/api/v1/workspaces/{ws}/assets" => READ;
-    Post   "/api/v1/workspaces/{ws}/assets" => EDIT;
+    Post   "/api/v1/workspaces/{ws}/assets" => EDIT @ audited("asset.uploaded");
     Get    "/api/v1/workspaces/{ws}/assets/{id}" => READ;
-    Delete "/api/v1/workspaces/{ws}/assets/{id}" => ADMIN;
+    Delete "/api/v1/workspaces/{ws}/assets/{id}" => ADMIN @ audited("asset.deleted");
     // imports
     Get    "/api/v1/workspaces/{ws}/imports" => READ;
-    Post   "/api/v1/workspaces/{ws}/imports" => EDIT, "values masked unless view_pii";
+    Post   "/api/v1/workspaces/{ws}/imports" => EDIT, "values masked unless view_pii" @ audited("import.created");
     Get    "/api/v1/workspaces/{ws}/imports/{id}" => READ, "values masked unless view_pii";
-    Put    "/api/v1/workspaces/{ws}/imports/{id}/mapping" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/imports/{id}/dry-run" => EDIT;
-    Post   "/api/v1/workspaces/{ws}/imports/{id}/run" => PUBLISH;
-    Post   "/api/v1/workspaces/{ws}/imports/{id}/cancel" => EDIT;
+    Put    "/api/v1/workspaces/{ws}/imports/{id}/mapping" => EDIT @ not_audited("the import is audited when it is created and when it runs");
+    Post   "/api/v1/workspaces/{ws}/imports/{id}/dry-run" => EDIT @ not_audited("a dry run writes nothing but its result");
+    Post   "/api/v1/workspaces/{ws}/imports/{id}/run" => PUBLISH @ audited("import.run_started");
+    Post   "/api/v1/workspaces/{ws}/imports/{id}/cancel" => EDIT @ audited("import.cancelled");
     Get    "/api/v1/workspaces/{ws}/imports/{id}/rejects" => READ;
-    Get    "/api/v1/workspaces/{ws}/imports/{id}/rejects.csv" => READ, "values masked unless view_pii";
+    Get    "/api/v1/workspaces/{ws}/imports/{id}/rejects.csv" => READ, "values masked unless view_pii" @ audited("import.rejects_downloaded");
     // traces
     Get    "/api/v1/workspaces/{ws}/traces/{trace_id}" => READ;
 };
@@ -558,6 +591,7 @@ mod tests {
             path: "/api/v1/workspaces/{ws}/nothing",
             class: READ,
             note: "",
+            audit: None,
         });
         assert_eq!(
             coverage_gaps(&documented(), &extended),
@@ -616,6 +650,78 @@ mod tests {
         }
     }
 
+    /// The rows that break the audit rule: a route that is not a `GET` with no audit class, an
+    /// action outside the catalogue, or a reason that is empty or longer than a short sentence.
+    fn audit_gaps(rows: &[Route]) -> Vec<String> {
+        let mut gaps = Vec::new();
+        for row in rows {
+            match row.audit {
+                None if row.method != Method::Get => {
+                    gaps.push(format!("no audit class: {}", row_key(row)));
+                }
+                Some(Audit::Audited(action)) if !zirv_flow_core::audit::is_known(action) => {
+                    gaps.push(format!("unlisted action {action}: {}", row_key(row)));
+                }
+                Some(Audit::NotAudited(reason))
+                    if reason.is_empty() || reason.len() > 80 || reason.ends_with('.') =>
+                {
+                    gaps.push(format!("bad reason: {}", row_key(row)));
+                }
+                _ => {}
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn every_mutating_route_is_audited_or_has_a_recorded_reason() {
+        assert_eq!(audit_gaps(ROUTES), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_mutating_row_with_no_audit_class_is_reported() {
+        let rows = [Route {
+            method: Method::Post,
+            path: "/api/v1/workspaces/{ws}/new",
+            class: EDIT,
+            note: "",
+            audit: None,
+        }];
+        assert_eq!(
+            audit_gaps(&rows),
+            vec!["no audit class: post /api/v1/workspaces/{ws}/new".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_action_outside_the_catalogue_is_reported() {
+        let rows = [Route {
+            method: Method::Post,
+            path: "/x",
+            class: EDIT,
+            note: "",
+            audit: Some(audited("made.up")),
+        }];
+        assert_eq!(
+            audit_gaps(&rows),
+            vec!["unlisted action made.up: post /x".to_owned()]
+        );
+    }
+
+    #[test]
+    fn the_audit_classes_are_counted() {
+        let audited_rows = ROUTES
+            .iter()
+            .filter(|row| matches!(row.audit, Some(Audit::Audited(_))))
+            .count();
+        let not_audited_rows = ROUTES
+            .iter()
+            .filter(|row| matches!(row.audit, Some(Audit::NotAudited(_))))
+            .count();
+        assert!(audited_rows > 100, "{audited_rows}");
+        assert!(not_audited_rows > 20, "{not_audited_rows}");
+    }
+
     #[test]
     fn no_route_is_left_unchecked() {
         assert_eq!(unchecked(ROUTES), Vec::<String>::new());
@@ -628,6 +734,7 @@ mod tests {
             path: "/api/v1/workspaces/{ws}/forgotten",
             class: UNCHECKED,
             note: "",
+            audit: None,
         }];
         assert_eq!(
             unchecked(&rows),
@@ -753,3 +860,6 @@ mod tests {
 
 #[cfg(test)]
 mod acceptance;
+
+#[cfg(test)]
+mod audit_acceptance;

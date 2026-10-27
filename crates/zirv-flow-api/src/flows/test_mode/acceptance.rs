@@ -254,6 +254,14 @@ mod tests {
         }
     }
 
+    /// The table counts without the audit log: a walk writes its one audit row and nothing else.
+    fn without_audit(counts: Vec<(String, i64)>) -> Vec<(String, i64)> {
+        counts
+            .into_iter()
+            .filter(|(name, _)| name != "audit_log")
+            .collect()
+    }
+
     /// Wait, set a trait, branch on it, wait for an order or its timeout, then a goal and the
     /// end; a timeout calls a webhook.
     fn journey(webhook: bool) -> Value {
@@ -549,8 +557,8 @@ mod tests {
         assert_eq!(send["detail"]["topic"], json!(topic));
         assert_eq!(send["detail"]["dimensions"], json!({"vertical": "sports"}));
         assert_eq!(
-            f.counts().await,
-            before,
+            without_audit(f.counts().await),
+            without_audit(before),
             "no message, event, job or decision was written"
         );
     }
@@ -720,7 +728,11 @@ mod tests {
         let envelope = &first.body["external_effects"][0]["detail"]["envelope"];
         assert_eq!(envelope["person_id"], person.to_string());
         assert_eq!(first.body["snapshot"]["person_id"], person.to_string());
-        assert_eq!(f.counts().await, before, "the reads wrote nothing");
+        assert_eq!(
+            without_audit(f.counts().await),
+            without_audit(before),
+            "the reads wrote nothing but their audit rows"
+        );
     }
 
     #[sqlx::test]
@@ -815,7 +827,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn no_row_is_written_by_any_walk_or_refusal(pool: PgPool) {
+    async fn only_an_audit_row_is_written_by_a_walk_and_none_by_a_refusal(pool: PgPool) {
         let f = fixture(&pool).await;
         let flow = f.create_flow("Journey", journey(true)).await;
         let published = f.create_flow("Published", journey(false)).await;
@@ -885,7 +897,17 @@ mod tests {
         )
         .await;
 
-        assert_eq!(f.counts().await, before);
+        assert_eq!(without_audit(f.counts().await), without_audit(before));
+        let actions: Vec<String> =
+            sqlx::query_scalar("SELECT action FROM audit_log WHERE action = 'flow.test_run'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            actions.len(),
+            3,
+            "one row per successful walk, none per refusal"
+        );
     }
 
     #[sqlx::test]

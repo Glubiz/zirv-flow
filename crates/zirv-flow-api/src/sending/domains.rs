@@ -201,7 +201,7 @@ pub(crate) async fn create_sending_domain(
         Some(workspace),
         "sending_domain.created",
         Some(("sending_domain", created.id)),
-        json!({"domain": created.domain, "selector": created.selector}),
+        json!({"domain": crate::admin::audit_text(&created.domain), "selector": created.selector}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -228,7 +228,7 @@ pub(crate) async fn request_verification(
         Some(workspace),
         "sending_domain.verification_requested",
         Some(("sending_domain", id)),
-        json!({"domain": domain.domain, "queued": queued}),
+        json!({"domain": crate::admin::audit_text(&domain.domain), "queued": queued}),
     )
     .await?;
     let records = zirv_flow_store::list_domain_records(&mut *tx, workspace, id).await?;
@@ -262,7 +262,7 @@ pub(crate) async fn delete_sending_domain(
         Some(workspace),
         "sending_domain.deleted",
         Some(("sending_domain", id)),
-        json!({"domain": domain.domain}),
+        json!({"domain": crate::admin::audit_text(&domain.domain)}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

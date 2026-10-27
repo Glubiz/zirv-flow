@@ -2105,6 +2105,7 @@ mod tests {
             .unwrap();
         assert_eq!(indexed.summary, json!({"key": "plan", "slot": "trait_s1"}));
         assert!(audit.iter().any(|row| row.action == "trait.unindexed"));
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -4148,6 +4149,7 @@ mod tests {
         )
         .await;
         assert_eq!(one.body["member_count"], 3);
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -4318,12 +4320,13 @@ mod tests {
         assert_eq!(rest.body["changes"].as_array().unwrap().len(), 1);
         assert!(rest.body["next_before"].is_null());
         assert_eq!(unknown.status, StatusCode::NOT_FOUND);
-        let membership_audit: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action LIKE 'list.m%'")
-                .fetch_one(&pool)
+        let membership_audit: Vec<String> =
+            sqlx::query_scalar("SELECT action FROM audit_log WHERE action LIKE 'list.m%'")
+                .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(membership_audit, 0);
+        assert_eq!(membership_audit, vec!["list.members_changed"; 4]);
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -4901,6 +4904,7 @@ mod tests {
             updated.summary,
             json!({"key": "vertical", "fields": ["name"]})
         );
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -5156,6 +5160,7 @@ mod tests {
             .collect();
         assert_eq!(imports.len(), 3, "the dry run left no audit row");
         assert!(imports.contains(&&json!({"changed": 3, "unchanged": 0, "invalid": 3})));
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -5401,6 +5406,7 @@ mod tests {
         )
         .await;
         assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -5939,6 +5945,7 @@ mod tests {
         assert_eq!(bad_header.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(bad_flag.status, StatusCode::BAD_REQUEST);
         assert_eq!(count().await, 3);
+        crate::test_support::assert_audit_log_holds_ids_only(&pool).await;
     }
 
     #[sqlx::test]
@@ -10965,14 +10972,14 @@ email,b@example.com,
             updates[0].summary["changed"],
             json!(["enabled", "transcript_days"])
         );
-        assert_eq!(updates[0].summary["values"]["enabled"], false);
-        assert!(updates[0].summary["values"]["transcript_days"].is_null());
+        assert_eq!(updates[0].summary["after"]["enabled"], false);
+        assert!(updates[0].summary["after"]["transcript_days"].is_null());
         let changed_fields = updates[1].summary["changed"].as_array().unwrap();
         for field in ["monthly_budget_micros", "transcript_days", "provider_key"] {
             assert!(changed_fields.contains(&json!(field)), "{field}");
         }
-        assert_eq!(updates[1].summary["values"]["transcript_days"], 14);
-        assert!(updates[1].summary["values"].get("provider_key").is_none());
+        assert_eq!(updates[1].summary["after"]["transcript_days"], 14);
+        assert!(updates[1].summary["after"].get("provider_key").is_none());
         assert!(
             updates
                 .iter()

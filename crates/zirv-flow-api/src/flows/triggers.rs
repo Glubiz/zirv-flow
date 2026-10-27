@@ -287,7 +287,7 @@ pub(crate) async fn start(
         Some(workspace.id),
         "flow.started",
         Some(("flow", flow.id)),
-        json!({ "name": flow.name, "audience": source.to_value() }),
+        json!({ "name": crate::admin::audit_text(&flow.name), "audience": source.to_value() }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

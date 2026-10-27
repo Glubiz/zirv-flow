@@ -204,7 +204,7 @@ pub(crate) async fn upload(
             Some(("asset", stored.asset.id)),
             json!({
                 "id": stored.asset.id,
-                "name": stored.asset.name,
+                "name": crate::admin::audit_text(&stored.asset.name),
                 "size_bytes": stored.asset.size_bytes
             }),
         )

@@ -4,6 +4,7 @@
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use time::OffsetDateTime;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -12,6 +13,7 @@ use zirv_flow_store::{ListMember, MAX_PEOPLE_PER_CALL};
 
 use super::{capped, invalid, membership_error, source_of};
 use crate::AppState;
+use crate::admin;
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
@@ -253,6 +255,15 @@ pub(crate) async fn add(
     )
     .await
     .map_err(|error| ApiError::from(membership_error(error)))?;
+    admin::audit(
+        &mut tx,
+        &principal.context(),
+        Some(workspace.id),
+        "list.members_changed",
+        Some(("list", list)),
+        json!({"change": "added", "count": outcome.changed}),
+    )
+    .await?;
     zirv_flow_store::commit(tx).await?;
 
     let mut not_found_list: Vec<NotFoundBody> = outcome
@@ -311,6 +322,15 @@ pub(crate) async fn remove(
     )
     .await
     .map_err(|error| ApiError::from(membership_error(error)))?;
+    admin::audit(
+        &mut tx,
+        &principal.context(),
+        Some(workspace.id),
+        "list.members_changed",
+        Some(("list", list)),
+        json!({"change": "removed", "count": outcome.changed}),
+    )
+    .await?;
     zirv_flow_store::commit(tx).await?;
     let missing = outcome
         .missing

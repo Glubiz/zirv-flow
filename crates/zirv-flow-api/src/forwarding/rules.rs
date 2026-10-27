@@ -222,7 +222,7 @@ pub(crate) async fn create_rule(
         Some(workspace),
         "forwarding.rule_created",
         Some(("forwarding_rule", rule.id)),
-        json!({"name": rule.name, "event_name": rule.event_name,
+        json!({"name": crate::admin::audit_text(&rule.name), "event_name": rule.event_name,
                "destination_id": rule.destination_id, "active": rule.active}),
     )
     .await?;
@@ -313,7 +313,7 @@ pub(crate) async fn update_rule(
         Some(workspace),
         "forwarding.rule_updated",
         Some(("forwarding_rule", rule.id)),
-        json!({"name": rule.name, "fields": fields}),
+        json!({"name": crate::admin::audit_text(&rule.name), "fields": fields}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -495,7 +495,7 @@ pub(crate) async fn remove(
         Some(workspace.id),
         "forwarding.rule_deleted",
         Some(("forwarding_rule", rule.id)),
-        json!({"name": rule.name, "event_name": rule.event_name}),
+        json!({"name": crate::admin::audit_text(&rule.name), "event_name": rule.event_name}),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

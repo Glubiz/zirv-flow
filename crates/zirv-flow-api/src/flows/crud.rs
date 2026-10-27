@@ -448,7 +448,7 @@ pub(crate) async fn create(
         Some(workspace.id),
         "flow.created",
         Some(("flow", flow.id)),
-        json!({ "name": flow.name }),
+        json!({ "name": crate::admin::audit_text(&flow.name) }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
@@ -559,7 +559,7 @@ pub(crate) async fn update(
         Some(workspace.id),
         "flow.updated",
         Some(("flow", flow.id)),
-        json!({ "name": flow.name, "fields": fields }),
+        json!({ "name": crate::admin::audit_text(&flow.name), "fields": fields }),
     )
     .await?;
     zirv_flow_store::commit(tx).await?;

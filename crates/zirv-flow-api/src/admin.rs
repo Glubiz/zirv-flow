@@ -190,6 +190,18 @@ impl fmt::Debug for CreatedApiKey {
     }
 }
 
+/// A name, key or domain a person typed, for an audit summary: itself, or `"withheld"` when it is
+/// shaped like an email address, a phone number or a token. The summary guard refuses those, and a
+/// rename must not fail because of what it was renamed to.
+pub(crate) fn audit_text(text: &str) -> Value {
+    let value = Value::String(text.to_owned());
+    if zirv_flow_core::audit::validate_summary(&value).is_ok() {
+        value
+    } else {
+        Value::String("withheld".to_owned())
+    }
+}
+
 /// Appends an audit row on `connection`.
 pub(crate) async fn audit(
     connection: &mut PgConnection,
@@ -990,7 +1002,7 @@ pub async fn save_ai_settings(
             Some(workspace),
             "ai.settings.updated",
             Some(("ai_settings", workspace.as_uuid())),
-            json!({"changed": changed, "values": values}),
+            json!({"changed": changed, "after": values}),
         )
         .await?;
     }
@@ -1106,6 +1118,19 @@ mod tests {
     use super::*;
 
     const PASSWORD: &str = "correct horse battery";
+
+    #[test]
+    fn typed_text_is_kept_unless_it_is_shaped_like_personal_data() {
+        assert_eq!(audit_text("Welcome series"), json!("Welcome series"));
+        assert_eq!(audit_text("mail.example.com"), json!("mail.example.com"));
+        for withheld in [
+            "ada@example.com",
+            "+45 70 12 34 99",
+            "c-0198c6f0-1c3a-7e5e-9c1b-2f2a4f5d6e7a",
+        ] {
+            assert_eq!(audit_text(withheld), json!("withheld"), "{withheld}");
+        }
+    }
 
     #[test]
     fn contexts_record_the_kind_of_actor() {
@@ -1544,14 +1569,14 @@ mod tests {
         // Newest first: the key replacement, the budget change, then the first save.
         assert_eq!(updates[0]["changed"], json!(["provider_key"]));
         assert_eq!(updates[1]["changed"], json!(["monthly_budget_micros"]));
-        assert_eq!(updates[1]["values"]["monthly_budget_micros"], 9_000_000);
+        assert_eq!(updates[1]["after"]["monthly_budget_micros"], 9_000_000);
         assert!(
             updates[2]["changed"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("transcript_days"))
         );
-        assert_eq!(updates[2]["values"]["transcript_days"], 7);
+        assert_eq!(updates[2]["after"]["transcript_days"], 7);
         let text = format!("{entries:?}");
         assert!(!text.contains("hunter"), "{text}");
     }
