@@ -8,7 +8,7 @@ import { renderRoute } from "../../test/renderFeature";
 import { WorkspacesProvider } from "../workspaces";
 import { MembersPage } from "./MembersPage";
 
-function members(role: "admin" | "member") {
+function members(role: "admin" | "editor") {
   return [
     { user_id: "u-boss", email: "boss@example.test", role: "admin", added_at: "2026-10-01T09:00:00Z" },
     { user_id: MEMBER.id, email: MEMBER.email, role, added_at: "2026-10-02T09:00:00Z" },
@@ -28,7 +28,7 @@ describe("members", () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
       "GET /api/v1/workspaces": () => json([WORKSPACE]),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member")),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor")),
     });
     renderRoute("/w/ws1/members", "/w/:ws/members", page());
 

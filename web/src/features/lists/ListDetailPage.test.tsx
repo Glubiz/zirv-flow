@@ -37,7 +37,7 @@ const ADD_ROUTE = `POST /api/v1/workspaces/ws1/lists/${LIST_ID}/members`;
 const REMOVE_ROUTE = `POST /api/v1/workspaces/ws1/lists/${LIST_ID}/members/remove`;
 const IMPORT_ROUTE = `POST /api/v1/workspaces/ws1/lists/${LIST_ID}/members/import`;
 
-function roles(role: "admin" | "member", userId: string) {
+function roles(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -74,7 +74,7 @@ describe("a list", () => {
   it("hides identifier values from a member and says so", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(roles("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(roles("editor", MEMBER.id)),
       [LIST_ROUTE]: () => json(LIST),
       [MEMBERS_ROUTE]: () => json({ members: [member(ADA, "email", null)], next_before: null }),
     });

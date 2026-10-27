@@ -101,10 +101,10 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                             aria-label={`Role for ${member.email}`}
                             value={member.role}
                             disabled={busyUser === member.user_id}
-                            onChange={(event) => void changeRole(member, event.target.value === "admin" ? "admin" : "member")}
+                            onChange={(event) => void changeRole(member, event.target.value === "admin" ? "admin" : "editor")}
                           >
                             <option value="admin">Admin</option>
-                            <option value="member">Member</option>
+                            <option value="editor">Member</option>
                           </select>
                         ) : (
                           <Pill>{member.role === "admin" ? "Admin" : "Member"}</Pill>
@@ -167,7 +167,7 @@ function AddMemberDialog({ workspaceId, existing, isOwner, onClose, onAdded }: A
     [isOwner],
   );
   const [userId, setUserId] = useState("");
-  const [role, setRole] = useState<MemberRole>("member");
+  const [role, setRole] = useState<MemberRole>("editor");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
 
@@ -242,9 +242,9 @@ function AddMemberDialog({ workspaceId, existing, isOwner, onClose, onAdded }: A
             id="add-member-role"
             className="select"
             value={role}
-            onChange={(event) => setRole(event.target.value === "admin" ? "admin" : "member")}
+            onChange={(event) => setRole(event.target.value === "admin" ? "admin" : "editor")}
           >
-            <option value="member">Member</option>
+            <option value="editor">Member</option>
             <option value="admin">Admin</option>
           </select>
         </div>

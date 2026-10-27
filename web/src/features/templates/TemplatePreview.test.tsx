@@ -110,7 +110,7 @@ describe("the preview", () => {
 
 describe("previewing as a person", () => {
   it("hides the real person choice from someone who is not an admin", async () => {
-    mockApi(templateRoutes({ role: "member" }));
+    mockApi(templateRoutes({ role: "editor" }));
     mount();
 
     await screen.findByTitle("Preview of the message");
@@ -153,7 +153,7 @@ describe("the saved preview people", () => {
   });
 
   it("shows only the sample person to a writer, and never asks for the saved people", async () => {
-    const calls = mockApi(templateRoutes({ role: "member", saved: SAVED }));
+    const calls = mockApi(templateRoutes({ role: "editor", saved: SAVED }));
     mount();
 
     await screen.findByTitle("Preview of the message");

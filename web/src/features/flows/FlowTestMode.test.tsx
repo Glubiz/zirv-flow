@@ -333,7 +333,7 @@ describe("test mode", () => {
   });
 
   it("does not offer a real person to someone who may not see people's values", async () => {
-    mockApi(flowRoutes({ role: "member" }));
+    mockApi(flowRoutes({ role: "editor" }));
     const user = userEvent.setup();
     mount();
     const sheet = await openTest(user);

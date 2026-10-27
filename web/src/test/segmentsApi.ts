@@ -139,7 +139,7 @@ export function previewBody(count = 4, overrides: Record<string, unknown> = {}) 
   };
 }
 
-export function members(role: "admin" | "member" | null) {
+export function members(role: "admin" | "editor" | null) {
   return role === null ? [] : [{ user_id: MEMBER.id, email: MEMBER.email, role, added_at: "2026-10-01T09:00:00Z" }];
 }
 

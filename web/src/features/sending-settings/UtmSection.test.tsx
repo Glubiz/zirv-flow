@@ -15,7 +15,7 @@ function workspace(utm: typeof UTM_OFF) {
   return { id: "ws1", name: "Spring campaigns", slug: "spring", timezone: "UTC", utm, created_at: "2026-10-01T09:00:00Z" };
 }
 
-function routes(role: "admin" | "member", utm: typeof UTM_OFF, extra: Record<string, Handler> = {}): Record<string, Handler> {
+function routes(role: "admin" | "editor", utm: typeof UTM_OFF, extra: Record<string, Handler> = {}): Record<string, Handler> {
   const who = role === "admin" ? OWNER : MEMBER;
   return {
     "GET /api/v1/session": () => json(session(who)),
@@ -138,7 +138,7 @@ describe("UTM parameters section", () => {
   });
 
   it("is read only for a member", async () => {
-    mockApi(routes("member", { ...UTM_OFF, enabled: true, domains: ["example.com"] }));
+    mockApi(routes("editor", { ...UTM_OFF, enabled: true, domains: ["example.com"] }));
     mount();
 
     const form = await screen.findByRole("form", { name: "UTM parameters" });

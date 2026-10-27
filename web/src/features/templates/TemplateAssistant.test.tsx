@@ -264,7 +264,7 @@ describe("the template assistant", () => {
   });
 
   it("offers the assistant to an admin only", async () => {
-    mockApi(templateRoutes({ role: "member" }));
+    mockApi(templateRoutes({ role: "editor" }));
     renderRoute(`/w/ws1/templates/${TEMPLATE_ID}`, "/w/:ws/templates/:id", <TemplatePage />);
 
     await screen.findByRole("textbox", { name: /source/ });

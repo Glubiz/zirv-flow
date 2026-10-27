@@ -7,7 +7,7 @@ import { renderRoute } from "../../test/renderFeature";
 import { ImportsPage } from "./ImportsPage";
 import { anImport } from "./testData";
 
-const members = (role: "admin" | "member", userId: string) => [
+const members = (role: "admin" | "editor", userId: string) => [
   { user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" },
 ];
 
@@ -113,7 +113,7 @@ describe("the import history", () => {
   it("lets a plain member start an import", async () => {
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
       "GET /api/v1/workspaces/ws1/imports": () => json({ imports: [DONE], next_before: null }),
     });
     mount();

@@ -28,7 +28,7 @@ const VERTICAL = {
   ],
 };
 
-function access(role: "admin" | "member"): Record<string, Handler> {
+function access(role: "admin" | "editor"): Record<string, Handler> {
   const who = role === "admin" ? OWNER : MEMBER;
   return {
     "GET /api/v1/session": () => json(session(who)),
@@ -101,7 +101,7 @@ describe("consent dimensions", () => {
   });
 
   it("is read-only for a member who is not an admin", async () => {
-    mockApi({ ...access("member"), [`GET ${WS}/consent/dimensions`]: () => json([TOPIC, VERTICAL]) });
+    mockApi({ ...access("editor"), [`GET ${WS}/consent/dimensions`]: () => json([TOPIC, VERTICAL]) });
     mount();
 
     expect(await screen.findByText("Vertical")).toBeInTheDocument();

@@ -79,7 +79,7 @@ describe("the snippet list", () => {
   });
 
   it("offers archive only to an admin", async () => {
-    mockApi(snippetRoutes({ role: "member" }));
+    mockApi(snippetRoutes({ role: "editor" }));
     mount();
 
     await screen.findByRole("link", { name: "Shipping promise" });

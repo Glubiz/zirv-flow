@@ -103,7 +103,7 @@ export const DESTINATION_OPTIONS = [
 
 interface Options {
   /** `admin` publishes and previews real people; `member` edits; `reader` only looks. */
-  role?: "admin" | "member" | "reader";
+  role?: "admin" | "editor" | "reader";
   detail?: Record<string, unknown>;
   /** What a preview answers for the saved draft, or a response to refuse it with. */
   preview?: (document: Doc, asked: number, body: Record<string, unknown>) => Record<string, unknown> | Response;
@@ -128,7 +128,7 @@ export function templateRoutes({ role = "admin", detail, preview, uses = [], ver
         }
       : {
           "GET /api/v1/session": () => json(session(MEMBER)),
-          "GET /api/v1/workspaces/ws1/members": () => json(members(role === "member" ? "member" : null)),
+          "GET /api/v1/workspaces/ws1/members": () => json(members(role === "editor" ? "editor" : null)),
         };
   return {
     ...actorRoutes,

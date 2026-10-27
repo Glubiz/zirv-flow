@@ -48,14 +48,14 @@ function contact(key: string, fields: Record<string, unknown>, masked: string[] 
   };
 }
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
 function mount(routes: Parameters<typeof mockApi>[0] = {}, user = OWNER) {
   const calls = mockApi({
     "GET /api/v1/session": () => json(session(user, "csrf-contacts")),
-    "GET /api/v1/workspaces/ws1/members": () => json(members(user === OWNER ? "admin" : "member", user.id)),
+    "GET /api/v1/workspaces/ws1/members": () => json(members(user === OWNER ? "admin" : "editor", user.id)),
     "GET /api/v1/workspaces/ws1/contact-definition": () => json(DEFINITION),
     "GET /api/v1/workspaces/ws1/traits": () =>
       json([trait("email", "string"), trait("age", "number"), trait("newsletter", "boolean")]),

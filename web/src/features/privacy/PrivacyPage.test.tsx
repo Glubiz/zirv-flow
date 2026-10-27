@@ -37,7 +37,7 @@ function exportBody(overrides: Record<string, unknown>) {
   };
 }
 
-function members(role: "admin" | "member", userId: string) {
+function members(role: "admin" | "editor", userId: string) {
   return [{ user_id: userId, email: "someone@example.test", role, added_at: "2026-10-01T09:00:00Z" }];
 }
 
@@ -240,7 +240,7 @@ describe("privacy", () => {
   it("gives a member no privacy tools and asks for none of its data", async () => {
     const calls = mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
     });
     renderRoute("/w/ws1/privacy", ROUTE, <PrivacyPage />);
 
@@ -257,7 +257,7 @@ describe("privacy", () => {
 
     mockApi({
       "GET /api/v1/session": () => json(session(MEMBER)),
-      "GET /api/v1/workspaces/ws1/members": () => json(members("member", MEMBER.id)),
+      "GET /api/v1/workspaces/ws1/members": () => json(members("editor", MEMBER.id)),
     });
     renderRoute("/w/ws1/privacy", ROUTE, <PrivacyNav workspaceId="ws1" />);
     await waitFor(() => expect(screen.queryByText("Waiting for the session")).not.toBeInTheDocument());
