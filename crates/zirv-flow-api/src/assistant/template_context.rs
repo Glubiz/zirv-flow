@@ -19,7 +19,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_ai::{Content, Privacy};
 
-use super::prompt::omitted;
+use super::catalog::{name, names};
 use super::segment_context::{ClearKeys, Placeholders, mask_many, within_walk};
 use super::tools::draft_template::TemplateTask;
 use crate::problem::ApiError;
@@ -90,30 +90,6 @@ pub(crate) struct TemplateContext<'a> {
     pub(crate) themes: Vec<(Uuid, String)>,
     pub(crate) snippets: Vec<(Uuid, String)>,
     pub(crate) task: TemplateTask,
-}
-
-fn list(title: &str, entries: &[(String, String)], notes: &mut Vec<String>) -> String {
-    let mut text = format!("{title}:\n");
-    if entries.is_empty() {
-        text.push_str("(none)\n");
-    }
-    for (name, kind) in entries.iter().take(MAX_FIELDS) {
-        text.push_str(&format!("- {name} ({kind})\n"));
-    }
-    omitted(notes, title, entries.len(), MAX_FIELDS);
-    text
-}
-
-fn named(title: &str, entries: &[(Uuid, String)], notes: &mut Vec<String>) -> String {
-    let mut text = format!("{title}:\n");
-    if entries.is_empty() {
-        text.push_str("(none)\n");
-    }
-    for (id, name) in entries.iter().take(MAX_NAMED) {
-        text.push_str(&format!("- {name} ({id})\n"));
-    }
-    omitted(notes, title, entries.len(), MAX_NAMED);
-    text
 }
 
 /// The pointers, below `base`, of every `visible_if` of the sections and of the blocks in their
@@ -203,7 +179,7 @@ pub(crate) fn restore_fragment(table: &Placeholders, arguments: &mut Value) -> V
 }
 
 /// The context as request content. Under [`Privacy::SchemaOnly`] the document's conditions are
-/// masked and the content is plain schema text, with the table to restore the model's answer;
+/// masked and the content is untrusted, with the table to restore the model's answer;
 /// with the opt-in the document is sent as it is, as personal data. A document over
 /// [`MAX_DOCUMENT_BYTES`] is refused: it is cut nowhere, because a half document is not the one
 /// the change would be merged onto.
@@ -219,30 +195,45 @@ pub(crate) fn render_template_context(
         Privacy::SchemaOnly => mask_document(context.document, clear)?,
         Privacy::PersonalAllowed => (context.document.clone(), Placeholders::default()),
     };
-    let mut notes = Vec::new();
-    let mut text = format!(
-        "The template is named {}. It is a {} message, {}.\n",
-        context.name, context.channel, context.category
+    let mut parts = Vec::new();
+    names(
+        &mut parts,
+        "Template (name, channel, category)",
+        [context],
+        1,
+        |context| {
+            format!(
+                "{}, {}, {}",
+                name(context.name),
+                name(context.channel),
+                name(context.category)
+            )
+        },
     );
-    text.push_str(&format!("The task is {}.\n", context.task.as_str()));
-    text.push_str(&list("Person merge fields", &context.traits, &mut notes));
-    text.push_str(&list(
-        "Event merge fields",
-        &context.event_properties,
-        &mut notes,
-    ));
-    text.push_str(&named("Themes", &context.themes, &mut notes));
-    text.push_str(&named("Snippets", &context.snippets, &mut notes));
-    for note in notes {
-        text.push_str(&note);
-        text.push('\n');
+    parts.push(Content::Schema(format!(
+        "The task is {}.\n",
+        context.task.as_str()
+    )));
+    for (title, entries) in [
+        ("Person merge fields", &context.traits),
+        ("Event merge fields", &context.event_properties),
+    ] {
+        names(&mut parts, title, entries, MAX_FIELDS, |(value, kind)| {
+            format!("- {} ({})", name(value), name(kind))
+        });
+    }
+    for (title, entries) in [("Themes", &context.themes), ("Snippets", &context.snippets)] {
+        names(&mut parts, title, entries, MAX_NAMED, |(id, value)| {
+            format!("- {} ({id})", name(value))
+        });
     }
     let document = format!("The current document: {document}\n");
     let document = match privacy {
-        Privacy::SchemaOnly => Content::Schema(document),
+        Privacy::SchemaOnly => Content::Untrusted(document),
         Privacy::PersonalAllowed => Content::Personal(document),
     };
-    Ok((vec![Content::Schema(text), document], table))
+    parts.push(document);
+    Ok((parts, table))
 }
 
 #[cfg(test)]
@@ -293,17 +284,38 @@ mod tests {
     }
 
     #[test]
-    fn every_part_is_schema_text_never_fenced_personal_data() {
+    fn catalog_names_and_document_are_untrusted_in_both_privacy_modes() {
         let document = json!({"schema": 2});
 
-        let (parts, _) = render_template_context(
-            &context(&document, TemplateTask::Copy),
-            &ClearKeys::default(),
-            Privacy::SchemaOnly,
-        )
-        .unwrap();
+        for privacy in [Privacy::SchemaOnly, Privacy::PersonalAllowed] {
+            let (parts, _) = render_template_context(
+                &context(&document, TemplateTask::Copy),
+                &ClearKeys::default(),
+                privacy,
+            )
+            .unwrap();
 
-        assert!(parts.iter().all(|part| matches!(part, Content::Schema(_))));
+            for value in ["Welcome", "plan", "order_id", "Brand", "Footer note"] {
+                assert!(
+                    parts.iter().any(
+                        |part| matches!(part, Content::Untrusted(text) if text.contains(value))
+                    )
+                );
+                assert!(
+                    !parts
+                        .iter()
+                        .any(|part| matches!(part, Content::Schema(text) if text.contains(value)))
+                );
+            }
+            assert!(
+                matches!(parts.last(), Some(Content::Untrusted(_)))
+                    == (privacy == Privacy::SchemaOnly)
+            );
+            assert!(
+                matches!(parts.last(), Some(Content::Personal(_)))
+                    == (privacy == Privacy::PersonalAllowed)
+            );
+        }
     }
 
     #[test]
@@ -331,10 +343,7 @@ mod tests {
 
         let text = rendered(&many);
 
-        assert!(
-            text.contains("3 Person merge fields were left out"),
-            "{text}"
-        );
+        assert!(text.contains("3 more omitted"), "{text}");
         assert!(!text.contains(&format!("t{}", MAX_FIELDS + 2)));
     }
 

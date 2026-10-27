@@ -125,6 +125,14 @@ mod tests {
     }
 
     async fn fixture_with(pool: &PgPool, keyring: Option<Arc<Keyring>>) -> Fixture {
+        fixture_with_policy(pool, keyring, Arc::default()).await
+    }
+
+    async fn fixture_with_policy(
+        pool: &PgPool,
+        keyring: Option<Arc<Keyring>>,
+        policy: Arc<zirv_flow_core::egress::EgressPolicy>,
+    ) -> Fixture {
         zirv_flow_store::migrate(pool).await.unwrap();
         let create = |slug: &'static str| async move {
             let name = WorkspaceName::parse(slug).unwrap();
@@ -136,7 +144,8 @@ mod tests {
         };
         let ws = create("ours").await;
         let other = create("theirs").await;
-        let mut state = AppState::new(pool.clone(), Arc::new(String::new));
+        let mut state =
+            AppState::new(pool.clone(), Arc::new(String::new)).with_egress_policy(policy);
         if let Some(keyring) = keyring {
             let root = HmacRoot::bootstrap_from(keyring.current()).to_secret_bytes();
             let sealed = seal(
@@ -634,7 +643,97 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_check_that_the_egress_policy_refuses_is_a_failed_check_not_an_error(pool: PgPool) {
+    async fn the_operator_allowlist_admits_only_the_named_private_address(pool: PgPool) {
+        let policy = zirv_flow_core::egress::EgressPolicy::parse(&["10.0.0.5/32".into()]).unwrap();
+        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+        let fx = fixture_with_policy(&pool, Some(keys), Arc::new(policy)).await;
+        for (host, allowed) in [
+            ("10.0.0.5", true),
+            ("10.0.0.6", false),
+            ("169.254.169.254", false),
+        ] {
+            let created = fx.as_admin("POST", "/destinations", Some(json!({
+                "kind": "webhook", "name": host, "config": {"url": format!("http://{host}/")},
+                "credential": {"signing_secret": "secret"}
+            }))).await;
+            assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+            let id = created.body["id"].as_str().unwrap();
+            let checked = fx
+                .as_admin("POST", &format!("/destinations/{id}/check"), None)
+                .await;
+            if allowed {
+                assert_eq!(checked.status, StatusCode::OK);
+                assert_eq!(checked.body["ok"], true);
+            } else {
+                assert_eq!(checked.status, StatusCode::UNPROCESSABLE_ENTITY);
+                assert_eq!(checked.body["code"], "egress_denied");
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn real_destinations_refuse_private_targets_with_a_typed_problem(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        for kind in ["webhook", "smtp", "provider"] {
+            let mut manifest: Value = serde_json::from_str(include_str!(
+                "../../../zirv-flow-connectors/tests/fixtures/providers/bearer_timestamped.json"
+            ))
+            .unwrap();
+            manifest["base_url"] = json!("http://169.254.169.254/");
+            let (config, credential) = match kind {
+                "webhook" => (
+                    json!({"url": "http://169.254.169.254/secret-path?token=secret-query"}),
+                    json!({"signing_secret": "secret"}),
+                ),
+                "smtp" => (
+                    json!({}),
+                    json!({"host": "169.254.169.254", "port": "25", "tls": "starttls", "username": "user", "password": "secret"}),
+                ),
+                _ => (
+                    json!({"manifest": manifest}),
+                    json!({"token": "secret", "feedback_secret": "secret"}),
+                ),
+            };
+            let created = fx
+                .as_admin(
+                    "POST",
+                    "/destinations",
+                    Some(json!({
+                        "kind": kind, "name": kind, "config": config, "credential": credential,
+                    })),
+                )
+                .await;
+            assert_eq!(
+                created.status,
+                StatusCode::CREATED,
+                "{kind}: {}",
+                created.body
+            );
+            let id = created.body["id"].as_str().unwrap();
+            let checked = fx
+                .as_admin("POST", &format!("/destinations/{id}/check"), None)
+                .await;
+            assert_eq!(
+                checked.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{kind}: {}",
+                checked.body
+            );
+            assert_eq!(
+                checked.headers[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+            assert_eq!(checked.body["code"], "egress_denied");
+            for secret in ["169.254.169.254", "secret-path", "secret-query"] {
+                assert!(!checked.body.to_string().contains(secret));
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_check_that_the_egress_policy_refuses_is_a_typed_problem(pool: PgPool) {
         let fx = fixture(&pool).await;
         let created = fx
             .as_admin(
@@ -652,8 +751,16 @@ mod tests {
             .as_admin("POST", &format!("/destinations/{id}/check"), None)
             .await;
 
-        assert_eq!(checked.status, StatusCode::OK, "{:?}", checked.body);
-        assert_eq!(checked.body["ok"], false);
+        assert_eq!(
+            checked.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{:?}",
+            checked.body
+        );
+        assert_eq!(
+            checked.headers[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
         assert_eq!(checked.body["code"], "egress_denied");
         let text = checked.body.to_string();
         assert!(!text.contains("10.0.0.5"), "the host is not named: {text}");

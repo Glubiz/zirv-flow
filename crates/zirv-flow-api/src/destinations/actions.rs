@@ -124,11 +124,18 @@ pub(crate) async fn check_destination(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
+    if body.code.as_deref() == Some("egress_denied") {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the destination's address is not allowed by the egress policy",
+        )
+        .with_code("egress_denied"));
+    }
     Ok(body)
 }
 
 /// Checks the destination's settings and stored credential without delivering anything. A failed
-/// check is a 200 with `ok` false and the reason. Workspace admins only. Audited as
+/// check is a 200 with `ok` false and the reason, except an egress denial (422). Workspace admins only. Audited as
 /// `destination.checked`.
 #[utoipa::path(
     post,
@@ -141,6 +148,7 @@ pub(crate) async fn check_destination(
     ),
     responses(
         (status = 200, description = "The outcome of the check", body = DestinationCheckBody),
+        (status = 422, description = "The egress policy refused the destination (`egress_denied`)", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace or destination, or no access", body = Problem, content_type = "application/problem+json"),

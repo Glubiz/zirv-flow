@@ -285,6 +285,61 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn http_manifests_and_oauth_token_endpoints_refuse_private_targets(pool: PgPool) {
+        let fx = fixture(&pool).await;
+        for oauth in [false, true] {
+            let mut manifest: Value = serde_json::from_str(include_str!(
+                "../../../zirv-flow-connectors/tests/fixtures/manifests/offset_api_key.json"
+            ))
+            .unwrap();
+            manifest["base_url"] = json!(if oauth {
+                "https://public.example.test"
+            } else {
+                "http://169.254.169.254"
+            });
+            manifest["auth"] = if oauth {
+                json!({"type": "oauth2_client_credentials", "token_url": "http://169.254.169.254/secret-path?token=secret-query"})
+            } else {
+                json!({"type": "none"})
+            };
+            let created = fx.as_admin("POST", "/sources", Some(json!({
+                "kind": "http", "name": format!("private-{oauth}"), "config": {"manifest": manifest},
+                "credential": if oauth { json!({"client_id": "client", "client_secret": "secret"}) } else { json!({}) },
+            }))).await;
+            assert_eq!(created.status, StatusCode::CREATED, "{}", created.body);
+            let id = created.body["id"].as_str().unwrap();
+            let checked = fx
+                .as_admin("POST", &format!("/sources/{id}/test"), None)
+                .await;
+            assert_eq!(
+                checked.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{}",
+                checked.body
+            );
+            assert_eq!(
+                checked.headers[header::CONTENT_TYPE],
+                "application/problem+json"
+            );
+            assert_eq!(checked.body["code"], "egress_denied");
+            let sample = fx
+                .as_admin(
+                    "POST",
+                    &format!("/sources/{id}/manifest/sample"),
+                    Some(json!({"stream": "customers", "limit": 1})),
+                )
+                .await;
+            assert_eq!(sample.status, StatusCode::BAD_GATEWAY, "{}", sample.body);
+            assert_eq!(sample.body["code"], "egress_denied");
+            for secret in ["169.254.169.254", "secret-path", "secret-query"] {
+                assert!(!checked.body.to_string().contains(secret));
+                assert!(!sample.body.to_string().contains(secret));
+            }
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_kinds_list_the_fake_with_its_field_specs_to_any_signed_in_caller(pool: PgPool) {
         let fx = fixture(&pool).await;
 

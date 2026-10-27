@@ -1309,6 +1309,14 @@ mod tests {
         /// Runs one claimed job as a worker does: its work commits with its completion, and an
         /// error rolls it back and puts the job up for another attempt at once.
         async fn execute(&self, claimed: ClaimedJob) -> Result<(), JobError> {
+            self.execute_with_policy(claimed, loopback()).await
+        }
+
+        async fn execute_with_policy(
+            &self,
+            claimed: ClaimedJob,
+            policy: Arc<EgressPolicy>,
+        ) -> Result<(), JobError> {
             let mut tx = zirv_flow_store::begin(&self.pool).await.unwrap();
             let result = {
                 let mut ctx = JobContext::new(&mut tx, &claimed)
@@ -1326,7 +1334,7 @@ mod tests {
                         Some(tracking_key()),
                     )
                     .with_rate_gates(Arc::clone(&self.gates))
-                    .with_outbound(self.keyring.clone(), loopback(), Arc::default());
+                    .with_outbound(self.keyring.clone(), policy, Arc::default());
                 DeliverySend.run(&mut ctx, claimed.payload.clone()).await
             };
             match result {
@@ -3021,6 +3029,26 @@ mod tests {
 
     // --- the smtp destination through the pipeline (#218) ---
 
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_private_smtp_target_records_egress_denied_without_connecting(pool: PgPool) {
+        let sink = SmtpSink::start(SmtpSinkOptions::default()).await;
+        let (env, _) = smtp_env(pool, &sink).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.execute_with_policy(env.claim().await.unwrap(), Arc::default())
+            .await
+            .unwrap();
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("egress_denied"))
+        );
+        assert_eq!(message.attempts, 1);
+        assert_eq!(sink.connections(), 0);
+    }
+
     /// An env whose destination is an SMTP relay at `sink` (no TLS: the sink is on loopback), whose
     /// sender domain has a real DKIM key sealed under a keyring the worker holds, and whose render
     /// host is running. Returns the env and the public key the domain publishes.
@@ -4638,6 +4666,28 @@ mod tests {
     }
 
     // ---- provider destinations (#223) ----
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_private_provider_target_records_egress_denied_without_connecting(pool: PgPool) {
+        use zirv_flow_connectors::destinations::{FakeProvider, FakeProviderOptions};
+
+        let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+        let env = provider_env(pool, "private-provider", &fake).await;
+        let template = env.plain_template("transactional").await;
+        let person = env.person("ada@example.com").await;
+        let queued = env.queue(person, template, 5).await;
+        env.execute_with_policy(env.claim().await.unwrap(), Arc::default())
+            .await
+            .unwrap();
+        let message = env.message(queued.message).await;
+        assert_eq!(
+            (message.status.as_str(), message.reason.as_deref()),
+            ("failed", Some("egress_denied"))
+        );
+        assert_eq!(message.attempts, 1);
+        assert_eq!(fake.requests(), 0);
+    }
 
     /// The fixture manifest of a provider with a timestamped feedback signature, pointed at `fake`.
     fn provider_config(fake: &zirv_flow_connectors::destinations::FakeProvider) -> Value {

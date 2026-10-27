@@ -2706,7 +2706,11 @@ bootstrap hosts, every broker the metadata names and every reconnect.
   tests on the built options pin that. TLS is verified by default against the configured CA alone
   or the compiled-in public roots (never the system store), and `tls = off` is refused when any
   checked address is public.
-- **Exempt.** The OIDC provider calls in `zirv-flow-identity` stay outside the policy, as above.
+- **Exempt.** The OIDC provider calls in `zirv-flow-identity` stay outside the policy. The issuer
+  comes from operator configuration; its discovery document supplies the trusted token and JWKS
+  endpoints. Request-supplied authorization codes, PKCE verifiers and nonces cannot replace those
+  endpoints, and HTTP redirects are disabled. The identity regression test pins this boundary;
+  the full threat-model inventory is tracked in #391.
 
 ### 16.2 Secrets, RBAC, audit
 

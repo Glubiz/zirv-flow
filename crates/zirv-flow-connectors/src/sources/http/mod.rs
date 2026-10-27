@@ -1347,6 +1347,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn private_manifest_targets_are_refused_by_check_and_read() {
+        use crate::http::testing::{HOSTS, PrivateNames};
+        use crate::http::{GuardedClient, HttpError};
+
+        for &(host, _) in HOSTS {
+            let authority = if host == "fe80::1%eth0" {
+                "[fe80::1%eth0]"
+            } else {
+                host
+            };
+            for token_endpoint in [false, true] {
+                let mut manifest: Value = serde_json::from_str(OFFSET).unwrap();
+                let target = format!("http://{authority}/");
+                manifest["base_url"] = json!(if token_endpoint {
+                    "https://public.example.test"
+                } else {
+                    &target
+                });
+                manifest["auth"] = if token_endpoint {
+                    json!({"type": "oauth2_client_credentials", "token_url": target})
+                } else {
+                    json!({"type": "none"})
+                };
+                let config = json!({"manifest": manifest});
+                let policy = Arc::new(EgressPolicy::default());
+                let http = GuardedClient::with_lookup(
+                    policy.clone(),
+                    HttpLimits::default(),
+                    Arc::new(PrivateNames),
+                )
+                .unwrap();
+                let ctx = SourceContext::from_client(
+                    http,
+                    policy,
+                    "http",
+                    "private-test",
+                    Arc::default(),
+                );
+                let credential =
+                    credential(&[("client_id", "client"), ("client_secret", "secret")]);
+                let checked = Http.check(&ctx, &config, &credential).await;
+                let read = read_all(
+                    &ctx,
+                    &config,
+                    &credential,
+                    &stream_config("customers", SyncMode::FullRefresh),
+                    None,
+                )
+                .await;
+                assert_eq!(read.len(), 1);
+                for result in [checked, read.into_iter().next().unwrap().map(|_| ())] {
+                    let error = result.unwrap_err();
+                    if host.contains('@') || host.contains('%') {
+                        assert!(
+                            matches!(error, SourceError::Config { .. }),
+                            "{host}: {error:?}"
+                        );
+                    } else {
+                        assert!(
+                            matches!(error, SourceError::Egress(HttpError::EgressDenied { .. })),
+                            "{host}: {error:?}"
+                        );
+                    }
+                    assert!(!error.to_string().contains("http://"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn the_default_egress_policy_blocks_loopback_and_no_request_arrives() {
         let state = ApiState::new(vec![contact(1, "active")]);
         let mock = api(&state).await;

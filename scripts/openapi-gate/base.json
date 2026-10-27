@@ -1,0 +1,31 @@
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Gate fixture", "version": "1"},
+  "paths": {
+    "/api/v1/people": {
+      "post": {
+        "operationId": "createPerson",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}}
+          }}}
+        },
+        "responses": {
+          "200": {
+            "description": "Person",
+            "content": {"application/json": {"schema": {
+              "type": "object",
+              "required": ["id", "status"],
+              "properties": {
+                "id": {"type": "string"},
+                "status": {"type": "string", "enum": ["active"]}
+              }
+            }}}
+          }
+        }
+      }
+    }
+  }
+}

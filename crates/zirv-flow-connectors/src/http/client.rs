@@ -15,7 +15,7 @@ use zirv_flow_core::egress::EgressPolicy;
 
 use super::body::{DEFAULT_MAX_BODY_BYTES, read_body};
 use super::error::{Denied, HttpError, TooManyRedirects};
-use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_all};
+use super::resolver::{GuardedResolver, Lookup, SystemLookup, check_all, invalid_host};
 
 /// How long and how large an outbound exchange may be.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +53,7 @@ pub struct GuardedClient {
     inner: reqwest::Client,
     policy: Arc<EgressPolicy>,
     limits: HttpLimits,
+    lookup: Arc<dyn Lookup>,
 }
 
 impl GuardedClient {
@@ -70,7 +71,10 @@ impl GuardedClient {
         // reqwest takes the process-wide rustls provider; another install is fine.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let inner = reqwest::Client::builder()
-            .dns_resolver(Arc::new(GuardedResolver::new(Arc::clone(&policy), lookup)))
+            .dns_resolver(Arc::new(GuardedResolver::new(
+                Arc::clone(&policy),
+                Arc::clone(&lookup),
+            )))
             .no_proxy()
             .redirect(redirect_policy(Arc::clone(&policy), limits.max_redirects))
             .connect_timeout(limits.connect_timeout)
@@ -81,6 +85,7 @@ impl GuardedClient {
             inner,
             policy,
             limits,
+            lookup,
         })
     }
 
@@ -91,12 +96,44 @@ impl GuardedClient {
     /// Sends the request. An IP-literal host is decided here; any other host is decided by the
     /// resolver when the connection is made.
     pub async fn execute(&self, request: reqwest::Request) -> Result<GuardedResponse, HttpError> {
+        let started = tokio::time::Instant::now();
         check_literal(&self.policy, request.url().host())?;
         let inner = self
             .inner
             .execute(request)
             .await
             .map_err(HttpError::from_reqwest)?;
+        // reqwest returns stopped cross-origin redirects and malformed Locations unchanged.
+        // Validate those as well, without sending credentials or a request to the next origin.
+        if matches!(inner.status().as_u16(), 301 | 302 | 303 | 307 | 308)
+            && let Some(location) = inner.headers().get(reqwest::header::LOCATION)
+        {
+            let location = std::str::from_utf8(location.as_bytes())
+                .map_err(|_| HttpError::from(invalid_host()))?;
+            let target = inner
+                .url()
+                .join(location)
+                .map_err(|_| HttpError::from(invalid_host()))?;
+            check_literal(&self.policy, target.host())?;
+            if let Some(Host::Domain(host)) = target.host() {
+                let remaining = self.limits.timeout.saturating_sub(started.elapsed());
+                let ips = tokio::time::timeout(
+                    remaining.min(self.limits.connect_timeout),
+                    self.lookup.lookup(host),
+                )
+                .await
+                .map_err(|_| HttpError::Timeout)?
+                .map_err(|_| {
+                    HttpError::Transport("the redirect target could not be resolved".to_owned())
+                })?;
+                if ips.is_empty() {
+                    return Err(HttpError::Transport(
+                        "the redirect target could not be resolved".to_owned(),
+                    ));
+                }
+                check_all(&self.policy, host, &ips)?;
+            }
+        }
         Ok(GuardedResponse {
             inner,
             max_body_bytes: self.limits.max_body_bytes,
@@ -113,7 +150,7 @@ impl GuardedClient {
         body: Vec<u8>,
     ) -> Result<GuardedResponse, HttpError> {
         let unbuildable = || HttpError::NotSent { timed_out: false };
-        let url = url::Url::parse(url).map_err(|_| unbuildable())?;
+        let url = parse_url(url)?;
         let mut request = reqwest::Request::new(reqwest::Method::POST, url);
         for (name, value) in headers {
             request.headers_mut().append(
@@ -125,6 +162,13 @@ impl GuardedClient {
         *request.body_mut() = Some(body.into());
         self.execute(request).await
     }
+}
+
+pub(crate) fn parse_url(url: &str) -> Result<url::Url, HttpError> {
+    url::Url::parse(url).map_err(|error| match error {
+        url::ParseError::InvalidIpv6Address => HttpError::from(invalid_host()),
+        _ => HttpError::NotSent { timed_out: false },
+    })
 }
 
 /// A response whose body can only be read under the client's `max_body_bytes`.
@@ -265,6 +309,113 @@ mod tests {
         HttpError::EgressDenied {
             host: host.to_owned(),
             class,
+        }
+    }
+
+    #[tokio::test]
+    async fn rebinding_cannot_replace_the_checked_address_during_connect() {
+        use crate::http::testing::Rebinding;
+
+        for later in ["10.0.0.5", "169.254.169.254"] {
+            let (port, hits) = serve().await;
+            // An exactly allowlisted loopback listener stands in for the first public answer.
+            let lookup = Arc::new(Rebinding::new("127.0.0.1", later));
+            let guarded = GuardedClient::with_lookup(
+                Arc::new(EgressPolicy::parse(&["127.0.0.1/32".into()]).unwrap()),
+                HttpLimits::default(),
+                lookup.clone(),
+            )
+            .unwrap();
+            let response = get_url(&guarded, &format!("http://rebind.test:{port}/"))
+                .await
+                .unwrap();
+            assert_eq!(response.body().await.unwrap(), "hello");
+            assert_eq!(hits.load(Ordering::SeqCst), 1);
+            assert_eq!(lookup.calls(), 1);
+        }
+    }
+
+    fn hostile_urls() -> Vec<(String, AddressClass)> {
+        crate::http::testing::HOSTS
+            .iter()
+            .map(|&(host, class)| {
+                let (host, class) = match host {
+                    "allowed@169.254.169.254" => (host, AddressClass::Metadata),
+                    "fe80::1%eth0" => ("[fe80::1%eth0]", class),
+                    _ => (host, class),
+                };
+                (
+                    format!("http://{host}/secret-path?token=secret-query"),
+                    class,
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn exotic_urls_and_redirect_locations_are_refused_and_counted() {
+        use crate::http::testing::PrivateNames;
+
+        for (target, class) in hostile_urls() {
+            for redirect in [false, true] {
+                let recorder =
+                    metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+                let handle = recorder.handle();
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                let policy = Arc::new(EgressPolicy::parse(&["127.0.0.1/32".into()]).unwrap());
+                // The direct request must deny loopback, too; only the redirect server is allowed.
+                let guarded = GuardedClient::with_lookup(
+                    if redirect { policy } else { Arc::default() },
+                    HttpLimits::default(),
+                    Arc::new(PrivateNames),
+                )
+                .unwrap();
+                let (result, server) = if redirect {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let address = listener.local_addr().unwrap();
+                    // Keep the numeric forms, but deny the adjacent address: 127.0.0.1 is
+                    // explicitly allowed only so the initial listener can stand in for public DNS.
+                    let location = target
+                        .replace("2130706433", "2130706434")
+                        .replace("0177.0.0.1", "0177.0.0.2")
+                        .replace("0x7f.1", "0x7f.2");
+                    let router = Router::new().route(
+                        "/",
+                        get(move || async move {
+                            (
+                                StatusCode::TEMPORARY_REDIRECT,
+                                [(reqwest::header::LOCATION, location)],
+                            )
+                        }),
+                    );
+                    let server =
+                        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+                    (
+                        get_url(&guarded, &format!("http://{address}/")).await,
+                        Some(server),
+                    )
+                } else {
+                    (guarded.post(&target, &[], Vec::new()).await, None)
+                };
+                if let Some(server) = server {
+                    server.abort();
+                }
+                let error = result.unwrap_err();
+                assert!(
+                    matches!(error, HttpError::EgressDenied { class: actual, .. } if actual == class),
+                    "{target}: {error:?}"
+                );
+                for secret in ["http://", "allowed@", "secret-path", "secret-query"] {
+                    assert!(!format!("{error:?} {error}").contains(secret), "{error:?}");
+                }
+                assert!(
+                    handle.render().contains(&format!(
+                        "zirv_flow_egress_denied_total{{class=\"{class}\"}} 1"
+                    )),
+                    "{target}: {}",
+                    handle.render()
+                );
+            }
         }
     }
 
@@ -502,13 +653,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_redirect_to_a_blocked_hostname_is_stopped_and_that_name_is_never_connected_to() {
+    async fn a_redirect_to_a_blocked_hostname_is_refused_without_connecting_to_it() {
         let (port, _) = serve().await;
         let guarded = client(&["127.0.0.1/32"], HttpLimits::default());
         let result = get_url(&guarded, &format!("http://local.test:{port}/private")).await;
-        // The name is another origin, so the redirect stops at the 3xx; the egress check of a name
-        // at connect time is covered by the direct requests above.
-        assert_eq!(result.unwrap().status(), 307);
+        assert_eq!(
+            result.unwrap_err(),
+            denied("private.test", AddressClass::Private)
+        );
     }
 
     #[tokio::test]
