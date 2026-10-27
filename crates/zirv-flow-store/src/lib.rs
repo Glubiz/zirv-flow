@@ -242,8 +242,9 @@ pub use privacy::{
     check_ledger_dir, delete_person, download_export, erase_person, expire_exports, export_ledger,
     find_erasure_request, find_ledger_entry, find_privacy_export, finish_erasure_call,
     idempotency_key, list_erasure_calls, list_erasure_requests, list_privacy_exports,
-    lock_person_call_shared, merge_ledger_entries, read_ledger_dir, reconcile_ledger_file,
-    replay_erasures, request_erasure, request_export, update_ledger_lists, write_ledger_file,
+    lock_person_call_shared, merge_ledger_entries, read_ledger_dir, read_ledger_dir_each,
+    reconcile_ledger_file, replay_erasures, request_erasure, request_export, update_ledger_lists,
+    write_ledger_file,
 };
 pub use retention::{
     AUDIT_DAYS_BOUNDS, DeploymentRetention, EXPORT_HOURS_BOUNDS, IMPORT_FILE_DAYS_BOUNDS,

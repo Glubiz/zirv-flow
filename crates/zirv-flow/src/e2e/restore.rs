@@ -305,7 +305,7 @@ mod tests {
         }
     }
 
-    async fn try_replay(restored: &Restored) -> Result<ReplayReport, admin::AdminError> {
+    async fn try_replay(restored: &Restored) -> Result<admin::ErasureReplay, admin::AdminError> {
         admin::replay_erasures(
             &restored.pool,
             &Context::system(),
@@ -317,7 +317,9 @@ mod tests {
     }
 
     async fn replay(restored: &Restored) -> ReplayReport {
-        try_replay(restored).await.expect("the replay")
+        let replayed = try_replay(restored).await.expect("the replay");
+        assert!(replayed.bad_files.is_empty());
+        replayed.report
     }
 
     async fn present(pool: &PgPool, ids: &[Uuid]) -> i64 {
@@ -435,7 +437,7 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_ledger_file_of_a_bad_shape_is_named_and_the_others_apply_once_it_is_moved_aside(
+    async fn a_ledger_file_of_a_bad_shape_is_named_and_the_other_entries_apply_in_the_same_run(
         live: PgPool,
     ) {
         let drill = restored(live).await;
@@ -444,25 +446,22 @@ mod tests {
             .await
             .expect("the workspace");
         let bad_name = format!("{workspace}-{}.json", Uuid::now_v7());
-        let bad: &Path = &drill.dir.0.join(&bad_name);
-        fs::write(bad, b"{\"format\": \"zirv-flow-ledger/1\", \"id\": 7}").expect("a bad file");
-        let before = totals(&drill.pool).await;
-
-        let refused = try_replay(&drill)
-            .await
-            .expect_err("a bad file stops the read");
-
-        assert!(
-            refused.to_string().contains(&bad_name),
-            "the error names the file: {refused}"
-        );
-        assert_eq!(totals(&drill.pool).await, before, "nothing was applied");
+        fs::write(
+            drill.dir.0.join(&bad_name),
+            b"{\"format\": \"zirv-flow-ledger/1\", \"id\": 7}",
+        )
+        .expect("a bad file");
         assert_eq!(present(&drill.pool, &drill.erased).await, 3);
 
-        fs::remove_file(bad).expect("the bad file moves aside");
-        let report = replay(&drill).await;
+        let replayed = try_replay(&drill).await.expect("the good entries apply");
 
-        assert_eq!(report.merged, 2);
+        assert_eq!(replayed.bad_files.len(), 1);
+        assert!(
+            replayed.bad_files[0].to_string().contains(&bad_name),
+            "the report names the file: {}",
+            replayed.bad_files[0]
+        );
+        assert_eq!(replayed.report.merged, 2);
         assert_eq!(present(&drill.pool, &drill.erased).await, 0);
         drill.pool.close().await;
     }
@@ -502,12 +501,42 @@ mod tests {
     }
 
     #[test]
-    fn the_drill_script_passes_shellcheck_when_it_is_installed() {
-        let Ok(output) = std::process::Command::new("shellcheck")
+    fn the_drill_script_refuses_a_server_url_that_names_a_database_or_a_query() {
+        for base in [
+            "postgres://u:p@127.0.0.1:5432/production",
+            "postgres://u:p@127.0.0.1:5432/production?application_name=x",
+            "postgres://u:p@127.0.0.1:5432?application_name=x",
+            "postgres://u:p@127.0.0.1:5432/",
+            "mysql://u:p@127.0.0.1:3306",
+        ] {
+            for variable in ["ZF_DRILL_APP_BASE", "ZF_DRILL_TOOL_BASE"] {
+                let output = bash()
+                    .arg(drill_script())
+                    .env("ZF_DRILL_SOURCE_DB", "zf_drill_src_ok")
+                    .env("ZF_DRILL_TARGET_DB", "zf_drill_dst_ok")
+                    .env(variable, base)
+                    .output()
+                    .expect("bash runs the script");
+
+                assert_eq!(output.status.code(), Some(2), "{variable}={base}");
+                let message = String::from_utf8_lossy(&output.stderr);
+                assert!(message.contains("refusing server URL"), "{message}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_drill_script_passes_shellcheck() {
+        let output = match std::process::Command::new("shellcheck")
             .arg(drill_script())
             .output()
-        else {
-            return;
+        {
+            Ok(output) => output,
+            // The CI runners ship shellcheck, so a missing one there is a failure, not a skip.
+            Err(error) if std::env::var_os("CI").is_some() => {
+                panic!("shellcheck is required when CI is set: {error}")
+            }
+            Err(_) => return,
         };
 
         assert!(

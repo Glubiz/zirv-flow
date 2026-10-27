@@ -106,9 +106,10 @@ so nothing may serve traffic before it.
 - **The ledger directory is missing.** Replay without `--from` still re-applies the ledger rows in
   the database, which only covers erasures made before the backup. Treat erasures after the backup
   as lost and re-request them.
-- **A ledger file is corrupt or of an unknown format.** The replay stops before it changes anything
-  and names the file. Move that file out of the directory, run the replay again, then repair or
-  re-request that one erasure.
+- **A ledger file is corrupt or of an unknown format.** The replay names each such file on
+  stderr, applies every other entry in the same run, and exits non-zero so you do not start
+  serving unaware. Do not start any role yet: repair or re-request that erasure, move the bad
+  file out of the directory, and run the replay again until it exits 0.
 - **The schema is newer than the binary.** Startup refuses with a newer-schema message. Use a binary
   at least as new as the backup. Never edit `_sqlx_migrations` to get past it.
 - **The workspace in a file does not exist here.** The file is skipped and counted as

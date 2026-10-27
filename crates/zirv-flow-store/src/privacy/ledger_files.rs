@@ -324,6 +324,14 @@ pub fn check_ledger_dir(dir: &Path) -> Result<(), LedgerFileError> {
 /// is corrupt, of an unknown format or named other than its entry fails the whole read, naming
 /// that file.
 pub fn read_ledger_dir(dir: &Path) -> Result<Vec<LedgerEntry>, LedgerFileError> {
+    read_ledger_dir_each(dir)?.into_iter().collect()
+}
+
+/// Like [`read_ledger_dir`], but a file that cannot be used does not stop the others: each file
+/// gives its own result, in file-name order. Only a directory that cannot be listed fails.
+pub fn read_ledger_dir_each(
+    dir: &Path,
+) -> Result<Vec<Result<LedgerEntry, LedgerFileError>>, LedgerFileError> {
     let listing = fs::read_dir(dir).map_err(|error| LedgerFileError::io(dir, "read", error))?;
     let mut names: Vec<String> = Vec::new();
     for item in listing {
@@ -336,11 +344,10 @@ pub fn read_ledger_dir(dir: &Path) -> Result<Vec<LedgerEntry>, LedgerFileError> 
         }
         names.push(name);
     }
-    names.sort();
-    names
+    Ok(names
         .into_iter()
         .map(|name| read_ledger_file(dir, name))
-        .collect()
+        .collect())
 }
 
 /// Reads one `*.json` entry, following a symlink. Anything that is not a regular file after that
@@ -747,6 +754,24 @@ mod tests {
         let text = fs::read_to_string(dir.0.join(entry.file_name())).unwrap();
         assert!(text.contains(LEDGER_FORMAT) && text.contains("2026-03-01T10:00:05Z"));
         assert!(text.contains("master key"));
+    }
+
+    #[test]
+    fn reading_each_file_keeps_the_good_entries_beside_a_bad_one() {
+        let dir = TempDir::new();
+        let good = entry();
+        write_ledger_file(&dir.0, &good).unwrap();
+        fs::write(dir.0.join("broken.json"), b"{ not json").unwrap();
+
+        let each = read_ledger_dir_each(&dir.0).unwrap();
+
+        assert_eq!(each.len(), 2);
+        assert_eq!(*each[0].as_ref().unwrap(), good);
+        assert!(matches!(
+            &each[1],
+            Err(LedgerFileError::Corrupt { file }) if file == "broken.json"
+        ));
+        assert!(read_ledger_dir(&dir.0).is_err());
     }
 
     #[test]

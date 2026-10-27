@@ -1232,8 +1232,9 @@ identifier value. Operator duties:
   The hashes are keyed with the deployment HMAC root, so restoring from the files also needs the
   master key and the database's `deployment_keys` row.
 - After restoring a database, run `zirv-flow admin replay-erasures --from <dir>` before it serves
-  traffic or any worker starts. It validates every file first (one corrupt or unknown-format file
-  stops it, naming the file, before anything changes), adds the entries the database lacks as
+  traffic or any worker starts. It reads each file on its own (a corrupt or unknown-format file
+  is named on stderr and makes the command exit non-zero, but the other files are still
+  applied), adds the entries the database lacks as
   completed, upgrades a request the backup still holds as pending or failed to completed (the file
   records a completed erasure and wins; a completed row is left alone), skips and counts files
   whose workspace does not exist, and then runs the replay. The counts include `merged` (added
