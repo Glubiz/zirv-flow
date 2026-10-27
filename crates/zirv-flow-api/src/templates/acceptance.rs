@@ -3463,8 +3463,51 @@ mod tests {
         assert_eq!(current.body["draft"]["revision"], 2);
         assert_eq!(stale.status, StatusCode::CONFLICT);
         assert_eq!(stale.body["code"], "template_draft_revision_mismatch");
+        assert_eq!(stale.body["current_revision"], 2);
         assert_eq!(read.body["draft"]["revision"], 2);
         assert_eq!(read.body["draft"]["document"], email_doc("Second", "two"));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_convert_that_names_a_stale_revision_is_a_409_and_writes_nothing(pool: PgPool) {
+        let f = fixture(&pool).await;
+        let document = blocks_doc("Welcome", "<p>Footer</p>");
+        let id = f.create("Newsletter", document.clone()).await;
+        let uri = format!("/{id}/draft");
+        let saved = f
+            .lead(
+                "PUT",
+                &uri,
+                Some(json!({"document": document, "revision": 1})),
+            )
+            .await;
+
+        let stale = f
+            .lead(
+                "POST",
+                &format!("{uri}/convert-to-mjml"),
+                Some(json!({"revision": 1})),
+            )
+            .await;
+        let read = f.lead("GET", &format!("/{id}"), None).await;
+        let current = f
+            .lead(
+                "POST",
+                &format!("{uri}/convert-to-mjml"),
+                Some(json!({"revision": 2})),
+            )
+            .await;
+
+        assert_eq!(saved.body["draft"]["revision"], 2, "{:?}", saved.body);
+        assert_eq!(stale.status, StatusCode::CONFLICT);
+        assert_eq!(stale.body["code"], "template_draft_revision_mismatch");
+        assert_eq!(stale.body["current_revision"], 2);
+        assert_eq!(read.body["draft"]["revision"], 2);
+        assert_eq!(read.body["draft"]["document"]["mode"], "blocks");
+        assert_eq!(current.status, StatusCode::OK, "{:?}", current.body);
+        assert_eq!(current.body["draft"]["revision"], 3);
+        assert_eq!(current.body["draft"]["document"]["mode"], "code");
     }
 
     #[sqlx::test]
