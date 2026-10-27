@@ -91,7 +91,7 @@ pub enum ExportStatus {
     Ready,
     /// The job ran out of attempts, or the document passed the size cap.
     Failed,
-    /// The 24 hours are over and the content is gone.
+    /// The configured window (`retention.export_hours`) is over and the content is gone.
     Expired,
 }
 
@@ -266,7 +266,7 @@ pub async fn list_privacy_exports(
 /// What [`build_export`] did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuildOutcome {
-    /// The document was built and stored; it expires 24 hours later.
+    /// The document was built and stored; it expires after the configured window (`retention.export_hours`).
     Built { size_bytes: i64 },
     /// An earlier attempt built it, or it expired since.
     NotPending,
@@ -341,7 +341,7 @@ pub async fn build_export(
 pub enum ExportDownload {
     /// The gzip-compressed JSON document.
     Content(Vec<u8>),
-    /// The export is past its 24 hours, or already marked expired.
+    /// The export is past its configured window, or already marked expired.
     Expired,
     /// The export is not ready: it is pending, or its job failed.
     NotReady,

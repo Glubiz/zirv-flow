@@ -2632,7 +2632,8 @@ export interface paths {
          *     and its links, forwarding rows and handled markers, ingest rejects, decision records and saved
          *     template previews, with the data of merged people under the survivor. A document past the
          *     size cap fails with the code `export_too_large`. A background job
-         *     builds it; it can be downloaded for 24 hours once it is ready. The request is given as a
+         *     builds it; it can be downloaded for the configured window
+         *     (`retention.export_hours`, default 24 hours) once it is ready. The request is given as a
          *     `person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.
          *     Audited as `privacy.export_requested`.
          */
@@ -2699,9 +2700,9 @@ export interface paths {
          */
         get: operations["get_retention"];
         /**
-         * Replaces the workspace's own message and decision-log windows. A value must be at least the
-         *     deployment minimum and at most the deployment window; null (or a missing field) returns the
-         *     window to the deployment value. Audit, ingest rejects, import files, job history and events are
+         * Changes the workspace's own message and decision-log windows. A value must be at least the
+         *     deployment minimum and at most the deployment window; a missing field keeps the stored value
+         *     and null returns the window to the deployment value. Audit, ingest rejects, import files, job history and events are
          *     the deployment's alone, and assistant transcripts stay under the AI settings: any other field
          *     is a 422. Audited as `retention.updated`, with window names and day counts only.
          */
@@ -6779,7 +6780,8 @@ export interface components {
         ExportBody: {
             /**
              * Format: date-time
-             * @description 24 hours after `ready_at`; the download answers 410 from then on.
+             * @description The configured window (`retention.export_hours`, default 24 hours) after `ready_at`; the
+             *     download answers 410 from then on.
              */
             expires_at?: string | null;
             /**
@@ -8539,18 +8541,20 @@ export interface components {
             fields: components["schemas"]["ContactFieldBody"][];
         };
         /**
-         * @description The windows a workspace admin may set. A PUT replaces both; a field that is null or left out
-         *     returns that window to the deployment value.
+         * @description The windows a workspace admin may set. A field left out keeps the stored value; an explicit
+         *     `null` returns that window to the deployment value.
          */
         PutRetentionRequest: {
             /**
              * Format: int64
-             * @description Days decision records are kept, within the same rule.
+             * @description Days decision records are kept, within the same rule and with the same treatment of a
+             *     missing field and `null`.
              */
             decision_days?: number | null;
             /**
              * Format: int64
              * @description Days messages are kept; at least the deployment minimum and at most the deployment window.
+             *     Left out keeps the stored value; `null` returns to the deployment value.
              */
             messages_days?: number | null;
         };

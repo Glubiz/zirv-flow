@@ -1199,8 +1199,8 @@ Erasure removes what was held or pending when it ran. Data that arrives while it
 creates a new person, who stays suppressed: the suppression keeps the address from being contacted.
 
 **CSV imports.** The import tables hold no person id, so erasure and deletion do not reach them.
-The stored file (`import_chunks`) is deleted 7 days (`retention.import_file_days`) after its import ends, and the rejected
-rows' cells (`import_rejects.raw`) 30 days after they were written, so the cells of an erased
+The stored file (`import_chunks`) is deleted after the configured window (`retention.import_file_days`, default 7 days) once its import ends, and the rejected
+rows' cells (`import_rejects.raw`) after the configured window (`retention.import_reject_days`, default 30 days) from when they were written, so the cells of an erased
 person can survive in either until then. Both age out within the one-month window of an erasure
 request; see [CSV import](#csv-import).
 
@@ -1257,7 +1257,8 @@ identifier value. Operator duties:
 - The replay re-erases from the ledger's ids and hashes only. Data that names neither a ledger
   person id nor a ledger hash is out of its reach: transcripts, rejects that never named a
   person, imported files and refused rows, and idempotency keys are found by value, so the live
-  erase is the control and their retention windows (30 days, 7 days, 24 hours) bound the rest.
+  erase is the control and their configured retention windows (`retention.import_reject_days`, `retention.import_file_days`,
+  `retention.export_hours`; defaults 30 days, 7 days, 24 hours) bound the rest.
 - **What the live erase finds by value, and its limits.** The person's ids and identifier values
   are matched ignoring case. Assistant transcripts keep substring matching. Everything else
   matches an identifier only as a whole field: a CSV cell (bounded by the start or end of the
@@ -1269,7 +1270,7 @@ identifier value. Operator duties:
   found, and a value spelled differently is missed. A value split across two chunks is found, and
   the whole file is deleted; every such import that has not ended is set `failed` with the code
   `erased` in the same transaction, so a running worker cannot commit a batch afterwards. Cost:
-  the erase reads the workspace's import files of the last 7 days once, each chunk tested against
+  the erase reads the workspace's import files within the `retention.import_file_days` window (default 7 days) once, each chunk tested against
   all identifiers in one pass. Each delete is bounded by the workspace. The content scan also reads
   the surviving tables (suppressions, the ledger, the audit log): their rows stay, plaintext may
   not. The erasure ledger file (`privacy.ledger_dir`) is outside the database, so the scan does
@@ -1293,8 +1294,8 @@ document may hold at most `privacy.export_max_bytes` of JSON before compression 
 a person over the cap ends as `failed` with the code `export_too_large` and nothing is stored.
 It is the one place values leave the system, so only
 workspace admins can list exports or download one, and every download is audited as
-`privacy.export_downloaded`. `GET .../privacy/exports/{id}/download` returns the file for 24 hours
-after the export is ready and then answers 410; the scheduler leader drops expired content
+`privacy.export_downloaded`. `GET .../privacy/exports/{id}/download` returns the file for the configured window
+(`retention.export_hours`, default 24 hours) after the export is ready and then answers 410; the scheduler leader drops expired content
 hourly. Erasing the person deletes their exports.
 
 Everything above is on the **Privacy** page of the web UI, visible to workspace admins and the
@@ -1562,9 +1563,9 @@ personal data; cells that start like a spreadsheet formula get a leading `'`. Ev
 who may read gets the codes alone. Each download is audited.
 
 **Retention and personal data.** The cells of rejected rows are the one place the file's
-values are kept beyond the people they created: they are admin-only and deleted 30 days after
-they were written. The scheduler leader deletes the uploaded file 7 days after an import ends
-(succeeded, failed or cancelled) and the rejects after 30 days. An import that is uploaded, mapped or dry-run and untouched for 7 days is cancelled as `abandoned` and loses its file at once, and an upload that never finished (a crash mid-body) is deleted after a day.
+values are kept beyond the people they created: they are admin-only and deleted after the
+configured window (`retention.import_reject_days`, default 30 days) from when they were written. The scheduler leader deletes the uploaded file after the configured window (`retention.import_file_days`, default 7 days) once an import ends
+(succeeded, failed or cancelled) and the rejects at their window. An import that is uploaded, mapped or dry-run and untouched for 7 days is cancelled as `abandoned` and loses its file at once, and an upload that never finished (a crash mid-body) is deleted after a day.
 The import itself, its mapping and its counters are kept. The import
 tables hold no person id, so an erasure does not reach the cells in a reject; they age out. The
 audit log records `import.created`, `import.run_started`, `import.cancelled` and
@@ -2560,7 +2561,7 @@ workspace start in any rolling hour; past that the answer is 429 with `Retry-Aft
 recipient is never sent to (`suppressed`), and an unverified sender ends `sender_unverified`. The job
 checks the recipient again when it runs: a member must still be a member (and the account's current
 address is used) and an allowlist entry must still exist, or the row ends `failed` with
-`recipient_unavailable` and nothing is sent. The log keeps 13 months. The log stores no address; an
+`recipient_unavailable` and nothing is sent. The log keeps the configured window (`retention.test_send_months`, default 13 months). The log stores no address; an
 allowlist entry holds the hash, the masked hint and the normalised address sealed with the master key
 like a credential, and no job payload ever holds an address. Erasing a person deletes the log rows and
 the allowlist entries sent to or holding their addresses, and purges their queued test-send jobs. The

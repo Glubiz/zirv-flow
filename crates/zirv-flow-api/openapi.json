@@ -15829,7 +15829,7 @@
         "tags": [
           "privacy"
         ],
-        "summary": "Asks for an export of everything held about a person: profile, identities, ledger\ncontributions, events, consent and its history, lists and segments and their history, merges\nand identity conflicts, flow enrollments with their steps, waits and entries, the message log\nand its links, forwarding rows and handled markers, ingest rejects, decision records and saved\ntemplate previews, with the data of merged people under the survivor. A document past the\nsize cap fails with the code `export_too_large`. A background job\nbuilds it; it can be downloaded for 24 hours once it is ready. The request is given as a\n`person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.\nAudited as `privacy.export_requested`.",
+        "summary": "Asks for an export of everything held about a person: profile, identities, ledger\ncontributions, events, consent and its history, lists and segments and their history, merges\nand identity conflicts, flow enrollments with their steps, waits and entries, the message log\nand its links, forwarding rows and handled markers, ingest rejects, decision records and saved\ntemplate previews, with the data of merged people under the survivor. A document past the\nsize cap fails with the code `export_too_large`. A background job\nbuilds it; it can be downloaded for the configured window\n(`retention.export_hours`, default 24 hours) once it is ready. The request is given as a\n`person_id` or as an `identifier`. Needs the workspace admin role and the CSRF token.\nAudited as `privacy.export_requested`.",
         "operationId": "request_export",
         "parameters": [
           {
@@ -16255,7 +16255,7 @@
         "tags": [
           "retention"
         ],
-        "summary": "Replaces the workspace's own message and decision-log windows. A value must be at least the\ndeployment minimum and at most the deployment window; null (or a missing field) returns the\nwindow to the deployment value. Audit, ingest rejects, import files, job history and events are\nthe deployment's alone, and assistant transcripts stay under the AI settings: any other field\nis a 422. Audited as `retention.updated`, with window names and day counts only.",
+        "summary": "Changes the workspace's own message and decision-log windows. A value must be at least the\ndeployment minimum and at most the deployment window; a missing field keeps the stored value\nand null returns the window to the deployment value. Audit, ingest rejects, import files, job history and events are\nthe deployment's alone, and assistant transcripts stay under the AI settings: any other field\nis a 422. Audited as `retention.updated`, with window names and day counts only.",
         "operationId": "put_retention",
         "parameters": [
           {
@@ -32977,7 +32977,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "24 hours after `ready_at`; the download answers 410 from then on."
+            "description": "The configured window (`retention.export_hours`, default 24 hours) after `ready_at`; the\ndownload answers 410 from then on."
           },
           "failure_code": {
             "type": [
@@ -37622,7 +37622,7 @@
       },
       "PutRetentionRequest": {
         "type": "object",
-        "description": "The windows a workspace admin may set. A PUT replaces both; a field that is null or left out\nreturns that window to the deployment value.",
+        "description": "The windows a workspace admin may set. A field left out keeps the stored value; an explicit\n`null` returns that window to the deployment value.",
         "properties": {
           "decision_days": {
             "type": [
@@ -37630,7 +37630,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Days decision records are kept, within the same rule."
+            "description": "Days decision records are kept, within the same rule and with the same treatment of a\nmissing field and `null`."
           },
           "messages_days": {
             "type": [
@@ -37638,7 +37638,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Days messages are kept; at least the deployment minimum and at most the deployment window."
+            "description": "Days messages are kept; at least the deployment minimum and at most the deployment window.\nLeft out keeps the stored value; `null` returns to the deployment value."
           }
         },
         "additionalProperties": false

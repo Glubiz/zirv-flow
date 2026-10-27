@@ -1,5 +1,7 @@
-//! Import retention (architecture section 16.3): the uploaded file goes 7 days after the
-//! import ends, the refused rows' cells 30 days after they were written. The import row, its
+//! Import retention (architecture section 16.3): the uploaded file goes after the configured
+//! window (`retention.import_file_days`, default 7) once the import ends, the refused rows' cells
+//! after the configured window (`retention.import_reject_days`, default 30) from when they were
+//! written. The import row, its
 //! counters and its reject codes' count stay.
 
 use uuid::Uuid;
@@ -125,10 +127,10 @@ pub struct ImportErasure {
 /// newline matches only as one correctly quoted cell; one made only of those and whitespace is
 /// ignored.
 ///
-/// Cost: the workspace's chunks (a 7 day window) are read once per erase, each window decoded
+/// Cost: the workspace's chunks (the `retention.import_file_days` window, default 7) are read once per erase, each window decoded
 /// once and tested against one combined pattern for all needles, never once per needle. The
 /// CSV is matched as `escape` text, so a value with non-ASCII bytes matches itself, and a value
-/// written in another spelling in the file is missed. The refused rows' cells (30 days) are
+/// written in another spelling in the file is missed. The refused rows' cells (`retention.import_reject_days`, default 30) are
 /// tested the same way, one scalar at a time.
 ///
 /// Both deletes are bounded by the workspace (`import_chunks_workspace_idx`,
