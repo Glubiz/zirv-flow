@@ -404,18 +404,14 @@ pub(crate) async fn enqueue_event_enrolls(
             _ => by_flow.push((flow, version, vec![(person, event)])),
         }
     }
-    // An enrollment continues the trace of the event that starts it.
-    let traces: HashMap<Uuid, TraceId> = sqlx::query_as::<_, (Uuid, Uuid)>(
-        "SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)",
-    )
-    .bind(workspace.as_uuid())
-    .bind(&events)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(StoreError::query)?
-    .into_iter()
-    .map(|(id, trace)| (id, TraceId::from_uuid(trace)))
-    .collect();
+    // An enrollment continues the trace of the event that starts it: the first event of each
+    // job. No match, no lookup.
+    let starters: Vec<Uuid> = by_flow
+        .iter()
+        .flat_map(|(_, _, pairs)| pairs.chunks(MAX_ENROLL_PEOPLE))
+        .filter_map(|chunk| chunk.first().map(|&(_, event)| event))
+        .collect();
+    let traces = trace_ids(connection, workspace, &starters).await?;
     let mut enqueued = 0;
     for (flow, version, pairs) in by_flow {
         for chunk in pairs.chunks(MAX_ENROLL_PEOPLE) {
@@ -441,6 +437,31 @@ pub(crate) async fn enqueue_event_enrolls(
     }
     Ok(enqueued)
 }
+
+/// The trace each of `events` arrived on, in one read. An erased event is simply missing. The
+/// lookup is by `(workspace_id, id)`: the id is minted at receipt but `occurred_at`, the key the
+/// table is partitioned and ordered by, is the client's, so it cannot be derived from the id.
+pub(crate) async fn trace_ids(
+    connection: &mut PgConnection,
+    workspace: WorkspaceId,
+    events: &[Uuid],
+) -> Result<HashMap<Uuid, TraceId>, StoreError> {
+    if events.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(sqlx::query_as::<_, (Uuid, Uuid)>(TRACE_IDS_SQL)
+        .bind(workspace.as_uuid())
+        .bind(events)
+        .fetch_all(connection)
+        .await
+        .map_err(StoreError::query)?
+        .into_iter()
+        .map(|(id, trace)| (id, TraceId::from_uuid(trace)))
+        .collect())
+}
+
+const TRACE_IDS_SQL: &str =
+    "SELECT id, trace_id FROM events WHERE workspace_id = $1 AND id = ANY($2)";
 
 /// An event as the trigger filters see it, with the person it belongs to.
 #[derive(Clone, Debug, PartialEq)]
@@ -1228,6 +1249,124 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(seen, expected);
+    }
+
+    fn index_names(plan: &Value, out: &mut Vec<String>, scans: &mut Vec<String>) {
+        if let Some(object) = plan.as_object() {
+            if let Some(kind) = object.get("Node Type").and_then(Value::as_str)
+                && kind.ends_with("Scan")
+            {
+                scans.push(kind.to_owned());
+            }
+            if let Some(index) = object.get("Index Name").and_then(Value::as_str) {
+                out.push(index.to_owned());
+            }
+            object
+                .values()
+                .for_each(|child| index_names(child, out, scans));
+        } else if let Some(array) = plan.as_array() {
+            array
+                .iter()
+                .for_each(|child| index_names(child, out, scans));
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_lookup_plan_uses_the_id_index_on_a_table_without_statistics(pool: PgPool) {
+        let ws = workspace(&pool, "trace-plan").await;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             SELECT gen_random_uuid(), $1, $2, 'order', now() - make_interval(secs => n), now(), \
+                '{}'::jsonb, 'web', gen_random_uuid(), 'valid' FROM generate_series(1, 3000) n",
+        )
+        .bind(ws.as_uuid())
+        .bind(person)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let analysed: Option<OffsetDateTime> = sqlx::query_scalar(
+            "SELECT max(coalesce(last_analyze, last_autoanalyze)) FROM pg_stat_user_tables \
+             WHERE relname LIKE 'events%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(analysed.is_none(), "the tables must have no statistics");
+
+        let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (FORMAT JSON) {TRACE_IDS_SQL}"
+        )))
+        .bind(ws.as_uuid())
+        .bind([Uuid::now_v7()])
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let (mut indexes, mut scans) = (Vec::new(), Vec::new());
+        index_names(&plan, &mut indexes, &mut scans);
+        assert!(!indexes.is_empty(), "{plan}");
+        assert!(
+            indexes
+                .iter()
+                .all(|index| index.ends_with("workspace_id_id_idx")),
+            "{plan}"
+        );
+        assert!(scans.iter().all(|scan| scan == "Index Scan"), "{plan}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trace_of_an_event_comes_from_its_workspace_and_none_is_asked_without_a_match(
+        pool: PgPool,
+    ) {
+        let ws = workspace(&pool, "trace-of").await;
+        let other = workspace(&pool, "trace-other").await;
+        let person = Uuid::now_v7();
+        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+            .bind(person)
+            .bind(ws.as_uuid())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (event, trace) = (Uuid::now_v7(), Uuid::now_v7());
+        // An occurred_at far from the id's own instant, as a late event has.
+        sqlx::query(
+            "INSERT INTO events (id, workspace_id, person_id, name, occurred_at, received_at, \
+                properties, source, trace_id, validation_state) \
+             VALUES ($1, $2, $3, 'order', now() - interval '300 days', now(), '{}', 'web', $4, \
+                'valid')",
+        )
+        .bind(event)
+        .bind(ws.as_uuid())
+        .bind(person)
+        .bind(trace)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+
+        let found = trace_ids(&mut connection, ws, &[event, Uuid::now_v7()])
+            .await
+            .unwrap();
+        let foreign = trace_ids(&mut connection, other, &[event]).await.unwrap();
+        let none = trace_ids(&mut connection, ws, &[]).await.unwrap();
+        let unmatched = enqueue_event_enrolls(&mut connection, ws, &[arrival(1, 11, "order")])
+            .await
+            .unwrap();
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found.get(&event), Some(&TraceId::from_uuid(trace)));
+        assert!(foreign.is_empty() && none.is_empty());
+        assert_eq!(unmatched, 0);
     }
 
     #[sqlx::test]
