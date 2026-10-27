@@ -145,6 +145,8 @@ mod tests {
 
         let encoded = format!("q={}", percent_encode(NAME));
         assert!(leaks(&encoded, &needles).contains(&"name (percent-encoded)".to_owned()));
+        let form = format!("q={}", percent_encode(NAME).replace("%20", "+"));
+        assert!(leaks(&form, &needles).contains(&"name (form-encoded)".to_owned()));
         let key = root.hmac_key(HmacPurpose::Identifier);
         let identifier = Identifier::parse("email", EMAIL).expect("an identifier");
         let hash = hex(&identifier_hash(&key, &identifier));
