@@ -324,6 +324,13 @@ per 500-item drain transaction. The drain transaction is the unit that commits t
 event it is 0.1 ms. The statements are issued one by one; the code does have a batched
 `append_decisions`, which the drain does not use.
 
+Since 0.144.0 (issue #75) a drain batch queues its decisions and appends them in one statement
+(`EventBatch::finish`), in the batch's transaction. The figures above are the one-statement-each
+code, kept as the record. Debug-build micro-benchmark against a host PostgreSQL
+(`five_hundred_decisions_one_by_one_against_one_batched_call`, 200 runs of 500 decisions, rolled
+back): one by one p50 168.8 ms and p95 194.6 ms; one batched call p50 14.0 ms and p95 15.0 ms.
+The container A/B and the 5 ms and 10% targets are re-measured in the M8 validation run.
+
 **Throughput loss.** Native release builds, unconstrained (not in the tier budgets), the same PostgreSQL;
 a backlog of 185k to 193k track events is preloaded with no worker running, then the worker and scheduler
 are started and the time to empty is measured. `off` is built with `bench-no-decisions`:
