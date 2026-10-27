@@ -34896,6 +34896,7 @@
           "email",
           "role",
           "view_pii",
+          "owner",
           "added_at"
         ],
         "properties": {
@@ -34905,6 +34906,10 @@
           },
           "email": {
             "type": "string"
+          },
+          "owner": {
+            "type": "boolean",
+            "description": "Whether this member is the instance owner, who has every right in every workspace."
           },
           "role": {
             "type": "string",

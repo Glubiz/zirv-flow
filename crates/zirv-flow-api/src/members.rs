@@ -25,6 +25,8 @@ pub(crate) struct MemberBody {
     role: Role,
     /// Whether a publisher, editor or viewer sees personal values unmasked. An admin always does.
     view_pii: bool,
+    /// Whether this member is the instance owner, who has every right in every workspace.
+    owner: bool,
     #[serde(with = "time::serde::rfc3339")]
     #[schema(value_type = String, format = DateTime)]
     added_at: OffsetDateTime,
@@ -37,6 +39,7 @@ impl From<&Member> for MemberBody {
             email: member.email.clone(),
             role: member.role,
             view_pii: member.view_pii,
+            owner: member.is_owner,
             added_at: member.created_at,
         }
     }
@@ -171,6 +174,7 @@ mod tests {
             email: "a@example.com".into(),
             role: Role::Admin,
             view_pii: true,
+            is_owner: true,
             created_at: OffsetDateTime::UNIX_EPOCH,
         };
 
@@ -178,6 +182,7 @@ mod tests {
 
         assert_eq!(json["role"], "admin");
         assert_eq!(json["view_pii"], true);
+        assert_eq!(json["owner"], true);
         assert_eq!(json["added_at"], "1970-01-01T00:00:00Z");
     }
 

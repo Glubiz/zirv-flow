@@ -7653,6 +7653,8 @@ export interface components {
             /** Format: date-time */
             added_at: string;
             email: string;
+            /** @description Whether this member is the instance owner, who has every right in every workspace. */
+            owner: boolean;
             /**
              * @description `admin`, `publisher`, `editor` or `viewer`.
              * @example editor

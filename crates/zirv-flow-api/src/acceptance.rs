@@ -658,6 +658,38 @@ mod tests {
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_member_list_marks_only_the_instance_owner_as_owner(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Acme").await;
+        let owner_id: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE is_owner")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (member_id, _) = user(&pool, &router, "member@example.com").await;
+        add_member(&router, &owner, &ws, UserId::from_uuid(owner_id), "admin").await;
+        add_member(&router, &owner, &ws, member_id, "editor").await;
+
+        let reply = call(
+            &router,
+            "GET",
+            &format!("/api/v1/workspaces/{ws}/members"),
+            None,
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::OK);
+        let rows = reply.body.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let is_owner = row["user_id"] == owner_id.to_string();
+            assert_eq!(row["owner"], is_owner, "{row}");
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn key_scopes_limit_what_a_key_may_do_in_its_own_workspace(pool: PgPool) {
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
