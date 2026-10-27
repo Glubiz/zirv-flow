@@ -2,6 +2,7 @@
 //! allowlist, the gated dispatch that is the only way product code calls a model, and the
 //! admin-only settings, models and usage endpoints.
 
+pub(crate) mod catalog;
 pub(crate) mod config;
 pub(crate) mod diff;
 pub(crate) mod dispatch;
