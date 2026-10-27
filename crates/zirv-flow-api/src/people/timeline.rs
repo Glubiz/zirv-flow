@@ -17,7 +17,7 @@ use zirv_flow_store::{
 };
 
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::consent::bool_param;
 use crate::jobs_admin::{DEFAULT_LIMIT, parse_limit};
 use crate::problem::{ApiError, Problem};
@@ -230,7 +230,7 @@ pub(crate) async fn get(
         zirv_flow_store::load_timeline(&state.pool, workspace.id, person, filter, limit, before)
             .await?
             .ok_or_else(ApiError::not_found)?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     Ok(Json(TimelineBody {
         entries: page
             .entries

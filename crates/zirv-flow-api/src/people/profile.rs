@@ -13,7 +13,7 @@ use zirv_flow_store::{IdentityGroup, Profile, ProfileMerge, ProfileTrait, Stored
 
 use super::search::DisplayBody;
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::consent::person::ConsentStateBody;
 use crate::lists::person::PersonListBody;
 use crate::problem::{ApiError, Problem};
@@ -184,7 +184,7 @@ pub(crate) async fn get(
     let profile = zirv_flow_store::load_profile(&state.pool, workspace.id, requested)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let consent = zirv_flow_store::consent_for(&state.pool, workspace.id, profile.id)
         .await?
         .unwrap_or_default();

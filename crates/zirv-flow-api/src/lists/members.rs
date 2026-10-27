@@ -12,7 +12,7 @@ use zirv_flow_store::{ListMember, MAX_PEOPLE_PER_CALL};
 
 use super::{capped, invalid, membership_error, source_of};
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -185,7 +185,7 @@ pub(crate) async fn page(
         Some(last) if more => Some(encode_cursor((last.added_at, last.person_id))),
         _ => None,
     };
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     Ok(Json(ListMembersBody {
         members: members
             .into_iter()

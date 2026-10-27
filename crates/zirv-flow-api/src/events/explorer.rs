@@ -32,7 +32,7 @@ use zirv_flow_store::{
 };
 
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::consent::csv;
 use crate::jobs_admin::{DEFAULT_LIMIT, MAX_LIMIT};
 use crate::json::ApiJson;
@@ -207,7 +207,7 @@ pub(crate) async fn count(
         .parse()
         .map_err(|()| ApiError::unprocessable("bucket: must be hour, day or week"))?;
     let filters = request.scope.filters()?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let result = zirv_flow_store::explore_count(
         &state.pool,
@@ -289,7 +289,7 @@ pub(crate) async fn breakdown(
 ) -> Result<Json<ExploreBreakdownBody>, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let filters = request.scope.filters()?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let result = zirv_flow_store::explore_breakdown(
         &state.pool,
@@ -436,7 +436,7 @@ pub(crate) async fn list(
         ),
     };
     let filters = request.scope.filters()?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let started = Instant::now();
     let page = zirv_flow_store::explore_rows(
         &state.pool,
@@ -558,7 +558,7 @@ pub(crate) async fn export(
 ) -> Result<Response, ApiError> {
     let workspace = authorize(&state, &principal, path_id(&ws)?, Need::Read).await?;
     let filters = request.filters()?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let limits = state.explorer.export();
 
     // Count first: a bad filter or a timeout is an error response, not a broken stream, and

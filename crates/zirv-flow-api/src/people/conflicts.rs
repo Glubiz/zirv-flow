@@ -14,7 +14,7 @@ use zirv_flow_store::{ConflictResolution, IdentityConflict, PgPool, ResolveError
 
 use crate::AppState;
 use crate::admin::{self, AdminError, Context};
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, decode_cursor, encode_cursor, parse_limit};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -281,7 +281,7 @@ pub(crate) async fn get(
     let conflict = zirv_flow_store::find_conflict(&state.pool, workspace.id, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
     let mut people: Vec<PersonIdentitiesBody> = Vec::with_capacity(2);
     for person in [conflict.person_id, conflict.other_person_id] {
         let current = zirv_flow_store::current_person(&state.pool, workspace.id, person)
