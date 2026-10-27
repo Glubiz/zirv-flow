@@ -12,6 +12,8 @@ mod condition;
 mod deps;
 mod evaluate;
 #[cfg(any(test, feature = "test-support"))]
+mod fuzz;
+#[cfg(any(test, feature = "test-support"))]
 pub mod generate;
 mod leaf;
 mod lower;
@@ -31,6 +33,8 @@ pub use compile::{CompiledSegment, compile, compile_policy};
 pub use condition::{ConditionError, compile_condition, parse_condition};
 pub use deps::Deps;
 pub use evaluate::{EvalNode, Evaluation, Observed, Outcome, evaluate, evaluate_policy};
+#[cfg(any(test, feature = "test-support"))]
+pub use fuzz::check_segment_ast;
 pub use normalize::normalize;
 pub use policy::{
     CompiledRule, PolicyFacts, RuleKind, SendContext, SnapshotMessage, compile_rules,

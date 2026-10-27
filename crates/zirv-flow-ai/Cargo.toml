@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [features]
 # The deterministic fake provider, for tests of this crate and of the crates that call it.

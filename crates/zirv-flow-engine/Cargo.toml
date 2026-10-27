@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [features]
 # TEST ONLY: the simulation's seeded generators (`sim`), for the PostgreSQL simulation in

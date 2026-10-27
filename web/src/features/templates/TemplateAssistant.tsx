@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { ApiError } from "../../api";
-import { Button, Dialog, InlineError } from "../../ui";
+import { Button, Dialog, InlineError, previewDocument } from "../../ui";
 import { AssistantPanel, DraftChanges, assistantGone, failureText, type Failure, type AcceptedDraft, type Draft, type TemplateTask } from "../assistant";
 import type { Editable, TemplateDetail } from "./model";
 
@@ -198,7 +198,7 @@ function Frame({ title, render, width, subject, missing }: { title: string; rend
         <>
           <p className="faint">{subject ?? render.subject ?? ""}</p>
           <div className={width === "mobile" ? "tp-frame tp-frame-mobile" : "tp-frame"}>
-            <iframe title={`${title} render`} sandbox="" srcDoc={render.html ?? ""} className="tp-iframe" />
+            <iframe title={`${title} render`} sandbox="" srcDoc={previewDocument(render.html ?? "")} className="tp-iframe" />
           </div>
         </>
       ) : (

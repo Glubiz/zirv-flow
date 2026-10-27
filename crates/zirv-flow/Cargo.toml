@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 description = "A self-hosted marketing automation tool: connect data sources, segment your people, and run automation flows."
 readme = "../../README.md"
 keywords = ["marketing-automation", "segmentation", "self-hosted", "automation", "workflow"]
