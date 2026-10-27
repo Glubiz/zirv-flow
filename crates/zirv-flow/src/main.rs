@@ -12,6 +12,8 @@ mod config;
 mod e2e;
 mod healthcheck;
 mod log;
+#[cfg(test)]
+mod ops_docs;
 mod otlp;
 mod secrets;
 
