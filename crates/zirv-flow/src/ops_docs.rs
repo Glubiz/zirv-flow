@@ -90,14 +90,18 @@ fn parse_rules(text: &str) -> Result<Vec<Rule>, String> {
     Ok(rules)
 }
 
+/// The identifier at the start of `text`.
+fn name_at(text: &str) -> String {
+    text.chars()
+        .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
+        .collect()
+}
+
 /// The `zirv_flow_` identifiers in `text`.
 fn names_in(text: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for (at, _) in text.match_indices(PREFIX) {
-        let name: String = text[at..]
-            .chars()
-            .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
-            .collect();
+        let name = name_at(&text[at..]);
         if name.len() > PREFIX.len() && !name.ends_with('_') {
             found.insert(name);
         }
@@ -156,10 +160,7 @@ struct Selector {
 fn selectors(expr: &str) -> Vec<Selector> {
     let mut found = Vec::new();
     for (at, _) in expr.match_indices(PREFIX) {
-        let name: String = expr[at..]
-            .chars()
-            .take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_')
-            .collect();
+        let name = name_at(&expr[at..]);
         let after = &expr[at + name.len()..];
         let matchers = match after
             .strip_prefix('{')
