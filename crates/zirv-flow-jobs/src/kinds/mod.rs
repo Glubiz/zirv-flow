@@ -7,6 +7,7 @@ use zirv_flow_core::WorkspaceId;
 use crate::{ErasedKind, JobError};
 
 mod ai_transcripts;
+mod audit_retention;
 mod decisions_retention;
 mod delivery_send;
 mod delivery_sync;
@@ -22,6 +23,7 @@ mod import_rows;
 mod import_run;
 mod ingest_drain;
 mod ingest_replay;
+mod jobs_retention;
 mod kafka_consume;
 mod messages_retention;
 mod noop;
@@ -50,6 +52,8 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &events_retention::EventsRetention,
     &messages_retention::MessagesRetention,
     &decisions_retention::DecisionsRetention,
+    &jobs_retention::JobsRetention,
+    &audit_retention::AuditRetention,
     &ai_transcripts::AiTranscripts,
     &ingest_drain::IngestDrain,
     &ingest_replay::IngestReplay,
