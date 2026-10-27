@@ -2199,8 +2199,12 @@ mod tests {
     }
 
     #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL; set ZIRV_FLOW_BENCH_NOTIFY to run the 18 s stress"]
     async fn commits_do_not_wait_on_the_notify_lock_under_load(pool: PgPool) {
+        if std::env::var_os("ZIRV_FLOW_BENCH_NOTIFY").is_none() {
+            eprintln!("ZIRV_FLOW_BENCH_NOTIFY is not set: skipping the stress run");
+            return;
+        }
         let run_for = Duration::from_secs(6);
         let production = stress(&pool, Notify::Production, run_for).await;
         let never = stress(&pool, Notify::Never, run_for).await;
@@ -2225,6 +2229,45 @@ mod tests {
             "enqueue still serialises commits: {production:?}"
         );
         assert!(production.notifications * 20 < always.notifications.max(1));
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_wake_check_uses_the_ready_kind_index_despite_a_large_backlog(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+             SELECT gen_random_uuid(), 'big.kind', '{}', gen_random_uuid(), 'api', 'x' \
+             FROM generate_series(1, 5000)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE jobs").execute(&pool).await.unwrap();
+
+        let plan: serde_json::Value = sqlx::query_scalar(
+            "EXPLAIN (FORMAT JSON) \
+             SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE state = 'ready' \
+                                        AND kind = 'idle.kind' AND run_at <= now())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let mut indexes = Vec::new();
+        let mut stack = vec![&plan];
+        while let Some(node) = stack.pop() {
+            match node {
+                Value::Object(map) => {
+                    if let Some(Value::String(name)) = map.get("Index Name") {
+                        indexes.push(name.clone());
+                    }
+                    stack.extend(map.values());
+                }
+                Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+        assert_eq!(indexes, ["jobs_ready_kind_idx"], "{plan}");
     }
 
     async fn wait_for_notification(listener: &mut PgListener) -> Duration {
