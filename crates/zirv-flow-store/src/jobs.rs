@@ -1759,6 +1759,35 @@ mod tests {
         assert!(rows[1].1.is_none());
     }
 
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_live_enrollments_index_migration_accepts_the_index_built_by_hand(pool: PgPool) {
+        let mut before = sqlx::migrate!("./migrations");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < 72)
+            .cloned()
+            .collect();
+        before.run(&pool).await.unwrap();
+        sqlx::query(
+            "CREATE INDEX enrollments_live_idx ON enrollments (state, wake_at)              WHERE state IN ('active', 'waiting')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::migrate(&pool).await.unwrap();
+
+        let indexes: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_indexes WHERE indexname = 'enrollments_live_idx'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(indexes, 1);
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn depths_count_each_state_per_kind_and_age_only_runnable_ready_jobs(pool: PgPool) {

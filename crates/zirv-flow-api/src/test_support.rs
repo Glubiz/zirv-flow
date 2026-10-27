@@ -179,11 +179,62 @@ pub(crate) async fn the_scan_finds_a_planted(pool: &PgPool, markers: &[&str]) {
     }
 }
 
+/// The value of the series `series` (its name and labels as rendered, such as
+/// `zirv_flow_explorer_timeouts_total{kind="count"}`) in the exposition text, if it is there.
+pub(crate) fn metric_sample(output: &str, series: &str) -> Option<f64> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix(series)?.strip_prefix(' '))
+        .find_map(|value| value.parse().ok())
+}
+
+/// Fails when a label of any series in the rendered `/metrics` text holds one of the `seeded`
+/// values (an email, a phone number, a name, a property value) or an `@`: labels carry closed
+/// sets and ids only.
+pub(crate) fn labels_hold_no(output: &str, seeded: &[&str]) {
+    for line in output.lines().filter(|line| !line.starts_with('#')) {
+        let Some((_, rest)) = line.split_once('{') else {
+            continue;
+        };
+        let labels = rest.rsplit_once('}').map_or(rest, |(labels, _)| labels);
+        assert!(
+            !labels.contains('@'),
+            "an address-like label value in {line}"
+        );
+        for value in seeded {
+            assert!(
+                !labels.contains(value),
+                "the seeded value {value} is a label in {line}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const MARKER: &str = "zz-scan-marker-3141";
+
+    #[test]
+    fn the_label_scan_passes_clean_labels_and_flags_a_seeded_value() {
+        let clean = "zirv_flow_jobs{kind=\"a\",state=\"ready\"} 1
+zirv_flow_x 2
+# TYPE x gauge";
+        labels_hold_no(clean, &["pat"]);
+        assert_eq!(metric_sample(clean, "zirv_flow_x"), Some(2.0));
+        assert_eq!(
+            metric_sample(clean, "zirv_flow_jobs{kind=\"a\",state=\"ready\"}"),
+            Some(1.0)
+        );
+        assert_eq!(metric_sample(clean, "zirv_flow"), None);
+
+        let dirty = "zirv_flow_x{plan=\"pat\"} 1";
+        let caught = std::panic::catch_unwind(|| labels_hold_no(dirty, &["pat"]));
+        assert!(caught.is_err());
+        let address = "zirv_flow_x{who=\"a@b\"} 1";
+        assert!(std::panic::catch_unwind(|| labels_hold_no(address, &[])).is_err());
+    }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]

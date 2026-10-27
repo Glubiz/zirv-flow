@@ -8655,6 +8655,9 @@ email,b@example.com,
     async fn the_debugger_streams_outcomes_in_order_masked_per_viewer_and_never_unredacted(
         pool: PgPool,
     ) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
@@ -8718,6 +8721,21 @@ email,b@example.com,
         let owner_frames = as_owner.take(3).await;
         let member_frames = as_member.take(3).await;
         let revealed_by_member = member_reveals.take(3).await;
+        let output = handle.render();
+        assert_eq!(
+            crate::test_support::metric_sample(&output, "zirv_flow_debugger_clients"),
+            Some(3.0),
+            "{output}"
+        );
+        assert!(
+            crate::test_support::metric_sample(
+                &output,
+                "zirv_flow_debugger_delivery_seconds_count"
+            )
+            .is_some_and(|count| count >= 9.0),
+            "{output}"
+        );
+        crate::test_support::labels_hold_no(&output, &["a@example.com", "plain-note"]);
         let outcomes: Vec<&str> = owner_frames
             .iter()
             .map(|frame| frame.data["outcome"].as_str().unwrap())
@@ -8987,6 +9005,9 @@ email,b@example.com,
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_explorer_count_breakdown_list_and_export_agree_and_mask_per_viewer(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
         let router = app(&pool).await;
         let owner = owner(&pool, &router).await;
         let ws = workspace(&router, &owner, "Alpha").await;
@@ -9106,6 +9127,30 @@ email,b@example.com,
         assert_eq!(entry.summary["filter_ops"], json!(["gte"]));
         let summary = entry.summary.to_string();
         assert!(!summary.contains("order") && !summary.contains("total"));
+        // Each query is timed by kind, a successful one times out never, and both exports count.
+        let output = handle.render();
+        for kind in ["count", "breakdown", "list", "export"] {
+            let series = format!("zirv_flow_explorer_query_seconds_count{{kind=\"{kind}\"}}");
+            assert!(
+                crate::test_support::metric_sample(&output, &series).is_some_and(|n| n >= 1.0),
+                "{series} in {output}"
+            );
+            assert!(
+                !output.contains(&format!(
+                    "zirv_flow_explorer_timeouts_total{{kind=\"{kind}\"}}"
+                )),
+                "{output}"
+            );
+        }
+        assert_eq!(
+            crate::test_support::metric_sample(&output, "zirv_flow_explorer_exports_total"),
+            Some(2.0),
+            "{output}"
+        );
+        crate::test_support::labels_hold_no(
+            &output,
+            &["a@example.com", "b@example.com", "member@example.com"],
+        );
     }
 
     #[sqlx::test]
@@ -9196,6 +9241,9 @@ email,b@example.com,
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_explorer_query_past_the_timeout_is_a_503_query_timeout(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = metrics::set_default_local_recorder(&recorder);
         zirv_flow_store::migrate(&pool).await.unwrap();
         let hurried = app_limits(crate::ExplorerLimits {
             interactive_timeout: std::time::Duration::from_millis(1),
@@ -9240,6 +9288,19 @@ email,b@example.com,
             reply.body
         );
         assert_eq!(reply.body["code"], "query_timeout");
+        let output = handle.render();
+        assert_eq!(
+            crate::test_support::metric_sample(
+                &output,
+                "zirv_flow_explorer_timeouts_total{kind=\"count\"}"
+            ),
+            Some(1.0),
+            "{output}"
+        );
+        assert!(
+            !output.contains("zirv_flow_explorer_query_seconds_count{kind=\"count\"}"),
+            "a timed-out query adds no duration: {output}"
+        );
     }
 
     #[sqlx::test]
@@ -10990,9 +11051,21 @@ email,b@example.com,
         for expected in [
             r#"zirv_flow_ai_calls_total{feature="mapping",outcome="ok"} 1"#,
             r#"zirv_flow_ai_refusals_total{reason="budget_exceeded"} 1"#,
+            r#"zirv_flow_ai_tokens_total{feature="mapping",direction="input"} 1000"#,
+            r#"zirv_flow_ai_tokens_total{feature="mapping",direction="output"} 500"#,
+            r#"zirv_flow_ai_latency_seconds_count{feature="mapping"} 1"#,
         ] {
             assert!(output.contains(expected), "{expected} in {output}");
         }
+        assert!(
+            crate::test_support::metric_sample(
+                &output,
+                r#"zirv_flow_ai_estimated_cost_micros_total{feature="mapping"}"#
+            )
+            .is_some_and(|micros| micros > 0.0),
+            "{output}"
+        );
+        crate::test_support::labels_hold_no(&output, &["example.com"]);
     }
 
     /// Runs `count` dispatches at once against a provider that takes a moment to answer, and
