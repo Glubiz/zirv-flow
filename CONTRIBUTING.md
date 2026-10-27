@@ -56,7 +56,7 @@ From the repository root:
 
 ```sh
 rustup toolchain install nightly-2026-10-26 --profile minimal
-cargo +nightly-2026-10-26 install cargo-fuzz --version 0.13.1 --locked
+cargo +stable install cargo-fuzz --version 0.13.1 --locked
 bash fuzz/seed-corpus.sh
 for target in segment_ast manifest template_document sanitize_source; do
   cargo +nightly-2026-10-26 fuzz run "$target" -- -max_total_time=600 -max_len=800000 -timeout=10 -rss_limit_mb=2048

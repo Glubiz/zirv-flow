@@ -46,7 +46,7 @@ jobs:
       - name: Install Rust And cargo-fuzz
         run: |
           rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal
-          cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --version 0.13.1 --locked
+          cargo +stable install cargo-fuzz --version 0.13.1 --locked
       - name: Restore Corpus
         uses: actions/cache/restore@v4.3.0
         with:
