@@ -4526,3 +4526,20 @@ main:focus {
   align-items: center;
   gap: 10px;
 }
+
+.disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.disclosure[open] > .facts {
+  margin-top: 6px;
+  padding: 14px 16px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #d8dde2);
+  border-radius: 14px;
+}

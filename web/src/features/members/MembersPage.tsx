@@ -1,7 +1,7 @@
 import { useState, type SyntheticEvent } from "react";
 import { useParams } from "react-router";
 
-import { client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
+import { ApiError, client, describeError, unwrap, unwrapEmpty, useResource, type ErrorSummary } from "../../api";
 import { Button, Dialog, EmptyState, formatDate, InlineError, PageHeader, Panel, Pill, ResourceView, TextField } from "../../ui";
 import { useSignedInUser } from "../session";
 import { useWorkspaces } from "../workspaces";
@@ -13,14 +13,36 @@ export function MembersPage() {
 }
 
 const ROLE_OPTIONS = [
-  { value: "admin", label: "Admin" },
-  { value: "publisher", label: "Publisher" },
-  { value: "editor", label: "Editor" },
-  { value: "viewer", label: "Viewer" },
+  { value: "admin", label: "Admin", help: "Access, credentials, settings" },
+  { value: "publisher", label: "Publisher", help: "Publishes flows and templates" },
+  { value: "editor", label: "Editor", help: "Edits drafts, runs tests" },
+  { value: "viewer", label: "Viewer", help: "Reads only" },
 ];
+
+const LAST_ADMIN = "A workspace needs an admin";
 
 function roleLabel(role: string): string {
   return ROLE_OPTIONS.find((option) => option.value === role)?.label ?? role;
+}
+
+function roleFrom(value: string): MemberRole {
+  return value === "admin" || value === "publisher" || value === "viewer" ? value : "editor";
+}
+
+function RolesDisclosure() {
+  return (
+    <details className="disclosure">
+      <summary>Roles</summary>
+      <dl className="facts">
+        {ROLE_OPTIONS.map((option) => (
+          <div className="fact" key={option.value}>
+            <dt>{option.label}</dt>
+            <dd>{option.help}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
+  );
 }
 
 function WorkspaceMembers({ ws }: { ws: string }) {
@@ -31,24 +53,34 @@ function WorkspaceMembers({ ws }: { ws: string }) {
   const [removing, setRemoving] = useState<Member | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
   const [failure, setFailure] = useState<ErrorSummary | null>(null);
+  const [refused, setRefused] = useState<string | null>(null);
 
   const name = workspaces.status === "ready" ? workspaces.data.find((item) => item.id === ws)?.name : undefined;
   const access = members.status === "ready" ? accessFor(members.data, user.id, user.is_owner) : null;
-  const canManage = access?.canManage ?? false;
+  const canAdmin = access?.canAdmin ?? false;
+  const adminCount = members.status === "ready" ? members.data.filter((member) => member.role === "admin").length : 0;
+  const lastAdmin = (member: Member) => member.role === "admin" && adminCount <= 1;
+  const reasonShown = (member: Member) => lastAdmin(member) || refused === member.user_id;
+  const reasonId = (member: Member) => `last-admin-${member.user_id}`;
 
-  async function changeRole(member: Member, role: string) {
+  async function save(member: Member, body: { role: string; view_pii?: boolean }) {
     setBusyUser(member.user_id);
     setFailure(null);
+    setRefused(null);
     try {
       await unwrap(
         client.PUT("/api/v1/workspaces/{ws}/members/{user_id}", {
           params: { path: { ws, user_id: member.user_id } },
-          body: { role },
+          body,
         }),
       );
       members.reload();
     } catch (error) {
-      setFailure(describeError(error));
+      if (error instanceof ApiError && error.code === "last_admin") {
+        setRefused(member.user_id);
+      } else {
+        setFailure(describeError(error));
+      }
     } finally {
       setBusyUser(null);
     }
@@ -60,16 +92,14 @@ function WorkspaceMembers({ ws }: { ws: string }) {
         title="Members"
         lede={name ? `People who can work in ${name}.` : "People who can work in this workspace."}
         actions={
-          canManage ? (
+          canAdmin ? (
             <Button variant="primary" onClick={() => setAdding(true)}>
               Add member
             </Button>
           ) : null
         }
       />
-      {access && !canManage ? (
-        <p className="muted">Only workspace admins and the instance owner can add people, change roles or remove people.</p>
-      ) : null}
+      <RolesDisclosure />
       {failure ? <InlineError {...failure} /> : null}
       <Panel flush>
         <ResourceView
@@ -78,7 +108,7 @@ function WorkspaceMembers({ ws }: { ws: string }) {
           isEmpty={(data) => data.length === 0}
           empty={
             <EmptyState title="No members yet">
-              {canManage ? "Add the first person to this workspace." : "Nobody has been added to this workspace."}
+              {canAdmin ? "Add the first person to this workspace." : "Nobody has been added to this workspace."}
             </EmptyState>
           }
         >
@@ -90,8 +120,9 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                   <tr>
                     <th scope="col">Email</th>
                     <th scope="col">Role</th>
+                    {canAdmin ? <th scope="col">Personal data</th> : null}
                     <th scope="col">Added</th>
-                    {canManage ? (
+                    {canAdmin ? (
                       <th scope="col">
                         <span className="visually-hidden">Actions</span>
                       </th>
@@ -106,28 +137,53 @@ function WorkspaceMembers({ ws }: { ws: string }) {
                         {member.user_id === user.id ? <span className="faint"> (you)</span> : null}
                       </td>
                       <td>
-                        {canManage ? (
-                          <select
-                            className="select"
-                            aria-label={`Role for ${member.email}`}
-                            value={member.role}
-                            disabled={busyUser === member.user_id}
-                            onChange={(event) => void changeRole(member, event.target.value)}
-                          >
-                            {ROLE_OPTIONS.map((option) => (
-                              <option key={option.value} value={option.value}>
-                                {option.label}
-                              </option>
-                            ))}
-                          </select>
+                        {canAdmin ? (
+                          <div className="stack-tight">
+                            <select
+                              className="select"
+                              aria-label={`Role for ${member.email}`}
+                              aria-describedby={reasonShown(member) ? reasonId(member) : undefined}
+                              value={member.role}
+                              disabled={busyUser === member.user_id || lastAdmin(member)}
+                              onChange={(event) => void save(member, { role: event.target.value })}
+                            >
+                              {ROLE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            {reasonShown(member) ? (
+                              <span id={reasonId(member)} className="faint">
+                                {LAST_ADMIN}
+                              </span>
+                            ) : null}
+                          </div>
                         ) : (
                           <Pill>{roleLabel(member.role)}</Pill>
                         )}
                       </td>
+                      {canAdmin ? (
+                        <td>
+                          <input
+                            type="checkbox"
+                            role="switch"
+                            aria-label={`Personal data for ${member.email}`}
+                            checked={member.role === "admin" || member.view_pii}
+                            disabled={member.role === "admin" || busyUser === member.user_id}
+                            onChange={(event) => void save(member, { role: member.role, view_pii: event.target.checked })}
+                          />
+                        </td>
+                      ) : null}
                       <td>{formatDate(member.added_at)}</td>
-                      {canManage ? (
+                      {canAdmin ? (
                         <td className="num">
-                          <Button onClick={() => setRemoving(member)} aria-label={`Remove ${member.email}`}>
+                          <Button
+                            onClick={() => setRemoving(member)}
+                            aria-label={`Remove ${member.email}`}
+                            aria-describedby={lastAdmin(member) ? reasonId(member) : undefined}
+                            disabled={lastAdmin(member)}
+                          >
                             Remove
                           </Button>
                         </td>
@@ -252,14 +308,12 @@ function AddMemberDialog({ workspaceId, existing, isOwner, onClose, onAdded }: A
           <label className="field-label" htmlFor="add-member-role">
             Role
           </label>
-          <select
-            id="add-member-role"
-            className="select"
-            value={role}
-            onChange={(event) => setRole(event.target.value === "admin" ? "admin" : "editor")}
-          >
-            <option value="editor">Member</option>
-            <option value="admin">Admin</option>
+          <select id="add-member-role" className="select" value={role} onChange={(event) => setRole(roleFrom(event.target.value))}>
+            {ROLE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </div>
         {failure ? <InlineError {...failure} /> : null}

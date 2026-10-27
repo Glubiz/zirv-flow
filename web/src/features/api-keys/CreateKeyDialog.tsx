@@ -4,13 +4,15 @@ import { client, describeError, unwrap, type components, type ErrorSummary } fro
 import { Button, CopyButton, Dialog, InlineError, TextField } from "../../ui";
 
 type Created = components["schemas"]["CreatedApiKeyBody"];
-type Scope = "ingest" | "read" | "write" | "admin";
+type Scope = "ingest" | "read" | "write" | "publish" | "admin" | "pii";
 
 const SCOPES: { value: Scope; label: string; help: string }[] = [
+  { value: "ingest", label: "Ingest", help: "Send data in" },
   { value: "read", label: "Read", help: "Look at data" },
-  { value: "write", label: "Write", help: "Change data, except members and keys" },
-  { value: "ingest", label: "Ingest", help: "Send data in only" },
-  { value: "admin", label: "Admin", help: "Manage members and keys" },
+  { value: "write", label: "Write", help: "Edit drafts" },
+  { value: "publish", label: "Publish", help: "Go live" },
+  { value: "admin", label: "Admin", help: "Manage access" },
+  { value: "pii", label: "Personal data", help: "See real values" },
 ];
 
 interface CreateKeyDialogProps {
@@ -70,7 +72,7 @@ export function CreateKeyDialog({ workspaceId, onClose }: CreateKeyDialogProps) 
   }
 
   return (
-    <Dialog key="form" title="Create an API key" onClose={onClose}>
+    <Dialog key="form" title="New API key" onClose={onClose}>
       <form className="stack" onSubmit={(event) => void submit(event)} noValidate>
         <TextField
           label="Name"
