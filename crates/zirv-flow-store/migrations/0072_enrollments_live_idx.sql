@@ -8,6 +8,9 @@
 -- range, a lookup that does not grow with the table.
 --
 -- This takes a SHARE lock on `enrollments` until it is built. A populated deployment builds it
--- first with CREATE INDEX CONCURRENTLY under the same name and definition.
-CREATE INDEX enrollments_live_idx ON enrollments (state, wake_at)
+-- first, by hand, with the statement below; the migration then finds it and does nothing:
+--
+--     CREATE INDEX CONCURRENTLY enrollments_live_idx ON enrollments (state, wake_at)
+--         WHERE state IN ('active', 'waiting');
+CREATE INDEX IF NOT EXISTS enrollments_live_idx ON enrollments (state, wake_at)
     WHERE state IN ('active', 'waiting');
