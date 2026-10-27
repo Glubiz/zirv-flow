@@ -75,7 +75,7 @@ pub use assets::{
 };
 pub use audit::{
     AUDIT_BATCH, Actor, ActorKind, AuditEntry, AuditFilter, AuditPage, NewAuditEntry, append_audit,
-    count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
+    append_audit_once_in, count_audit, list_audit, list_audit_page, purge_audit, stream_audit,
 };
 pub use changes::{
     DirtyHead, DirtyPerson, REEVALUATE_JOB_KIND, claim_dirty, dirty_backlog, dirty_heads,
@@ -411,6 +411,7 @@ enum StoreErrorKind {
     Timeout,
     RunActive,
     Erased,
+    AuditSummary,
 }
 
 impl StoreError {
@@ -531,6 +532,16 @@ impl StoreError {
         Self::new(StoreErrorKind::Erased)
     }
 
+    /// An audit summary that holds a banned key or a value shaped like personal data.
+    pub(crate) fn audit_summary(issue: zirv_flow_core::audit::SummaryIssue) -> Self {
+        Self::with_source(StoreErrorKind::AuditSummary, issue)
+    }
+
+    /// Whether the write was refused because the audit summary broke the redaction rules.
+    pub fn is_audit_summary(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::AuditSummary)
+    }
+
     /// Whether the write was refused because an erasure ended the import being uploaded.
     pub fn is_erased(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Erased)
@@ -601,6 +612,10 @@ impl fmt::Display for StoreError {
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
             StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
+            StoreErrorKind::AuditSummary => {
+                formatter.write_str("the audit summary was refused")?;
+                self.write_source(formatter)
+            }
             StoreErrorKind::Erased => {
                 formatter.write_str("the import was erased while it was being uploaded")
             }

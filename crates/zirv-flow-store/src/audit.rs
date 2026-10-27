@@ -107,6 +107,7 @@ pub async fn append_audit<'e>(
         "audit action {:?} is not in zirv_flow_core::audit::ACTIONS",
         entry.action
     );
+    audit::validate_summary(&entry.summary).map_err(StoreError::audit_summary)?;
     sqlx::query(
         "INSERT INTO audit_log \
             (workspace_id, actor_kind, actor_id, action, object_kind, object_id, request_id, \
@@ -126,6 +127,39 @@ pub async fn append_audit<'e>(
     .await
     .map_err(StoreError::query)?;
     Ok(())
+}
+
+/// Appends `entry` unless a row with the same workspace, action, object and summary was written in
+/// the last `window`: for a use that repeats once per message, where one row per window says it as
+/// well. Whether a row was written.
+pub async fn append_audit_once_in<'e>(
+    executor: impl PgExecutor<'e>,
+    entry: &NewAuditEntry,
+    window: std::time::Duration,
+) -> Result<bool, StoreError> {
+    debug_assert!(
+        audit::is_known(entry.action),
+        "audit action {:?} is not in zirv_flow_core::audit::ACTIONS",
+        entry.action
+    );
+    audit::validate_summary(&entry.summary).map_err(StoreError::audit_summary)?;
+    let written = sqlx::query(
+        "INSERT INTO audit_log \n            (workspace_id, actor_kind, actor_id, action, object_kind, object_id, request_id, \n             trace_id, summary) \n         SELECT $1::uuid, $2, $3::uuid, $4, $5, $6::uuid, $7, $8::uuid, $9::jsonb \n         WHERE NOT EXISTS (SELECT 1 FROM audit_log \n             WHERE workspace_id IS NOT DISTINCT FROM $1::uuid AND action = $4 \n               AND object_id IS NOT DISTINCT FROM $6::uuid AND summary = $9::jsonb \n               AND occurred_at > now() - make_interval(secs => $10))",
+    )
+    .bind(entry.workspace_id.map(|id| id.as_uuid()))
+    .bind(entry.actor.kind.as_str())
+    .bind(entry.actor.id)
+    .bind(entry.action)
+    .bind(entry.object_kind)
+    .bind(entry.object_id)
+    .bind(entry.request_id.as_deref())
+    .bind(entry.trace_id)
+    .bind(&entry.summary)
+    .bind(window.as_secs_f64())
+    .execute(executor)
+    .await
+    .map_err(StoreError::query)?;
+    Ok(written.rows_affected() == 1)
 }
 
 /// The newest rows first, at most `limit`.
@@ -339,6 +373,80 @@ mod tests {
         assert_eq!(Actor::api_key(id).kind.as_str(), "api_key");
         assert_eq!(Actor::system().id, None);
         assert_eq!(Actor::anonymous().kind.as_str(), "anonymous");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_summary_with_personal_data_is_refused_and_nothing_is_written(pool: PgPool) {
+        for summary in [
+            json!({"email": "x"}),
+            json!({"note": "ada@example.com"}),
+            json!({"nested": [{"phone": 1}]}),
+        ] {
+            let error = append_audit(
+                &pool,
+                &NewAuditEntry {
+                    summary,
+                    ..entry(None, "flow.created")
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.is_audit_summary());
+            assert!(!error.to_string().contains("ada"));
+        }
+        assert!(list_audit(&pool, 10).await.unwrap().is_empty());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_repeated_use_is_written_once_per_window_object_and_summary(pool: PgPool) {
+        let object = Uuid::new_v4();
+        let entry = |object: Uuid, kind: &str| NewAuditEntry {
+            object_kind: Some("credential"),
+            object_id: Some(object),
+            summary: json!({"use": kind}),
+            ..entry(None, "credential.used")
+        };
+        let hour = std::time::Duration::from_secs(3600);
+
+        assert!(
+            append_audit_once_in(&pool, &entry(object, "send"), hour)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !append_audit_once_in(&pool, &entry(object, "send"), hour)
+                .await
+                .unwrap()
+        );
+        assert!(
+            append_audit_once_in(&pool, &entry(object, "sync"), hour)
+                .await
+                .unwrap()
+        );
+        assert!(
+            append_audit_once_in(&pool, &entry(Uuid::new_v4(), "send"), hour)
+                .await
+                .unwrap()
+        );
+        let none = std::time::Duration::ZERO;
+        assert!(
+            append_audit_once_in(&pool, &entry(object, "send"), none)
+                .await
+                .unwrap()
+        );
+        assert_eq!(list_audit(&pool, 10).await.unwrap().len(), 4);
+        let refused = NewAuditEntry {
+            summary: json!({"token": 1}),
+            ..entry(object, "send")
+        };
+        assert!(
+            append_audit_once_in(&pool, &refused, hour)
+                .await
+                .unwrap_err()
+                .is_audit_summary()
+        );
     }
 
     #[sqlx::test]
