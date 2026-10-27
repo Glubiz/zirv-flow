@@ -15,7 +15,6 @@ use hashbrown::HashMap;
 use sqlx::PgPool;
 use time::macros::datetime;
 use time::{Date, Duration, Month, OffsetDateTime, UtcOffset};
-use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_core::WorkspaceId;
 
@@ -54,11 +53,11 @@ impl Default for DecisionRetention {
 }
 
 /// What one run removed. Counts only.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DecisionRetentionReport {
     pub partitions_dropped: u64,
     /// Partitions a drop gave up on because the table was locked; the next run retries them.
-    pub partitions_skipped: u64,
+    pub skipped_partitions: Vec<String>,
     pub records_deleted: u64,
 }
 
@@ -241,8 +240,7 @@ async fn drop_old_partitions(
                 report.partitions_dropped += 1;
             }
             Err(error) if is_lock_timeout(&error) => {
-                warn!(partition = %name, "decision partition drop skipped: the table is locked");
-                report.partitions_skipped += 1;
+                report.skipped_partitions.push(name);
             }
             Err(error) => return Err(StoreError::query(error)),
         }
@@ -552,13 +550,12 @@ mod tests {
             .unwrap();
 
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!((report.partitions_dropped, report.records_deleted), (0, 1));
+        let mut skipped = report.skipped_partitions.clone();
+        skipped.sort();
         assert_eq!(
-            (
-                report.partitions_dropped,
-                report.partitions_skipped,
-                report.records_deleted
-            ),
-            (0, 2, 1)
+            skipped,
+            ["decision_records_y2025m01", "decision_records_y2025m02"]
         );
         assert!(exists(&pool, "decision_records_y2025m01").await);
         holder.rollback().await.unwrap();
@@ -567,7 +564,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!((again.partitions_dropped, again.partitions_skipped), (2, 0));
+        assert_eq!(again.partitions_dropped, 2);
+        assert!(again.skipped_partitions.is_empty());
         assert!(!exists(&pool, "decision_records_y2025m01").await);
     }
 

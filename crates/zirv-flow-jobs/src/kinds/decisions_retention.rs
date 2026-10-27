@@ -5,7 +5,7 @@
 
 use hashbrown::HashMap;
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 use zirv_flow_store::{
     DecisionRetentionReport, apply_decision_retention_progress, decision_log_size,
 };
@@ -38,13 +38,16 @@ impl JobKind for DecisionsRetention {
             report.records_deleted,
             now.unix_timestamp() as f64,
         );
+        for partition in &report.skipped_partitions {
+            warn!(partition = %partition, "decision partition drop skipped: the table is locked");
+        }
         outcome?;
         let size = decision_log_size(&pool).await?;
         metrics::record_decision_log_size(size.bytes, size.partitions);
         info!(
             records_deleted = report.records_deleted,
             partitions_dropped = report.partitions_dropped,
-            partitions_skipped = report.partitions_skipped,
+            partitions_skipped = report.skipped_partitions.len(),
             "decision retention ran"
         );
         Ok(())
