@@ -2123,7 +2123,10 @@ flowchart LR
 Decision records are append-only and time-partitioned by record time. Their
 retention is set by `retention.decision_days`, default 13 months, bounded from
 30 days to 25 months, with whole-partition drops and no hard volume cap
-(OQ-28, ruling ca12b4e5; 16.3). Erasure removes records scoped to the person
+(OQ-28, ruling ca12b4e5; 16.3). Measured at 200,000 records per shape, a record
+takes about 450 bytes (ingest), 730 (flow step) and 800 (send), about 260, 430
+and 500 without the three secondary indexes; at 1,000 events/s and one record
+per event that is 39 to 69 GB a day, 15 TB (ingest), 25 TB (flow) or 27 TB (send) at the 13-month default. Erasure removes records scoped to the person
 while preserving aggregate operational metrics.
 
 As built (M1 skeleton):
@@ -2870,6 +2873,26 @@ without personal-data values. Templates,
 snippets, themes and assets hold no personal data by design. Each milestone
 that adds a table extends erasure, and a scan of every table asserts that only
 the suppression hash, the ledger entry and id-only audit rows survive.
+
+**Content scan and its limits (#373).** A test seeds distinctive values in every data
+class, erases, then reads every text, JSON, bytea and array column of every base table for
+them (raw, lowercase, percent-encoded, form-encoded), reporting table, column and count and
+never a value. A drift guard fails on a table that is not person-scoped, a survivor, closed by
+value or declared value-free. Data with no person column is deleted by value in the erase
+transaction, beside the transcript delete and outside `DELETIONS`: rejects with no person
+(payload, sample), import chunks (the whole file of an import with a matching chunk; every such
+import that has not ended is set `failed` with `erased` first, in the same transaction, and the
+batch checkpoint locks the import row and requires `running`, so a worker that already read rows
+cannot commit them), import reject cells and contact idempotency keys, each bounded by the
+workspace. Matching: an identifier matches only as a whole field, ignoring case (a CSV cell, a
+JSON scalar, the message id, the whole idempotency key); an email also as a substring; transcripts
+keep substring matching. A non-email identifier embedded in free text is not found. The chunk scan
+reads the workspace's import files of the last 7 days once per erase, each decoded once and tested
+against one combined pattern. The scan also reads the survivor tables (their rows may stay, a
+plaintext value may not). Limits: a changed spelling is missed; replay holds only hashes and
+cannot reach these value-keyed classes, so the live erase is the control and the retention
+windows (30 days, 7 days, 24 hours) bound the rest; the ledger file under `privacy.ledger_dir` is
+outside the database and the scan does not cover it.
 
 **Ledger outside the database (OQ-13, ruling cae7a407).** `privacy.ledger_dir`
 names the directory holding one JSON file per completed erasure entry.

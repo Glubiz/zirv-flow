@@ -7,6 +7,7 @@ use zirv_flow_core::WorkspaceId;
 use crate::{ErasedKind, JobError};
 
 mod ai_transcripts;
+mod decisions_retention;
 mod delivery_send;
 mod delivery_sync;
 mod destination_erase;
@@ -48,6 +49,7 @@ pub(crate) static ALL: &[&dyn ErasedKind] = &[
     &traits_slot::TraitsSlotClear,
     &events_retention::EventsRetention,
     &messages_retention::MessagesRetention,
+    &decisions_retention::DecisionsRetention,
     &ai_transcripts::AiTranscripts,
     &ingest_drain::IngestDrain,
     &ingest_replay::IngestReplay,
