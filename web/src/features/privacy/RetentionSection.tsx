@@ -123,9 +123,7 @@ export function RetentionSection({ workspaceId, canAdmin }: { workspaceId: strin
               <tbody>
                 {data.windows.map((window) => (
                   <tr key={window.key}>
-                    <td className="strong">
-                      {labelOf(window)}
-                    </td>
+                    <td className="strong">{labelOf(window)}</td>
                     <td>{window.value == null ? "Off" : formatWindow(window.value)}</td>
                     <td>
                       <Change workspaceId={workspaceId} window={window} canAdmin={canAdmin} onShorten={(w) => setEditing(toEditable(w))} />
