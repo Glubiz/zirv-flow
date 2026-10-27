@@ -78,3 +78,14 @@ describe("flow graph edits", () => {
     ]);
   });
 });
+
+describe("flow layout with count badges", () => {
+  it("grows the card of a counted step and moves the rows below it down by as much", () => {
+    const plain = layout(graph);
+    const grown = layout(graph, new Map([["n2", 30]]));
+
+    expect(grown.placed.get("n2")?.height).toBe((plain.placed.get("n2")?.height ?? 0) + 30);
+    expect(grown.placed.get("n3")?.y).toBe((plain.placed.get("n3")?.y ?? 0) + 30);
+    expect(grown.placed.get("n1")).toEqual(plain.placed.get("n1"));
+  });
+});
