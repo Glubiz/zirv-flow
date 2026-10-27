@@ -364,9 +364,19 @@ fn parse_ledger_bytes(bytes: &[u8], name: String) -> Result<LedgerEntry, LedgerF
         None => return Err(corrupt()),
     }
     let entry: LedgerEntry = serde_json::from_value(value).map_err(|_| corrupt())?;
+    let distinct = {
+        let pairs: HashSet<(&String, &String)> = entry
+            .identifier_hashes
+            .iter()
+            .zip(&entry.identifier_kinds)
+            .collect();
+        let people: HashSet<&Uuid> = entry.person_ids.iter().collect();
+        pairs.len() == entry.identifier_hashes.len() && people.len() == entry.person_ids.len()
+    };
     let consistent = entry.file_name() == name
         && entry.identifier_hashes.len() == entry.identifier_kinds.len()
-        && entry.hash_bytes().is_some();
+        && entry.hash_bytes().is_some()
+        && distinct;
     if consistent {
         Ok(entry)
     } else {
@@ -527,6 +537,61 @@ pub struct MergeReport {
     pub skipped_workspaces: u64,
 }
 
+/// The guarded upsert of one entry: inserts it, or upgrades a pending or failed row of the same
+/// workspace. Returns the rows it changed. When it changes none, the row that is there must not
+/// belong to another workspace (an insert that raced the preflight): that is
+/// [`MergeError::IdInOtherWorkspace`], and the caller's transaction rolls back.
+async fn upsert_entry(
+    connection: &mut PgConnection,
+    entry: &LedgerEntry,
+) -> Result<u64, MergeError> {
+    let hashes = entry.hash_bytes().ok_or_else(|| {
+        StoreError::query(sqlx::Error::Decode("a ledger hash is not 32 bytes".into()))
+    })?;
+    let inserted = sqlx::query(
+        "INSERT INTO erasure_requests \
+            (id, workspace_id, person_id, identifier_hashes, identifier_kinds, person_ids, \
+             status, requested_by, requested_at, completed_at, trace_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10) \
+         ON CONFLICT (id) DO UPDATE SET \
+            status = 'completed', person_id = EXCLUDED.person_id, \
+            person_ids = EXCLUDED.person_ids, \
+            identifier_hashes = EXCLUDED.identifier_hashes, \
+            identifier_kinds = EXCLUDED.identifier_kinds, \
+            completed_at = EXCLUDED.completed_at \
+         WHERE erasure_requests.status <> 'completed' \
+           AND erasure_requests.workspace_id = EXCLUDED.workspace_id",
+    )
+    .bind(entry.id)
+    .bind(entry.workspace_id)
+    .bind(entry.person_id)
+    .bind(&hashes)
+    .bind(&entry.identifier_kinds)
+    .bind(&entry.person_ids)
+    .bind(entry.requested_by)
+    .bind(entry.requested_at)
+    .bind(entry.completed_at)
+    .bind(entry.trace_id)
+    .execute(&mut *connection)
+    .await
+    .map_err(StoreError::query)?;
+    let changed = inserted.rows_affected();
+    if changed == 0 {
+        let holder: Option<Uuid> =
+            sqlx::query_scalar("SELECT workspace_id FROM erasure_requests WHERE id = $1")
+                .bind(entry.id)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::query)?;
+        if holder.is_some_and(|workspace| workspace != entry.workspace_id) {
+            return Err(MergeError::IdInOtherWorkspace {
+                file: entry.file_name(),
+            });
+        }
+    }
+    Ok(changed)
+}
+
 /// Why [`merge_ledger_entries`] changed nothing.
 #[derive(Debug)]
 pub enum MergeError {
@@ -606,37 +671,7 @@ pub async fn merge_ledger_entries(
             report.skipped_workspaces += 1;
             continue;
         }
-        let hashes = entry.hash_bytes().ok_or_else(|| {
-            StoreError::query(sqlx::Error::Decode("a ledger hash is not 32 bytes".into()))
-        })?;
-        let inserted = sqlx::query(
-            "INSERT INTO erasure_requests \
-                (id, workspace_id, person_id, identifier_hashes, identifier_kinds, person_ids, \
-                 status, requested_by, requested_at, completed_at, trace_id) \
-             VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7, $8, $9, $10) \
-             ON CONFLICT (id) DO UPDATE SET \
-                status = 'completed', person_id = EXCLUDED.person_id, \
-                person_ids = EXCLUDED.person_ids, \
-                identifier_hashes = EXCLUDED.identifier_hashes, \
-                identifier_kinds = EXCLUDED.identifier_kinds, \
-                completed_at = EXCLUDED.completed_at \
-             WHERE erasure_requests.status <> 'completed' \
-               AND erasure_requests.workspace_id = EXCLUDED.workspace_id",
-        )
-        .bind(entry.id)
-        .bind(entry.workspace_id)
-        .bind(entry.person_id)
-        .bind(&hashes)
-        .bind(&entry.identifier_kinds)
-        .bind(&entry.person_ids)
-        .bind(entry.requested_by)
-        .bind(entry.requested_at)
-        .bind(entry.completed_at)
-        .bind(entry.trace_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(StoreError::query)?;
-        report.merged += inserted.rows_affected();
+        report.merged += upsert_entry(&mut tx, entry).await?;
     }
     commit(tx).await?;
     Ok(report)
@@ -970,6 +1005,49 @@ mod tests {
     }
 
     #[test]
+    fn a_file_with_a_repeated_pair_or_person_id_is_corrupt() {
+        let dir = TempDir::new();
+        let mut pairs = entry();
+        pairs.identifier_hashes = vec![encode_hex(&[7; 32]), encode_hex(&[7; 32])];
+        pairs.identifier_kinds = vec!["email".to_owned(), "email".to_owned()];
+        fs::write(
+            dir.0.join(pairs.file_name()),
+            serde_json::to_vec(&pairs).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            read_ledger_dir(&dir.0).unwrap_err(),
+            LedgerFileError::Corrupt { file } if file == pairs.file_name()
+        ));
+        assert!(matches!(
+            reconcile_ledger_file(&dir.0, &pairs).unwrap_err(),
+            LedgerFileError::Corrupt { .. }
+        ));
+
+        let mut people = entry();
+        let id = Uuid::now_v7();
+        people.person_ids = vec![id, id];
+        fs::write(
+            dir.0.join(people.file_name()),
+            serde_json::to_vec(&people).unwrap(),
+        )
+        .unwrap();
+        fs::remove_file(dir.0.join(pairs.file_name())).unwrap();
+        assert!(matches!(
+            read_ledger_dir(&dir.0).unwrap_err(),
+            LedgerFileError::Corrupt { file } if file == people.file_name()
+        ));
+
+        // The same hash under two kinds is two pairs, not a repeat.
+        let mut kinds = entry();
+        kinds.identifier_hashes = vec![encode_hex(&[7; 32]), encode_hex(&[7; 32])];
+        kinds.identifier_kinds = vec!["email".to_owned(), "phone".to_owned()];
+        let other = TempDir::new();
+        write_ledger_file(&other.0, &kinds).unwrap();
+        assert_eq!(read_ledger_dir(&other.0).unwrap(), [kinds]);
+    }
+
+    #[test]
     fn a_file_with_a_short_hash_or_another_name_is_corrupt() {
         let dir = TempDir::new();
         let mut short = entry();
@@ -1159,6 +1237,34 @@ mod tests {
             "{error}"
         );
         assert_eq!(rows(&pool).await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_upsert_that_changes_nothing_because_another_workspace_holds_the_id_is_an_error(
+        pool: PgPool,
+    ) {
+        crate::migrate(&pool).await.unwrap();
+        let ours = workspace(&pool, "ours").await;
+        let theirs = workspace(&pool, "theirs").await;
+        let mut held = entry();
+        held.workspace_id = theirs.as_uuid();
+        merge_ledger_entries(&pool, std::slice::from_ref(&held))
+            .await
+            .unwrap();
+        let mut clash = held.clone();
+        clash.workspace_id = ours.as_uuid();
+        let mut conn = pool.acquire().await.unwrap();
+
+        // The preflight is skipped: this is the insert that raced it.
+        let error = upsert_entry(&mut conn, &clash).await.unwrap_err();
+        let same = upsert_entry(&mut conn, &held).await.unwrap();
+
+        assert!(
+            matches!(&error, MergeError::IdInOtherWorkspace { file } if *file == clash.file_name()),
+            "{error}"
+        );
+        assert_eq!(same, 0, "a completed row of the same workspace is a no-op");
     }
 
     #[sqlx::test]

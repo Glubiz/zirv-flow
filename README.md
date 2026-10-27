@@ -1036,6 +1036,8 @@ identifier value. Operator duties:
   workspace in the database stops the merge before any change, naming the file. A request merged
   or upgraded from a file runs only the replay: it does not make the destination erase calls and
   does not erase AI transcripts, which is the existing limit of replay.
+- A hung `privacy.ledger_dir` stalls the erase jobs, and the row locks they hold, until the
+  file system returns, so the directory must be reliable storage.
 - If a retry of an erasure finds its file already there with other content (the person gained an
   identity since the first attempt, or a pending request came back from an older backup), the job
   writes the union of the two to the file and to the ledger row; the file never shrinks. A file that

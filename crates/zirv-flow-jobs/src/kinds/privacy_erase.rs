@@ -68,10 +68,10 @@ async fn write_ledger_file(
     let write = tokio::task::spawn_blocking(move || {
         zirv_flow_store::reconcile_ledger_file(dir.as_path(), &on_disk)
     });
-    // The transaction holds row locks while the write runs, so it cannot wait for ever.
-    let written = tokio::time::timeout(LEDGER_WRITE_TIMEOUT, write)
+    // Strictly sequential: the write and its rename finish before the job returns and commits, so
+    // a stale attempt can never rename over a newer file.
+    let written = write
         .await
-        .map_err(|_| JobError::new("the erasure ledger file write timed out"))?
         .map_err(|_| JobError::new("the erasure ledger file write was interrupted"))?;
     let merged = match written {
         Ok(merged) => merged,
@@ -104,9 +104,6 @@ async fn write_ledger_file(
     }
     Ok(())
 }
-
-/// How long the ledger file write may take.
-const LEDGER_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Where a destination of this type and configuration takes its external key from, when it
 /// declares erase. A built-in type declares it through `Capabilities.erase` and keys on the person
