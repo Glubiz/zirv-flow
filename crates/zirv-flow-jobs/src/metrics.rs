@@ -182,6 +182,13 @@ pub(crate) fn set_enrollments(sample: &EnrollmentSample) {
     metrics::gauge!("zirv_flow_timer_lateness_seconds").set(sample.oldest_late_seconds as f64);
 }
 
+/// The `zirv_flow_enrollments_last_sample_timestamp_seconds` gauge: the Unix time of the last
+/// successful enrollment sample. The gauges above keep their last values when a sample fails, so
+/// an alert on this series going stale covers the case where the sampler cannot see.
+pub(crate) fn set_enrollments_sampled(unix_seconds: i64) {
+    metrics::gauge!("zirv_flow_enrollments_last_sample_timestamp_seconds").set(unix_seconds as f64);
+}
+
 /// The `zirv_flow_timer_wake_lateness_seconds` histogram: how long after its `wake_at` a timer's
 /// `flow.step` ran. It is what architecture 19 states the p99 of.
 pub(crate) fn record_wake_lateness(seconds: f64) {

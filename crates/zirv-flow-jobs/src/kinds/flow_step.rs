@@ -121,7 +121,9 @@ impl JobKind for FlowStep {
             return Ok(());
         }
 
-        if let (StepJobInput::Wake, Some(due)) = (&job.input, enrollment.wake_at) {
+        if let (StepJobInput::Wake, Some(due)) = (&job.input, enrollment.wake_at)
+            && at.1 == 1
+        {
             record_wake_lateness((now - due).as_seconds_f64());
         }
 
@@ -1914,6 +1916,47 @@ pub(super) mod tests {
         );
         let late = sample("zirv_flow_timer_wake_lateness_seconds_sum").unwrap();
         assert!((39.0..41.0).contains(&late), "{output}");
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_retried_wake_records_its_lateness_once(pool: PgPool) {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _guard = ::metrics::set_default_local_recorder(&recorder);
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
+        let graph = json!({"v": 1, "nodes": [
+            {"id": "w", "type": "wait.duration", "seconds": 60},
+            {"id": "bump", "type": "action.update_trait", "key": "plan",
+             "change": {"op": "increment", "by": 1.0}},
+            {"id": "end", "type": "exit"}
+        ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]});
+        let flow = env.flow("Retried", graph).await;
+        env.enroll(flow, 1, &[ada]).await;
+        env.run_due().await;
+        sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE kind = 'flow.step'")
+            .execute(&env.pool)
+            .await
+            .unwrap();
+        env.advance(100);
+
+        let mut attempts = Vec::new();
+        for _ in 0..2 {
+            env.hold_others(None, None).await;
+            let claimed = env.claim().await.unwrap();
+            env.release().await;
+            attempts.push(claimed.attempts);
+            let _ = env.execute(claimed).await;
+        }
+
+        assert_eq!(attempts, [1, 2]);
+        let output = handle.render();
+        let count = output
+            .lines()
+            .find_map(|line| line.strip_prefix("zirv_flow_timer_wake_lateness_seconds_count "));
+        assert_eq!(count, Some("1"), "{output}");
     }
 
     #[sqlx::test]
