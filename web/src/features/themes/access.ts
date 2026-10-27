@@ -7,15 +7,18 @@ interface ThemeAccess {
   canWrite: boolean;
   /** Publish, set the default and archive: workspace admins and the owner. */
   canAdmin: boolean;
+  /** Publish: publisher and above. */
+  canPublish: boolean;
 }
 
 export function useThemeAccess(workspaceId: string): ThemeAccess {
   const access = useWorkspaceAccess(workspaceId);
-  if (access.status === "loading") return { ready: false, canWrite: false, canAdmin: false };
-  if (access.status === "error") return { ready: true, canWrite: false, canAdmin: false };
+  if (access.status === "loading") return { ready: false, canWrite: false, canAdmin: false, canPublish: false };
+  if (access.status === "error") return { ready: true, canWrite: false, canAdmin: false, canPublish: false };
   return {
     ready: true,
-    canWrite: access.data.canManage || access.data.role !== null,
-    canAdmin: access.data.canManage,
+    canWrite: access.data.canEdit,
+    canAdmin: access.data.canAdmin,
+    canPublish: access.data.canPublish,
   };
 }

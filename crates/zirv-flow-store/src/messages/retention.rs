@@ -75,7 +75,21 @@ pub async fn apply_message_retention_for(
     workspace_days: &HashMap<WorkspaceId, u32>,
     now: OffsetDateTime,
 ) -> Result<MessageRetentionReport, StoreError> {
-    purge_in_batches(pool, settings, workspace_days, now, RETENTION_BATCH).await
+    let mut report = MessageRetentionReport::default();
+    apply_message_retention_progress(pool, settings, workspace_days, now, &mut report).await?;
+    Ok(report)
+}
+
+/// Like [`apply_message_retention_for`], but adds what it removed to `report` as it goes, so a
+/// caller keeps the count of the batches that committed before a later one failed.
+pub async fn apply_message_retention_progress(
+    pool: &PgPool,
+    settings: &MessageRetention,
+    workspace_days: &HashMap<WorkspaceId, u32>,
+    now: OffsetDateTime,
+    report: &mut MessageRetentionReport,
+) -> Result<(), StoreError> {
+    purge_in_batches(pool, settings, workspace_days, now, RETENTION_BATCH, report).await
 }
 
 async fn purge_in_batches(
@@ -84,7 +98,8 @@ async fn purge_in_batches(
     workspace_days: &HashMap<WorkspaceId, u32>,
     now: OffsetDateTime,
     batch_size: i64,
-) -> Result<MessageRetentionReport, StoreError> {
+    report: &mut MessageRetentionReport,
+) -> Result<(), StoreError> {
     let days = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
     let (workspaces, windows): (Vec<Uuid>, Vec<i32>) = workspace_days
         .iter()
@@ -92,7 +107,6 @@ async fn purge_in_batches(
         .unzip();
     let shortest = windows.iter().copied().fold(days(settings.days), i32::min);
     let statement = batch_statement();
-    let mut report = MessageRetentionReport::default();
     loop {
         let deleted: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement.clone()))
             .bind(now)
@@ -106,7 +120,7 @@ async fn purge_in_batches(
             .map_err(StoreError::query)?;
         report.messages_deleted += u64::try_from(deleted).unwrap_or(0);
         if deleted < batch_size {
-            return Ok(report);
+            return Ok(());
         }
     }
 }
@@ -386,7 +400,8 @@ mod tests {
         }
         message(&pool, world, 1, "sent", "fresh").await;
 
-        let report = purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2)
+        let mut report = MessageRetentionReport::default();
+        purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2, &mut report)
             .await
             .unwrap();
 
@@ -422,15 +437,22 @@ mod tests {
         }
         poison(&pool, "m2").await;
 
-        let failed = purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2).await;
+        let mut partial = MessageRetentionReport::default();
+        let failed =
+            purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2, &mut partial).await;
 
         assert!(failed.is_err());
+        assert_eq!(
+            partial.messages_deleted, 2,
+            "the committed batch is reported"
+        );
         assert_eq!(nodes(&pool).await, ["m2", "m3"], "batch one is committed");
         sqlx::query("DROP TRIGGER refuse ON messages")
             .execute(&pool)
             .await
             .unwrap();
-        let rerun = purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2)
+        let mut rerun = MessageRetentionReport::default();
+        purge_in_batches(&pool, &settings(), &HashMap::new(), NOW, 2, &mut rerun)
             .await
             .unwrap();
         assert_eq!(rerun.messages_deleted, 2, "only what the rerun removed");

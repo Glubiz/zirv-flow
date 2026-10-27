@@ -1260,6 +1260,10 @@ impl From<crate::admin::AdminError> for ApiError {
                 code: Some(code),
                 ..Self::unprocessable(detail)
             },
+            AdminError::RetentionBounds(detail) => Self {
+                code: Some("retention_out_of_bounds"),
+                ..Self::unprocessable(detail)
+            },
         }
     }
 }

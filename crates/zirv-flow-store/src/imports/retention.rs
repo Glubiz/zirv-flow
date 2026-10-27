@@ -1,5 +1,7 @@
-//! Import retention (architecture section 16.3): the uploaded file goes 7 days after the
-//! import ends, the refused rows' cells 30 days after they were written. The import row, its
+//! Import retention (architecture section 16.3): the uploaded file goes after the configured
+//! window (`retention.import_file_days`, default 7) once the import ends, the refused rows' cells
+//! after the configured window (`retention.import_reject_days`, default 30) from when they were
+//! written. The import row, its
 //! counters and its reject codes' count stay.
 
 use uuid::Uuid;
@@ -34,9 +36,13 @@ pub struct ImportRetention {
     pub uploads: u64,
 }
 
-/// Deletes the files of imports that ended more than [`CHUNK_RETENTION_DAYS`] days ago and the
-/// rejects older than [`REJECT_RETENTION_DAYS`] days, by the database clock.
-pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention, StoreError> {
+/// Deletes the files of imports that ended more than `import_file_days` ago and the rejects older
+/// than `import_reject_days`, by the database clock. [`CHUNK_RETENTION_DAYS`] and
+/// [`REJECT_RETENTION_DAYS`] are the defaults.
+pub async fn delete_expired_import_data(
+    pool: &PgPool,
+    settings: &crate::RetentionSettings,
+) -> Result<ImportRetention, StoreError> {
     let uploads = sqlx::query(
         "DELETE FROM imports WHERE status = 'uploading' \n           AND created_at < now() - make_interval(days => $1)",
     )
@@ -65,7 +71,7 @@ pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention
             WHERE finished_at IS NOT NULL \
               AND finished_at < now() - make_interval(days => $1))",
     )
-    .bind(CHUNK_RETENTION_DAYS)
+    .bind(i32::try_from(settings.import_file_days).unwrap_or(i32::MAX))
     .execute(pool)
     .await
     .map_err(StoreError::query)?
@@ -77,7 +83,7 @@ pub async fn delete_expired_import_data(pool: &PgPool) -> Result<ImportRetention
                 SELECT ctid FROM import_rejects \
                 WHERE created_at < now() - make_interval(days => $1) LIMIT $2)",
         )
-        .bind(REJECT_RETENTION_DAYS)
+        .bind(i32::try_from(settings.import_reject_days).unwrap_or(i32::MAX))
         .bind(REJECT_BATCH)
         .execute(pool)
         .await
@@ -121,10 +127,10 @@ pub struct ImportErasure {
 /// newline matches only as one correctly quoted cell; one made only of those and whitespace is
 /// ignored.
 ///
-/// Cost: the workspace's chunks (a 7 day window) are read once per erase, each window decoded
+/// Cost: the workspace's chunks (the `retention.import_file_days` window, default 7) are read once per erase, each window decoded
 /// once and tested against one combined pattern for all needles, never once per needle. The
 /// CSV is matched as `escape` text, so a value with non-ASCII bytes matches itself, and a value
-/// written in another spelling in the file is missed. The refused rows' cells (30 days) are
+/// written in another spelling in the file is missed. The refused rows' cells (`retention.import_reject_days`, default 30) are
 /// tested the same way, one scalar at a time.
 ///
 /// Both deletes are bounded by the workspace (`import_chunks_workspace_idx`,

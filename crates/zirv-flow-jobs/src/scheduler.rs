@@ -10,15 +10,15 @@ use tracing::{info, warn};
 use zirv_flow_core::schedule::latest_slot;
 use zirv_flow_core::{Cause, CauseKind, TraceContext, WorkspaceId};
 use zirv_flow_store::{
-    EnrollmentSample, JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, Schedule,
-    StoreError, abandon_orphaned_test_sends, advance_schedule, begin, database_now,
+    EnrollmentSample, JOB_DEAD, Leadership, NewJob, PgPool, QueueCounts, Reaped, RetentionSettings,
+    Schedule, StoreError, abandon_orphaned_test_sends, advance_schedule, begin, database_now,
     delete_expired_import_data, destination_report, dirty_backlog, dirty_heads, disable_schedule,
     due_schedules, due_sending_domains, end_orphaned_messages, enqueue, enqueue_domain_verify,
     enqueue_drain, enqueue_reevaluate, ensure_decision_partitions, ensure_event_partitions,
     ensure_forward_job, expire_contact_idempotency, expire_exports, fail_orphaned_runs,
     forwarding_report, inbox_heads, prune_debugger_feed, queue_depths, reap_expired,
-    reconcile_flow_schedules, reconcile_segment_schedules, sample_enrollments, stream_freshness,
-    try_lead,
+    reconcile_flow_schedules, reconcile_segment_schedules, record_retention_run,
+    sample_enrollments, stream_freshness, try_lead,
 };
 
 use crate::metrics::{
@@ -72,6 +72,9 @@ pub struct SchedulerConfig {
     pub standby_interval: Duration,
     /// How long a sending domain may go without a DNS check before the leader queues one.
     pub sending_domain_recheck: Duration,
+    /// How long import files and rejects are kept (`retention.import_file_days` and
+    /// `retention.import_reject_days`).
+    pub retention: RetentionSettings,
 }
 
 impl Default for SchedulerConfig {
@@ -80,6 +83,7 @@ impl Default for SchedulerConfig {
             tick_interval: Duration::from_secs(1),
             standby_interval: Duration::from_secs(5),
             sending_domain_recheck: DEFAULT_SENDING_DOMAIN_RECHECK,
+            retention: RetentionSettings::default(),
         }
     }
 }
@@ -272,15 +276,26 @@ impl Scheduler {
             return;
         }
         self.imports_checked = Some(Instant::now());
-        match delete_expired_import_data(&self.pool).await {
-            Ok(report) if report.chunks + report.rejects > 0 => {
-                info!(
-                    chunks = report.chunks,
-                    rejects = report.rejects,
-                    "deleted import data past its retention"
-                );
+        match delete_expired_import_data(&self.pool, &self.config.retention).await {
+            Ok(report) => {
+                if let Err(error) = record_retention_run(
+                    &self.pool,
+                    "import_files",
+                    OffsetDateTime::now_utc(),
+                    report.chunks,
+                )
+                .await
+                {
+                    warn!("could not record the import retention run: {error}");
+                }
+                if report.chunks + report.rejects > 0 {
+                    info!(
+                        chunks = report.chunks,
+                        rejects = report.rejects,
+                        "deleted import data past its retention"
+                    );
+                }
             }
-            Ok(_) => {}
             Err(error) => warn!("could not delete expired import data: {error}"),
         }
     }
@@ -1365,6 +1380,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "the import and its status stay");
+        let runs = zirv_flow_store::retention_runs(&pool).await.unwrap();
+        assert_eq!(
+            runs.iter()
+                .map(|run| (run.window.as_str(), run.deleted))
+                .collect::<Vec<_>>(),
+            [("import_files", 1)]
+        );
     }
 
     #[sqlx::test]

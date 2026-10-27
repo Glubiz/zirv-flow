@@ -22,7 +22,7 @@ import { useConflicts, type Conflict, type ConflictStatus } from "./useConflicts
 export function ConflictsPage() {
   const { ws = "" } = useParams();
   const access = useWorkspaceAccess(ws);
-  const canManage = access.status === "ready" && access.data.canManage;
+  const canManage = access.status === "ready" && access.data.canAdmin;
 
   return (
     <div className="page">

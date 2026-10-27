@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router";
 
+import { AuditNav } from "../features/audit";
 import { AccountMenu, useSignedInUser } from "../features/session";
 import { DestinationsNav } from "../features/destinations";
 import { SendingNav } from "../features/sending";
@@ -34,6 +35,7 @@ const TITLES: Record<string, string> = {
   "sending-domains": "Sending domains",
   forwarding: "Forwarding",
   traces: "Traces",
+  audit: "Audit log",
   jobs: "Jobs",
   health: "Health",
 };
@@ -44,6 +46,7 @@ function titleFor(pathname: string): string {
   if (parts[2] === "consent" && parts[3] === "dimensions") return "Consent dimensions";
   if (parts[2] === "consent" && parts[3] === "policy") return "Consent policy";
   if (parts[2] === "settings" && parts[3] === "sending") return "Sending limits";
+  if (parts[2] === "settings" && parts[3] === "audit") return "Audit log";
   const key = parts[0] === "w" && parts.length > 2 ? (parts[2] ?? "w") : (parts[0] ?? "w");
   return TITLES[key] ?? "zirv flow";
 }
@@ -147,6 +150,7 @@ export function Shell() {
             {current ? <SendingNav workspaceId={current.id} /> : null}
             <WorkspaceItem base={base} segment="api-keys">API keys</WorkspaceItem>
             <WorkspaceItem base={base} segment="traces">Traces</WorkspaceItem>
+            {current ? <AuditNav workspaceId={current.id} /> : null}
             {user.is_owner ? <NavLink to="/jobs">Jobs</NavLink> : null}
             <NavLink to="/health">Health</NavLink>
           </nav>

@@ -340,7 +340,7 @@ describe("test mode", () => {
 
     expect(within(sheet).getByRole("radio", { name: "A real person" })).toBeDisabled();
     expect(within(sheet).getByRole("radio", { name: /made-up person/ })).toBeChecked();
-    expect(within(sheet).getByText(/needs a workspace admin/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/needs the personal data permission/)).toBeInTheDocument();
   });
 
   it("shows a refusal of the walk and keeps the earlier result", async () => {

@@ -104,7 +104,7 @@ describe("people search", () => {
 
     const table = await screen.findByRole("table");
     expect(within(table).getByText("Hidden")).toBeInTheDocument();
-    expect(within(table).getByText(/only workspace admins can see it/)).toBeInTheDocument();
+    expect(within(table).getByText(/needs the personal data permission/)).toBeInTheDocument();
     expect(within(table).queryByText("bob@example.test")).not.toBeInTheDocument();
   });
 

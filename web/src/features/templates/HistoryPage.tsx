@@ -54,7 +54,7 @@ export function HistoryPage() {
     <ResourceView resource={access.ready ? detail : { status: "loading", reload: detail.reload }} loadingLabel="Loading the history">
       {(template) => (
         <ResourceView resource={versions} loadingLabel="Loading the history">
-          {(list) => <History key={`${ws}:${id}`} workspaceId={ws} template={template} versions={list} authors={authors} canWrite={access.canWrite} canAdmin={access.canAdmin} />}
+          {(list) => <History key={`${ws}:${id}`} workspaceId={ws} template={template} versions={list} authors={authors} canWrite={access.canWrite} canAdmin={access.canAdmin} canPublish={access.canPublish} />}
         </ResourceView>
       )}
     </ResourceView>
@@ -68,6 +68,7 @@ interface Props {
   authors: ReadonlyMap<string, string>;
   canWrite: boolean;
   canAdmin: boolean;
+  canPublish: boolean;
 }
 
 /** Reads the live version, which the draft row counts its changes against. */
@@ -95,7 +96,7 @@ function History(props: Props) {
   );
 }
 
-function Body({ workspaceId, template, versions, authors, canWrite, canAdmin, liveDocument }: Props & { liveDocument: unknown }) {
+function Body({ workspaceId, template, versions, authors, canWrite, canAdmin, canPublish, liveDocument }: Props & { liveDocument: unknown }) {
   const live = template.current_version ?? null;
   const archived = template.archived_at !== null && template.archived_at !== undefined;
   const [draft, setDraft] = useState<Draft>(() => fromDetail(template));
@@ -207,7 +208,7 @@ function Body({ workspaceId, template, versions, authors, canWrite, canAdmin, li
               <Button onClick={() => void copy(selected)} disabled={busy}>
                 Copy into the draft
               </Button>
-            ) : selected === "draft" && canAdmin && !archived ? (
+            ) : selected === "draft" && canPublish && !archived ? (
               <Link className="btn btn-primary" to={`${editPath}/publish`}>
                 Review and publish
               </Link>

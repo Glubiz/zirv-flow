@@ -15,8 +15,8 @@ use zirv_flow_core::schedule::backoff;
 use zirv_flow_render::RenderPool;
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionRetention, EventRetention, FailOutcome, HmacKey, Keyring,
-    MessageRetention, PgPool, begin, claim_job, complete_job, fail_job, heartbeat_job,
-    listen_for_jobs, lock_lease, observe_pool, sized_like,
+    MessageRetention, PgPool, RetentionSettings, begin, claim_job, complete_job, fail_job,
+    heartbeat_job, listen_for_jobs, lock_lease, observe_pool, sized_like,
 };
 
 use crate::context::{IngestSettings, JobContext};
@@ -53,6 +53,9 @@ pub struct WorkerConfig {
     pub message_retention: MessageRetention,
     /// What the `decisions.retention` job keeps and for how long.
     pub decision_retention: DecisionRetention,
+    /// The other retention windows (`retention.import_file_days`, `retention.export_hours` and
+    /// `retention.test_send_months`).
+    pub retention_settings: RetentionSettings,
     /// How many days the `jobs.retention` job keeps dead jobs (`retention.job_history_days`).
     pub job_history_days: u32,
     /// How many days the `audit.retention` job keeps audit rows (`retention.audit_days`).
@@ -104,6 +107,7 @@ impl WorkerConfig {
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
+            retention_settings: RetentionSettings::default(),
             job_history_days: crate::context::DEFAULT_JOB_HISTORY_DAYS,
             audit_days: crate::context::DEFAULT_AUDIT_DAYS,
             redaction_key: None,
@@ -425,6 +429,7 @@ async fn execute(shared: Arc<Shared>, job: ClaimedJob) -> Attempt {
             .with_export_max_bytes(shared.config.export_max_bytes)
             .with_message_retention(shared.config.message_retention)
             .with_decision_retention(shared.config.decision_retention)
+            .with_retention_settings(shared.config.retention_settings)
             .with_log_retention_days(shared.config.job_history_days, shared.config.audit_days)
             .with_identifier_key(shared.config.identifier_key.clone())
             .with_ledger_dir(shared.config.ledger_dir.clone())
@@ -692,6 +697,7 @@ mod tests {
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
+            retention_settings: RetentionSettings::default(),
             job_history_days: crate::context::DEFAULT_JOB_HISTORY_DAYS,
             audit_days: crate::context::DEFAULT_AUDIT_DAYS,
             redaction_key: None,

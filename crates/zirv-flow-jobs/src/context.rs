@@ -14,7 +14,7 @@ use zirv_flow_render::RenderPool;
 
 use zirv_flow_store::{
     ClaimedJob, Clock, DecisionRetention, EventRetention, HmacKey, Keyring, MessageRetention,
-    NewDecision, NewJob, PgConnection, PgPool,
+    NewDecision, NewJob, PgConnection, PgPool, RetentionSettings,
 };
 
 use crate::JobError;
@@ -48,6 +48,7 @@ pub struct JobContext<'a> {
     export_max_bytes: u64,
     message_retention: MessageRetention,
     decision_retention: DecisionRetention,
+    retention_settings: RetentionSettings,
     job_history_days: u32,
     audit_days: u32,
     ingest: Option<IngestSettings>,
@@ -73,6 +74,7 @@ impl<'a> JobContext<'a> {
             export_max_bytes: zirv_flow_store::EXPORT_MAX_BYTES_DEFAULT,
             message_retention: MessageRetention::default(),
             decision_retention: DecisionRetention::default(),
+            retention_settings: RetentionSettings::default(),
             job_history_days: DEFAULT_JOB_HISTORY_DAYS,
             audit_days: DEFAULT_AUDIT_DAYS,
             ingest: None,
@@ -185,6 +187,18 @@ impl<'a> JobContext<'a> {
     /// The operator's decision-log retention settings.
     pub fn decision_retention(&self) -> &DecisionRetention {
         &self.decision_retention
+    }
+
+    /// Gives the handler the operator's other retention windows (`retention.import_file_days`
+    /// and its siblings).
+    pub(crate) fn with_retention_settings(mut self, settings: RetentionSettings) -> Self {
+        self.retention_settings = settings;
+        self
+    }
+
+    /// The operator's other retention windows.
+    pub fn retention_settings(&self) -> &RetentionSettings {
+        &self.retention_settings
     }
 
     /// Gives the handler how long dead jobs and audit rows are kept, in days.

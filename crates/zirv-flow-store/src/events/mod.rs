@@ -34,7 +34,10 @@ pub use replay::{
     MAX_REPLAY, REPLAY_JOB_KIND, ReplayPrediction, ReplaySelection, ReplayTotals, enqueue_replay,
     preview_replay, replay_rejects, select_rejects,
 };
-pub use retention::{EventRetention, RETENTION_BATCH, RetentionReport, apply_event_retention};
+pub use retention::{
+    EventRetention, RETENTION_BATCH, RetentionReport, apply_event_retention,
+    apply_event_retention_progress,
+};
 pub use schemas::{
     EventPolicy, EventSchema, EventSchemaUpdate, NewEventSchema, PublishOutcome, SchemaVersion,
     create_event_schema, find_event_schema, get_event_policy, list_event_schemas,

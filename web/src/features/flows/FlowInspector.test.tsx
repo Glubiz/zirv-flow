@@ -406,7 +406,7 @@ describe("the enrollment inspector", () => {
     mount();
     const sheet = await openFailed(user);
 
-    expect(await within(sheet).findByText(/needs a workspace admin/)).toBeInTheDocument();
+    expect(await within(sheet).findByText(/needs a publisher/)).toBeInTheDocument();
     expect(within(sheet).queryByRole("button", { name: /^Retry/ })).not.toBeInTheDocument();
     expect(within(sheet).queryByRole("button", { name: "Skip it…" })).not.toBeInTheDocument();
   });
@@ -472,7 +472,7 @@ describe("the enrollment inspector", () => {
     const card = screen.getByRole("group", { name: "Counts and versions" });
     await user.selectOptions(within(card).getByLabelText("Counts for"), "1");
 
-    expect(await within(card).findByText(/needs a workspace admin/)).toBeInTheDocument();
+    expect(await within(card).findByText(/needs a publisher/)).toBeInTheDocument();
     expect(within(card).queryByRole("button", { name: "Exit them…" })).not.toBeInTheDocument();
   });
 
