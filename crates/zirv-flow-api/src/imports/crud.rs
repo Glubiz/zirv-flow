@@ -21,7 +21,7 @@ use zirv_flow_store::{
 use super::{CsvImportBody, CsvImportDetailBody, MappingBody, SAMPLE_ROWS, transition_error};
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{encode_cursor, parse_page};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -141,7 +141,7 @@ pub(crate) async fn get(
     } else {
         Vec::new()
     };
-    let may_see = may_see_values(&state, &principal, workspace.id).await;
+    let may_see = may_view_pii(&state, &principal, workspace.id).await;
     Ok(Json(CsvImportDetailBody::new(&import, samples, may_see)))
 }
 

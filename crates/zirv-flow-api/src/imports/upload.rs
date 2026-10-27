@@ -16,7 +16,7 @@ use zirv_flow_store::{ImportUpload, UploadScan, UploadStart};
 use super::{CsvImportDetailBody, ImportLimits, SAMPLE_ROWS};
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::problem::{ApiError, Problem};
 use crate::trace::request_trace;
 
@@ -274,7 +274,16 @@ async fn receive(
         if total > limits.max_file_bytes {
             return Err(too_large());
         }
-        upload.write(&piece).await?;
+        upload.write(&piece).await.map_err(|error| {
+            if error.is_erased() {
+                ApiError::new(
+                    StatusCode::CONFLICT,
+                    "the import was erased while it was being uploaded",
+                )
+            } else {
+                error.into()
+            }
+        })?;
         scan.push(&piece).map_err(csv_problem)?;
     }
     let mut scanned = scan.finish().map_err(csv_problem)?;
@@ -385,7 +394,7 @@ pub(crate) async fn upload(
     )
     .await?;
     zirv_flow_store::commit(tx).await?;
-    let may_see = may_see_values(&state, &principal, workspace.id).await;
+    let may_see = may_view_pii(&state, &principal, workspace.id).await;
     Ok((
         StatusCode::CREATED,
         Json(CsvImportDetailBody::new(&import, samples, may_see)),

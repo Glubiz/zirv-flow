@@ -6,12 +6,14 @@ mod api_keys;
 mod assets;
 mod audit;
 mod bounded;
+mod by_value;
 mod changes;
 mod clock;
 mod consent;
 mod contacts;
 mod decisions;
 mod destinations;
+mod drop_lock;
 mod events;
 mod feedback;
 mod flows;
@@ -95,12 +97,14 @@ pub use consent::{
 pub use contacts::{
     Contact, ContactChange, ContactDefinition, ContactPage, ContactSearch, ContactSearchError,
     DefinitionError, DefinitionProblem, Idempotency, WriteError, Written, contact_registry,
-    delete_contact, expire_contact_idempotency, find_contact, find_contact_definition,
-    list_contacts, put_contact_definition, search_contacts, typed_definition, write_contact,
+    delete_contact, erase_contact_idempotency, expire_contact_idempotency, find_contact,
+    find_contact_definition, list_contacts, put_contact_definition, search_contacts,
+    typed_definition, write_contact,
 };
 pub use decisions::{
-    Decision, GraphPoint, NewDecision, append_decision, append_decisions,
-    ensure_decision_partitions, list_trace,
+    Decision, DecisionLogSize, DecisionRetention, DecisionRetentionReport, GraphPoint, NewDecision,
+    append_decision, append_decisions, apply_decision_retention, apply_decision_retention_for,
+    apply_decision_retention_progress, decision_log_size, ensure_decision_partitions, list_trace,
 };
 pub use destinations::{
     Admission, AttemptOutcome, AttemptStats, BucketState, DEFAULT_RETRY_AFTER, DeliveryAttempt,
@@ -121,12 +125,12 @@ pub use events::{
     RowsPage, SchemaVersion, WATCH_SECONDS, apply_event_batch, apply_event_retention,
     create_event_schema, debugger_epoch, debugger_epoch_peek, debugger_feed_head,
     debugger_feed_missing, debugger_feed_position, debugger_feed_start, enqueue_replay,
-    ensure_event_partitions, explore_breakdown, explore_count, explore_rows, explore_total,
-    find_event_schema, get_event_policy, list_event_schemas, list_ingest_rejects,
-    list_schema_versions, listen_for_debugger, preview_replay, prune_debugger_feed,
-    publish_schema_draft, read_debugger_batch, read_debugger_feed, read_debugger_feed_at,
-    replay_rejects, save_schema_draft, select_rejects, set_event_policy, touch_debugger_watch,
-    update_event_schema,
+    ensure_event_partitions, erase_unattributed_rejects, explore_breakdown, explore_count,
+    explore_rows, explore_total, find_event_schema, get_event_policy, list_event_schemas,
+    list_ingest_rejects, list_schema_versions, listen_for_debugger, preview_replay,
+    prune_debugger_feed, publish_schema_draft, read_debugger_batch, read_debugger_feed,
+    read_debugger_feed_at, replay_rejects, save_schema_draft, select_rejects, set_event_policy,
+    touch_debugger_watch, update_event_schema,
 };
 pub use feedback::{
     FeedbackEvent, FeedbackOutcome, ProviderFeedback, SuppressionMade, record_provider_feedback,
@@ -172,13 +176,13 @@ pub use identities::{
 };
 pub use imports::{
     ABANDONED_AFTER_DAYS, BatchOutcome, BatchProgress, CHUNK_BYTES, CHUNK_RETENTION_DAYS,
-    DRY_RUN_JOB_KIND, DryRunBatch, Import, ImportBatch, ImportPhase, ImportReject, ImportRetention,
-    ImportStatus, ImportUpload, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS, RUN_JOB_KIND,
-    RejectReason, RejectedRow, RowDetail, StoredReason, TransitionError,
+    DRY_RUN_JOB_KIND, DryRunBatch, Import, ImportBatch, ImportErasure, ImportPhase, ImportReject,
+    ImportRetention, ImportStatus, ImportUpload, REJECT_CHECK_MIN_ROWS, REJECT_RETENTION_DAYS,
+    RUN_JOB_KIND, RejectReason, RejectedRow, RowDetail, StoredReason, TransitionError,
     UPLOAD_ABANDONED_AFTER_DAYS, UploadScan, UploadStart, cancel_import, commit_dry_run_batch,
-    commit_import_batch, delete_expired_import_data, enqueue_import_job, fail_import, find_import,
-    finish_import_dry_run, finish_import_run, list_import_rejects, list_imports, read_import_chunk,
-    set_import_mapping, start_import_dry_run, start_import_run,
+    commit_import_batch, delete_expired_import_data, enqueue_import_job, erase_import_values,
+    fail_import, find_import, finish_import_dry_run, finish_import_run, list_import_rejects,
+    list_imports, read_import_chunk, set_import_mapping, start_import_dry_run, start_import_run,
 };
 pub use ingest::{
     DRAIN_JOB_KIND, DrainOutcome, InboxHead, IngestItem, IngestPayload, Shard, append_inbox,
@@ -373,7 +377,7 @@ pub use workspace_credentials::{
     record_credential_test, swap_credential_secret, update_credential,
 };
 pub use workspaces::{
-    Member, Membership, UtmSettings, Workspace, create_workspace, find_workspace,
+    Member, Membership, UtmSettings, Workspace, create_workspace, find_membership, find_workspace,
     find_workspace_by_slug, list_members, list_workspaces_for_user, lock_memberships,
     membership_role, orphan_policy, remove_membership, set_membership, set_orphan_policy,
     set_workspace_timezone, set_workspace_utm,
@@ -406,6 +410,7 @@ enum StoreErrorKind {
     Retryable,
     Timeout,
     RunActive,
+    Erased,
 }
 
 impl StoreError {
@@ -520,6 +525,17 @@ impl StoreError {
         matches!(self.kind, StoreErrorKind::RunActive)
     }
 
+    /// An upload that an erasure ended: the import is no longer `uploading` and nothing was
+    /// written.
+    pub(crate) fn erased() -> Self {
+        Self::new(StoreErrorKind::Erased)
+    }
+
+    /// Whether the write was refused because an erasure ended the import being uploaded.
+    pub fn is_erased(&self) -> bool {
+        matches!(self.kind, StoreErrorKind::Erased)
+    }
+
     /// Whether the query ran past its statement timeout and PostgreSQL cancelled it.
     pub fn is_timeout(&self) -> bool {
         matches!(self.kind, StoreErrorKind::Timeout)
@@ -585,6 +601,9 @@ impl fmt::Display for StoreError {
             StoreErrorKind::Conflict => formatter.write_str("the value already exists"),
             StoreErrorKind::Timeout => formatter.write_str("the query ran past its time limit"),
             StoreErrorKind::RunActive => formatter.write_str("a sync run is queued or running"),
+            StoreErrorKind::Erased => {
+                formatter.write_str("the import was erased while it was being uploaded")
+            }
             StoreErrorKind::Retryable => {
                 formatter
                     .write_str("the transaction conflicted with another and can be retried")?;

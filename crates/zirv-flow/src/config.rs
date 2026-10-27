@@ -34,7 +34,7 @@ const MIN_RENDER_MEMORY_MIB: u64 = 64;
 /// The most `render.memory_limit_mib`: 1 TiB, which keeps the byte count far from overflowing.
 const MAX_RENDER_MEMORY_MIB: u64 = 1_048_576;
 
-const CONFIG_KEYS: [&str; 57] = [
+const CONFIG_KEYS: [&str; 60] = [
     "server.bind",
     "server.cookie_secure",
     "server.public_url",
@@ -62,6 +62,9 @@ const CONFIG_KEYS: [&str; 57] = [
     "retention.messages_days",
     "retention.messages_min_days",
     "retention.messages_max_days",
+    "retention.decision_days",
+    "retention.decision_min_days",
+    "retention.decision_max_days",
     "ingest.max_request_bytes",
     "ingest.max_batch_items",
     "ingest.rate_per_key",
@@ -369,7 +372,7 @@ struct EventsConfig {
     reject_retention_days: u32,
 }
 
-/// How long the message log keeps ended messages, in days (architecture 16.3).
+/// How long the message log and the decision log keep their records, in days (architecture 16.3).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetentionConfig {
@@ -378,6 +381,11 @@ struct RetentionConfig {
     /// The shortest and the longest per-workspace window.
     messages_min_days: u32,
     messages_max_days: u32,
+    /// How long decision records are kept unless their workspace has a shorter window.
+    decision_days: u32,
+    /// The shortest and the longest per-workspace window.
+    decision_min_days: u32,
+    decision_max_days: u32,
 }
 
 /// What the ingestion API accepts and how fast the drain applies it.
@@ -593,6 +601,9 @@ impl Config {
             .merge(Serialized::default("retention.messages_days", 395_u32))
             .merge(Serialized::default("retention.messages_min_days", 30_u32))
             .merge(Serialized::default("retention.messages_max_days", 1095_u32))
+            .merge(Serialized::default("retention.decision_days", 395_u32))
+            .merge(Serialized::default("retention.decision_min_days", 30_u32))
+            .merge(Serialized::default("retention.decision_max_days", 760_u32))
             .merge(Serialized::default(
                 "ingest.max_request_bytes",
                 1_048_576_u64,
@@ -935,7 +946,7 @@ impl Config {
         Ok(())
     }
 
-    /// The message windows must be positive, ordered, and contain the default.
+    /// The message and decision-log windows must be positive, ordered, and contain the default.
     fn validate_retention(
         &self,
         path: Option<&Path>,
@@ -945,28 +956,43 @@ impl Config {
         let fail = |key: &str, reason: &str| {
             ConfigError::new(key, reason, source_for(key, path, env_sources))
         };
-        for (key, value) in [
-            ("retention.messages_days", retention.messages_days),
-            ("retention.messages_min_days", retention.messages_min_days),
-            ("retention.messages_max_days", retention.messages_max_days),
+        for (log, days, min, max) in [
+            (
+                "messages",
+                retention.messages_days,
+                retention.messages_min_days,
+                retention.messages_max_days,
+            ),
+            (
+                "decision",
+                retention.decision_days,
+                retention.decision_min_days,
+                retention.decision_max_days,
+            ),
         ] {
-            if value == 0 {
-                return Err(fail(key, "must be at least 1"));
+            for (key, value) in [
+                (format!("retention.{log}_days"), days),
+                (format!("retention.{log}_min_days"), min),
+                (format!("retention.{log}_max_days"), max),
+            ] {
+                if value == 0 {
+                    return Err(fail(&key, "must be at least 1"));
+                }
             }
-        }
-        if retention.messages_min_days > retention.messages_max_days {
-            return Err(fail(
-                "retention.messages_min_days",
-                "must not exceed retention.messages_max_days",
-            ));
-        }
-        if !(retention.messages_min_days..=retention.messages_max_days)
-            .contains(&retention.messages_days)
-        {
-            return Err(fail(
-                "retention.messages_days",
-                "must lie between retention.messages_min_days and retention.messages_max_days",
-            ));
+            if min > max {
+                return Err(fail(
+                    &format!("retention.{log}_min_days"),
+                    &format!("must not exceed retention.{log}_max_days"),
+                ));
+            }
+            if !(min..=max).contains(&days) {
+                return Err(fail(
+                    &format!("retention.{log}_days"),
+                    &format!(
+                        "must lie between retention.{log}_min_days and retention.{log}_max_days"
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -1179,6 +1205,15 @@ impl Config {
             days: self.retention.messages_days,
             min_days: self.retention.messages_min_days,
             max_days: self.retention.messages_max_days,
+        }
+    }
+
+    /// What the decision log keeps and for how long.
+    pub(crate) fn decisions_retention(&self) -> zirv_flow_store::DecisionRetention {
+        zirv_flow_store::DecisionRetention {
+            days: self.retention.decision_days,
+            min_days: self.retention.decision_min_days,
+            max_days: self.retention.decision_max_days,
         }
     }
 
@@ -1850,6 +1885,70 @@ cookie_secure = false
             (retention.days, retention.min_days, retention.max_days),
             (100, 10, 200)
         );
+    }
+
+    #[test]
+    fn the_decision_retention_defaults_are_13_months_and_30_days_to_25_months() {
+        let config = Config::load(None, database_env("postgres://localhost/database")).unwrap();
+
+        assert_eq!(
+            config.decisions_retention(),
+            zirv_flow_store::DecisionRetention::default()
+        );
+        let shown = toml::to_string(&config).unwrap();
+        assert!(shown.contains("decision_days = 395") && shown.contains("decision_max_days = 760"));
+    }
+
+    #[test]
+    fn the_decision_retention_can_be_set_from_the_environment() {
+        let mut env = database_env("postgres://localhost/database");
+        for (key, value) in [("DAYS", "100"), ("MIN_DAYS", "10"), ("MAX_DAYS", "200")] {
+            env.push((
+                format!("ZIRV_FLOW_RETENTION__DECISION_{key}").into(),
+                value.into(),
+            ));
+        }
+
+        let retention = Config::load(None, env).unwrap().decisions_retention();
+
+        assert_eq!(
+            (retention.days, retention.min_days, retention.max_days),
+            (100, 10, 200)
+        );
+    }
+
+    #[test]
+    fn the_decision_retention_refuses_29_days_and_26_months_and_unordered_bounds() {
+        let cases = [
+            (
+                "ZIRV_FLOW_RETENTION__DECISION_DAYS",
+                "29",
+                "must lie between",
+            ),
+            (
+                "ZIRV_FLOW_RETENTION__DECISION_DAYS",
+                "790",
+                "must lie between",
+            ),
+            (
+                "ZIRV_FLOW_RETENTION__DECISION_MIN_DAYS",
+                "0",
+                "must be at least 1",
+            ),
+            (
+                "ZIRV_FLOW_RETENTION__DECISION_MIN_DAYS",
+                "2000",
+                "must not exceed retention.decision_max_days",
+            ),
+        ];
+        for (key, value, expected) in cases {
+            let mut env = database_env("postgres://localhost/database");
+            env.push((key.into(), value.into()));
+
+            let error = Config::load(None, env).unwrap_err().to_string();
+
+            assert!(error.contains(expected), "{key}: {error}");
+        }
     }
 
     #[test]

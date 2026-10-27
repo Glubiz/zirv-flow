@@ -17,7 +17,7 @@ use zirv_flow_store::{HistoryCursor, RefreshRequest, SegmentError, Tx};
 use super::preview::{DataAgeBody, read_error};
 use crate::AppState;
 use crate::admin;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::jobs_admin::{DEFAULT_LIMIT, parse_limit};
 use crate::people::search::DisplayBody;
 use crate::problem::{ApiError, Problem};
@@ -180,7 +180,7 @@ pub(crate) async fn members(
     let after = cursor
         .map(|text| Uuid::parse_str(&text).map_err(|_| bad_cursor()))
         .transpose()?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
 
     let (mut tx, found) = snapshot(&state, workspace.id, segment).await?;
     let (rows, more) =
@@ -254,7 +254,7 @@ pub(crate) async fn history(
     let after = cursor
         .map(|text| decode_history_cursor(&text).ok_or_else(bad_cursor))
         .transpose()?;
-    let reveal = may_see_values(&state, &principal, workspace.id).await;
+    let reveal = may_view_pii(&state, &principal, workspace.id).await;
 
     let (mut tx, _) = snapshot(&state, workspace.id, segment).await?;
     let (rows, more) =
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_display_is_masked_unless_the_caller_may_see_values() {
+    fn a_display_is_masked_unless_the_caller_may_view_pii() {
         let shown = display(Some(("email".into(), "a@example.com".into())), true).unwrap();
         let masked = display(Some(("email".into(), "a@example.com".into())), false).unwrap();
 

@@ -4,7 +4,7 @@
 //! needs no workspace and no master key.
 
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 use zirv_flow_store::{apply_event_retention, database_now};
 
 use crate::{JobContext, JobError, JobKind};
@@ -21,9 +21,13 @@ impl JobKind for EventsRetention {
         let settings = *ctx.event_retention();
         let now = database_now(pool).await?;
         let report = apply_event_retention(pool, &settings, now).await?;
+        for partition in &report.skipped_partitions {
+            warn!(partition = %partition, "event partition drop skipped: the table is locked");
+        }
         info!(
             events_deleted = report.events_deleted,
             partitions_dropped = report.partitions_dropped,
+            partitions_skipped = report.skipped_partitions.len(),
             rejects_deleted = report.rejects_deleted,
             dedupe_deleted = report.dedupe_deleted,
             "event retention ran"

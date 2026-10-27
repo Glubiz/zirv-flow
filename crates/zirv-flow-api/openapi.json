@@ -35729,6 +35729,7 @@
           "user_id",
           "email",
           "role",
+          "view_pii",
           "added_at"
         ],
         "properties": {
@@ -35747,6 +35748,10 @@
           "user_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "view_pii": {
+            "type": "boolean",
+            "description": "Whether a publisher, editor or viewer sees personal values unmasked. An admin always does."
           }
         }
       },
@@ -37967,7 +37972,8 @@
         "type": "object",
         "required": [
           "user_id",
-          "role"
+          "role",
+          "view_pii"
         ],
         "properties": {
           "role": {
@@ -37977,6 +37983,9 @@
           "user_id": {
             "type": "string",
             "format": "uuid"
+          },
+          "view_pii": {
+            "type": "boolean"
           }
         }
       },
@@ -40053,6 +40062,13 @@
           "role": {
             "type": "string",
             "description": "`admin`, `publisher`, `editor` or `viewer`."
+          },
+          "view_pii": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Grants or revokes the personal-values grant; leave it out to keep the stored value."
           }
         }
       },

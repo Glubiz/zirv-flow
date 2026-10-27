@@ -6374,6 +6374,220 @@ email,b@example.com,
         assert!(direct.body["merged_from"].is_null());
     }
 
+    async fn put_member(
+        router: &Router,
+        owner: &Login,
+        ws: &str,
+        user: UserId,
+        body: Value,
+    ) -> Reply {
+        call(
+            router,
+            "PUT",
+            &format!("/api/v1/workspaces/{ws}/members/{user}"),
+            Some(body),
+            Auth::Session(owner),
+        )
+        .await
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_view_pii_grant_unmasks_the_profile_and_timeline_for_a_viewer_and_is_kept_when_omitted(
+        pool: PgPool,
+    ) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (viewer_id, viewer) = user(&pool, &router, "viewer@example.com").await;
+        let (lead_id, lead) = user(&pool, &router, "lead@example.com").await;
+        let (_, merged) = seed_profile(&pool, &ws).await;
+        let profile = people_uri(&ws, &format!("/{merged}"));
+        let timeline = people_uri(&ws, &format!("/{merged}/timeline"));
+        let members = format!("/api/v1/workspaces/{ws}/members");
+
+        let added = put_member(&router, &owner, &ws, viewer_id, json!({"role": "viewer"})).await;
+        add_member(&router, &owner, &ws, lead_id, "admin").await;
+        let masked_profile = call(&router, "GET", &profile, None, Auth::Session(&viewer)).await;
+        let masked_timeline = call(&router, "GET", &timeline, None, Auth::Session(&viewer)).await;
+        let granted = put_member(
+            &router,
+            &owner,
+            &ws,
+            viewer_id,
+            json!({"role": "viewer", "view_pii": true}),
+        )
+        .await;
+        let shown_profile = call(&router, "GET", &profile, None, Auth::Session(&viewer)).await;
+        let shown_timeline = call(&router, "GET", &timeline, None, Auth::Session(&viewer)).await;
+        let kept = put_member(&router, &owner, &ws, viewer_id, json!({"role": "editor"})).await;
+        let listed = call(&router, "GET", &members, None, Auth::Session(&owner)).await;
+        let as_owner = call(&router, "GET", &profile, None, Auth::Session(&owner)).await;
+        let as_lead = call(&router, "GET", &profile, None, Auth::Session(&lead)).await;
+        let owner_timeline = call(&router, "GET", &timeline, None, Auth::Session(&owner)).await;
+        let revoked = put_member(
+            &router,
+            &owner,
+            &ws,
+            viewer_id,
+            json!({"role": "editor", "view_pii": false}),
+        )
+        .await;
+        let masked_again = call(&router, "GET", &profile, None, Auth::Session(&viewer)).await;
+
+        assert_eq!(added.body["view_pii"], false, "{:?}", added.body);
+        assert_eq!(masked_profile.body["display"]["masked"], true);
+        assert!(!masked_profile.body.to_string().contains("ada@example.com"));
+        let coupon = |reply: &Reply| {
+            reply.body["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["type"] == "event")
+                .unwrap()["properties"]["coupon"]
+                .clone()
+        };
+        assert!(coupon(&masked_timeline).is_null());
+        assert_eq!(granted.body["view_pii"], true);
+        assert_eq!(shown_profile.body["display"]["value"], "ada@example.com");
+        assert_eq!(shown_profile.body["display"]["masked"], false);
+        assert_eq!(coupon(&shown_timeline), "SECRET-COUPON");
+        assert_eq!(
+            kept.body["view_pii"], true,
+            "an omitted flag keeps the grant"
+        );
+        assert_eq!(kept.body["role"], "editor");
+        let flag = |user: UserId| {
+            listed
+                .body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["user_id"] == user.to_string())
+                .unwrap()["view_pii"]
+                .clone()
+        };
+        assert_eq!(flag(viewer_id), true);
+        assert_eq!(flag(lead_id), false);
+        // A workspace admin sees values with no flag, and gets the owner's response.
+        assert_eq!(as_lead.body, as_owner.body);
+        assert_eq!(as_owner.body["display"]["value"], "ada@example.com");
+        assert_eq!(coupon(&owner_timeline), "SECRET-COUPON");
+        assert_eq!(revoked.body["view_pii"], false);
+        assert_eq!(masked_again.body["display"]["masked"], true);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_pii_key_needs_read_to_read_and_read_alone_masks(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (_, merged) = seed_profile(&pool, &ws).await;
+        let uri = people_uri(&ws, &format!("/{merged}"));
+        let (_, pii_only) = make_key(&router, &owner, &ws, &["pii"]).await;
+        let (_, read_and_pii) = make_key(&router, &owner, &ws, &["read", "pii"]).await;
+        let (_, read_only) = make_key(&router, &owner, &ws, &["read"]).await;
+
+        let refused = call(&router, "GET", &uri, None, Auth::Key(&pii_only)).await;
+        let revealed = call(&router, "GET", &uri, None, Auth::Key(&read_and_pii)).await;
+        let masked = call(&router, "GET", &uri, None, Auth::Key(&read_only)).await;
+        let bad = call(
+            &router,
+            "POST",
+            &format!("/api/v1/workspaces/{ws}/api-keys"),
+            Some(json!({"name": "x", "scopes": ["piii"]})),
+            Auth::Session(&owner),
+        )
+        .await;
+
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(revealed.status, StatusCode::OK, "{:?}", revealed.body);
+        assert_eq!(revealed.body["display"]["value"], "ada@example.com");
+        assert_eq!(masked.body["display"]["masked"], true);
+        assert!(!masked.body.to_string().contains("ada@example.com"));
+        assert_eq!(bad.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_view_pii_grant_unmasks_list_members_for_a_viewer(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (ada, _, _) = seed_people(&pool, &ws).await;
+        let list = make_list(&router, Auth::Session(&owner), &ws, "VIPs").await;
+        let members = format!("{}/{list}/members", lists_uri(&ws));
+        call(
+            &router,
+            "POST",
+            &members,
+            Some(json!({"person_ids": [ada]})),
+            Auth::Session(&owner),
+        )
+        .await;
+        let (viewer_id, viewer) = user(&pool, &router, "viewer@example.com").await;
+        put_member(&router, &owner, &ws, viewer_id, json!({"role": "viewer"})).await;
+
+        let masked = call(&router, "GET", &members, None, Auth::Session(&viewer)).await;
+        put_member(
+            &router,
+            &owner,
+            &ws,
+            viewer_id,
+            json!({"role": "viewer", "view_pii": true}),
+        )
+        .await;
+        let shown = call(&router, "GET", &members, None, Auth::Session(&viewer)).await;
+
+        assert_eq!(masked.status, StatusCode::OK, "{:?}", masked.body);
+        assert_eq!(masked.body["members"][0]["identifier"]["masked"], true);
+        assert!(masked.body["members"][0]["identifier"]["value"].is_null());
+        assert_eq!(shown.body["members"][0]["identifier"]["masked"], false);
+        assert!(shown.body["members"][0]["identifier"]["value"].is_string());
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_view_pii_grant_unmasks_explorer_values_for_a_viewer(pool: PgPool) {
+        let router = app(&pool).await;
+        let owner = owner(&pool, &router).await;
+        let ws = workspace(&router, &owner, "Alpha").await;
+        let (viewer_id, viewer) = user(&pool, &router, "viewer@example.com").await;
+        put_member(&router, &owner, &ws, viewer_id, json!({"role": "viewer"})).await;
+        seed_explorer(&pool, &router, &owner, &ws).await;
+        let body = with_range(json!({"name": "order"}));
+
+        let masked = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(body.clone()),
+            Auth::Session(&viewer),
+        )
+        .await;
+        put_member(
+            &router,
+            &owner,
+            &ws,
+            viewer_id,
+            json!({"role": "viewer", "view_pii": true}),
+        )
+        .await;
+        let shown = call(
+            &router,
+            "POST",
+            &explore_uri(&ws, "list"),
+            Some(body),
+            Auth::Session(&viewer),
+        )
+        .await;
+
+        assert_eq!(masked.status, StatusCode::OK, "{:?}", masked.body);
+        assert!(!masked.body.to_string().contains("a@example.com"));
+        assert!(shown.body.to_string().contains("a@example.com"));
+    }
+
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_person_of_another_workspace_is_a_404_for_the_profile_and_the_timeline(pool: PgPool) {

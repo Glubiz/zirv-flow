@@ -347,13 +347,18 @@ pub async fn erase_person(
     let wanted: HashSet<Vec<u8>> = hashes.iter().cloned().collect();
     let inbox_rows =
         delete_inbox_rows(connection, workspace, &matching_rows(&inbox, &wanted)).await?;
-    // Transcripts are free text, so they are found by the person's ids and identifier values.
-    let needles: Vec<String> = std::iter::once(person)
-        .chain(people.iter().copied())
-        .map(|id| id.to_string())
-        .chain(values)
-        .collect();
+    // Transcripts, rejects with no person, import files and idempotency keys are free text or
+    // client-chosen, so they are found by the person's ids and identifier values.
+    let needles = usable_needles(
+        std::iter::once(person)
+            .chain(people.iter().copied())
+            .map(|id| id.to_string())
+            .chain(values),
+    );
     crate::ai::erase_ai_transcripts(connection, workspace, &needles).await?;
+    crate::erase_unattributed_rejects(connection, workspace, &needles).await?;
+    crate::erase_import_values(connection, workspace, &needles).await?;
+    crate::erase_contact_idempotency(connection, workspace, &needles).await?;
     let mut person_found = false;
     for id in std::iter::once(person).chain(people) {
         person_found |=
@@ -577,6 +582,22 @@ async fn lock_inbox(
     }
 }
 
+/// The needles to search free text for: trimmed, without blanks (an empty needle would match
+/// everything) and without repeats.
+fn usable_needles(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut needles: Vec<String> = Vec::new();
+    for value in values {
+        let value = value.trim();
+        let meaningful = value
+            .chars()
+            .any(|c| !(matches!(c, ',' | ';' | '|' | '"') || c.is_whitespace()));
+        if meaningful && !needles.iter().any(|known| known == value) {
+            needles.push(value.to_owned());
+        }
+    }
+    needles
+}
+
 /// The ids of the locked rows that name any of `hashes`.
 fn matching_rows(rows: &[LockedRow], hashes: &HashSet<Vec<u8>>) -> Vec<i64> {
     rows.iter()
@@ -683,6 +704,23 @@ mod tests {
         seed_everything, trace, workspace,
     };
     use crate::{is_suppressed, remove_suppression};
+
+    #[test]
+    fn needles_are_trimmed_and_unique_and_never_blank() {
+        let needles = usable_needles(
+            [
+                " Ada@Example.com ",
+                "",
+                "  ",
+                " , ; \"| ",
+                "ada@example.com",
+                "Ada@Example.com",
+            ]
+            .map(String::from),
+        );
+
+        assert_eq!(needles, ["Ada@Example.com", "ada@example.com"]);
+    }
 
     fn hash(value: &str) -> [u8; 32] {
         identifier_hash(

@@ -25,7 +25,7 @@ use super::crud::SCHEDULE_TIMEZONE;
 use super::problems;
 use crate::AppState;
 use crate::admin::{self, Context};
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
@@ -770,7 +770,7 @@ pub(crate) async fn list(
         .await?
         .ok_or_else(ApiError::not_found)?;
     let streams = zirv_flow_store::list_streams(&state.pool, workspace.id, source).await?;
-    let admin = may_see_values(&state, &principal, workspace.id).await;
+    let admin = may_view_pii(&state, &principal, workspace.id).await;
     Ok(Json(
         bodies(&state, workspace.id, source, &streams, admin).await?,
     ))

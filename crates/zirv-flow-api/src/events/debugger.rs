@@ -66,7 +66,7 @@ use zirv_flow_store::{
 };
 
 use crate::AppState;
-use crate::auth::{Need, Principal, authorize, may_see_values, path_id};
+use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
 use crate::consent::bool_param;
 use crate::problem::{ApiError, Problem};
 
@@ -862,7 +862,7 @@ pub(crate) async fn stream(
     let query = query.unwrap_or_default();
     let filter = parse_filter(&query)?;
     let asked = bool_param(&query, "reveal")?;
-    let reveal = asked && may_see_values(&state, &principal, workspace.id).await;
+    let reveal = asked && may_view_pii(&state, &principal, workspace.id).await;
 
     let subscription = state.debugger.subscribe(workspace.id).ok_or_else(|| {
         ApiError::new(

@@ -77,10 +77,6 @@ mod tests {
 
     use super::*;
 
-    /// Series the architecture names that the code does not emit yet: the decision-log size gauge
-    /// belongs to the partition work (#378). Remove an entry when its series is emitted.
-    const NOT_EMITTED_YET: [&str; 1] = ["zirv_flow_decision_log_bytes"];
-
     /// The metric names passed as the first literal of a `counter!`, `gauge!` or `histogram!`
     /// call in `source`.
     fn series_in(source: &str) -> BTreeSet<String> {
@@ -166,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn every_series_the_architecture_row_names_is_emitted_or_pending() {
+    fn every_series_the_architecture_row_names_is_emitted() {
         let emitted = series_in_crates();
         let architecture = std::fs::read_to_string(root().join("docs/architecture.md")).unwrap();
         let row = architecture
@@ -176,7 +172,7 @@ mod tests {
 
         let unknown: Vec<String> = names_in(row)
             .into_iter()
-            .filter(|name| !emitted.contains(name) && !NOT_EMITTED_YET.contains(&name.as_str()))
+            .filter(|name| !emitted.contains(name))
             .collect();
 
         assert!(
@@ -184,12 +180,6 @@ mod tests {
             "architecture 17 names series the code does not emit: {}",
             unknown.join(", ")
         );
-        for pending in NOT_EMITTED_YET {
-            assert!(
-                !emitted.contains(pending),
-                "{pending} is emitted now: drop it from NOT_EMITTED_YET and list it in the README table"
-            );
-        }
     }
 
     #[test]

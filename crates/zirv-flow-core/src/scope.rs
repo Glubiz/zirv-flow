@@ -19,6 +19,8 @@ pub enum Scope {
     Publish,
     /// Members and keys.
     Admin,
+    /// Personal values unmasked. Additive: it does not imply `read`.
+    Pii,
 }
 
 impl Scope {
@@ -29,6 +31,7 @@ impl Scope {
             Self::Write => "write",
             Self::Publish => "publish",
             Self::Admin => "admin",
+            Self::Pii => "pii",
         }
     }
 }
@@ -49,9 +52,10 @@ impl FromStr for Scope {
             "write" => Ok(Self::Write),
             "publish" => Ok(Self::Publish),
             "admin" => Ok(Self::Admin),
+            "pii" => Ok(Self::Pii),
             _ => Err(ValidationError::new(
                 "scopes",
-                "must be ingest, read, write, publish or admin",
+                "must be ingest, read, write, publish, admin or pii",
             )),
         }
     }
@@ -69,6 +73,7 @@ mod tests {
             Scope::Write,
             Scope::Publish,
             Scope::Admin,
+            Scope::Pii,
         ] {
             assert_eq!(scope.to_string().parse::<Scope>().unwrap(), scope);
         }
@@ -82,6 +87,7 @@ mod tests {
         assert!("READ".parse::<Scope>().is_err());
         assert!("".parse::<Scope>().is_err());
         assert!("PUBLISH".parse::<Scope>().is_err());
+        assert!("PII".parse::<Scope>().is_err());
     }
 
     #[test]
