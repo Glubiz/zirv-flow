@@ -518,7 +518,7 @@ Passwords are 12 to 1024 characters.
   deployment use `admin create-owner`.
 - **Jobs administration.** Owner session only; API keys get 403.
   `GET /api/v1/admin/jobs` shows ready, running and dead counts per job kind and
-  the age of the oldest runnable job. `GET /api/v1/admin/jobs/dead?limit=&before=`
+  the age of the oldest runnable job. `GET /api/v1/admin/jobs/dead?limit=&cursor=`
   lists dead jobs newest first (payloads are never shown), with their
   `trace_id`; `POST /api/v1/admin/jobs/{id}/retry` puts a dead job back in the
   queue under its original trace, and is audited.
@@ -705,7 +705,7 @@ shows the two people side by side with the shared identifier marked and offers t
 keep the people separate, or move the identifier to one of them (refused when it would break
 a rule for that person). Members can read conflicts but see identifier values masked and
 cannot resolve them. The API is `GET /api/v1/workspaces/{ws}/identity-conflicts` (filter with
-`status=open|resolved`, page with `before`), `GET .../identity-conflicts/{id}` and
+`status=open|resolved`, page with `cursor`), `GET .../identity-conflicts/{id}` and
 `POST .../identity-conflicts/{id}/resolve` with `{"outcome": "keep_separate"}` or
 `{"outcome": "move_identifier", "to_person_id": "..."}`. Each resolution is audited and
 recorded as a decision.
@@ -770,7 +770,7 @@ equal inside one workspace) and truncate IP addresses (the last IPv4 octet is ze
 address keeps its first 48 bits; `ip` and `context.ip` by default). Paths are dot-separated.
 
 **Rejects.** A refused event is listed under **Rejects** (`GET .../ingest-rejects`, newest
-first, filtered by `name` and `reason`, paged with `before`) with its reasons and a masked
+first, filtered by `name` and `reason`, paged with `cursor`) with its reasons and a masked
 sample: only the values of properties the published schema marks as not personal data are
 shown, and every value of an event without a published schema is hidden. The stored payload
 is kept for a later replay and is never returned.
@@ -916,7 +916,7 @@ edited. Read and write a person's consent with
 `GET` and `PUT /api/v1/workspaces/{ws}/people/{id}/consent` (`{"channel": "email",
 "topic_key": "newsletter", "status": "unsubscribed", "evidence": {...}}`; leave out
 `topic_key` for the channel as a whole; `unknown` cannot be set) and read the history with
-`GET .../consent/history?limit&before`. Any member or `write` key can record a decision;
+`GET .../consent/history?limit&cursor`. Any member or `write` key can record a decision;
 the source is `ui` for a session and `api` for a key.
 
 **Merging people** combines their consent for each channel and topic: the most recent
@@ -1094,7 +1094,7 @@ curl -X POST $BASE/contacts -H "authorization: Bearer $KEY" -H 'content-type: ap
 
 # read, list (keyset-paginated by key), search
 curl $BASE/contacts/c-1001 -H "authorization: Bearer $KEY"
-curl "$BASE/contacts?limit=50&after=<next_after>" -H "authorization: Bearer $KEY"
+curl "$BASE/contacts?limit=50&cursor=<next_cursor>" -H "authorization: Bearer $KEY"
 curl "$BASE/contacts/search?q=c-10" -H "authorization: Bearer $KEY"
 
 # replace all the fields (200), or a JSON merge patch where null removes a field (200)
@@ -1434,7 +1434,7 @@ The conditions on a field depend on its type: `eq` and `exists` for any type (on
 and `lte` for numbers, timestamps and dates. The API is `POST /api/v1/workspaces/{ws}/people/search`
 with exactly one of `{"identifier": {"kind": "email", "value": "..."}}` and
 `{"trait": {"key": "plan", "op": "prefix", "value": "pro"}}`, plus `limit` (1 to 200,
-default 50) and `after` (the `next_after` of the previous page). It is a POST so the values
+default 50) and `cursor` (the `next_cursor` of the previous page). It is a POST so the values
 stay out of URLs and access logs. Results are `{id, display, updated_at}`, paged by person
 id, where `display` is the person's strongest identifier. Searches run under a 5 second
 limit; one that takes longer is answered `503` with the problem code `search_timeout`, so
@@ -1451,7 +1451,7 @@ where a member can also record a consent choice for the person.
 
 **Timeline.** `GET .../people/{id}/timeline?limit&before&kinds&all_decisions` returns the
 person's events and the decisions the system made about them, newest first, as entries with
-`"type": "event"` or `"type": "decision"`, paged with an opaque `before` cursor. Decisions
+`"type": "event"` or `"type": "decision"`, paged with an opaque `cursor`. Decisions
 cover trait changes, merges, consent changes, list membership and identity conflicts. The
 people merged into this one are included. `kinds` is `event`, `decision` or both separated by
 a comma. The `event.accepted` decision repeats the event entry, so it is left out unless you
@@ -1562,7 +1562,7 @@ applied before it stopped stay applied; fix the mapping and run the file again, 
 only what is still missing. Other failure codes: `list_not_found` (a mapped list was
 deleted), `file_missing` (the file was already deleted), `file_unreadable`, `job_failed` and `abandoned`.
 
-`GET .../imports/{id}/rejects?phase=&limit=&after=` pages through the rejects in row order
+`GET .../imports/{id}/rejects?phase=&limit=&cursor=` pages through the rejects in row order
 with `row_number` and the codes (`limit` 1 to 200). `GET .../imports/{id}/rejects.csv?phase=` downloads them as
 `row_number,column,reason`, one line per problem. For the owner, workspace admins and `admin`
 keys each row's own cells follow under the file's column names, in a file that may hold
@@ -2559,7 +2559,7 @@ changed." and does nothing.
 | Route | Needs | |
 |-------|-------|-|
 | `POST /templates/{id}/test-send` | write (admin with `person_id`) | body: `version` (absent: the draft), `destination_id`, `sender_identity_id`, `to` (`{"member": id}` or `{"address": "..."}`), `person_id` (optional; absent renders the sample person); answers 202 with the log row |
-| `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `before` |
+| `GET /test-sends` | read | the log, newest first; `template_id`, `limit`, `cursor` |
 | `GET`, `POST /test-send-allowlist`, `DELETE /test-send-allowlist/{id}` | admin | `{"address"}` to add; the list shows only a masked hint (`q***@example.com`) |
 | `GET /test-send-allowlist/options` | write | the same entries as `{id, name}`, `name` being the masked hint, for the test-send dialog |
 
@@ -2702,7 +2702,7 @@ All of these are for workspace admins and are audited:
 
 - `GET`, `POST /api/v1/workspaces/{ws}/forwarding/rules` and `GET`, `PATCH`, `DELETE
   /api/v1/workspaces/{ws}/forwarding/rules/{id}`.
-- `GET /api/v1/workspaces/{ws}/forwarding/dead-letters?destination_id=&limit=&before=` lists dead
+- `GET /api/v1/workspaces/{ws}/forwarding/dead-letters?destination_id=&limit=&cursor=` lists dead
   rows newest first with the error code, attempts and times; never the payload.
 - `GET /api/v1/workspaces/{ws}/forwarding/status` gives each destination's queue `depth`, the
   `oldest_lag_seconds` of its oldest waiting row and its `dead` count.
