@@ -261,8 +261,8 @@ pub fn decision_violations(row: &StoredDecision) -> Vec<String> {
     let mut found = Vec::new();
     let at = format!("{} {}", row.action, row.outcome);
 
-    let mut specs = specs_of(&row.action, &row.outcome).peekable();
-    if specs.peek().is_none() {
+    let specs: Vec<&DecisionSpec> = specs_of(&row.action, &row.outcome).collect();
+    if specs.is_empty() {
         found.push(format!(
             "{at}: the action and outcome are not in the registry"
         ));
@@ -277,12 +277,12 @@ pub fn decision_violations(row: &StoredDecision) -> Vec<String> {
             found.push(format!("{at}: the reason is not code-shaped"));
         }
         reason => {
-            let registered = specs_of(&row.action, &row.outcome).any(|spec| match spec.reason() {
+            let registered = specs.iter().any(|spec| match spec.reason() {
                 Reason::None => reason.is_none(),
                 Reason::Fixed(code) => reason == Some(code),
                 Reason::Detail(_) => true,
             });
-            if !registered && specs_of(&row.action, &row.outcome).next().is_some() {
+            if !registered && !specs.is_empty() {
                 found.push(format!(
                     "{at}: the reason is not in the registry for this action"
                 ));
@@ -374,7 +374,7 @@ pub fn job_violations(
 /// Every violation in the decision log and the job table of the database.
 pub async fn decision_leaks(pool: &PgPool) -> Vec<String> {
     let rows: Vec<StoredDecision> = sqlx::query_as(
-        "SELECT action, outcome, reason, cause_kind, cause_id, subject_ids, d::text AS text          FROM decision_records d",
+        "SELECT action, outcome, reason, cause_kind, cause_id, subject_ids, d::text AS text FROM decision_records d",
     )
     .fetch_all(pool)
     .await
