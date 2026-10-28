@@ -487,6 +487,8 @@ async fn wait_for_token(
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use serde_json::json;
     use sqlx::PgPool;
     use zirv_flow_connectors::destinations::{
@@ -504,7 +506,7 @@ mod tests {
 
     const FIXTURE: &str =
         include_str!("../../../zirv-flow-connectors/tests/fixtures/providers/profile_sync.json");
-    const EMAIL: &str = "ada@example.com";
+    const EMAIL: &str = PERSONAL_DATA.email;
     const TRAIT_VALUE: &str = "SENTINEL-TRAIT-VALUE";
 
     /// One workspace with a provider destination on a fake provider, a person and an enrollment.
@@ -820,134 +822,146 @@ mod tests {
     async fn an_upsert_sends_exactly_the_listed_traits_under_the_key_and_records_its_outcome(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        let key = env.queue(&enrolled, "upsert", 5).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            let key = env.queue(&enrolled, "upsert", 5).await;
 
-        env.attempt().await.unwrap();
+            env.attempt().await.unwrap();
 
-        let accepted = env.fake.accepted();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].method, "PUT");
-        assert_eq!(accepted[0].path, "/v1/profiles/ada%40example.com");
-        assert_eq!(
-            accepted[0].key, key,
-            "the effect key is the idempotency key"
-        );
-        // `age` is on the person and not on the node: it is not sent. `country` is on the node
-        // and not on the person: it is sent as null.
-        assert_eq!(
-            accepted[0].body,
-            json!({
-                "source": "zirv-flow",
-                "profile": {
-                    "id": EMAIL,
-                    "attributes": {"plan": TRAIT_VALUE, "country": null}
-                }
-            })
-        );
-        let succeeded = env.events("sync.succeeded").await;
-        assert_eq!(
-            succeeded,
-            [json!({
-                "node_id": "push", "enrollment_id": enrolled.enrollment, "status": 200,
-                "attempts": 1, "destination_id": env.destination, "operation": "upsert"
-            })]
-        );
-        assert!(env.events("sync.failed").await.is_empty());
-        assert_eq!(
-            env.decisions().await,
-            [("sync.upsert".to_owned(), "succeeded".to_owned(), None)]
-        );
-        assert_eq!(
-            env.attempts().await,
-            [("sync".to_owned(), "delivered".to_owned(), 1)]
-        );
-        assert_no_personal_data(&env.written().await);
+            let accepted = env.fake.accepted();
+            assert_eq!(accepted.len(), 1);
+            assert_eq!(accepted[0].method, "PUT");
+            assert_eq!(accepted[0].path, "/v1/profiles/ada%40example.com");
+            assert_eq!(
+                accepted[0].key, key,
+                "the effect key is the idempotency key"
+            );
+            // `age` is on the person and not on the node: it is not sent. `country` is on the node
+            // and not on the person: it is sent as null.
+            assert_eq!(
+                accepted[0].body,
+                json!({
+                    "source": "zirv-flow",
+                    "profile": {
+                        "id": EMAIL,
+                        "attributes": {"plan": TRAIT_VALUE, "country": null}
+                    }
+                })
+            );
+            let succeeded = env.events("sync.succeeded").await;
+            assert_eq!(
+                succeeded,
+                [json!({
+                    "node_id": "push", "enrollment_id": enrolled.enrollment, "status": 200,
+                    "attempts": 1, "destination_id": env.destination, "operation": "upsert"
+                })]
+            );
+            assert!(env.events("sync.failed").await.is_empty());
+            assert_eq!(
+                env.decisions().await,
+                [("sync.upsert".to_owned(), "succeeded".to_owned(), None)]
+            );
+            assert_eq!(
+                env.attempts().await,
+                [("sync".to_owned(), "delivered".to_owned(), 1)]
+            );
+            assert_no_personal_data(&env.written().await);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_remove_deletes_the_profile_under_the_same_key(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "remove", 5).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "remove", 5).await;
 
-        env.attempt().await.unwrap();
+            env.attempt().await.unwrap();
 
-        let accepted = env.fake.accepted();
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].method, "DELETE");
-        assert_eq!(accepted[0].path, "/v1/profiles/ada%40example.com");
-        assert_eq!(accepted[0].body, Value::Null);
-        assert_eq!(env.events("sync.succeeded").await.len(), 1);
-        assert_eq!(env.decisions().await[0].0, "sync.remove");
+            let accepted = env.fake.accepted();
+            assert_eq!(accepted.len(), 1);
+            assert_eq!(accepted[0].method, "DELETE");
+            assert_eq!(accepted[0].path, "/v1/profiles/ada%40example.com");
+            assert_eq!(accepted[0].body, Value::Null);
+            assert_eq!(env.events("sync.succeeded").await.len(), 1);
+            assert_eq!(env.decisions().await[0].0, "sync.remove");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_person_without_the_key_ends_missing_key_with_no_call_and_no_attempt(pool: PgPool) {
-        let env = Env::with(
-            pool,
-            |mut manifest| {
-                manifest["destination"]["upsert_profile"]["key_from"] =
-                    json!({"identity": "phone"});
-                manifest
-            },
-            100,
-            100,
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(
+                pool,
+                |mut manifest| {
+                    manifest["destination"]["upsert_profile"]["key_from"] =
+                        json!({"identity": "phone"});
+                    manifest
+                },
+                100,
+                100,
+            )
+            .await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "upsert", 5).await;
+
+            env.attempt().await.unwrap();
+
+            assert_eq!(env.fake.requests(), 0);
+            let failed = env.events("sync.failed").await;
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failed[0]["status"], Value::Null);
+            assert_eq!(
+                env.decisions().await,
+                [(
+                    "sync.upsert".to_owned(),
+                    "failed".to_owned(),
+                    Some("missing_key".to_owned())
+                )]
+            );
+            assert!(env.attempts().await.is_empty());
+            assert_no_personal_data(&env.written().await);
+        })
         .await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "upsert", 5).await;
-
-        env.attempt().await.unwrap();
-
-        assert_eq!(env.fake.requests(), 0);
-        let failed = env.events("sync.failed").await;
-        assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0]["status"], Value::Null);
-        assert_eq!(
-            env.decisions().await,
-            [(
-                "sync.upsert".to_owned(),
-                "failed".to_owned(),
-                Some("missing_key".to_owned())
-            )]
-        );
-        assert!(env.attempts().await.is_empty());
-        assert_no_personal_data(&env.written().await);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_trait_can_be_the_key(pool: PgPool) {
-        let env = Env::with(
-            pool,
-            |mut manifest| {
-                manifest["destination"]["upsert_profile"]["key_from"] = json!({"trait": "age"});
-                manifest
-            },
-            100,
-            100,
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(
+                pool,
+                |mut manifest| {
+                    manifest["destination"]["upsert_profile"]["key_from"] = json!({"trait": "age"});
+                    manifest
+                },
+                100,
+                100,
+            )
+            .await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "upsert", 5).await;
+
+            env.attempt().await.unwrap();
+
+            let accepted = env.fake.accepted();
+            assert_eq!(accepted[0].path, "/v1/profiles/41");
+            assert_eq!(
+                accepted[0].body["profile"]["attributes"],
+                json!({"plan": TRAIT_VALUE, "country": null}),
+                "the key trait is not sent unless the node lists it"
+            );
+        })
         .await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "upsert", 5).await;
-
-        env.attempt().await.unwrap();
-
-        let accepted = env.fake.accepted();
-        assert_eq!(accepted[0].path, "/v1/profiles/41");
-        assert_eq!(
-            accepted[0].body["profile"]["attributes"],
-            json!({"plan": TRAIT_VALUE, "country": null}),
-            "the key trait is not sent unless the node lists it"
-        );
     }
 
     #[sqlx::test]
@@ -955,35 +969,38 @@ mod tests {
     async fn a_429_waits_for_the_retry_after_and_the_retry_reuses_the_idempotency_key(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        let key = env.queue(&enrolled, "upsert", 5).await;
-        env.fake.script(FakeProviderScript::Status {
-            status: 429,
-            body: json!({}),
-            retry_after: Some(17),
-        });
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            let key = env.queue(&enrolled, "upsert", 5).await;
+            env.fake.script(FakeProviderScript::Status {
+                status: 429,
+                body: json!({}),
+                retry_after: Some(17),
+            });
 
-        let limited = env.attempt().await.unwrap_err();
-        let after_first =
-            env.events("sync.succeeded").await.len() + env.events("sync.failed").await.len();
-        env.attempt().await.unwrap();
+            let limited = env.attempt().await.unwrap_err();
+            let after_first =
+                env.events("sync.succeeded").await.len() + env.events("sync.failed").await.len();
+            env.attempt().await.unwrap();
 
-        assert_eq!(limited.retry_after(), Some(Duration::from_secs(17)));
-        assert_eq!(after_first, 0, "a retried attempt writes no outcome");
-        assert_eq!(env.fake.requests(), 2);
-        let accepted = env.fake.accepted();
-        assert_eq!(accepted.len(), 1, "one change at a key-honouring provider");
-        assert_eq!(accepted[0].key, key);
-        assert_eq!(env.events("sync.succeeded").await[0]["attempts"], json!(2));
-        assert_eq!(
-            env.attempts().await,
-            [
-                ("sync".to_owned(), "throttled".to_owned(), 1),
-                ("sync".to_owned(), "delivered".to_owned(), 2)
-            ]
-        );
+            assert_eq!(limited.retry_after(), Some(Duration::from_secs(17)));
+            assert_eq!(after_first, 0, "a retried attempt writes no outcome");
+            assert_eq!(env.fake.requests(), 2);
+            let accepted = env.fake.accepted();
+            assert_eq!(accepted.len(), 1, "one change at a key-honouring provider");
+            assert_eq!(accepted[0].key, key);
+            assert_eq!(env.events("sync.succeeded").await[0]["attempts"], json!(2));
+            assert_eq!(
+                env.attempts().await,
+                [
+                    ("sync".to_owned(), "throttled".to_owned(), 1),
+                    ("sync".to_owned(), "delivered".to_owned(), 2)
+                ]
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -991,49 +1008,53 @@ mod tests {
     async fn a_4xx_is_terminal_and_the_last_attempt_of_a_5xx_is_recorded_as_a_failure(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "upsert", 1).await;
-        env.fake.script(FakeProviderScript::Status {
-            status: 422,
-            body: json!({}),
-            retry_after: None,
-        });
-        env.attempt().await.unwrap();
-        env.queue(&enrolled, "remove", 1).await;
-        env.fake.script(FakeProviderScript::Status {
-            status: 503,
-            body: json!({}),
-            retry_after: None,
-        });
-        env.attempt().await.unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "upsert", 1).await;
+            env.fake.script(FakeProviderScript::Status {
+                status: 422,
+                body: json!({}),
+                retry_after: None,
+            });
+            env.attempt().await.unwrap();
+            env.queue(&enrolled, "remove", 1).await;
+            env.fake.script(FakeProviderScript::Status {
+                status: 503,
+                body: json!({}),
+                retry_after: None,
+            });
+            env.attempt().await.unwrap();
 
-        let failed = env.events("sync.failed").await;
-        assert_eq!(failed.len(), 2);
-        assert_eq!(failed[0]["status"], json!(422));
-        assert_eq!(failed[1]["status"], json!(503));
-        assert_eq!(
-            env.decisions().await,
-            [
-                (
-                    "sync.remove".to_owned(),
-                    "failed".to_owned(),
-                    Some("http_5xx".to_owned())
-                ),
-                (
-                    "sync.upsert".to_owned(),
-                    "failed".to_owned(),
-                    Some("http_4xx".to_owned())
-                )
-            ]
-        );
-        assert!(env.events("sync.succeeded").await.is_empty());
+            let failed = env.events("sync.failed").await;
+            assert_eq!(failed.len(), 2);
+            assert_eq!(failed[0]["status"], json!(422));
+            assert_eq!(failed[1]["status"], json!(503));
+            assert_eq!(
+                env.decisions().await,
+                [
+                    (
+                        "sync.remove".to_owned(),
+                        "failed".to_owned(),
+                        Some("http_5xx".to_owned())
+                    ),
+                    (
+                        "sync.upsert".to_owned(),
+                        "failed".to_owned(),
+                        Some("http_4xx".to_owned())
+                    )
+                ]
+            );
+            assert!(env.events("sync.succeeded").await.is_empty());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_person_who_is_gone_or_exited_gets_no_call_and_no_outcome(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = Env::new(pool).await;
         let person = env.person().await;
         let exited = env.enroll(person).await;
@@ -1059,6 +1080,8 @@ mod tests {
         assert!(env.decisions().await.is_empty());
         assert!(env.events("sync.failed").await.is_empty());
         assert!(env.events("sync.succeeded").await.is_empty());
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1066,65 +1089,72 @@ mod tests {
     async fn an_operation_the_manifest_lacks_and_an_archived_destination_end_with_a_reason(
         pool: PgPool,
     ) {
-        let env = Env::with(
-            pool,
-            |mut manifest| {
-                manifest["destination"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("remove_profile");
-                manifest
-            },
-            100,
-            100,
-        )
-        .await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "remove", 5).await;
-        env.attempt().await.unwrap();
-        env.queue(&enrolled, "upsert", 5).await;
-        sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
-            .bind(env.destination)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        env.attempt().await.unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(
+                pool,
+                |mut manifest| {
+                    manifest["destination"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("remove_profile");
+                    manifest
+                },
+                100,
+                100,
+            )
+            .await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "remove", 5).await;
+            env.attempt().await.unwrap();
+            env.queue(&enrolled, "upsert", 5).await;
+            sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
+                .bind(env.destination)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            env.attempt().await.unwrap();
 
-        let reasons: Vec<Option<String>> = env.decisions().await.into_iter().map(|d| d.2).collect();
-        assert_eq!(
-            reasons,
-            [
-                Some("operation_unsupported".to_owned()),
-                Some("destination_unavailable".to_owned())
-            ]
-        );
-        assert_eq!(env.fake.requests(), 0);
+            let reasons: Vec<Option<String>> =
+                env.decisions().await.into_iter().map(|d| d.2).collect();
+            assert_eq!(
+                reasons,
+                [
+                    Some("operation_unsupported".to_owned()),
+                    Some("destination_unavailable".to_owned())
+                ]
+            );
+            assert_eq!(env.fake.requests(), 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_empty_rate_bucket_re_enqueues_the_sync_without_spending_an_attempt(pool: PgPool) {
-        let env = Env::with(pool, |manifest| manifest, 1, 1).await;
-        let person = env.person().await;
-        let first = env.enroll(person).await;
-        let second = env.enroll(env.person().await).await;
-        env.queue(&first, "upsert", 5).await;
-        env.queue(&second, "upsert", 5).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, |manifest| manifest, 1, 1).await;
+            let person = env.person().await;
+            let first = env.enroll(person).await;
+            let second = env.enroll(env.person().await).await;
+            env.queue(&first, "upsert", 5).await;
+            env.queue(&second, "upsert", 5).await;
 
-        env.attempt().await.unwrap();
-        env.attempt().await.unwrap();
+            env.attempt().await.unwrap();
+            env.attempt().await.unwrap();
 
-        assert_eq!(env.fake.requests(), 1, "the second sync waits for a token");
-        assert_eq!(env.events("sync.succeeded").await.len(), 1);
-        let (waits, attempts, base): (i64, i32, i32) = sqlx::query_as(
-            "SELECT count(*), max(max_attempts), max((payload ->> 'attempt_base')::int) \
+            assert_eq!(env.fake.requests(), 1, "the second sync waits for a token");
+            assert_eq!(env.events("sync.succeeded").await.len(), 1);
+            let (waits, attempts, base): (i64, i32, i32) = sqlx::query_as(
+                "SELECT count(*), max(max_attempts), max((payload ->> 'attempt_base')::int) \
              FROM jobs WHERE kind = 'delivery.sync' AND unique_key LIKE '%:wait:1'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!((waits, attempts, base), (1, 5, 0));
+            )
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!((waits, attempts, base), (1, 5, 0));
+        })
+        .await;
     }
 
     /// A second sync that must wait for a token, its job naming a person as `flow.step` writes
@@ -1179,104 +1209,110 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_rate_wait_that_meets_an_erasure_in_flight_enqueues_no_copy(pool: PgPool) {
-        let env = Env::with(pool, |manifest| manifest, 1, 1).await;
-        let person = waiting_sync_of_a_person(&env).await;
-        // The worker has the job (an erasure marks a running job instead of deleting it).
-        let claimed = env.claim().await.expect("the waiting sync is ready");
-        let trace = TraceContext::root(Cause::api("erase"));
-        // The erasure has deleted the person and purged the jobs, and has not committed.
-        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
-        zirv_flow_store::delete_person(
-            &mut erasure,
-            env.ws,
-            person,
-            zirv_flow_store::DeleteReason::Erasure,
-            &trace,
-        )
-        .await
-        .unwrap();
-
-        let commit_when_the_handler_waits = async {
-            wait_until_something_waits_for_a_lock(&env.pool).await;
-            zirv_flow_store::commit(erasure).await.unwrap();
-        };
-        let (result, ()) =
-            tokio::join!(env.attempt_claimed(claimed), commit_when_the_handler_waits);
-
-        result.unwrap();
-        assert_eq!(
-            sync_jobs(&env.pool).await,
-            0,
-            "no job names the erased person"
-        );
-        assert_eq!(env.fake.requests(), 1, "the waiting sync made no call");
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn an_erasure_that_follows_a_rate_wait_purges_the_copy_it_enqueued(pool: PgPool) {
-        let env = Env::with(pool, |manifest| manifest, 1, 1).await;
-        let person = waiting_sync_of_a_person(&env).await;
-        let claimed = env.claim().await.expect("the waiting sync is ready");
-        let mut handler = zirv_flow_store::begin(&env.pool).await.unwrap();
-        env.run(&mut handler, &claimed).await.unwrap();
-        let copies: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE unique_key LIKE '%:wait:1'")
-                .fetch_one(&mut *handler)
-                .await
-                .unwrap();
-        assert_eq!(
-            copies, 1,
-            "the wait copy is enqueued in the handler's transaction"
-        );
-
-        // The erasure starts while the handler holds the person, and waits for it.
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        let (pool, ws) = (env.pool.clone(), env.ws);
-        let erasure = tokio::spawn(async move {
-            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
-            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&mut *tx)
-                .await
-                .unwrap();
-            sender.send(pid).unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, |manifest| manifest, 1, 1).await;
+            let person = waiting_sync_of_a_person(&env).await;
+            // The worker has the job (an erasure marks a running job instead of deleting it).
+            let claimed = env.claim().await.expect("the waiting sync is ready");
             let trace = TraceContext::root(Cause::api("erase"));
+            // The erasure has deleted the person and purged the jobs, and has not committed.
+            let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
             zirv_flow_store::delete_person(
-                &mut tx,
-                ws,
+                &mut erasure,
+                env.ws,
                 person,
                 zirv_flow_store::DeleteReason::Erasure,
                 &trace,
             )
             .await
             .unwrap();
-            zirv_flow_store::commit(tx).await.unwrap();
-        });
-        let pid = receiver.await.unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while !sqlx::query_scalar::<_, bool>("SELECT cardinality(pg_blocking_pids($1)) > 0")
-            .bind(pid)
-            .fetch_one(&env.pool)
-            .await
-            .unwrap()
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the erasure never waited"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        zirv_flow_store::complete_job(&mut *handler, claimed.id, claimed.lease_token)
-            .await
-            .unwrap();
-        zirv_flow_store::commit(handler).await.unwrap();
-        erasure.await.unwrap();
 
-        assert_eq!(
-            sync_jobs(&env.pool).await,
-            0,
-            "the copy went with the erasure"
-        );
+            let commit_when_the_handler_waits = async {
+                wait_until_something_waits_for_a_lock(&env.pool).await;
+                zirv_flow_store::commit(erasure).await.unwrap();
+            };
+            let (result, ()) =
+                tokio::join!(env.attempt_claimed(claimed), commit_when_the_handler_waits);
+
+            result.unwrap();
+            assert_eq!(
+                sync_jobs(&env.pool).await,
+                0,
+                "no job names the erased person"
+            );
+            assert_eq!(env.fake.requests(), 1, "the waiting sync made no call");
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_that_follows_a_rate_wait_purges_the_copy_it_enqueued(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, |manifest| manifest, 1, 1).await;
+            let person = waiting_sync_of_a_person(&env).await;
+            let claimed = env.claim().await.expect("the waiting sync is ready");
+            let mut handler = zirv_flow_store::begin(&env.pool).await.unwrap();
+            env.run(&mut handler, &claimed).await.unwrap();
+            let copies: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE unique_key LIKE '%:wait:1'")
+                    .fetch_one(&mut *handler)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                copies, 1,
+                "the wait copy is enqueued in the handler's transaction"
+            );
+
+            // The erasure starts while the handler holds the person, and waits for it.
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let (pool, ws) = (env.pool.clone(), env.ws);
+            let erasure = tokio::spawn(async move {
+                let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+                let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                sender.send(pid).unwrap();
+                let trace = TraceContext::root(Cause::api("erase"));
+                zirv_flow_store::delete_person(
+                    &mut tx,
+                    ws,
+                    person,
+                    zirv_flow_store::DeleteReason::Erasure,
+                    &trace,
+                )
+                .await
+                .unwrap();
+                zirv_flow_store::commit(tx).await.unwrap();
+            });
+            let pid = receiver.await.unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !sqlx::query_scalar::<_, bool>("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                .bind(pid)
+                .fetch_one(&env.pool)
+                .await
+                .unwrap()
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the erasure never waited"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            zirv_flow_store::complete_job(&mut *handler, claimed.id, claimed.lease_token)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(handler).await.unwrap();
+            erasure.await.unwrap();
+
+            assert_eq!(
+                sync_jobs(&env.pool).await,
+                0,
+                "the copy went with the erasure"
+            );
+        })
+        .await;
     }
 
     fn payload() -> Value {
@@ -1374,36 +1410,42 @@ mod tests {
     async fn a_sync_that_meets_an_erasure_in_flight_waits_for_it_then_skips_the_person(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "upsert", 5).await;
-        let claimed = env.claim().await.expect("the sync is ready");
-        let key = zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
-            .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
-        let trace = TraceContext::root(Cause::api("erase"));
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let request = zirv_flow_store::request_erasure(&mut tx, env.ws, person, &key, None, &trace)
-            .await
-            .unwrap()
-            .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        // The erasure has the person's call lock and has not committed.
-        let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
-        zirv_flow_store::erase_person(&mut erasure, env.ws, request.id, &key, &[], &trace)
-            .await
-            .unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "upsert", 5).await;
+            let claimed = env.claim().await.expect("the sync is ready");
+            let key =
+                zirv_flow_core::HmacRoot::bootstrap_from(&zirv_flow_core::MasterKey::generate())
+                    .hmac_key(zirv_flow_core::HmacPurpose::Identifier);
+            let trace = TraceContext::root(Cause::api("erase"));
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let request =
+                zirv_flow_store::request_erasure(&mut tx, env.ws, person, &key, None, &trace)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            // The erasure has the person's call lock and has not committed.
+            let mut erasure = zirv_flow_store::begin(&env.pool).await.unwrap();
+            zirv_flow_store::erase_person(&mut erasure, env.ws, request.id, &key, &[], &trace)
+                .await
+                .unwrap();
 
-        let commit_when_the_sync_waits = async {
-            wait_until_something_waits_for_a_lock(&env.pool).await;
-            zirv_flow_store::commit(erasure).await.unwrap();
-        };
-        let (result, ()) = tokio::join!(env.attempt_claimed(claimed), commit_when_the_sync_waits);
+            let commit_when_the_sync_waits = async {
+                wait_until_something_waits_for_a_lock(&env.pool).await;
+                zirv_flow_store::commit(erasure).await.unwrap();
+            };
+            let (result, ()) =
+                tokio::join!(env.attempt_claimed(claimed), commit_when_the_sync_waits);
 
-        result.unwrap();
-        assert_eq!(env.fake.requests(), 0, "the sync made no call");
-        assert!(env.events("sync.succeeded").await.is_empty());
-        assert!(env.events("sync.failed").await.is_empty());
+            result.unwrap();
+            assert_eq!(env.fake.requests(), 0, "the sync made no call");
+            assert!(env.events("sync.succeeded").await.is_empty());
+            assert!(env.events("sync.failed").await.is_empty());
+        })
+        .await;
     }
 
     /// Requests the erasure of `person` and carries it out with `targets`, as `privacy.erase` does.
@@ -1444,27 +1486,30 @@ mod tests {
     async fn an_erasure_between_a_retryable_sync_attempt_and_its_retry_plans_the_erase_call(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let person = env.person().await;
-        let enrolled = env.enroll(person).await;
-        env.queue(&enrolled, "upsert", 5).await;
-        // The destination takes the request and the answer is lost: the attempt is retryable and
-        // its transaction rolls back, so no outcome event exists.
-        env.fake.script(FakeProviderScript::Status {
-            status: 503,
-            body: json!({}),
-            retry_after: None,
-        });
-        env.attempt().await.unwrap_err();
-        assert!(env.events("sync.failed").await.is_empty());
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person().await;
+            let enrolled = env.enroll(person).await;
+            env.queue(&enrolled, "upsert", 5).await;
+            // The destination takes the request and the answer is lost: the attempt is retryable and
+            // its transaction rolls back, so no outcome event exists.
+            env.fake.script(FakeProviderScript::Status {
+                status: 503,
+                body: json!({}),
+                retry_after: None,
+            });
+            env.attempt().await.unwrap_err();
+            assert!(env.events("sync.failed").await.is_empty());
 
-        let ledger = erase_with(&env, person, &[email_target(&env)]).await;
+            let ledger = erase_with(&env, person, &[email_target(&env)]).await;
 
-        assert_eq!(
-            planned_destinations(&env, ledger).await,
-            [env.destination],
-            "the queued retry is evidence that the destination may hold the person"
-        );
+            assert_eq!(
+                planned_destinations(&env, ledger).await,
+                [env.destination],
+                "the queued retry is evidence that the destination may hold the person"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1472,61 +1517,64 @@ mod tests {
     async fn a_sync_whose_person_was_merged_during_the_call_leaves_evidence_for_the_survivor(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let other = ProfileRecord {
-            source: "crm".into(),
-            stream: "contacts".into(),
-            record_key: "grace".into(),
-            identifiers: vec![("email".into(), "grace@example.com".into())],
-            traits: json!({}).as_object().cloned().unwrap(),
-            observed_at: time::OffsetDateTime::now_utc() - time::Duration::days(1),
-            trace: TraceContext::root(Cause::api("t")),
-        };
-        zirv_flow_store::apply_profile_batch(&env.pool, env.ws, &[other])
-            .await
-            .unwrap();
-        // Grace is the older person, so she survives the merge.
-        let ada = env.person().await;
-        let enrolled = env.enroll(ada).await;
-        env.queue(&enrolled, "upsert", 5).await;
-        // The destination answers late, and the two people are merged meanwhile.
-        env.fake
-            .script(FakeProviderScript::HangAfterAccept(Duration::from_millis(
-                800,
-            )));
-        let merge = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let both = ProfileRecord {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let other = ProfileRecord {
                 source: "crm".into(),
                 stream: "contacts".into(),
-                record_key: "merge".into(),
-                identifiers: vec![
-                    ("email".into(), EMAIL.into()),
-                    ("email".into(), "grace@example.com".into()),
-                ],
+                record_key: "grace".into(),
+                identifiers: vec![("email".into(), "grace@example.com".into())],
                 traits: json!({}).as_object().cloned().unwrap(),
-                observed_at: time::OffsetDateTime::now_utc(),
+                observed_at: time::OffsetDateTime::now_utc() - time::Duration::days(1),
                 trace: TraceContext::root(Cause::api("t")),
             };
-            zirv_flow_store::apply_profile_batch(&env.pool, env.ws, &[both])
+            zirv_flow_store::apply_profile_batch(&env.pool, env.ws, &[other])
                 .await
                 .unwrap();
-        };
+            // Grace is the older person, so she survives the merge.
+            let ada = env.person().await;
+            let enrolled = env.enroll(ada).await;
+            env.queue(&enrolled, "upsert", 5).await;
+            // The destination answers late, and the two people are merged meanwhile.
+            env.fake
+                .script(FakeProviderScript::HangAfterAccept(Duration::from_millis(
+                    800,
+                )));
+            let merge = async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let both = ProfileRecord {
+                    source: "crm".into(),
+                    stream: "contacts".into(),
+                    record_key: "merge".into(),
+                    identifiers: vec![
+                        ("email".into(), EMAIL.into()),
+                        ("email".into(), "grace@example.com".into()),
+                    ],
+                    traits: json!({}).as_object().cloned().unwrap(),
+                    observed_at: time::OffsetDateTime::now_utc(),
+                    trace: TraceContext::root(Cause::api("t")),
+                };
+                zirv_flow_store::apply_profile_batch(&env.pool, env.ws, &[both])
+                    .await
+                    .unwrap();
+            };
 
-        let (result, ()) = tokio::join!(env.attempt(), merge);
+            let (result, ()) = tokio::join!(env.attempt(), merge);
 
-        result.unwrap();
-        assert_eq!(env.fake.accepted().len(), 1, "the destination was called");
-        let survivor = zirv_flow_store::current_person(&env.pool, env.ws, ada)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_ne!(survivor, ada, "the sync's person was merged away");
-        let ledger = erase_with(&env, survivor, &[email_target(&env)]).await;
-        assert_eq!(
-            planned_destinations(&env, ledger).await,
-            [env.destination],
-            "the survivor's erasure reaches the destination contacted during the merge"
-        );
+            result.unwrap();
+            assert_eq!(env.fake.accepted().len(), 1, "the destination was called");
+            let survivor = zirv_flow_store::current_person(&env.pool, env.ws, ada)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(survivor, ada, "the sync's person was merged away");
+            let ledger = erase_with(&env, survivor, &[email_target(&env)]).await;
+            assert_eq!(
+                planned_destinations(&env, ledger).await,
+                [env.destination],
+                "the survivor's erasure reaches the destination contacted during the merge"
+            );
+        })
+        .await;
     }
 }

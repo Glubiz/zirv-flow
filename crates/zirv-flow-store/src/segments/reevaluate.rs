@@ -376,6 +376,8 @@ pub async fn apply_reevaluation(
 
 #[cfg(test)]
 mod tests {
+    use crate::decision_testing::PERSONAL_DATA;
+
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;
@@ -599,9 +601,10 @@ mod tests {
     async fn a_batch_diff_touches_only_its_people_and_records_each_under_its_own_trace(
         pool: PgPool,
     ) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "one").await;
         let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
+        let ada = person(&pool, ws, PERSONAL_DATA.email, "pro").await;
         let bob = person(&pool, ws, "bob@example.com", "pro").await;
         let cy = person(&pool, ws, "cy@example.com", "free").await;
         let fallback = TraceContext::root(Cause::schedule(id(1)));
@@ -720,72 +723,80 @@ mod tests {
             .unwrap(),
             0
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unchanged_batch_writes_nothing(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let batch = DirtyBatch::new(&[dirty(ada, &trace)], &trace);
-        reevaluate(&pool, ws, seg.id, "pro", &batch).await;
-        let events_before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let batch = DirtyBatch::new(&[dirty(ada, &trace)], &trace);
+            reevaluate(&pool, ws, seg.id, "pro", &batch).await;
+            let events_before: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
 
-        let again = reevaluate(&pool, ws, seg.id, "pro", &batch).await;
+            let again = reevaluate(&pool, ws, seg.id, "pro", &batch).await;
 
-        assert_eq!(
-            again,
-            RefreshOutcome {
-                entered: 0,
-                exited: 0
-            }
-        );
-        let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(events_before, events_after);
+            assert_eq!(
+                again,
+                RefreshOutcome {
+                    entered: 0,
+                    exited: 0
+                }
+            );
+            let events_after: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(events_before, events_after);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_merged_person_in_the_batch_leaves_every_segment(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
-        let trace = TraceContext::root(Cause::api("req"));
-        let batch = DirtyBatch::new(&[dirty(ada, &trace)], &trace);
-        reevaluate(&pool, ws, seg.id, "pro", &batch).await;
-        // A refresh that ran concurrently with a merge opened a row after the merge closed
-        // them: the loser is merged but has an open row.
-        let survivor = person(&pool, ws, "ada2@example.com", "pro").await;
-        sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
-            .bind(ada)
-            .bind(survivor)
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            let trace = TraceContext::root(Cause::api("req"));
+            let batch = DirtyBatch::new(&[dirty(ada, &trace)], &trace);
+            reevaluate(&pool, ws, seg.id, "pro", &batch).await;
+            // A refresh that ran concurrently with a merge opened a row after the merge closed
+            // them: the loser is merged but has an open row.
+            let survivor = person(&pool, ws, "ada2@example.com", "pro").await;
+            sqlx::query("UPDATE people SET merged_into = $2 WHERE id = $1")
+                .bind(ada)
+                .bind(survivor)
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        let outcome = reevaluate(&pool, ws, seg.id, "pro", &batch).await;
+            let outcome = reevaluate(&pool, ws, seg.id, "pro", &batch).await;
 
-        assert_eq!(
-            outcome,
-            RefreshOutcome {
-                entered: 0,
-                exited: 1
-            }
-        );
-        let count: i32 = sqlx::query_scalar("SELECT member_count FROM segments WHERE id = $1")
-            .bind(seg.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(count, 0);
+            assert_eq!(
+                outcome,
+                RefreshOutcome {
+                    entered: 0,
+                    exited: 1
+                }
+            );
+            let count: i32 = sqlx::query_scalar("SELECT member_count FROM segments WHERE id = $1")
+                .bind(seg.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
+        })
+        .await;
     }
 
     /// Opens `count` people of the plan and a row for each in `segment`.
@@ -811,119 +822,125 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_diff_of_a_segment_missing_from_the_statistics_probes_by_person(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let known = segment(&pool, ws, "Known", 60).await;
-        fill(&pool, ws, known.id, 300).await;
-        // Autovacuum stays off so that it cannot analyze the second fill before the batch runs.
-        sqlx::query("ALTER TABLE segment_members SET (autovacuum_enabled = false)")
-            .execute(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let known = segment(&pool, ws, "Known", 60).await;
+            fill(&pool, ws, known.id, 300).await;
+            // Autovacuum stays off so that it cannot analyze the second fill before the batch runs.
+            sqlx::query("ALTER TABLE segment_members SET (autovacuum_enabled = false)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("ANALYZE segment_members")
+                .execute(&pool)
+                .await
+                .unwrap();
+            // The statistics know only the first segment when this one fills.
+            let fresh = segment(&pool, ws, "Fresh", 60).await;
+            fill(&pool, ws, fresh.id, 20_000).await;
+            let people: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT person_id FROM segment_members WHERE segment_id = $1 LIMIT 3",
+            )
+            .bind(fresh.id)
+            .fetch_all(&pool)
             .await
             .unwrap();
-        sqlx::query("ANALYZE segment_members")
-            .execute(&pool)
-            .await
-            .unwrap();
-        // The statistics know only the first segment when this one fills.
-        let fresh = segment(&pool, ws, "Fresh", 60).await;
-        fill(&pool, ws, fresh.id, 20_000).await;
-        let people: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT person_id FROM segment_members WHERE segment_id = $1 LIMIT 3",
-        )
-        .bind(fresh.id)
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let trace = TraceContext::root(Cause::api("req"));
-        let dirty_people: Vec<DirtyPerson> = people.iter().map(|p| dirty(*p, &trace)).collect();
-        let batch = DirtyBatch::new(&dirty_people, &trace);
+            let trace = TraceContext::root(Cause::api("req"));
+            let dirty_people: Vec<DirtyPerson> = people.iter().map(|p| dirty(*p, &trace)).collect();
+            let batch = DirtyBatch::new(&dirty_people, &trace);
 
-        let mut tx = begin(&pool).await.unwrap();
-        lock_segment_refresh(&mut tx, fresh.id).await.unwrap();
-        let read = "SELECT COALESCE(sum(seq_tup_read + idx_tup_fetch), 0)::bigint \
+            let mut tx = begin(&pool).await.unwrap();
+            lock_segment_refresh(&mut tx, fresh.id).await.unwrap();
+            let read = "SELECT COALESCE(sum(seq_tup_read + idx_tup_fetch), 0)::bigint \
                     FROM pg_stat_xact_user_tables WHERE relname = 'segment_members'";
-        let before: i64 = sqlx::query_scalar(read).fetch_one(&mut *tx).await.unwrap();
-        let outcome = apply_reevaluation(
-            &mut tx,
-            &ReevaluateApply {
-                workspace: ws,
-                segment: fresh.id,
-                version: 1,
-                members: &pro_batch("pro"),
-                now: NOW,
-                batch: &batch,
-                job: (Uuid::new_v4(), 1),
-            },
-        )
-        .await
-        .unwrap();
-        let after: i64 = sqlx::query_scalar(read).fetch_one(&mut *tx).await.unwrap();
-        let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
-            .fetch_one(&mut *tx)
+            let before: i64 = sqlx::query_scalar(read).fetch_one(&mut *tx).await.unwrap();
+            let outcome = apply_reevaluation(
+                &mut tx,
+                &ReevaluateApply {
+                    workspace: ws,
+                    segment: fresh.id,
+                    version: 1,
+                    members: &pro_batch("pro"),
+                    now: NOW,
+                    batch: &batch,
+                    job: (Uuid::new_v4(), 1),
+                },
+            )
             .await
             .unwrap();
-        commit(tx).await.unwrap();
+            let after: i64 = sqlx::query_scalar(read).fetch_one(&mut *tx).await.unwrap();
+            let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
 
-        assert_eq!(
-            outcome,
-            RefreshOutcome {
-                entered: 0,
-                exited: 0
-            }
-        );
-        // The rows read follow the batch, not the segment's 20 000 open rows.
-        assert!(after - before < 100, "read {} rows", after - before);
-        // The setting does not leak into the rest of the transaction.
-        assert_eq!(mode, "auto");
+            assert_eq!(
+                outcome,
+                RefreshOutcome {
+                    entered: 0,
+                    exited: 0
+                }
+            );
+            // The rows read follow the batch, not the segment's 20 000 open rows.
+            assert!(after - before < 100, "read {} rows", after - before);
+            // The setting does not leak into the rest of the transaction.
+            assert_eq!(mode, "auto");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_batch_passes_segment_events_reach_the_forwarding_outbox(pool: PgPool) {
-        use crate::forwarding::support::{
-            add_rule, destination_in, forward_jobs, outbox_rows, payloads,
-        };
+        crate::decision_testing::checked(pool, |pool| async move {
+            use crate::forwarding::support::{
+                add_rule, destination_in, forward_jobs, outbox_rows, payloads,
+            };
 
-        let ws = workspace(&pool, "one").await;
-        let seg = segment(&pool, ws, "Pros", 60).await;
-        let ada = person(&pool, ws, "ada@example.com", "pro").await;
-        let sink = destination_in(&pool, ws).await;
-        add_rule(
-            &pool,
-            ws,
-            sink,
-            "segment.entered",
-            json!([]),
-            json!({"who": {"from": "person.id"}}),
-        )
+            let ws = workspace(&pool, "one").await;
+            let seg = segment(&pool, ws, "Pros", 60).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email, "pro").await;
+            let sink = destination_in(&pool, ws).await;
+            add_rule(
+                &pool,
+                ws,
+                sink,
+                "segment.entered",
+                json!([]),
+                json!({"who": {"from": "person.id"}}),
+            )
+            .await;
+            let fallback = TraceContext::root(Cause::schedule(id(1)));
+            let trace = TraceContext::root(Cause::api("req"));
+            let batch = DirtyBatch::new(&[dirty(ada, &trace)], &fallback);
+
+            let mut tx = begin(&pool).await.unwrap();
+            lock_segment_refresh(&mut tx, seg.id).await.unwrap();
+            apply_reevaluation(
+                &mut tx,
+                &ReevaluateApply {
+                    workspace: ws,
+                    segment: seg.id,
+                    version: 1,
+                    members: &pro_batch("pro"),
+                    now: NOW,
+                    batch: &batch,
+                    job: (Uuid::new_v4(), 1),
+                },
+            )
+            .await
+            .unwrap();
+            tx.rollback().await.unwrap();
+            assert_eq!(
+                (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
+                (0, 0)
+            );
+
+            reevaluate(&pool, ws, seg.id, "pro", &batch).await;
+            assert_eq!(payloads(&pool, ws).await, [json!({"who": ada.to_string()})]);
+            assert_eq!(forward_jobs(&pool).await, 1);
+        })
         .await;
-        let fallback = TraceContext::root(Cause::schedule(id(1)));
-        let trace = TraceContext::root(Cause::api("req"));
-        let batch = DirtyBatch::new(&[dirty(ada, &trace)], &fallback);
-
-        let mut tx = begin(&pool).await.unwrap();
-        lock_segment_refresh(&mut tx, seg.id).await.unwrap();
-        apply_reevaluation(
-            &mut tx,
-            &ReevaluateApply {
-                workspace: ws,
-                segment: seg.id,
-                version: 1,
-                members: &pro_batch("pro"),
-                now: NOW,
-                batch: &batch,
-                job: (Uuid::new_v4(), 1),
-            },
-        )
-        .await
-        .unwrap();
-        tx.rollback().await.unwrap();
-        assert_eq!(
-            (outbox_rows(&pool, ws).await, forward_jobs(&pool).await),
-            (0, 0)
-        );
-
-        reevaluate(&pool, ws, seg.id, "pro", &batch).await;
-        assert_eq!(payloads(&pool, ws).await, [json!({"who": ada.to_string()})]);
-        assert_eq!(forward_jobs(&pool).await, 1);
     }
 }

@@ -622,6 +622,8 @@ pub async fn consent_history(
 
 #[cfg(test)]
 mod tests {
+    use crate::decision_testing::PERSONAL_DATA;
+
     use serde_json::json;
     use sqlx::PgPool;
     use time::macros::datetime;
@@ -720,88 +722,94 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_change_is_stored_with_history_and_a_decision_that_holds_ids_only(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let news = topic(&pool, ws, "news").await;
-        let trace = TraceContext::root(Cause::api("test"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = crate::decision_testing::seed_personal_data(&pool, ws).await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
 
-        let outcome = set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
-            &trace,
-        )
+            let outcome = set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+
+            let ConsentOutcome::Changed {
+                person_id,
+                change_id,
+            } = outcome
+            else {
+                panic!("{outcome:?}");
+            };
+            assert_eq!(person_id, ada);
+            let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].topic_key.as_deref(), Some("news"));
+            assert_eq!(entries[0].status, "subscribed");
+            assert!(entries[0].explicit);
+            assert_eq!(entries[0].changed_at, T1);
+            let (history, more) = consent_history(&pool, ws, ada, 10, None, &Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!more);
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].id, change_id);
+            assert_eq!(history[0].from_status, None);
+            assert_eq!(history[0].to_status, "subscribed");
+            assert_eq!(history[0].source, "api");
+            assert_eq!(history[0].evidence, json!({"form": "footer"}));
+
+            let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 20).await.unwrap();
+            let decision = decisions
+                .iter()
+                .find(|d| d.action == "consent.change")
+                .unwrap();
+            assert_eq!(decision.reason.as_deref(), Some("api"));
+            assert_eq!(
+                decision.subject_ids,
+                json!({"person": ada.to_string(), "consent_change": change_id.to_string()})
+            );
+        })
         .await;
-
-        let ConsentOutcome::Changed {
-            person_id,
-            change_id,
-        } = outcome
-        else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!(person_id, ada);
-        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].topic_key.as_deref(), Some("news"));
-        assert_eq!(entries[0].status, "subscribed");
-        assert!(entries[0].explicit);
-        assert_eq!(entries[0].changed_at, T1);
-        let (history, more) = consent_history(&pool, ws, ada, 10, None, &Default::default())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!more);
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].id, change_id);
-        assert_eq!(history[0].from_status, None);
-        assert_eq!(history[0].to_status, "subscribed");
-        assert_eq!(history[0].source, "api");
-        assert_eq!(history[0].evidence, json!({"form": "footer"}));
-
-        let (decisions, _) = list_trace(&pool, ws, trace.trace_id, 20).await.unwrap();
-        let decision = decisions
-            .iter()
-            .find(|d| d.action == "consent.change")
-            .unwrap();
-        assert_eq!(decision.reason.as_deref(), Some("api"));
-        assert_eq!(
-            decision.subject_ids,
-            json!({"person": ada.to_string(), "consent_change": change_id.to_string()})
-        );
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn writing_the_status_already_held_leaves_no_history_and_no_decision(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        let decisions_before = count(&pool, "decision_records").await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            let decisions_before = count(&pool, "decision_records").await;
 
-        let outcome = set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Subscribed, T2),
-            &trace,
-        )
-        .await;
+            let outcome = set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Subscribed, T2),
+                &trace,
+            )
+            .await;
 
-        assert_eq!(outcome, ConsentOutcome::Unchanged);
-        assert_eq!(count(&pool, "consent_changes").await, 1);
-        assert_eq!(count(&pool, "decision_records").await, decisions_before);
-        let changed_at: OffsetDateTime = sqlx::query_scalar("SELECT changed_at FROM consent")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(changed_at, T1);
+            assert_eq!(outcome, ConsentOutcome::Unchanged);
+            assert_eq!(count(&pool, "consent_changes").await, 1);
+            assert_eq!(count(&pool, "decision_records").await, decisions_before);
+            let changed_at: OffsetDateTime = sqlx::query_scalar("SELECT changed_at FROM consent")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(changed_at, T1);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -809,127 +817,137 @@ mod tests {
     async fn a_second_change_records_where_it_came_from_and_the_history_pages_newest_first(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        let mut second = change(ada, None, ConsentStatus::Unsubscribed, T2);
-        second.source = ChangeSource::UnsubscribeLink;
-        set(&pool, ws, &second, &trace).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            let mut second = change(ada, None, ConsentStatus::Unsubscribed, T2);
+            second.source = ChangeSource::UnsubscribeLink;
+            set(&pool, ws, &second, &trace).await;
 
-        let (page, more) = consent_history(&pool, ws, ada, 1, None, &Default::default())
+            let (page, more) = consent_history(&pool, ws, ada, 1, None, &Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(more);
+            assert_eq!(page[0].to_status, "unsubscribed");
+            assert_eq!(page[0].from_status.as_deref(), Some("subscribed"));
+            assert_eq!(page[0].source, "unsubscribe_link");
+            let (rest, more) = consent_history(
+                &pool,
+                ws,
+                ada,
+                1,
+                Some((page[0].occurred_at, page[0].id)),
+                &Default::default(),
+            )
             .await
             .unwrap()
             .unwrap();
-
-        assert!(more);
-        assert_eq!(page[0].to_status, "unsubscribed");
-        assert_eq!(page[0].from_status.as_deref(), Some("subscribed"));
-        assert_eq!(page[0].source, "unsubscribe_link");
-        let (rest, more) = consent_history(
-            &pool,
-            ws,
-            ada,
-            1,
-            Some((page[0].occurred_at, page[0].id)),
-            &Default::default(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(!more);
-        assert_eq!(rest[0].to_status, "subscribed");
+            assert!(!more);
+            assert_eq!(rest[0].to_status, "subscribed");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_channel_wide_state_and_a_topic_state_are_separate_rows(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let news = topic(&pool, ws, "news").await;
-        let trace = TraceContext::root(Cause::api("test"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
 
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Unsubscribed, T1),
-            &trace,
-        )
-        .await;
-        set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Unsubscribed, T1),
+                &trace,
+            )
+            .await;
+            set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
 
-        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
-        let shown: Vec<(Option<&str>, &str)> = entries
-            .iter()
-            .map(|entry| (entry.topic_key.as_deref(), entry.status.as_str()))
-            .collect();
-        assert_eq!(
-            shown,
-            [(None, "unsubscribed"), (Some("news"), "subscribed")]
-        );
+            let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
+            let shown: Vec<(Option<&str>, &str)> = entries
+                .iter()
+                .map(|entry| (entry.topic_key.as_deref(), entry.status.as_str()))
+                .collect();
+            assert_eq!(
+                shown,
+                [(None, "unsubscribed"), (Some("news"), "subscribed")]
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_topic_of_another_workspace_or_an_unknown_person_changes_nothing(pool: PgPool) {
-        let one = workspace(&pool, "one").await;
-        let two = workspace(&pool, "two").await;
-        let ada = person(&pool, one, "ada@example.com").await;
-        let foreign_topic = topic(&pool, two, "news").await;
-        let trace = TraceContext::root(Cause::api("test"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let one = workspace(&pool, "one").await;
+            let two = workspace(&pool, "two").await;
+            let ada = person(&pool, one, PERSONAL_DATA.email).await;
+            let foreign_topic = topic(&pool, two, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
 
-        let wrong_topic = set(
-            &pool,
-            one,
-            &change(ada, Some(foreign_topic), ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        let wrong_person = set(
-            &pool,
-            two,
-            &change(ada, None, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        let nobody = set(
-            &pool,
-            one,
-            &change(Uuid::now_v7(), None, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
+            let wrong_topic = set(
+                &pool,
+                one,
+                &change(ada, Some(foreign_topic), ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            let wrong_person = set(
+                &pool,
+                two,
+                &change(ada, None, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            let nobody = set(
+                &pool,
+                one,
+                &change(Uuid::now_v7(), None, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
 
-        assert_eq!(wrong_topic, ConsentOutcome::NoSuchTopic);
-        assert_eq!(wrong_person, ConsentOutcome::NoSuchPerson);
-        assert_eq!(nobody, ConsentOutcome::NoSuchPerson);
-        assert_eq!(count(&pool, "consent").await, 0);
-        assert!(consent_for(&pool, two, ada).await.unwrap().is_none());
-        assert!(
-            consent_history(&pool, two, ada, 5, None, &Default::default())
-                .await
-                .unwrap()
-                .is_none()
-        );
+            assert_eq!(wrong_topic, ConsentOutcome::NoSuchTopic);
+            assert_eq!(wrong_person, ConsentOutcome::NoSuchPerson);
+            assert_eq!(nobody, ConsentOutcome::NoSuchPerson);
+            assert_eq!(count(&pool, "consent").await, 0);
+            assert!(consent_for(&pool, two, ada).await.unwrap().is_none());
+            assert!(
+                consent_history(&pool, two, ada, 5, None, &Default::default())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_write_for_a_merged_person_lands_on_the_survivor(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "one").await;
-        let survivor = person(&pool, ws, "ada@example.com").await;
+        let survivor = person(&pool, ws, PERSONAL_DATA.email).await;
         let merged = person(&pool, ws, "ada2@example.com").await;
         sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
             .bind(survivor)
@@ -957,96 +975,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(owner, survivor);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_history_cannot_be_updated_but_can_be_deleted_for_erasure(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+
+            let rewrite = sqlx::query("UPDATE consent_changes SET to_status = 'unsubscribed'")
+                .execute(&pool)
+                .await;
+            let evidence = sqlx::query("UPDATE consent_changes SET evidence = '{}'")
+                .execute(&pool)
+                .await;
+            let repoint = sqlx::query("UPDATE consent_changes SET person_id = person_id")
+                .execute(&pool)
+                .await;
+            let stranger = person(&pool, ws, "stranger@example.com").await;
+            let to_stranger = sqlx::query("UPDATE consent_changes SET person_id = $1")
+                .bind(stranger)
+                .execute(&pool)
+                .await;
+            sqlx::query("DELETE FROM consent_changes")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            assert!(rewrite.unwrap_err().to_string().contains("append-only"));
+            assert!(evidence.is_err());
+            assert!(repoint.is_ok());
+            assert!(to_stranger.unwrap_err().to_string().contains("survivor"));
+            assert_eq!(count(&pool, "consent_changes").await, 0);
+        })
         .await;
-
-        let rewrite = sqlx::query("UPDATE consent_changes SET to_status = 'unsubscribed'")
-            .execute(&pool)
-            .await;
-        let evidence = sqlx::query("UPDATE consent_changes SET evidence = '{}'")
-            .execute(&pool)
-            .await;
-        let repoint = sqlx::query("UPDATE consent_changes SET person_id = person_id")
-            .execute(&pool)
-            .await;
-        let stranger = person(&pool, ws, "stranger@example.com").await;
-        let to_stranger = sqlx::query("UPDATE consent_changes SET person_id = $1")
-            .bind(stranger)
-            .execute(&pool)
-            .await;
-        sqlx::query("DELETE FROM consent_changes")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        assert!(rewrite.unwrap_err().to_string().contains("append-only"));
-        assert!(evidence.is_err());
-        assert!(repoint.is_ok());
-        assert!(to_stranger.unwrap_err().to_string().contains("survivor"));
-        assert_eq!(count(&pool, "consent_changes").await, 0);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn history_moves_only_to_the_survivor_of_a_merge(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let loser = person(&pool, ws, "ada@example.com").await;
-        let survivor = person(&pool, ws, "ada2@example.com").await;
-        let stranger = person(&pool, ws, "bob@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        set(
-            &pool,
-            ws,
-            &change(loser, None, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let loser = person(&pool, ws, PERSONAL_DATA.email).await;
+            let survivor = person(&pool, ws, "ada2@example.com").await;
+            let stranger = person(&pool, ws, "bob@example.com").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            set(
+                &pool,
+                ws,
+                &change(loser, None, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
+                .bind(survivor)
+                .bind(loser)
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            let to_stranger = sqlx::query("UPDATE consent_changes SET person_id = $1")
+                .bind(stranger)
+                .execute(&pool)
+                .await;
+            let to_survivor = sqlx::query("UPDATE consent_changes SET person_id = $1")
+                .bind(survivor)
+                .execute(&pool)
+                .await;
+
+            assert!(to_stranger.is_err());
+            assert_eq!(to_survivor.unwrap().rows_affected(), 1);
+        })
         .await;
-        sqlx::query("UPDATE people SET merged_into = $1 WHERE id = $2")
-            .bind(survivor)
-            .bind(loser)
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let to_stranger = sqlx::query("UPDATE consent_changes SET person_id = $1")
-            .bind(stranger)
-            .execute(&pool)
-            .await;
-        let to_survivor = sqlx::query("UPDATE consent_changes SET person_id = $1")
-            .bind(survivor)
-            .execute(&pool)
-            .await;
-
-        assert!(to_stranger.is_err());
-        assert_eq!(to_survivor.unwrap().rows_affected(), 1);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn evidence_that_is_not_an_object_is_refused_by_the_database(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        let mut tx = begin(&pool).await.unwrap();
-        let mut array = change(ada, None, ConsentStatus::Subscribed, T1);
-        array.evidence = json!(["x"]);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let mut tx = begin(&pool).await.unwrap();
+            let mut array = change(ada, None, ConsentStatus::Subscribed, T1);
+            array.evidence = json!(["x"]);
 
-        let not_object = set_consent(&mut tx, ws, &array, &trace).await;
+            let not_object = set_consent(&mut tx, ws, &array, &trace).await;
 
-        assert!(not_object.is_err());
+            assert!(not_object.is_err());
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1054,39 +1083,42 @@ mod tests {
     async fn a_consent_change_marks_the_person_in_the_consent_class_and_a_repeat_marks_nobody(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("consent"));
-        let change = change(ada, None, ConsentStatus::Subscribed, T1);
-        sqlx::query("DELETE FROM person_changes")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        set(&pool, ws, &change, &trace).await;
-
-        let marks: Vec<(Uuid, i16, Option<Uuid>, Option<String>)> =
-            sqlx::query_as("SELECT person_id, classes, trace_id, cause_id FROM person_changes")
-                .fetch_all(&pool)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("consent"));
+            let change = change(ada, None, ConsentStatus::Subscribed, T1);
+            sqlx::query("DELETE FROM person_changes")
+                .execute(&pool)
                 .await
                 .unwrap();
-        assert_eq!(
-            marks,
-            [(
-                ada,
-                8,
-                Some(trace.trace_id.as_uuid()),
-                Some("consent".into())
-            )]
-        );
-        sqlx::query("DELETE FROM person_changes")
-            .execute(&pool)
-            .await
-            .unwrap();
 
-        set(&pool, ws, &change, &trace).await;
+            set(&pool, ws, &change, &trace).await;
 
-        assert_eq!(count(&pool, "person_changes").await, 0);
+            let marks: Vec<(Uuid, i16, Option<Uuid>, Option<String>)> =
+                sqlx::query_as("SELECT person_id, classes, trace_id, cause_id FROM person_changes")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                marks,
+                [(
+                    ada,
+                    8,
+                    Some(trace.trace_id.as_uuid()),
+                    Some("consent".into())
+                )]
+            );
+            sqlx::query("DELETE FROM person_changes")
+                .execute(&pool)
+                .await
+                .unwrap();
+
+            set(&pool, ws, &change, &trace).await;
+
+            assert_eq!(count(&pool, "person_changes").await, 0);
+        })
+        .await;
     }
 
     fn scoped(pairs: &[(&str, &str)]) -> Dimensions {
@@ -1150,186 +1182,196 @@ mod tests {
     async fn a_vertical_scoped_unsubscribe_blocks_only_that_vertical_and_the_rest_stays_separate(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let news = topic(&pool, ws, "news").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        let retail = [("vertical", "retail")];
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let retail = [("vertical", "retail")];
 
-        set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        let scoped_out = set(
-            &pool,
-            ws,
-            &scoped_change(ada, Some(news), &retail, ConsentStatus::Unsubscribed, T2),
-            &trace,
-        )
-        .await;
+            set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            let scoped_out = set(
+                &pool,
+                ws,
+                &scoped_change(ada, Some(news), &retail, ConsentStatus::Unsubscribed, T2),
+                &trace,
+            )
+            .await;
 
-        assert!(matches!(scoped_out, ConsentOutcome::Changed { .. }));
-        assert_eq!(count(&pool, "consent").await, 2);
-        assert!(allowed_for(&pool, ws, ada, Some(news), &[]).await);
-        assert!(allowed_for(&pool, ws, ada, Some(news), &[("vertical", "b2b")]).await);
-        assert!(!allowed_for(&pool, ws, ada, Some(news), &retail).await);
-        let again = set(
-            &pool,
-            ws,
-            &scoped_change(ada, Some(news), &retail, ConsentStatus::Unsubscribed, T2),
-            &trace,
-        )
-        .await;
-        assert_eq!(again, ConsentOutcome::Unchanged);
-        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
-        let shown: Vec<(String, &str)> = entries
-            .iter()
-            .map(|entry| (entry.dimensions.to_string(), entry.status.as_str()))
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                ("{}".to_owned(), "subscribed"),
-                (r#"{"vertical":"retail"}"#.to_owned(), "unsubscribed")
-            ]
-        );
+            assert!(matches!(scoped_out, ConsentOutcome::Changed { .. }));
+            assert_eq!(count(&pool, "consent").await, 2);
+            assert!(allowed_for(&pool, ws, ada, Some(news), &[]).await);
+            assert!(allowed_for(&pool, ws, ada, Some(news), &[("vertical", "b2b")]).await);
+            assert!(!allowed_for(&pool, ws, ada, Some(news), &retail).await);
+            let again = set(
+                &pool,
+                ws,
+                &scoped_change(ada, Some(news), &retail, ConsentStatus::Unsubscribed, T2),
+                &trace,
+            )
+            .await;
+            assert_eq!(again, ConsentOutcome::Unchanged);
+            let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
+            let shown: Vec<(String, &str)> = entries
+                .iter()
+                .map(|entry| (entry.dimensions.to_string(), entry.status.as_str()))
+                .collect();
+            assert_eq!(
+                shown,
+                [
+                    ("{}".to_owned(), "subscribed"),
+                    (r#"{"vertical":"retail"}"#.to_owned(), "unsubscribed")
+                ]
+            );
 
-        set(
-            &pool,
-            ws,
-            &change(
-                ada,
-                Some(news),
-                ConsentStatus::Unsubscribed,
-                T2 + time::Duration::DAY,
-            ),
-            &trace,
-        )
+            set(
+                &pool,
+                ws,
+                &change(
+                    ada,
+                    Some(news),
+                    ConsentStatus::Unsubscribed,
+                    T2 + time::Duration::DAY,
+                ),
+                &trace,
+            )
+            .await;
+            assert!(!allowed_for(&pool, ws, ada, Some(news), &[("vertical", "b2b")]).await);
+            let (history, _) = consent_history(&pool, ws, ada, 10, None, &scoped(&retail))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].dimensions, json!({"vertical": "retail"}));
+        })
         .await;
-        assert!(!allowed_for(&pool, ws, ada, Some(news), &[("vertical", "b2b")]).await);
-        let (history, _) = consent_history(&pool, ws, ada, 10, None, &scoped(&retail))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].dimensions, json!({"vertical": "retail"}));
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_export_pages_every_state_in_a_stable_order(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let bob = person(&pool, ws, "bob@example.com").await;
-        let news = topic(&pool, ws, "news").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        let retail = [("vertical", "retail")];
-        for (who, topic, pairs) in [
-            (ada, None, &[][..]),
-            (ada, Some(news), &[][..]),
-            (ada, Some(news), &retail[..]),
-            (bob, None, &retail[..]),
-        ] {
-            set(
-                &pool,
-                ws,
-                &scoped_change(who, topic, pairs, ConsentStatus::Subscribed, T1),
-                &trace,
-            )
-            .await;
-        }
-
-        let mut seen = Vec::new();
-        let mut cursor = None;
-        loop {
-            let page = consent_export_page(&pool, ws, cursor.as_ref(), 3)
-                .await
-                .unwrap();
-            let Some(last) = page.last() else { break };
-            cursor = Some(last.cursor());
-            seen.extend(page);
-        }
-
-        let shown: Vec<(Uuid, Option<&str>, &str)> = seen
-            .iter()
-            .map(|row| {
-                (
-                    row.person_id,
-                    row.topic_key.as_deref(),
-                    row.dimensions_key.as_str(),
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let bob = person(&pool, ws, "bob@example.com").await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let retail = [("vertical", "retail")];
+            for (who, topic, pairs) in [
+                (ada, None, &[][..]),
+                (ada, Some(news), &[][..]),
+                (ada, Some(news), &retail[..]),
+                (bob, None, &retail[..]),
+            ] {
+                set(
+                    &pool,
+                    ws,
+                    &scoped_change(who, topic, pairs, ConsentStatus::Subscribed, T1),
+                    &trace,
                 )
-            })
-            .collect();
-        let mut ordered = vec![
-            (ada, None, ""),
-            (ada, Some("news"), ""),
-            (ada, Some("news"), "vertical=retail"),
-            (bob, None, "vertical=retail"),
-        ];
-        ordered.sort_by_key(|(who, topic, dims)| (*who, topic.unwrap_or(""), *dims));
-        assert_eq!(shown, ordered);
+                .await;
+            }
+
+            let mut seen = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = consent_export_page(&pool, ws, cursor.as_ref(), 3)
+                    .await
+                    .unwrap();
+                let Some(last) = page.last() else { break };
+                cursor = Some(last.cursor());
+                seen.extend(page);
+            }
+
+            let shown: Vec<(Uuid, Option<&str>, &str)> = seen
+                .iter()
+                .map(|row| {
+                    (
+                        row.person_id,
+                        row.topic_key.as_deref(),
+                        row.dimensions_key.as_str(),
+                    )
+                })
+                .collect();
+            let mut ordered = vec![
+                (ada, None, ""),
+                (ada, Some("news"), ""),
+                (ada, Some("news"), "vertical=retail"),
+                (bob, None, "vertical=retail"),
+            ];
+            ordered.sort_by_key(|(who, topic, dims)| (*who, topic.unwrap_or(""), *dims));
+            assert_eq!(shown, ordered);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_unknown_dimension_or_value_changes_nothing(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
 
-        let mut refused = Vec::new();
-        for pairs in [
-            &[("vertical", "unheard-of")][..],
-            &[("brand", "x")][..],
-            &[("topic", "news")][..],
-        ] {
-            refused.push(
-                set(
-                    &pool,
-                    ws,
-                    &scoped_change(ada, None, pairs, ConsentStatus::Unsubscribed, T1),
-                    &trace,
-                )
-                .await,
+            let mut refused = Vec::new();
+            for pairs in [
+                &[("vertical", "unheard-of")][..],
+                &[("brand", "x")][..],
+                &[("topic", "news")][..],
+            ] {
+                refused.push(
+                    set(
+                        &pool,
+                        ws,
+                        &scoped_change(ada, None, pairs, ConsentStatus::Unsubscribed, T1),
+                        &trace,
+                    )
+                    .await,
+                );
+            }
+            let read = consent_read(
+                &pool,
+                ws,
+                ada,
+                Channel::Email,
+                None,
+                &scoped(&[("brand", "x")]),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                refused,
+                [
+                    ConsentOutcome::NoSuchDimensionValue,
+                    ConsentOutcome::NoSuchDimension,
+                    ConsentOutcome::NoSuchDimension
+                ]
             );
-        }
-        let read = consent_read(
-            &pool,
-            ws,
-            ada,
-            Channel::Email,
-            None,
-            &scoped(&[("brand", "x")]),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            refused,
-            [
-                ConsentOutcome::NoSuchDimensionValue,
-                ConsentOutcome::NoSuchDimension,
-                ConsentOutcome::NoSuchDimension
-            ]
-        );
-        assert_eq!(read, ReadOutcome::NoSuchDimension);
-        assert_eq!(count(&pool, "consent").await, 0);
-        assert_eq!(count(&pool, "consent_changes").await, 0);
+            assert_eq!(read, ReadOutcome::NoSuchDimension);
+            assert_eq!(count(&pool, "consent").await, 0);
+            assert_eq!(count(&pool, "consent_changes").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn topic_consent_written_without_dimensions_reads_as_before(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let news = topic(&pool, ws, "news").await;
-        sqlx::query(
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let news = topic(&pool, ws, "news").await;
+            sqlx::query(
             "INSERT INTO consent (workspace_id, person_id, channel, topic_id, status, explicit, \
                                   changed_at) \
              VALUES ($1, $2, 'email', $3, 'unsubscribed', true, $4)",
@@ -1342,19 +1384,21 @@ mod tests {
         .await
         .unwrap();
 
-        let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
+            let entries = consent_for(&pool, ws, ada).await.unwrap().unwrap();
 
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].dimensions, json!({}));
-        assert_eq!(entries[0].topic_key.as_deref(), Some("news"));
-        assert_eq!(entries[0].status, "unsubscribed");
-        assert_eq!(entries[0].changed_at, T1);
-        assert!(!allowed_for(&pool, ws, ada, Some(news), &[]).await);
-        let key: String = sqlx::query_scalar("SELECT dimensions_key FROM consent")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(key, "");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].dimensions, json!({}));
+            assert_eq!(entries[0].topic_key.as_deref(), Some("news"));
+            assert_eq!(entries[0].status, "unsubscribed");
+            assert_eq!(entries[0].changed_at, T1);
+            assert!(!allowed_for(&pool, ws, ada, Some(news), &[]).await);
+            let key: String = sqlx::query_scalar("SELECT dimensions_key FROM consent")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(key, "");
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1362,41 +1406,45 @@ mod tests {
     async fn equal_maps_in_any_key_order_are_one_row_and_the_empty_scope_stays_unique(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let insert = async |dimensions: &str| {
-            sqlx::query(
-                "INSERT INTO consent (workspace_id, person_id, channel, topic_id, dimensions, \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let insert = async |dimensions: &str| {
+                sqlx::query(
+                    "INSERT INTO consent (workspace_id, person_id, channel, topic_id, dimensions, \
                                       status, explicit, changed_at) \
                  VALUES ($1, $2, 'email', NULL, $3::jsonb, 'subscribed', true, $4)",
-            )
-            .bind(ws.as_uuid())
-            .bind(ada)
-            .bind(dimensions)
-            .bind(T1)
-            .execute(&pool)
-            .await
-        };
-
-        assert!(insert("{}").await.is_ok());
-        assert!(insert("{}").await.is_err());
-        assert!(insert(r#"{"a": "x", "bb": "y"}"#).await.is_ok());
-        assert!(insert(r#"{"bb":"y","a":"x"}"#).await.is_err());
-        assert!(insert(r#"{"a": "x"}"#).await.is_ok());
-        let keys: Vec<String> =
-            sqlx::query_scalar("SELECT dimensions_key FROM consent ORDER BY dimensions_key")
-                .fetch_all(&pool)
+                )
+                .bind(ws.as_uuid())
+                .bind(ada)
+                .bind(dimensions)
+                .bind(T1)
+                .execute(&pool)
                 .await
-                .unwrap();
-        assert_eq!(keys, ["", "a=x", "a=x;bb=y"]);
+            };
+
+            assert!(insert("{}").await.is_ok());
+            assert!(insert("{}").await.is_err());
+            assert!(insert(r#"{"a": "x", "bb": "y"}"#).await.is_ok());
+            assert!(insert(r#"{"bb":"y","a":"x"}"#).await.is_err());
+            assert!(insert(r#"{"a": "x"}"#).await.is_ok());
+            let keys: Vec<String> =
+                sqlx::query_scalar("SELECT dimensions_key FROM consent ORDER BY dimensions_key")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(keys, ["", "a=x", "a=x;bb=y"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_older_change_is_kept_in_the_history_but_never_replaces_a_newer_state(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "one").await;
         verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
+        let ada = person(&pool, ws, PERSONAL_DATA.email).await;
         let news = topic(&pool, ws, "news").await;
         let trace = TraceContext::root(Cause::api("test"));
         let retail = [("vertical", "retail")];
@@ -1438,58 +1486,63 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(kept, ["unsubscribed", "unsubscribed"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn reaffirming_the_held_status_advances_it_when_a_covered_record_is_newer(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        let retail = [("vertical", "retail")];
-        let t3 = T2 + time::Duration::DAY;
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Unsubscribed, T1),
-            &trace,
-        )
-        .await;
-        set(
-            &pool,
-            ws,
-            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T2),
-            &trace,
-        )
-        .await;
-        assert!(allowed_for(&pool, ws, ada, None, &retail).await);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let retail = [("vertical", "retail")];
+            let t3 = T2 + time::Duration::DAY;
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Unsubscribed, T1),
+                &trace,
+            )
+            .await;
+            set(
+                &pool,
+                ws,
+                &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T2),
+                &trace,
+            )
+            .await;
+            assert!(allowed_for(&pool, ws, ada, None, &retail).await);
 
-        let again = set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Unsubscribed, t3),
-            &trace,
-        )
-        .await;
+            let again = set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Unsubscribed, t3),
+                &trace,
+            )
+            .await;
 
-        assert!(matches!(again, ConsentOutcome::Changed { .. }), "{again:?}");
-        assert!(!allowed_for(&pool, ws, ada, None, &retail).await);
-        assert_eq!(count(&pool, "consent_changes").await, 3);
-        let plain = set(
-            &pool,
-            ws,
-            &change(
-                ada,
-                None,
-                ConsentStatus::Unsubscribed,
-                t3 + time::Duration::DAY,
-            ),
-            &trace,
-        )
+            assert!(matches!(again, ConsentOutcome::Changed { .. }), "{again:?}");
+            assert!(!allowed_for(&pool, ws, ada, None, &retail).await);
+            assert_eq!(count(&pool, "consent_changes").await, 3);
+            let plain = set(
+                &pool,
+                ws,
+                &change(
+                    ada,
+                    None,
+                    ConsentStatus::Unsubscribed,
+                    t3 + time::Duration::DAY,
+                ),
+                &trace,
+            )
+            .await;
+            assert_eq!(plain, ConsentOutcome::Unchanged);
+            assert_eq!(count(&pool, "consent_changes").await, 3);
+        })
         .await;
-        assert_eq!(plain, ConsentOutcome::Unchanged);
-        assert_eq!(count(&pool, "consent_changes").await, 3);
     }
 
     #[sqlx::test]
@@ -1497,8 +1550,9 @@ mod tests {
     async fn the_database_refuses_a_dimension_map_that_is_not_strings_of_the_key_form(
         pool: PgPool,
     ) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let ws = workspace(&pool, "one").await;
-        let ada = person(&pool, ws, "ada@example.com").await;
+        let ada = person(&pool, ws, PERSONAL_DATA.email).await;
         let state = async |dimensions: &str| {
             sqlx::query(
                 "INSERT INTO consent (workspace_id, person_id, channel, dimensions, status,                                       explicit, changed_at)                  VALUES ($1, $2, 'email', $3::jsonb, 'subscribed', true, $4)",
@@ -1537,6 +1591,8 @@ mod tests {
         assert!(state(r#"{"vertical":"retail-eu_1"}"#).await.is_ok());
         assert!(history(r#"{"vertical":"retail-eu_1"}"#).await.is_ok());
         assert!(state("{}").await.is_ok());
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1544,124 +1600,127 @@ mod tests {
     async fn a_reaffirm_matters_only_when_an_overlapping_record_of_another_status_lies_between(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let news = topic(&pool, ws, "news").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        let retail = [("vertical", "retail")];
-        let day = time::Duration::DAY;
-        let (t3, t4) = (T2 + day, T2 + day + day);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let news = topic(&pool, ws, "news").await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let retail = [("vertical", "retail")];
+            let day = time::Duration::DAY;
+            let (t3, t4) = (T2 + day, T2 + day + day);
 
-        // A broader record in between: retail subscribed, all-values unsubscribed, retail again.
-        set(
-            &pool,
-            ws,
-            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Unsubscribed, T2),
-            &trace,
-        )
-        .await;
-        assert!(!allowed_for(&pool, ws, ada, None, &retail).await);
-        let again = set(
-            &pool,
-            ws,
-            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, t3),
-            &trace,
-        )
-        .await;
-        assert!(matches!(again, ConsentOutcome::Changed { .. }), "{again:?}");
-        assert!(allowed_for(&pool, ws, ada, None, &retail).await);
+            // A broader record in between: retail subscribed, all-values unsubscribed, retail again.
+            set(
+                &pool,
+                ws,
+                &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Unsubscribed, T2),
+                &trace,
+            )
+            .await;
+            assert!(!allowed_for(&pool, ws, ada, None, &retail).await);
+            let again = set(
+                &pool,
+                ws,
+                &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, t3),
+                &trace,
+            )
+            .await;
+            assert!(matches!(again, ConsentOutcome::Changed { .. }), "{again:?}");
+            assert!(allowed_for(&pool, ws, ada, None, &retail).await);
 
-        // The same with a topic: news subscribed, channel-wide unsubscribed, news again.
-        set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        set(
-            &pool,
-            ws,
-            &change(ada, None, ConsentStatus::Unsubscribed, t3),
-            &trace,
-        )
-        .await;
-        assert!(!allowed_for(&pool, ws, ada, Some(news), &[]).await);
-        let news_again = set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, t4),
-            &trace,
-        )
-        .await;
-        assert!(
-            matches!(news_again, ConsentOutcome::Changed { .. }),
-            "{news_again:?}"
-        );
-        assert!(allowed_for(&pool, ws, ada, Some(news), &[]).await);
+            // The same with a topic: news subscribed, channel-wide unsubscribed, news again.
+            set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            set(
+                &pool,
+                ws,
+                &change(ada, None, ConsentStatus::Unsubscribed, t3),
+                &trace,
+            )
+            .await;
+            assert!(!allowed_for(&pool, ws, ada, Some(news), &[]).await);
+            let news_again = set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, t4),
+                &trace,
+            )
+            .await;
+            assert!(
+                matches!(news_again, ConsentOutcome::Changed { .. }),
+                "{news_again:?}"
+            );
+            assert!(allowed_for(&pool, ws, ada, Some(news), &[]).await);
 
-        // Nothing in between: newer than everything, or older than the held row, writes nothing.
-        let before = count(&pool, "consent_changes").await;
-        let newest = set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, t4 + day),
-            &trace,
-        )
-        .await;
-        let old = set(
-            &pool,
-            ws,
-            &change(ada, Some(news), ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        assert_eq!(
-            (newest, old),
-            (ConsentOutcome::Unchanged, ConsentOutcome::Unchanged)
-        );
-        assert_eq!(count(&pool, "consent_changes").await, before);
+            // Nothing in between: newer than everything, or older than the held row, writes nothing.
+            let before = count(&pool, "consent_changes").await;
+            let newest = set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, t4 + day),
+                &trace,
+            )
+            .await;
+            let old = set(
+                &pool,
+                ws,
+                &change(ada, Some(news), ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            assert_eq!(
+                (newest, old),
+                (ConsentOutcome::Unchanged, ConsentOutcome::Unchanged)
+            );
+            assert_eq!(count(&pool, "consent_changes").await, before);
 
-        // A record that does not overlap (another vertical) never counts.
-        let bob = person(&pool, ws, "bob@example.com").await;
-        set(
-            &pool,
-            ws,
-            &scoped_change(bob, None, &retail, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
+            // A record that does not overlap (another vertical) never counts.
+            let bob = person(&pool, ws, "bob@example.com").await;
+            set(
+                &pool,
+                ws,
+                &scoped_change(bob, None, &retail, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            set(
+                &pool,
+                ws,
+                &scoped_change(
+                    bob,
+                    None,
+                    &[("vertical", "b2b")],
+                    ConsentStatus::Unsubscribed,
+                    T2,
+                ),
+                &trace,
+            )
+            .await;
+            let before = count(&pool, "consent_changes").await;
+            let apart = set(
+                &pool,
+                ws,
+                &scoped_change(bob, None, &retail, ConsentStatus::Subscribed, t3),
+                &trace,
+            )
+            .await;
+            assert_eq!(apart, ConsentOutcome::Unchanged);
+            assert_eq!(count(&pool, "consent_changes").await, before);
+        })
         .await;
-        set(
-            &pool,
-            ws,
-            &scoped_change(
-                bob,
-                None,
-                &[("vertical", "b2b")],
-                ConsentStatus::Unsubscribed,
-                T2,
-            ),
-            &trace,
-        )
-        .await;
-        let before = count(&pool, "consent_changes").await;
-        let apart = set(
-            &pool,
-            ws,
-            &scoped_change(bob, None, &retail, ConsentStatus::Subscribed, t3),
-            &trace,
-        )
-        .await;
-        assert_eq!(apart, ConsentOutcome::Unchanged);
-        assert_eq!(count(&pool, "consent_changes").await, before);
     }
 
     #[sqlx::test]
@@ -1669,35 +1728,37 @@ mod tests {
     async fn a_record_with_a_later_id_at_the_change_time_does_not_make_a_reaffirm_matter(
         pool: PgPool,
     ) {
-        let ws = workspace(&pool, "one").await;
-        verticals(&pool, ws).await;
-        let ada = person(&pool, ws, "ada@example.com").await;
-        let trace = TraceContext::root(Cause::api("test"));
-        let retail = [("vertical", "retail")];
-        set(
-            &pool,
-            ws,
-            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T1),
-            &trace,
-        )
-        .await;
-        // An unsubscribed all-values record at T2 whose change id is later than any id the
-        // incoming change can get: a v7 id with the largest timestamp.
-        let later =
-            Uuid::from_u128((0xFFFF_FFFF_FFFF_u128 << 80) | (0x7_u128 << 76) | (0x2_u128 << 62));
-        sqlx::query(
-            "INSERT INTO consent_changes (id, workspace_id, person_id, channel, dimensions, \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            verticals(&pool, ws).await;
+            let ada = person(&pool, ws, PERSONAL_DATA.email).await;
+            let trace = TraceContext::root(Cause::api("test"));
+            let retail = [("vertical", "retail")];
+            set(
+                &pool,
+                ws,
+                &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T1),
+                &trace,
+            )
+            .await;
+            // An unsubscribed all-values record at T2 whose change id is later than any id the
+            // incoming change can get: a v7 id with the largest timestamp.
+            let later = Uuid::from_u128(
+                (0xFFFF_FFFF_FFFF_u128 << 80) | (0x7_u128 << 76) | (0x2_u128 << 62),
+            );
+            sqlx::query(
+                "INSERT INTO consent_changes (id, workspace_id, person_id, channel, dimensions, \
                 to_status, source, occurred_at, trace_id) \
              VALUES ($1, $2, $3, 'email', '{}'::jsonb, 'unsubscribed', 'api', $4, $1)",
-        )
-        .bind(later)
-        .bind(ws.as_uuid())
-        .bind(ada)
-        .bind(T2)
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
+            )
+            .bind(later)
+            .bind(ws.as_uuid())
+            .bind(ada)
+            .bind(T2)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
             "INSERT INTO consent (workspace_id, person_id, channel, dimensions, status, explicit, \
                 changed_at, last_change_id) \
              VALUES ($1, $2, 'email', '{}'::jsonb, 'unsubscribed', true, $3, $4)",
@@ -1709,17 +1770,19 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let before = count(&pool, "consent_changes").await;
+            let before = count(&pool, "consent_changes").await;
 
-        let outcome = set(
-            &pool,
-            ws,
-            &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T2),
-            &trace,
-        )
+            let outcome = set(
+                &pool,
+                ws,
+                &scoped_change(ada, None, &retail, ConsentStatus::Subscribed, T2),
+                &trace,
+            )
+            .await;
+
+            assert_eq!(outcome, ConsentOutcome::Unchanged);
+            assert_eq!(count(&pool, "consent_changes").await, before);
+        })
         .await;
-
-        assert_eq!(outcome, ConsentOutcome::Unchanged);
-        assert_eq!(count(&pool, "consent_changes").await, before);
     }
 }

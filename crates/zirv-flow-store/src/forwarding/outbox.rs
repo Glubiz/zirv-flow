@@ -569,6 +569,8 @@ pub async fn defer_row(
 
 #[cfg(test)]
 mod tests {
+    use crate::decision_testing::PERSONAL_DATA;
+
     use std::path::{Path, PathBuf};
 
     use serde_json::json;
@@ -591,7 +593,7 @@ mod tests {
         EventRecord {
             source_record_id: None,
             source: "web".into(),
-            identifiers: vec![("email".into(), "ada@example.com".into())],
+            identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
             name: name.into(),
             properties: properties.as_object().cloned().unwrap(),
             timestamp: Some(datetime!(2031-05-06 07:08:09.25 UTC)),
@@ -639,431 +641,450 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_mapping_reads_every_source_kind_in_the_writers_transaction(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "map").await;
-        let mapping = json!({
-            "event_id": {"from": "event.id"},
-            "name": {"from": "event.name"},
-            "at": {"from": "event.time"},
-            "seen": {"from": "event.received_at"},
-            "who": {"from": "person.id"},
-            "plan": {"from": "event.properties", "pointer": "/plan"},
-            "deep": {"from": "event.properties", "pointer": "/cart/items/0"},
-            "missing": {"from": "event.properties", "pointer": "/nope"},
-            "src": {"value": "shop"},
-            "n": {"value": 3},
-            "flag": {"value": true},
-        });
-        add_rule(&pool, ws, destination, "order", json!([]), mapping).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "map").await;
+            let mapping = json!({
+                "event_id": {"from": "event.id"},
+                "name": {"from": "event.name"},
+                "at": {"from": "event.time"},
+                "seen": {"from": "event.received_at"},
+                "who": {"from": "person.id"},
+                "plan": {"from": "event.properties", "pointer": "/plan"},
+                "deep": {"from": "event.properties", "pointer": "/cart/items/0"},
+                "missing": {"from": "event.properties", "pointer": "/nope"},
+                "src": {"value": "shop"},
+                "n": {"value": 3},
+                "flag": {"value": true},
+            });
+            add_rule(&pool, ws, destination, "order", json!([]), mapping).await;
 
-        let outcomes = apply_event_batch(
-            &pool,
-            ws,
-            &redaction_key(),
-            &[
-                record(
-                    "order",
-                    json!({"plan": "pro", "cart": {"items": ["a", "b"]}}),
-                    "m-1",
-                ),
-                record("other", json!({"plan": "pro"}), "m-2"),
-            ],
-        )
-        .await
-        .unwrap();
+            let outcomes = apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[
+                    record(
+                        "order",
+                        json!({"plan": "pro", "cart": {"items": ["a", "b"]}}),
+                        "m-1",
+                    ),
+                    record("other", json!({"plan": "pro"}), "m-2"),
+                ],
+            )
+            .await
+            .unwrap();
 
-        let ids = accepted(&outcomes);
-        let sent = payloads(&pool, ws).await;
-        assert_eq!(sent.len(), 1, "only the event of the rule's name is copied");
-        assert_eq!(
-            sent[0],
-            json!({
-                "event_id": ids[0].0.to_string(),
-                "name": "order",
-                "at": "2031-05-06T07:08:09.250000Z",
-                "seen": "2031-05-06T07:08:10.000000Z",
-                "who": ids[0].1.to_string(),
-                "plan": "pro",
-                "deep": "a",
-                "missing": null,
-                "src": "shop",
-                "n": 3,
-                "flag": true,
-            })
-        );
-        let (key, person, state): (String, Uuid, String) = sqlx::query_as(
-            "SELECT idempotency_key, person_id, state FROM forwarding_outbox \
+            let ids = accepted(&outcomes);
+            let sent = payloads(&pool, ws).await;
+            assert_eq!(sent.len(), 1, "only the event of the rule's name is copied");
+            assert_eq!(
+                sent[0],
+                json!({
+                    "event_id": ids[0].0.to_string(),
+                    "name": "order",
+                    "at": "2031-05-06T07:08:09.250000Z",
+                    "seen": "2031-05-06T07:08:10.000000Z",
+                    "who": ids[0].1.to_string(),
+                    "plan": "pro",
+                    "deep": "a",
+                    "missing": null,
+                    "src": "shop",
+                    "n": 3,
+                    "flag": true,
+                })
+            );
+            let (key, person, state): (String, Uuid, String) = sqlx::query_as(
+                "SELECT idempotency_key, person_id, state FROM forwarding_outbox \
              WHERE workspace_id = $1",
-        )
-        .bind(ws.as_uuid())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(key, idempotency_key(ids[0].0, destination));
-        assert_eq!((person, state.as_str()), (ids[0].1, "pending"));
-        let jobs: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(jobs, 1, "one ready job for the destination");
+            )
+            .bind(ws.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(key, idempotency_key(ids[0].0, destination));
+            assert_eq!((person, state.as_str()), (ids[0].1, "pending"));
+            let jobs: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(jobs, 1, "one ready job for the destination");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn with_no_active_rule_nothing_is_copied_and_no_job_is_made(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "norule").await;
-        let rule = add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"id": {"from": "event.id"}}),
-        )
-        .await;
-        let mut connection = pool.acquire().await.unwrap();
-        update_rule(
-            &mut connection,
-            ws,
-            rule,
-            &RuleUpdate {
-                active: Some(false),
-                ..RuleUpdate::default()
-            },
-        )
-        .await
-        .unwrap();
-        drop(connection);
-
-        apply_event_batch(
-            &pool,
-            ws,
-            &redaction_key(),
-            &[record("order", json!({}), "m-1")],
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(rows(&pool, ws).await, 0);
-        let jobs: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(jobs, 0);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn a_rolled_back_write_leaves_no_outbox_row_and_no_job(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "rollback").await;
-        add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"id": {"from": "event.id"}}),
-        )
-        .await;
-
-        let mut tx = crate::begin(&pool).await.unwrap();
-        let mut batch = crate::events::EventBatch::default();
-        crate::events::apply_event_record(
-            &mut tx,
-            ws,
-            &redaction_key(),
-            &mut batch,
-            &record("order", json!({}), "m-1"),
-        )
-        .await
-        .unwrap();
-        batch.finish(&mut tx, ws).await.unwrap();
-        let inside: i64 = sqlx::query_scalar("SELECT count(*) FROM forwarding_outbox")
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-        tx.rollback().await.unwrap();
-
-        assert_eq!(inside, 1, "the row exists inside the writer's transaction");
-        assert_eq!(rows(&pool, ws).await, 0);
-        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
-            .bind(ws.as_uuid())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(events, 0);
-        let jobs: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(jobs, 0);
-    }
-
-    #[sqlx::test]
-    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
-    async fn the_filter_selects_by_property_and_a_type_mismatch_never_matches(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "filter").await;
-        let events = [
-            json!({"plan": "pro", "total": 20, "tags": "vip-gold"}),
-            json!({"plan": "free", "total": 5, "tags": "100%_off"}),
-            json!({"plan": 7, "total": "20"}),
-            json!({}),
-        ];
-        let records: Vec<EventRecord> = events
-            .iter()
-            .enumerate()
-            .map(|(n, properties)| record("order", properties.clone(), &format!("m-{n}")))
-            .collect();
-        apply_event_batch(&pool, ws, &redaction_key(), &records)
-            .await
-            .unwrap();
-        let rule = add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"plan": {"from": "event.properties", "pointer": "/plan"}}),
-        )
-        .await;
-        let stored = refs(&pool, ws).await;
-        let all = vec![json!("pro"), json!("free"), json!(7), Value::Null];
-        let cases: Vec<(Value, Vec<Value>)> = vec![
-            (json!([]), all),
-            (
-                json!([{"prop": "plan", "op": "eq", "value": "pro"}]),
-                vec![json!("pro")],
-            ),
-            (
-                json!([{"prop": "plan", "op": "neq", "value": "pro"}]),
-                vec![json!("free")],
-            ),
-            (
-                json!([{"prop": "plan", "op": "in", "value": ["pro", "free"]}]),
-                vec![json!("pro"), json!("free")],
-            ),
-            (
-                json!([{"prop": "plan", "op": "not_in", "value": ["pro"]}]),
-                vec![json!("free")],
-            ),
-            (
-                json!([{"prop": "total", "op": "gte", "value": 20}]),
-                vec![json!("pro")],
-            ),
-            (
-                json!([{"prop": "total", "op": "lt", "value": 10}]),
-                vec![json!("free")],
-            ),
-            (
-                json!([{"prop": "total", "op": "between", "value": [1, 25]}]),
-                vec![json!("pro"), json!("free")],
-            ),
-            (
-                json!([{"prop": "tags", "op": "contains", "value": "gold"}]),
-                vec![json!("pro")],
-            ),
-            (
-                json!([{"prop": "tags", "op": "contains", "value": "%_"}]),
-                vec![json!("free")],
-            ),
-            (
-                json!([{"prop": "tags", "op": "starts_with", "value": "vip"}]),
-                vec![json!("pro")],
-            ),
-            (
-                json!([{"prop": "tags", "op": "exists"}]),
-                vec![json!("pro"), json!("free")],
-            ),
-            (
-                json!([{"prop": "tags", "op": "not_exists"}]),
-                vec![json!(7), Value::Null],
-            ),
-            (
-                json!([
-                    {"prop": "plan", "op": "eq", "value": "pro"},
-                    {"prop": "total", "op": "gt", "value": 100}
-                ]),
-                vec![],
-            ),
-        ];
-
-        for (filter, want) in cases {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "norule").await;
+            let rule = add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
             let mut connection = pool.acquire().await.unwrap();
-            sqlx::query("DELETE FROM forwarding_outbox")
-                .execute(&mut *connection)
-                .await
-                .unwrap();
             update_rule(
                 &mut connection,
                 ws,
                 rule,
                 &RuleUpdate {
-                    filter: Some(&filter),
+                    active: Some(false),
                     ..RuleUpdate::default()
                 },
             )
             .await
             .unwrap();
-            enqueue_forwarding(&mut connection, ws, &stored)
-                .await
-                .unwrap();
             drop(connection);
 
-            let mut got: Vec<String> = payloads(&pool, ws)
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[record("order", json!({}), "m-1")],
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(rows(&pool, ws).await, 0);
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_rolled_back_write_leaves_no_outbox_row_and_no_job(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "rollback").await;
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+
+            let mut tx = crate::begin(&pool).await.unwrap();
+            let mut batch = crate::events::EventBatch::default();
+            crate::events::apply_event_record(
+                &mut tx,
+                ws,
+                &redaction_key(),
+                &mut batch,
+                &record("order", json!({}), "m-1"),
+            )
+            .await
+            .unwrap();
+            batch.finish(&mut tx, ws).await.unwrap();
+            let inside: i64 = sqlx::query_scalar("SELECT count(*) FROM forwarding_outbox")
+                .fetch_one(&mut *tx)
                 .await
-                .into_iter()
-                .map(|payload| payload["plan"].to_string())
+                .unwrap();
+            tx.rollback().await.unwrap();
+
+            assert_eq!(inside, 1, "the row exists inside the writer's transaction");
+            assert_eq!(rows(&pool, ws).await, 0);
+            let events: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM events WHERE workspace_id = $1")
+                    .bind(ws.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(events, 0);
+            let jobs: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(jobs, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_filter_selects_by_property_and_a_type_mismatch_never_matches(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "filter").await;
+            let events = [
+                json!({"plan": "pro", "total": 20, "tags": "vip-gold"}),
+                json!({"plan": "free", "total": 5, "tags": "100%_off"}),
+                json!({"plan": 7, "total": "20"}),
+                json!({}),
+            ];
+            let records: Vec<EventRecord> = events
+                .iter()
+                .enumerate()
+                .map(|(n, properties)| record("order", properties.clone(), &format!("m-{n}")))
                 .collect();
-            let mut want: Vec<String> = want.iter().map(Value::to_string).collect();
-            got.sort();
-            want.sort();
-            assert_eq!(got, want, "{filter}");
-        }
+            apply_event_batch(&pool, ws, &redaction_key(), &records)
+                .await
+                .unwrap();
+            let rule = add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"plan": {"from": "event.properties", "pointer": "/plan"}}),
+            )
+            .await;
+            let stored = refs(&pool, ws).await;
+            let all = vec![json!("pro"), json!("free"), json!(7), Value::Null];
+            let cases: Vec<(Value, Vec<Value>)> = vec![
+                (json!([]), all),
+                (
+                    json!([{"prop": "plan", "op": "eq", "value": "pro"}]),
+                    vec![json!("pro")],
+                ),
+                (
+                    json!([{"prop": "plan", "op": "neq", "value": "pro"}]),
+                    vec![json!("free")],
+                ),
+                (
+                    json!([{"prop": "plan", "op": "in", "value": ["pro", "free"]}]),
+                    vec![json!("pro"), json!("free")],
+                ),
+                (
+                    json!([{"prop": "plan", "op": "not_in", "value": ["pro"]}]),
+                    vec![json!("free")],
+                ),
+                (
+                    json!([{"prop": "total", "op": "gte", "value": 20}]),
+                    vec![json!("pro")],
+                ),
+                (
+                    json!([{"prop": "total", "op": "lt", "value": 10}]),
+                    vec![json!("free")],
+                ),
+                (
+                    json!([{"prop": "total", "op": "between", "value": [1, 25]}]),
+                    vec![json!("pro"), json!("free")],
+                ),
+                (
+                    json!([{"prop": "tags", "op": "contains", "value": "gold"}]),
+                    vec![json!("pro")],
+                ),
+                (
+                    json!([{"prop": "tags", "op": "contains", "value": "%_"}]),
+                    vec![json!("free")],
+                ),
+                (
+                    json!([{"prop": "tags", "op": "starts_with", "value": "vip"}]),
+                    vec![json!("pro")],
+                ),
+                (
+                    json!([{"prop": "tags", "op": "exists"}]),
+                    vec![json!("pro"), json!("free")],
+                ),
+                (
+                    json!([{"prop": "tags", "op": "not_exists"}]),
+                    vec![json!(7), Value::Null],
+                ),
+                (
+                    json!([
+                        {"prop": "plan", "op": "eq", "value": "pro"},
+                        {"prop": "total", "op": "gt", "value": 100}
+                    ]),
+                    vec![],
+                ),
+            ];
+
+            for (filter, want) in cases {
+                let mut connection = pool.acquire().await.unwrap();
+                sqlx::query("DELETE FROM forwarding_outbox")
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+                update_rule(
+                    &mut connection,
+                    ws,
+                    rule,
+                    &RuleUpdate {
+                        filter: Some(&filter),
+                        ..RuleUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+                enqueue_forwarding(&mut connection, ws, &stored)
+                    .await
+                    .unwrap();
+                drop(connection);
+
+                let mut got: Vec<String> = payloads(&pool, ws)
+                    .await
+                    .into_iter()
+                    .map(|payload| payload["plan"].to_string())
+                    .collect();
+                let mut want: Vec<String> = want.iter().map(Value::to_string).collect();
+                got.sort();
+                want.sort();
+                assert_eq!(got, want, "{filter}");
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn two_concurrent_batches_with_the_same_event_make_one_row(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "dup").await;
-        apply_event_batch(
-            &pool,
-            ws,
-            &redaction_key(),
-            &[record("order", json!({}), "m-1")],
-        )
-        .await
-        .unwrap();
-        add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"id": {"from": "event.id"}}),
-        )
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "dup").await;
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[record("order", json!({}), "m-1")],
+            )
+            .await
+            .unwrap();
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+            let stored = refs(&pool, ws).await;
+
+            let mut first = crate::begin(&pool).await.unwrap();
+            enqueue_forwarding(&mut first, ws, &stored).await.unwrap();
+            let second = tokio::spawn({
+                let (pool, stored) = (pool.clone(), stored.clone());
+                async move {
+                    let mut tx = crate::begin(&pool).await.unwrap();
+                    enqueue_forwarding(&mut tx, ws, &stored).await.unwrap();
+                    crate::commit(tx).await.unwrap();
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::commit(first).await.unwrap();
+            second.await.unwrap();
+
+            assert_eq!(rows(&pool, ws).await, 1);
+        })
         .await;
-        let stored = refs(&pool, ws).await;
-
-        let mut first = crate::begin(&pool).await.unwrap();
-        enqueue_forwarding(&mut first, ws, &stored).await.unwrap();
-        let second = tokio::spawn({
-            let (pool, stored) = (pool.clone(), stored.clone());
-            async move {
-                let mut tx = crate::begin(&pool).await.unwrap();
-                enqueue_forwarding(&mut tx, ws, &stored).await.unwrap();
-                crate::commit(tx).await.unwrap();
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        crate::commit(first).await.unwrap();
-        second.await.unwrap();
-
-        assert_eq!(rows(&pool, ws).await, 1);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_claim_counts_the_attempt_and_a_settle_is_fenced_on_its_token(pool: PgPool) {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        let (ws, destination) = fixture(&pool, "claim").await;
-        add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"id": {"from": "event.id"}}),
-        )
-        .await;
-        apply_event_batch(
-            &pool,
-            ws,
-            &redaction_key(),
-            &[record("order", json!({}), "m-1")],
-        )
-        .await
-        .unwrap();
-        let mut connection = pool.acquire().await.unwrap();
-        let lease = Duration::from_secs(300);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = metrics::set_default_local_recorder(&recorder);
+            let (ws, destination) = fixture(&pool, "claim").await;
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[record("order", json!({}), "m-1")],
+            )
+            .await
+            .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            let lease = Duration::from_secs(300);
 
-        let first = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap();
-        let again = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap();
-        assert_eq!((first.len(), first[0].attempts, again.len()), (1, 1, 0));
-        let row = &first[0];
-
-        // A settle for another claim changes nothing.
-        let stale = settle_row(
-            &mut connection,
-            row.id,
-            Uuid::new_v4(),
-            Settled::Dead,
-            Some("http_4xx"),
-        )
-        .await
-        .unwrap();
-        let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
-        let retried = settle_row(
-            &mut connection,
-            row.id,
-            row.claim_token,
-            Settled::Retry(later),
-            Some("http_5xx"),
-        )
-        .await
-        .unwrap();
-        assert!(!stale && retried);
-        let none = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap();
-        assert!(none.is_empty(), "a retry waits for its time");
-        assert!(
-            next_due(&mut connection, destination)
+            let first = claim_due(&mut connection, ws, destination, 10, lease)
                 .await
-                .unwrap()
-                .is_some()
-        );
+                .unwrap();
+            let again = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap();
+            assert_eq!((first.len(), first[0].attempts, again.len()), (1, 1, 0));
+            let row = &first[0];
 
-        sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now()")
-            .execute(&mut *connection)
+            // A settle for another claim changes nothing.
+            let stale = settle_row(
+                &mut connection,
+                row.id,
+                Uuid::new_v4(),
+                Settled::Dead,
+                Some("http_4xx"),
+            )
             .await
             .unwrap();
-        let second = claim_due(&mut connection, ws, destination, 10, lease)
+            let later = OffsetDateTime::now_utc() + time::Duration::hours(1);
+            let retried = settle_row(
+                &mut connection,
+                row.id,
+                row.claim_token,
+                Settled::Retry(later),
+                Some("http_5xx"),
+            )
             .await
             .unwrap();
-        assert_eq!(second[0].attempts, 2);
-        assert_eq!(second[0].idempotency_key, row.idempotency_key);
-        settle_row(
-            &mut connection,
-            row.id,
-            second[0].claim_token,
-            Settled::Dead,
-            Some("http_5xx"),
-        )
-        .await
-        .unwrap();
-        let letters = list_dead_letters(&mut connection, ws, None, None, 10)
+            assert!(!stale && retried);
+            let none = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap();
+            assert!(none.is_empty(), "a retry waits for its time");
+            assert!(
+                next_due(&mut connection, destination)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+
+            sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now()")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            let second = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap();
+            assert_eq!(second[0].attempts, 2);
+            assert_eq!(second[0].idempotency_key, row.idempotency_key);
+            settle_row(
+                &mut connection,
+                row.id,
+                second[0].claim_token,
+                Settled::Dead,
+                Some("http_5xx"),
+            )
             .await
             .unwrap();
-        assert_eq!(letters.len(), 1);
-        assert_eq!(
-            (letters[0].last_error.as_deref(), letters[0].attempts),
-            (Some("http_5xx"), 2)
-        );
-        // Only the settle that changed the row counts: the fenced one did not.
-        let output = handle.render();
-        assert!(
-            output.contains("zirv_flow_destination_forwarding_dead_total 1"),
-            "{output}"
-        );
+            let letters = list_dead_letters(&mut connection, ws, None, None, 10)
+                .await
+                .unwrap();
+            assert_eq!(letters.len(), 1);
+            assert_eq!(
+                (letters[0].last_error.as_deref(), letters[0].attempts),
+                (Some("http_5xx"), 2)
+            );
+            // Only the settle that changed the row counts: the fenced one did not.
+            let output = handle.render();
+            assert!(
+                output.contains("zirv_flow_destination_forwarding_dead_total 1"),
+                "{output}"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1071,90 +1092,94 @@ mod tests {
     async fn a_redrive_resets_the_cycle_keeps_attempt_numbers_unique_and_starts_no_flow(
         pool: PgPool,
     ) {
-        let (ws, destination) = fixture(&pool, "redrive").await;
-        add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"id": {"from": "event.id"}}),
-        )
-        .await;
-        apply_event_batch(
-            &pool,
-            ws,
-            &redaction_key(),
-            &[
-                record("order", json!({}), "m-1"),
-                record("order", json!({}), "m-2"),
-            ],
-        )
-        .await
-        .unwrap();
-        let mut connection = pool.acquire().await.unwrap();
-        let lease = Duration::from_secs(300);
-        let claimed = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap();
-        for row in &claimed {
-            settle_row(
-                &mut connection,
-                row.id,
-                row.claim_token,
-                Settled::Dead,
-                Some("http_4xx"),
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "redrive").await;
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[
+                    record("order", json!({}), "m-1"),
+                    record("order", json!({}), "m-2"),
+                ],
             )
             .await
             .unwrap();
-        }
-        sqlx::query("DELETE FROM jobs WHERE kind = 'event.forward'")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
+            let mut connection = pool.acquire().await.unwrap();
+            let lease = Duration::from_secs(300);
+            let claimed = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap();
+            for row in &claimed {
+                settle_row(
+                    &mut connection,
+                    row.id,
+                    row.claim_token,
+                    Settled::Dead,
+                    Some("http_4xx"),
+                )
+                .await
+                .unwrap();
+            }
+            sqlx::query("DELETE FROM jobs WHERE kind = 'event.forward'")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
 
-        let one = redrive(&mut connection, ws, Redrive::Row(claimed[0].id))
-            .await
-            .unwrap();
-        let rest = redrive(&mut connection, ws, Redrive::Destination(destination))
-            .await
-            .unwrap();
-        let nothing = redrive(&mut connection, ws, Redrive::Workspace)
-            .await
-            .unwrap();
+            let one = redrive(&mut connection, ws, Redrive::Row(claimed[0].id))
+                .await
+                .unwrap();
+            let rest = redrive(&mut connection, ws, Redrive::Destination(destination))
+                .await
+                .unwrap();
+            let nothing = redrive(&mut connection, ws, Redrive::Workspace)
+                .await
+                .unwrap();
 
-        assert_eq!((one, rest, nothing), (1, 1, 0));
-        let again = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap();
-        assert_eq!(again.len(), 2);
-        for row in &again {
-            assert_eq!((row.attempts, row.attempt_offset), (1, 1));
+            assert_eq!((one, rest, nothing), (1, 1, 0));
+            let again = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap();
+            assert_eq!(again.len(), 2);
+            for row in &again {
+                assert_eq!((row.attempts, row.attempt_offset), (1, 1));
+                assert_eq!(
+                    row.attempt_number(),
+                    2,
+                    "the number continues past the dead cycle"
+                );
+            }
+            let forward: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+            let flow: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
             assert_eq!(
-                row.attempt_number(),
-                2,
-                "the number continues past the dead cycle"
+                (forward, flow),
+                (1, 0),
+                "one forwarding job, and no flow job"
             );
-        }
-        let forward: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind = 'event.forward'")
+            let enrollments: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollments")
                 .fetch_one(&mut *connection)
                 .await
                 .unwrap();
-        let flow: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-        assert_eq!(
-            (forward, flow),
-            (1, 0),
-            "one forwarding job, and no flow job"
-        );
-        let enrollments: i64 = sqlx::query_scalar("SELECT count(*) FROM enrollments")
-            .fetch_one(&mut *connection)
-            .await
-            .unwrap();
-        assert_eq!(enrollments, 0);
+            assert_eq!(enrollments, 0);
+        })
+        .await;
     }
 
     async fn one_pending_row(pool: &PgPool, name: &str) -> (WorkspaceId, Uuid) {
@@ -1182,301 +1207,316 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_outcome_of_an_older_claim_never_settles_a_newer_one(pool: PgPool) {
-        let (ws, destination) = one_pending_row(&pool, "oldclaim").await;
-        let mut connection = pool.acquire().await.unwrap();
-        let lease = Duration::from_secs(300);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = one_pending_row(&pool, "oldclaim").await;
+            let mut connection = pool.acquire().await.unwrap();
+            let lease = Duration::from_secs(300);
 
-        let first = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap()
-            .remove(0);
-        settle_row(
-            &mut connection,
-            first.id,
-            first.claim_token,
-            Settled::Dead,
-            Some("http_4xx"),
-        )
-        .await
-        .unwrap();
-        redrive(&mut connection, ws, Redrive::Row(first.id))
+            let first = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap()
+                .remove(0);
+            settle_row(
+                &mut connection,
+                first.id,
+                first.claim_token,
+                Settled::Dead,
+                Some("http_4xx"),
+            )
             .await
             .unwrap();
-        let second = claim_due(&mut connection, ws, destination, 10, lease)
-            .await
-            .unwrap()
-            .remove(0);
-        // The cycle counter repeats (attempt 1 again) but the claim does not.
-        assert_eq!((first.attempts, second.attempts), (1, 1));
-        assert_ne!(first.claim_token, second.claim_token);
-
-        let late_dead = settle_row(
-            &mut connection,
-            first.id,
-            first.claim_token,
-            Settled::Dead,
-            Some("http_5xx"),
-        )
-        .await
-        .unwrap();
-        let late_defer = defer_row(
-            &mut connection,
-            first.id,
-            first.claim_token,
-            OffsetDateTime::now_utc(),
-        )
-        .await
-        .unwrap();
-        assert!(!late_dead && !late_defer, "the older claim changes nothing");
-        let (state, attempts): (String, i32) =
-            sqlx::query_as("SELECT state, attempts FROM forwarding_outbox WHERE id = $1")
-                .bind(first.id)
-                .fetch_one(&mut *connection)
+            redrive(&mut connection, ws, Redrive::Row(first.id))
                 .await
                 .unwrap();
-        assert_eq!((state.as_str(), attempts), ("pending", 1));
+            let second = claim_due(&mut connection, ws, destination, 10, lease)
+                .await
+                .unwrap()
+                .remove(0);
+            // The cycle counter repeats (attempt 1 again) but the claim does not.
+            assert_eq!((first.attempts, second.attempts), (1, 1));
+            assert_ne!(first.claim_token, second.claim_token);
 
-        let settled = settle_row(
-            &mut connection,
-            second.id,
-            second.claim_token,
-            Settled::Delivered,
-            None,
-        )
-        .await
-        .unwrap();
-        let again = settle_row(
-            &mut connection,
-            second.id,
-            second.claim_token,
-            Settled::Dead,
-            Some("http_5xx"),
-        )
-        .await
-        .unwrap();
-        assert!(settled && !again, "the second claim wins, once");
+            let late_dead = settle_row(
+                &mut connection,
+                first.id,
+                first.claim_token,
+                Settled::Dead,
+                Some("http_5xx"),
+            )
+            .await
+            .unwrap();
+            let late_defer = defer_row(
+                &mut connection,
+                first.id,
+                first.claim_token,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+            assert!(!late_dead && !late_defer, "the older claim changes nothing");
+            let (state, attempts): (String, i32) =
+                sqlx::query_as("SELECT state, attempts FROM forwarding_outbox WHERE id = $1")
+                    .bind(first.id)
+                    .fetch_one(&mut *connection)
+                    .await
+                    .unwrap();
+            assert_eq!((state.as_str(), attempts), ("pending", 1));
+
+            let settled = settle_row(
+                &mut connection,
+                second.id,
+                second.claim_token,
+                Settled::Delivered,
+                None,
+            )
+            .await
+            .unwrap();
+            let again = settle_row(
+                &mut connection,
+                second.id,
+                second.claim_token,
+                Settled::Dead,
+                Some("http_5xx"),
+            )
+            .await
+            .unwrap();
+            assert!(settled && !again, "the second claim wins, once");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_lease_is_extended_only_by_the_current_claim(pool: PgPool) {
-        let (ws, destination) = one_pending_row(&pool, "extend").await;
-        let mut connection = pool.acquire().await.unwrap();
-        let row = claim_due(&mut connection, ws, destination, 10, Duration::from_secs(1))
-            .await
-            .unwrap()
-            .remove(0);
-        async fn due(connection: &mut sqlx::PgConnection) -> OffsetDateTime {
-            sqlx::query_scalar("SELECT next_attempt_at FROM forwarding_outbox")
-                .fetch_one(connection)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = one_pending_row(&pool, "extend").await;
+            let mut connection = pool.acquire().await.unwrap();
+            let row = claim_due(&mut connection, ws, destination, 10, Duration::from_secs(1))
                 .await
                 .unwrap()
-        }
-        let short = due(&mut connection).await;
+                .remove(0);
+            async fn due(connection: &mut sqlx::PgConnection) -> OffsetDateTime {
+                sqlx::query_scalar("SELECT next_attempt_at FROM forwarding_outbox")
+                    .fetch_one(connection)
+                    .await
+                    .unwrap()
+            }
+            let short = due(&mut connection).await;
 
-        let stranger = extend_lease(
-            &mut connection,
-            row.id,
-            Uuid::new_v4(),
-            Duration::from_secs(600),
-        )
-        .await
-        .unwrap();
-        let unchanged = due(&mut connection).await;
-        let held = extend_lease(
-            &mut connection,
-            row.id,
-            row.claim_token,
-            Duration::from_secs(600),
-        )
-        .await
-        .unwrap();
-        let extended = due(&mut connection).await;
+            let stranger = extend_lease(
+                &mut connection,
+                row.id,
+                Uuid::new_v4(),
+                Duration::from_secs(600),
+            )
+            .await
+            .unwrap();
+            let unchanged = due(&mut connection).await;
+            let held = extend_lease(
+                &mut connection,
+                row.id,
+                row.claim_token,
+                Duration::from_secs(600),
+            )
+            .await
+            .unwrap();
+            let extended = due(&mut connection).await;
 
-        assert!(!stranger && held);
-        assert_eq!(unchanged, short);
-        assert!(extended > short + time::Duration::seconds(300));
-        settle_row(
-            &mut connection,
-            row.id,
-            row.claim_token,
-            Settled::Delivered,
-            None,
-        )
-        .await
-        .unwrap();
-        let after_settle = extend_lease(
-            &mut connection,
-            row.id,
-            row.claim_token,
-            Duration::from_secs(600),
-        )
-        .await
-        .unwrap();
-        assert!(!after_settle, "a settled claim holds nothing");
+            assert!(!stranger && held);
+            assert_eq!(unchanged, short);
+            assert!(extended > short + time::Duration::seconds(300));
+            settle_row(
+                &mut connection,
+                row.id,
+                row.claim_token,
+                Settled::Delivered,
+                None,
+            )
+            .await
+            .unwrap();
+            let after_settle = extend_lease(
+                &mut connection,
+                row.id,
+                row.claim_token,
+                Duration::from_secs(600),
+            )
+            .await
+            .unwrap();
+            assert!(!after_settle, "a settled claim holds nothing");
+        })
+        .await;
     }
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn at_most_one_job_is_ready_and_a_running_one_leaves_a_successor(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "jobs").await;
-        let mut connection = pool.acquire().await.unwrap();
-        async fn ready(
-            connection: &mut sqlx::PgConnection,
-        ) -> Result<Vec<(String, bool)>, sqlx::Error> {
-            sqlx::query_as(
-                "SELECT unique_key, run_at > now() + interval '30 minutes' FROM jobs \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "jobs").await;
+            let mut connection = pool.acquire().await.unwrap();
+            async fn ready(
+                connection: &mut sqlx::PgConnection,
+            ) -> Result<Vec<(String, bool)>, sqlx::Error> {
+                sqlx::query_as(
+                    "SELECT unique_key, run_at > now() + interval '30 minutes' FROM jobs \
                  WHERE kind = 'event.forward' AND state = 'ready' ORDER BY unique_key",
+                )
+                .fetch_all(connection)
+                .await
+            }
+
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            let first = ready(&mut connection).await.unwrap();
+            assert_eq!(first.len(), 1);
+            assert!(first[0].0.ends_with(":0"));
+
+            // A job that is running does not count as the ready one.
+            let claimed = crate::claim_job(
+                &pool,
+                "w",
+                &[FORWARD_JOB_KIND],
+                Duration::from_secs(30),
+                None,
             )
-            .fetch_all(connection)
             .await
-        }
+            .unwrap()
+            .unwrap();
+            assert_eq!(claimed.unique_key.as_deref(), Some(first[0].0.as_str()));
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            let successor = ready(&mut connection).await.unwrap();
+            assert_eq!(successor.len(), 1);
+            assert!(successor[0].0.ends_with(":1"), "{successor:?}");
 
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        let first = ready(&mut connection).await.unwrap();
-        assert_eq!(first.len(), 1);
-        assert!(first[0].0.ends_with(":0"));
-
-        // A job that is running does not count as the ready one.
-        let claimed = crate::claim_job(
-            &pool,
-            "w",
-            &[FORWARD_JOB_KIND],
-            Duration::from_secs(30),
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(claimed.unique_key.as_deref(), Some(first[0].0.as_str()));
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        let successor = ready(&mut connection).await.unwrap();
-        assert_eq!(successor.len(), 1);
-        assert!(successor[0].0.ends_with(":1"), "{successor:?}");
-
-        // A ready job due later is pulled forward, not duplicated.
-        sqlx::query("UPDATE jobs SET run_at = now() + interval '1 hour' WHERE state = 'ready'")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        assert!(ready(&mut connection).await.unwrap()[0].1);
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        let pulled = ready(&mut connection).await.unwrap();
-        assert_eq!((pulled.len(), pulled[0].1), (1, false));
+            // A ready job due later is pulled forward, not duplicated.
+            sqlx::query("UPDATE jobs SET run_at = now() + interval '1 hour' WHERE state = 'ready'")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            assert!(ready(&mut connection).await.unwrap()[0].1);
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            let pulled = ready(&mut connection).await.unwrap();
+            assert_eq!((pulled.len(), pulled[0].1), (1, false));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_forward_job_wakes_an_idle_queue_but_not_a_backlog(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "wake").await;
-        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
-            .await
-            .unwrap();
-        listener.listen(NOTIFY_CHANNEL).await.unwrap();
-        let mut connection = pool.acquire().await.unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "wake").await;
+            let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+                .await
+                .unwrap();
+            listener.listen(NOTIFY_CHANNEL).await.unwrap();
+            let mut connection = pool.acquire().await.unwrap();
 
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(2), listener.recv())
-            .await
-            .expect("an idle queue is woken")
-            .unwrap();
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), listener.recv())
+                .await
+                .expect("an idle queue is woken")
+                .unwrap();
 
-        sqlx::query("UPDATE jobs SET run_at = now() + interval '1 hour' WHERE state = 'ready'")
+            sqlx::query("UPDATE jobs SET run_at = now() + interval '1 hour' WHERE state = 'ready'")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
+             VALUES (gen_random_uuid(), 'event.forward', '{}', gen_random_uuid(), 'api', 'x')",
+            )
             .execute(&mut *connection)
             .await
             .unwrap();
-        sqlx::query(
-            "INSERT INTO jobs (id, kind, payload, trace_id, cause_kind, cause_id) \
-             VALUES (gen_random_uuid(), 'event.forward', '{}', gen_random_uuid(), 'api', 'x')",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-        ensure_forward_job(&mut connection, ws, destination, None)
-            .await
-            .unwrap();
-        let heard = tokio::time::timeout(Duration::from_millis(300), listener.recv()).await;
-        assert!(heard.is_err(), "a runnable backlog is already awake");
+            ensure_forward_job(&mut connection, ws, destination, None)
+                .await
+                .unwrap();
+            let heard = tokio::time::timeout(Duration::from_millis(300), listener.recv()).await;
+            assert!(heard.is_err(), "a runnable backlog is already awake");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_status_reports_depth_lag_and_dead_and_delivered_rows_are_purged(pool: PgPool) {
-        let (ws, destination) = fixture(&pool, "status").await;
-        add_rule(
-            &pool,
-            ws,
-            destination,
-            "order",
-            json!([]),
-            json!({"id": {"from": "event.id"}}),
-        )
-        .await;
-        apply_event_batch(
-            &pool,
-            ws,
-            &redaction_key(),
-            &[
-                record("order", json!({}), "m-1"),
-                record("order", json!({}), "m-2"),
-                record("order", json!({}), "m-3"),
-            ],
-        )
-        .await
-        .unwrap();
-        let mut connection = pool.acquire().await.unwrap();
-        sqlx::query(
-            "UPDATE forwarding_outbox SET next_attempt_at = now() - interval '90 seconds' \
-             WHERE id = (SELECT id FROM forwarding_outbox ORDER BY id LIMIT 1)",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-        sqlx::query(
-            "UPDATE forwarding_outbox SET state = 'dead', last_error = 'http_4xx' \
-             WHERE id = (SELECT id FROM forwarding_outbox ORDER BY id DESC LIMIT 1)",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-
-        let status = forwarding_status(&mut connection, ws).await.unwrap();
-        let report = forwarding_report(&mut connection).await.unwrap();
-
-        assert_eq!(status.len(), 1);
-        assert_eq!((status[0].depth, status[0].dead), (2, 1));
-        assert!(
-            (90..=95).contains(&status[0].oldest_lag_seconds),
-            "{status:?}"
-        );
-        assert_eq!(report.len(), 1);
-        assert_eq!((report[0].depth, report[0].has_job), (2, true));
-
-        sqlx::query(
-            "UPDATE forwarding_outbox SET state = 'delivered', payload = '{}', \
-                updated_at = now() - interval '8 days' WHERE state = 'pending'",
-        )
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-        let purged = purge_delivered(&pool, destination, DELIVERED_RETENTION, 10)
+        crate::decision_testing::checked(pool, |pool| async move {
+            let (ws, destination) = fixture(&pool, "status").await;
+            add_rule(
+                &pool,
+                ws,
+                destination,
+                "order",
+                json!([]),
+                json!({"id": {"from": "event.id"}}),
+            )
+            .await;
+            apply_event_batch(
+                &pool,
+                ws,
+                &redaction_key(),
+                &[
+                    record("order", json!({}), "m-1"),
+                    record("order", json!({}), "m-2"),
+                    record("order", json!({}), "m-3"),
+                ],
+            )
             .await
             .unwrap();
-        assert_eq!(purged, 2);
-        assert_eq!(rows(&pool, ws).await, 1, "the dead letter stays");
+            let mut connection = pool.acquire().await.unwrap();
+            sqlx::query(
+                "UPDATE forwarding_outbox SET next_attempt_at = now() - interval '90 seconds' \
+             WHERE id = (SELECT id FROM forwarding_outbox ORDER BY id LIMIT 1)",
+            )
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+            sqlx::query(
+                "UPDATE forwarding_outbox SET state = 'dead', last_error = 'http_4xx' \
+             WHERE id = (SELECT id FROM forwarding_outbox ORDER BY id DESC LIMIT 1)",
+            )
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+            let status = forwarding_status(&mut connection, ws).await.unwrap();
+            let report = forwarding_report(&mut connection).await.unwrap();
+
+            assert_eq!(status.len(), 1);
+            assert_eq!((status[0].depth, status[0].dead), (2, 1));
+            assert!(
+                (90..=95).contains(&status[0].oldest_lag_seconds),
+                "{status:?}"
+            );
+            assert_eq!(report.len(), 1);
+            assert_eq!((report[0].depth, report[0].has_job), (2, true));
+
+            sqlx::query(
+                "UPDATE forwarding_outbox SET state = 'delivered', payload = '{}', \
+                updated_at = now() - interval '8 days' WHERE state = 'pending'",
+            )
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+            let purged = purge_delivered(&pool, destination, DELIVERED_RETENTION, 10)
+                .await
+                .unwrap();
+            assert_eq!(purged, 2);
+            assert_eq!(rows(&pool, ws).await, 1, "the dead letter stays");
+        })
+        .await;
     }
 
     /// Source files under `crates/*/src`, with the text from the first test module on cut off.
@@ -1603,6 +1643,7 @@ mod tests {
     async fn ingest_batch_time_with_the_outbox_switched_off_with_no_rule_and_with_a_rule(
         pool: PgPool,
     ) {
+        crate::decision_testing::checked(pool, |pool| async move {
         let batches: usize = std::env::var("ZIRV_MEASURE_BATCHES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1692,5 +1733,7 @@ mod tests {
                 series.len()
             );
         }
+        })
+        .await;
     }
 }

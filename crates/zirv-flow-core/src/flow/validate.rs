@@ -148,7 +148,8 @@ pub fn validate_settings(settings: &FlowSettings) -> Vec<Issue> {
     issues
 }
 
-fn valid_id(id: &str) -> bool {
+/// Whether a node or edge id has the bounded ASCII identifier shape used by flow graphs.
+pub fn valid_id(id: &str) -> bool {
     (1..=MAX_ID_CHARS).contains(&id.chars().count())
         && id
             .chars()

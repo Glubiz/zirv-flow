@@ -13,6 +13,8 @@ mod trace;
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use axum::http::StatusCode;
     use serde_json::{Value, json};
     use sqlx::PgPool;
@@ -27,7 +29,7 @@ mod tests {
 
     /// A synthetic address. It must appear in no decision, no trace and, once the person is
     /// erased, in no table.
-    const ADDRESS: &str = "ada@example.com";
+    const ADDRESS: &str = PERSONAL_DATA.email;
     /// The allowlisted address of the test send. It too must be gone after the erasure.
     const TEST_ADDRESS: &str = "qa@example.com";
     const OFFER_URL: &str = "https://shop.example/offer?x=1";
@@ -213,22 +215,26 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_send_path_and_its_trace_hold_end_to_end(pool: PgPool) {
-        let world = World::start(pool, PUBLIC_URL).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let world = World::start(pool, PUBLIC_URL).await;
 
-        // A verified sender (its records resolve in the fixture DNS), two destinations, a
-        // marketing template and a flow: send over SMTP, send through the provider, wait a day,
-        // send over SMTP again. A person who is in the segment enters the flow.
-        let (sender, dkim_record) = world
-            .verified_sender("example.com", "news@example.com")
-            .await;
-        let smtp = world.smtp_destination().await;
-        let provider = world.provider_destination().await;
-        let offer = world.template("Offer", html_doc(&sender)).await;
-        world.event_schema("order_placed").await;
-        let segment = world
-            .segment("Buyers", json!({"v": 1, "event": "order_placed"}))
-            .await;
-        let graph = json!({"v": 1, "nodes": [
+            // A verified sender (its records resolve in the fixture DNS), two destinations, a
+            // marketing template and a flow: send over SMTP, send through the provider, wait a day,
+            // send over SMTP again. A person who is in the segment enters the flow.
+            let (sender, dkim_record) = world
+                .verified_sender("example.com", "news@example.com")
+                .await;
+            let smtp = world.smtp_destination().await;
+            let provider = world.provider_destination().await;
+            let offer = world.template("Offer", html_doc(&sender)).await;
+            world.event_schema("order_placed").await;
+            let segment = world
+                .segment(
+                    PERSONAL_DATA.segment_name,
+                    json!({"v": 1, "event": "order_placed"}),
+                )
+                .await;
+            let graph = json!({"v": 1, "nodes": [
             send_node("welcome", &offer, &smtp),
             send_node("receipt", &offer, &provider),
             {"id": "pause", "type": "wait.duration", "seconds": 86400},
@@ -236,270 +242,263 @@ mod tests {
             {"id": "end", "type": "exit"}],
             "edges": [edge("welcome", "receipt"), edge("receipt", "pause"),
                       edge("pause", "reminder"), edge("reminder", "end")]});
-        let flow = world
-            .flow(
-                "Offer flow",
-                graph,
-                json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+            let flow = world
+                .flow(
+                    "Offer flow",
+                    graph,
+                    json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
                        "reentry": {"mode": "once"}}),
-            )
-            .await;
+                )
+                .await;
 
-        // The person exists and subscribed.
-        let person = world.subscribed_person(ADDRESS).await;
+            // The person exists and subscribed.
+            let person = world.subscribed_person(ADDRESS).await;
 
-        // Step 1 and 2: a track call moves the person into the segment, which starts the flow.
-        let track_trace = world.track_order(ADDRESS).await;
-        // The flow reaches its wait on this instant of the manual clock.
-        let waited_at = world.clock.now();
-        world.settle().await;
-        assert_eq!(
-            world
-                .count("SELECT count(*) FROM segment_members WHERE exited_at IS NULL")
-                .await,
-            1,
-            "the event moved the person into the segment"
-        );
-
-        // Step 3: the sink captured the SMTP message, with the one-click headers and a DKIM
-        // signature that verifies against the record the domain publishes.
-        let captured = world.sink.messages();
-        assert_eq!(
-            captured.len(),
-            1,
-            "the first SMTP send; the second waits a day"
-        );
-        let welcome = &captured[0];
-        assert_eq!(welcome.recipients, [ADDRESS]);
-        assert_eq!(welcome.mail_from, "news@example.com");
-        let data = &welcome.data;
-        let list_unsubscribe = mail::header(data, "List-Unsubscribe").expect("List-Unsubscribe");
-        assert!(
-            list_unsubscribe.starts_with(&format!("<{PUBLIC_URL}/u/")),
-            "{list_unsubscribe}"
-        );
-        assert_eq!(
-            mail::header(data, "List-Unsubscribe-Post").as_deref(),
-            Some("List-Unsubscribe=One-Click")
-        );
-        let signature = mail::header(data, "DKIM-Signature").expect("a DKIM signature");
-        assert!(signature.contains("d=example.com;"), "{signature}");
-        assert_eq!(verify_dkim_signature(data, &dkim_record), Ok(()));
-        assert_eq!(
-            world.provider.accepted().len(),
-            1,
-            "the provider got the second send"
-        );
-
-        // The HTML that went out is the preview, apart from the tracking tokens.
-        let html = mail::part(data, "text/html").expect("an html part");
-        assert_eq!(
-            without_tracking(&html),
-            without_tracking(&preview_html(&world, &offer, person).await)
-        );
-
-        // Step 4: the click is recorded and redirects to the URL recorded for the link.
-        world.clock.advance(Duration::minutes(1));
-        let links = mail::urls_containing(&html, "/t/c/");
-        assert_eq!(links.len(), 1, "{links:?}");
-        let click = call(&world.router, "GET", path_of(&links[0]), None, None).await;
-        assert_eq!(click.status, StatusCode::FOUND);
-        assert_eq!(click.headers["location"], OFFER_URL);
-        assert_eq!(
-            world
-                .count("SELECT count(*) FROM events WHERE name = 'email.clicked'")
-                .await,
-            1
-        );
-
-        // Step 5: the one-click unsubscribe updates consent.
-        world.clock.advance(Duration::minutes(1));
-        let unsubscribe_url = list_unsubscribe
-            .trim_start_matches('<')
-            .split('>')
-            .next()
-            .expect("a URL")
-            .to_owned();
-        let one_click = call_form(
-            &world.router,
-            "POST",
-            path_of(&unsubscribe_url),
-            "List-Unsubscribe=One-Click",
-        )
-        .await;
-        assert_eq!(one_click.status, StatusCode::OK, "{}", one_click.text);
-        let consent = world
-            .api_ok(
-                "GET",
-                &format!("/people/{person}/consent"),
-                None,
-                StatusCode::OK,
-            )
-            .await;
-        assert_eq!(consent["states"][0]["channel"], "email");
-        assert_eq!(consent["states"][0]["status"], "unsubscribed", "{consent}");
-
-        // The provider reports the receipt delivered, signed as it signs.
-        world.clock.advance(Duration::minutes(1));
-        let receipt: uuid::Uuid =
-            sqlx::query_scalar("SELECT id FROM messages WHERE node_id = 'receipt'")
-                .fetch_one(&world.pool)
-                .await
-                .expect("the receipt message");
-        let feedback = deliver_feedback(&world, &provider, receipt).await;
-        assert_eq!(feedback.status, StatusCode::ACCEPTED);
-        assert_eq!(
-            world
-                .count("SELECT count(*) FROM events WHERE name = 'email.delivered'")
-                .await,
-            1
-        );
-
-        // Step 6: a day later the flow runs its second send, which is skipped for no consent.
-        // The wake was scheduled from the manual clock: a day after the wait began.
-        let scheduled: OffsetDateTime = sqlx::query_scalar(
-            "SELECT run_at FROM jobs WHERE kind = 'flow.step' AND state = 'ready'",
-        )
-        .fetch_one(&world.pool)
-        .await
-        .expect("exactly one step is waiting");
-        assert!(
-            (scheduled - (waited_at + Duration::days(1))).abs() < Duration::milliseconds(1),
-            "the wake is due a day after {waited_at}, not at {scheduled}"
-        );
-        world.clock.advance(Duration::days(1));
-        // The queue claims by database time, so the due wake is moved there.
-        sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'flow.step'")
-            .execute(&world.pool)
-            .await
-            .expect("the wake is due");
-        world.settle().await;
-        assert_eq!(world.sink.messages().len(), 1, "nothing more went out");
-        let (status, reason): (String, Option<String>) =
-            sqlx::query_as("SELECT status, reason FROM messages WHERE node_id = 'reminder'")
-                .fetch_one(&world.pool)
-                .await
-                .expect("the reminder message");
-        assert_eq!(
-            (status.as_str(), reason.as_deref()),
-            ("skipped", Some("no_consent"))
-        );
-
-        // Criterion 9, API: one trace, the track call's, holds the event, the segment entry, the
-        // enrollment, the steps, the messages, the unsubscribe, the delivery feedback and the
-        // later skipped send. The enrollment continues the trace of the segment entry.
-        let tree = world
-            .api_ok(
-                "GET",
-                &format!("/traces/{track_trace}"),
-                None,
-                StatusCode::OK,
-            )
-            .await;
-        let enrollments = world
-            .api_ok(
-                "GET",
-                &format!("/flows/{flow}/enrollments"),
-                None,
-                StatusCode::OK,
-            )
-            .await;
-        assert_eq!(
-            enrollments["enrollments"][0]["trace_id"], track_trace,
-            "the enrollment continues the trace of the track call"
-        );
-        assert_eq!(tree["truncated"], false);
-        let records = trace::records_of(&tree);
-        if let Err(gap) = trace::complete(&records) {
-            panic!("{gap}");
-        }
-
-        // No address value in the trace response or in any stored decision.
-        let shown = serde_json::to_string(&records).expect("text");
-        assert!(!shown.contains('@'), "an address is in the trace");
-        let body = tree.to_string();
-        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
-            assert!(!body.contains(marker), "{marker} is in the trace response");
-        }
-
-        // Criterion 9, UI: the trace, normalised, is the fixture the web test renders.
-        trace::bless_or_compare(&trace::normalised(&track_trace, records));
-
-        // The message log of the person agrees with the trace on the later send.
-        let log = world
-            .api_ok(
-                "GET",
-                &format!("/people/{person}/messages?result=skipped"),
-                None,
-                StatusCode::OK,
-            )
-            .await;
-        assert_eq!(log["messages"].as_array().map(Vec::len), Some(1), "{log}");
-        assert_eq!(log["messages"][0]["reason"], "no_consent");
-
-        // A test send to an allowlisted address is logged, so the erasure scan has one to find.
-        world
-            .api_ok(
-                "POST",
-                "/test-send-allowlist",
-                Some(json!({"address": TEST_ADDRESS})),
-                StatusCode::CREATED,
-            )
-            .await;
-        world
-            .api_ok(
-                "POST",
-                &format!("/templates/{offer}/test-send"),
-                Some(json!({"destination_id": smtp, "sender_identity_id": sender,
-                            "to": {"address": TEST_ADDRESS}})),
-                StatusCode::ACCEPTED,
-            )
-            .await;
-        world.settle().await;
-        assert_eq!(world.count("SELECT count(*) FROM test_sends").await, 1);
-        // No address in any stored decision or job, the test send's included.
-        let decisions = dump_text(&world.pool, Some(&["decision_records", "jobs"])).await;
-        for marker in ["ada@", ADDRESS, "qa@", TEST_ADDRESS] {
-            assert!(
-                !decisions.contains(marker),
-                "{marker} is in a stored decision"
-            );
-        }
-
-        // The erasure scan, once, at the end: the person is erased, and nothing of them is left
-        // in `messages`, `message_links` or `test_sends`, nor anywhere else.
-        assert_eq!(world.count("SELECT count(*) FROM messages").await, 3);
-        assert!(world.count("SELECT count(*) FROM message_links").await >= 1);
-        world
-            .api_ok(
-                "POST",
-                "/privacy/erasures",
-                Some(json!({"person_id": person})),
-                StatusCode::ACCEPTED,
-            )
-            .await;
-        world.settle().await;
-        for table in ["messages", "message_links", "people", "identities"] {
+            // Step 1 and 2: a track call moves the person into the segment, which starts the flow.
+            let track_trace = world.track_order(ADDRESS).await;
+            // The flow reaches its wait on this instant of the manual clock.
+            let waited_at = world.clock.now();
+            world.settle().await;
             assert_eq!(
-                world.count(&format!("SELECT count(*) FROM {table}")).await,
-                0,
-                "{table} still holds rows of the erased person"
+                world
+                    .count("SELECT count(*) FROM segment_members WHERE exited_at IS NULL")
+                    .await,
+                1,
+                "the event moved the person into the segment"
             );
-        }
-        let leaked = dump_text(
-            &world.pool,
-            Some(&["messages", "message_links", "test_sends"]),
-        )
-        .await;
-        assert!(!names(&leaked, "ada"), "the erased person is still named");
-        let everything = dump_text(&world.pool, None).await;
-        for marker in [ADDRESS, TEST_ADDRESS] {
+
+            // Step 3: the sink captured the SMTP message, with the one-click headers and a DKIM
+            // signature that verifies against the record the domain publishes.
+            let captured = world.sink.messages();
+            assert_eq!(
+                captured.len(),
+                1,
+                "the first SMTP send; the second waits a day"
+            );
+            let welcome = &captured[0];
+            assert_eq!(welcome.recipients, [ADDRESS]);
+            assert_eq!(welcome.mail_from, "news@example.com");
+            let data = &welcome.data;
+            let list_unsubscribe =
+                mail::header(data, "List-Unsubscribe").expect("List-Unsubscribe");
             assert!(
-                !everything.contains(marker),
-                "{marker} survives the erasure"
+                list_unsubscribe.starts_with(&format!("<{PUBLIC_URL}/u/")),
+                "{list_unsubscribe}"
             );
-        }
-        world.finish().await;
+            assert_eq!(
+                mail::header(data, "List-Unsubscribe-Post").as_deref(),
+                Some("List-Unsubscribe=One-Click")
+            );
+            let signature = mail::header(data, "DKIM-Signature").expect("a DKIM signature");
+            assert!(signature.contains("d=example.com;"), "{signature}");
+            assert_eq!(verify_dkim_signature(data, &dkim_record), Ok(()));
+            assert_eq!(
+                world.provider.accepted().len(),
+                1,
+                "the provider got the second send"
+            );
+
+            // The HTML that went out is the preview, apart from the tracking tokens.
+            let html = mail::part(data, "text/html").expect("an html part");
+            assert_eq!(
+                without_tracking(&html),
+                without_tracking(&preview_html(&world, &offer, person).await)
+            );
+
+            // Step 4: the click is recorded and redirects to the URL recorded for the link.
+            world.clock.advance(Duration::minutes(1));
+            let links = mail::urls_containing(&html, "/t/c/");
+            assert_eq!(links.len(), 1, "{links:?}");
+            let click = call(&world.router, "GET", path_of(&links[0]), None, None).await;
+            assert_eq!(click.status, StatusCode::FOUND);
+            assert_eq!(click.headers["location"], OFFER_URL);
+            assert_eq!(
+                world
+                    .count("SELECT count(*) FROM events WHERE name = 'email.clicked'")
+                    .await,
+                1
+            );
+
+            // Step 5: the one-click unsubscribe updates consent.
+            world.clock.advance(Duration::minutes(1));
+            let unsubscribe_url = list_unsubscribe
+                .trim_start_matches('<')
+                .split('>')
+                .next()
+                .expect("a URL")
+                .to_owned();
+            let one_click = call_form(
+                &world.router,
+                "POST",
+                path_of(&unsubscribe_url),
+                "List-Unsubscribe=One-Click",
+            )
+            .await;
+            assert_eq!(one_click.status, StatusCode::OK, "{}", one_click.text);
+            let consent = world
+                .api_ok(
+                    "GET",
+                    &format!("/people/{person}/consent"),
+                    None,
+                    StatusCode::OK,
+                )
+                .await;
+            assert_eq!(consent["states"][0]["channel"], "email");
+            assert_eq!(consent["states"][0]["status"], "unsubscribed", "{consent}");
+
+            // The provider reports the receipt delivered, signed as it signs.
+            world.clock.advance(Duration::minutes(1));
+            let receipt: uuid::Uuid =
+                sqlx::query_scalar("SELECT id FROM messages WHERE node_id = 'receipt'")
+                    .fetch_one(&world.pool)
+                    .await
+                    .expect("the receipt message");
+            let feedback = deliver_feedback(&world, &provider, receipt).await;
+            assert_eq!(feedback.status, StatusCode::ACCEPTED);
+            assert_eq!(
+                world
+                    .count("SELECT count(*) FROM events WHERE name = 'email.delivered'")
+                    .await,
+                1
+            );
+
+            // Step 6: a day later the flow runs its second send, which is skipped for no consent.
+            // The wake was scheduled from the manual clock: a day after the wait began.
+            let scheduled: OffsetDateTime = sqlx::query_scalar(
+                "SELECT run_at FROM jobs WHERE kind = 'flow.step' AND state = 'ready'",
+            )
+            .fetch_one(&world.pool)
+            .await
+            .expect("exactly one step is waiting");
+            assert!(
+                (scheduled - (waited_at + Duration::days(1))).abs() < Duration::milliseconds(1),
+                "the wake is due a day after {waited_at}, not at {scheduled}"
+            );
+            world.clock.advance(Duration::days(1));
+            // The queue claims by database time, so the due wake is moved there.
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'flow.step'")
+                .execute(&world.pool)
+                .await
+                .expect("the wake is due");
+            world.settle().await;
+            assert_eq!(world.sink.messages().len(), 1, "nothing more went out");
+            let (status, reason): (String, Option<String>) =
+                sqlx::query_as("SELECT status, reason FROM messages WHERE node_id = 'reminder'")
+                    .fetch_one(&world.pool)
+                    .await
+                    .expect("the reminder message");
+            assert_eq!(
+                (status.as_str(), reason.as_deref()),
+                ("skipped", Some("no_consent"))
+            );
+
+            // Criterion 9, API: one trace, the track call's, holds the event, the segment entry, the
+            // enrollment, the steps, the messages, the unsubscribe, the delivery feedback and the
+            // later skipped send. The enrollment continues the trace of the segment entry.
+            let tree = world
+                .api_ok(
+                    "GET",
+                    &format!("/traces/{track_trace}"),
+                    None,
+                    StatusCode::OK,
+                )
+                .await;
+            let enrollments = world
+                .api_ok(
+                    "GET",
+                    &format!("/flows/{flow}/enrollments"),
+                    None,
+                    StatusCode::OK,
+                )
+                .await;
+            assert_eq!(
+                enrollments["enrollments"][0]["trace_id"], track_trace,
+                "the enrollment continues the trace of the track call"
+            );
+            assert_eq!(tree["truncated"], false);
+            let records = trace::records_of(&tree);
+            if let Err(gap) = trace::complete(&records) {
+                panic!("{gap}");
+            }
+
+            zirv_flow_store::decision_testing::assert_no_personal_data(&tree);
+
+            // Criterion 9, UI: the trace, normalised, is the fixture the web test renders.
+            trace::bless_or_compare(&trace::normalised(&track_trace, records));
+
+            // The message log of the person agrees with the trace on the later send.
+            let log = world
+                .api_ok(
+                    "GET",
+                    &format!("/people/{person}/messages?result=skipped"),
+                    None,
+                    StatusCode::OK,
+                )
+                .await;
+            assert_eq!(log["messages"].as_array().map(Vec::len), Some(1), "{log}");
+            assert_eq!(log["messages"][0]["reason"], "no_consent");
+
+            // A test send to an allowlisted address is logged, so the erasure scan has one to find.
+            world
+                .api_ok(
+                    "POST",
+                    "/test-send-allowlist",
+                    Some(json!({"address": TEST_ADDRESS})),
+                    StatusCode::CREATED,
+                )
+                .await;
+            world
+                .api_ok(
+                    "POST",
+                    &format!("/templates/{offer}/test-send"),
+                    Some(json!({"destination_id": smtp, "sender_identity_id": sender,
+                            "to": {"address": TEST_ADDRESS}})),
+                    StatusCode::ACCEPTED,
+                )
+                .await;
+            world.settle().await;
+            assert_eq!(world.count("SELECT count(*) FROM test_sends").await, 1);
+            zirv_flow_store::decision_testing::assert_decisions_hold_no_personal_data(&world.pool)
+                .await;
+            let jobs = dump_text(&world.pool, Some(&["jobs"])).await;
+            zirv_flow_store::decision_testing::assert_no_personal_data(&Value::String(jobs));
+
+            // The erasure scan, once, at the end: the person is erased, and nothing of them is left
+            // in `messages`, `message_links` or `test_sends`, nor anywhere else.
+            assert_eq!(world.count("SELECT count(*) FROM messages").await, 3);
+            assert!(world.count("SELECT count(*) FROM message_links").await >= 1);
+            world
+                .api_ok(
+                    "POST",
+                    "/privacy/erasures",
+                    Some(json!({"person_id": person})),
+                    StatusCode::ACCEPTED,
+                )
+                .await;
+            world.settle().await;
+            for table in ["messages", "message_links", "people", "identities"] {
+                assert_eq!(
+                    world.count(&format!("SELECT count(*) FROM {table}")).await,
+                    0,
+                    "{table} still holds rows of the erased person"
+                );
+            }
+            let leaked = dump_text(
+                &world.pool,
+                Some(&["messages", "message_links", "test_sends"]),
+            )
+            .await;
+            assert!(!names(&leaked, "ada"), "the erased person is still named");
+            let everything = dump_text(&world.pool, None).await;
+            for marker in [ADDRESS, TEST_ADDRESS] {
+                assert!(
+                    !everything.contains(marker),
+                    "{marker} survives the erasure"
+                );
+            }
+            world.finish().await;
+        })
+        .await;
     }
 
     /// The blocks step of the scenario: a flow sends a block document built from the v1 set, and
@@ -507,38 +506,44 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_block_document_email_is_the_preview_render_apart_from_tracking(pool: PgPool) {
-        let world = World::start(pool, PUBLIC_URL).await;
-        let (sender, _) = world
-            .verified_sender("example.com", "news@example.com")
-            .await;
-        let smtp = world.smtp_destination().await;
-        let blocks = world.template("Blocks", blocks_doc(&sender)).await;
-        world.event_schema("order_placed").await;
-        let segment = world
-            .segment("Buyers", json!({"v": 1, "event": "order_placed"}))
-            .await;
-        world
-            .flow(
-                "Blocks flow",
-                json!({"v": 1, "nodes": [send_node("blocks", &blocks, &smtp),
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let world = World::start(pool, PUBLIC_URL).await;
+            let (sender, _) = world
+                .verified_sender("example.com", "news@example.com")
+                .await;
+            let smtp = world.smtp_destination().await;
+            let blocks = world.template("Blocks", blocks_doc(&sender)).await;
+            world.event_schema("order_placed").await;
+            let segment = world
+                .segment(
+                    PERSONAL_DATA.segment_name,
+                    json!({"v": 1, "event": "order_placed"}),
+                )
+                .await;
+            world
+                .flow(
+                    "Blocks flow",
+                    json!({"v": 1, "nodes": [send_node("blocks", &blocks, &smtp),
                                          {"id": "end", "type": "exit"}],
                        "edges": [edge("blocks", "end")]}),
-                json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+                    json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
                        "reentry": {"mode": "once"}}),
-            )
-            .await;
-        let person = world.subscribed_person(ADDRESS).await;
-        world.track_order(ADDRESS).await;
-        world.settle().await;
+                )
+                .await;
+            let person = world.subscribed_person(ADDRESS).await;
+            world.track_order(ADDRESS).await;
+            world.settle().await;
 
-        let captured = world.sink.messages();
-        assert_eq!(captured.len(), 1, "the block email was sent");
-        let html = mail::part(&captured[0].data, "text/html").expect("an html part");
-        assert_eq!(
-            without_tracking(&html),
-            without_tracking(&preview_html(&world, &blocks, person).await)
-        );
-        world.finish().await;
+            let captured = world.sink.messages();
+            assert_eq!(captured.len(), 1, "the block email was sent");
+            let html = mail::part(&captured[0].data, "text/html").expect("an html part");
+            assert_eq!(
+                without_tracking(&html),
+                without_tracking(&preview_html(&world, &blocks, person).await)
+            );
+            world.finish().await;
+        })
+        .await;
     }
 
     /// Creates and publishes a snippet or a theme through the API; returns its id.
@@ -576,12 +581,13 @@ mod tests {
     async fn a_themed_email_with_snippets_and_conditions_is_the_preview_apart_from_tracking(
         pool: PgPool,
     ) {
-        let world = World::start(pool, PUBLIC_URL).await;
-        let (sender, _) = world
-            .verified_sender("example.com", "news@example.com")
-            .await;
-        let smtp = world.smtp_destination().await;
-        let legal = published(
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let world = World::start(pool, PUBLIC_URL).await;
+            let (sender, _) = world
+                .verified_sender("example.com", "news@example.com")
+                .await;
+            let smtp = world.smtp_destination().await;
+            let legal = published(
             &world,
             "snippet",
             "Legal",
@@ -592,7 +598,7 @@ mod tests {
             ]}),
         )
         .await;
-        let promo = published(
+            let promo = published(
             &world,
             "snippet",
             "Promo",
@@ -601,59 +607,64 @@ mod tests {
             ]}),
         )
         .await;
-        let theme = published(
-            &world,
-            "theme",
-            "Brand",
-            json!({"primary": "#aa0000", "footer_snippet": legal}),
-        )
-        .await;
-        let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
-            "subject": "Themed", "sender": sender, "lang": "en", "category": "marketing",
-            "theme": {"id": theme},
-            "sections": [{"id": "main", "columns": [[
-                {"type": "snippet", "id": "promo", "snippet_id": promo},
-                {"type": "text", "id": "shown", "content": "<p>CONDITION MET TEXT</p>",
-                 "visible_if": {"identifier": "email"}},
-                {"type": "text", "id": "hidden", "content": "<p>CONDITION UNMET TEXT</p>",
-                 "visible_if": {"identifier": "phone"}}
-            ]]}]
-        }});
-        let template = world.template("Themed", document).await;
-        world.event_schema("order_placed").await;
-        let segment = world
-            .segment("Buyers", json!({"v": 1, "event": "order_placed"}))
-            .await;
-        world
-            .flow(
-                "Themed flow",
-                json!({"v": 1, "nodes": [send_node("themed", &template, &smtp),
-                                         {"id": "end", "type": "exit"}],
-                       "edges": [edge("themed", "end")]}),
-                json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
-                       "reentry": {"mode": "once"}}),
+            let theme = published(
+                &world,
+                "theme",
+                "Brand",
+                json!({"primary": "#aa0000", "footer_snippet": legal}),
             )
             .await;
-        let person = world.subscribed_person(ADDRESS).await;
-        world.track_order(ADDRESS).await;
-        world.settle().await;
+            let document = json!({"schema": 2, "channel": "email", "mode": "blocks", "blocks": {
+                "subject": "Themed", "sender": sender, "lang": "en", "category": "marketing",
+                "theme": {"id": theme},
+                "sections": [{"id": "main", "columns": [[
+                    {"type": "snippet", "id": "promo", "snippet_id": promo},
+                    {"type": "text", "id": "shown", "content": "<p>CONDITION MET TEXT</p>",
+                     "visible_if": {"identifier": "email"}},
+                    {"type": "text", "id": "hidden", "content": "<p>CONDITION UNMET TEXT</p>",
+                     "visible_if": {"identifier": "phone"}}
+                ]]}]
+            }});
+            let template = world.template("Themed", document).await;
+            world.event_schema("order_placed").await;
+            let segment = world
+                .segment(
+                    PERSONAL_DATA.segment_name,
+                    json!({"v": 1, "event": "order_placed"}),
+                )
+                .await;
+            world
+                .flow(
+                    "Themed flow",
+                    json!({"v": 1, "nodes": [send_node("themed", &template, &smtp),
+                                         {"id": "end", "type": "exit"}],
+                       "edges": [edge("themed", "end")]}),
+                    json!({"trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+                       "reentry": {"mode": "once"}}),
+                )
+                .await;
+            let person = world.subscribed_person(ADDRESS).await;
+            world.track_order(ADDRESS).await;
+            world.settle().await;
 
-        let captured = world.sink.messages();
-        assert_eq!(captured.len(), 1, "the themed email was sent");
-        let sent = without_tracking(&mail::part(&captured[0].data, "text/html").expect("html"));
-        let previewed = without_tracking(&preview_html(&world, &template, person).await);
+            let captured = world.sink.messages();
+            assert_eq!(captured.len(), 1, "the themed email was sent");
+            let sent = without_tracking(&mail::part(&captured[0].data, "text/html").expect("html"));
+            let previewed = without_tracking(&preview_html(&world, &template, person).await);
 
-        assert_eq!(sent, previewed);
-        for present in [
-            "PROMO SNIPPET TEXT",
-            "FOOTER SNIPPET TEXT",
-            "CONDITION MET TEXT",
-            "#aa0000",
-        ] {
-            assert!(sent.contains(present), "{present} is in the sent HTML");
-        }
-        assert!(!sent.contains("CONDITION UNMET TEXT"));
-        world.finish().await;
+            assert_eq!(sent, previewed);
+            for present in [
+                "PROMO SNIPPET TEXT",
+                "FOOTER SNIPPET TEXT",
+                "CONDITION MET TEXT",
+                "#aa0000",
+            ] {
+                assert!(sent.contains(present), "{present} is in the sent HTML");
+            }
+            assert!(!sent.contains("CONDITION UNMET TEXT"));
+            world.finish().await;
+        })
+        .await;
     }
 
     /// The smoke run of the send benchmark scenario (#233): the same shape the bench scripts
@@ -664,104 +675,107 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_send_bench_scenario_delivers_one_message_per_person_per_template(pool: PgPool) {
-        const PEOPLE: usize = 12;
-        let world = World::start(pool, PUBLIC_URL).await;
-        let (sender, _) = world
-            .verified_sender("example.com", "news@example.com")
-            .await;
-        let smtp = world.smtp_destination().await;
-        let blocks = world.template("Bench blocks", blocks_doc(&sender)).await;
-        let html = world.template("Bench html", html_doc(&sender)).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const PEOPLE: usize = 12;
+            let world = World::start(pool, PUBLIC_URL).await;
+            let (sender, _) = world
+                .verified_sender("example.com", "news@example.com")
+                .await;
+            let smtp = world.smtp_destination().await;
+            let blocks = world.template("Bench blocks", blocks_doc(&sender)).await;
+            let html = world.template("Bench html", html_doc(&sender)).await;
 
-        let items: Vec<Value> = (0..PEOPLE)
-            .map(|n| {
-                json!({"type": "identify",
+            let items: Vec<Value> = (0..PEOPLE)
+                .map(|n| {
+                    json!({"type": "identify",
                        "identifiers": {"email": format!("sb-{n}@bench.example")},
                        "messageId": format!("sb-{n}")})
-            })
-            .collect();
-        let identify = call(
-            &world.router,
-            "POST",
-            "/api/v1/ingest/batch",
-            Some(json!({ "batch": items })),
-            Some(&world.ingest),
-        )
-        .await;
-        assert_eq!(identify.status, StatusCode::ACCEPTED, "{}", identify.text);
-        world.settle().await;
-        let people: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM people")
-            .fetch_all(&world.pool)
-            .await
-            .expect("people");
-        assert_eq!(people.len(), PEOPLE);
-        for person in &people {
-            world
-                .api_ok(
-                    "PUT",
-                    &format!("/people/{person}/consent"),
-                    Some(json!({"channel": "email", "status": "subscribed"})),
-                    StatusCode::OK,
-                )
-                .await;
-        }
+                })
+                .collect();
+            let identify = call(
+                &world.router,
+                "POST",
+                "/api/v1/ingest/batch",
+                Some(json!({ "batch": items })),
+                Some(&world.ingest),
+            )
+            .await;
+            assert_eq!(identify.status, StatusCode::ACCEPTED, "{}", identify.text);
+            world.settle().await;
+            let people: Vec<uuid::Uuid> = sqlx::query_scalar("SELECT id FROM people")
+                .fetch_all(&world.pool)
+                .await
+                .expect("people");
+            assert_eq!(people.len(), PEOPLE);
+            for person in &people {
+                world
+                    .api_ok(
+                        "PUT",
+                        &format!("/people/{person}/consent"),
+                        Some(json!({"channel": "email", "status": "subscribed"})),
+                        StatusCode::OK,
+                    )
+                    .await;
+            }
 
-        let mut expected = 0;
-        for (name, template) in [("blocks", &blocks), ("html", &html)] {
-            let list = world
-                .api_ok(
-                    "POST",
-                    "/lists",
-                    Some(json!({"name": format!("bench {name}")})),
-                    StatusCode::CREATED,
-                )
-                .await["id"]
-                .as_str()
-                .expect("a list id")
-                .to_owned();
-            world
-                .api_ok(
-                    "POST",
-                    &format!("/lists/{list}/members"),
-                    Some(json!({"person_ids": people})),
-                    StatusCode::OK,
-                )
-                .await;
-            let flow = world
-                .flow(
-                    &format!("Bench {name}"),
-                    json!({"v": 1, "nodes": [send_node("send", template, &smtp),
+            let mut expected = 0;
+            for (name, template) in [("blocks", &blocks), ("html", &html)] {
+                let list = world
+                    .api_ok(
+                        "POST",
+                        "/lists",
+                        Some(json!({"name": format!("bench {name}")})),
+                        StatusCode::CREATED,
+                    )
+                    .await["id"]
+                    .as_str()
+                    .expect("a list id")
+                    .to_owned();
+                world
+                    .api_ok(
+                        "POST",
+                        &format!("/lists/{list}/members"),
+                        Some(json!({"person_ids": people})),
+                        StatusCode::OK,
+                    )
+                    .await;
+                let flow = world
+                    .flow(
+                        &format!("Bench {name}"),
+                        json!({"v": 1, "nodes": [send_node("send", template, &smtp),
                                              {"id": "end", "type": "exit"}],
                            "edges": [edge("send", "end")]}),
-                    json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
-                )
-                .await;
-            world
-                .api_ok(
-                    "POST",
-                    &format!("/flows/{flow}/start"),
-                    Some(json!({"list_id": list})),
-                    StatusCode::ACCEPTED,
-                )
-                .await;
-            world.settle().await;
-            expected += PEOPLE;
-            assert_eq!(
-                world.sink.messages().len(),
-                expected,
-                "after the {name} flow"
-            );
-        }
+                        json!({"trigger": {"type": "manual"}, "reentry": {"mode": "once"}}),
+                    )
+                    .await;
+                world
+                    .api_ok(
+                        "POST",
+                        &format!("/flows/{flow}/start"),
+                        Some(json!({"list_id": list})),
+                        StatusCode::ACCEPTED,
+                    )
+                    .await;
+                world.settle().await;
+                expected += PEOPLE;
+                assert_eq!(
+                    world.sink.messages().len(),
+                    expected,
+                    "after the {name} flow"
+                );
+            }
 
-        let mut recipients: Vec<String> = world
-            .sink
-            .messages()
-            .iter()
-            .flat_map(|message| message.recipients.clone())
-            .collect();
-        recipients.sort();
-        recipients.dedup();
-        assert_eq!(recipients.len(), PEOPLE, "each person got mail");
-        world.finish().await;
+            let mut recipients: Vec<String> = world
+                .sink
+                .messages()
+                .iter()
+                .flat_map(|message| message.recipients.clone())
+                .collect();
+            recipients.sort();
+            recipients.dedup();
+            assert_eq!(recipients.len(), PEOPLE, "each person got mail");
+            world.finish().await;
+        })
+        .await;
     }
 }

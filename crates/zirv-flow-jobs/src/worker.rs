@@ -1008,7 +1008,7 @@ mod tests {
                 (
                     "job.attempt".to_owned(),
                     "failed".to_owned(),
-                    Some("planned failure".to_owned())
+                    Some("job_error".to_owned())
                 ),
                 ("flow.wake".to_owned(), "timer".to_owned(), None),
             ]

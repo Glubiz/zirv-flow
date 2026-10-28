@@ -954,181 +954,194 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_export_holds_every_section_of_the_person_and_the_merged_people(pool: PgPool) {
-        let seeded = seed_everything(&pool).await;
-        seed_export_extras(&pool, &seeded).await;
-        let Seeded {
-            ws, person, merged, ..
-        } = seeded;
-        let export = requested(&pool, ws, person).await;
-        assert_eq!(export.status, ExportStatus::Pending);
+        crate::decision_testing::checked(pool, |pool| async move {
+            let seeded = seed_everything(&pool).await;
+            seed_export_extras(&pool, &seeded).await;
+            let Seeded {
+                ws, person, merged, ..
+            } = seeded;
+            let export = requested(&pool, ws, person).await;
+            assert_eq!(export.status, ExportStatus::Pending);
 
-        let outcome = built(&pool, ws, export.id).await;
+            let outcome = built(&pool, ws, export.id).await;
 
-        assert!(matches!(outcome, BuildOutcome::Built { .. }), "{outcome:?}");
-        let ExportDownload::Content(bytes) = download_export(&pool, ws, export.id).await.unwrap()
-        else {
-            panic!("not ready");
-        };
-        let document = unzip(&bytes);
-        assert_eq!(document["format"], EXPORT_FORMAT);
-        assert!(document["generated_at"].is_string());
-        let person_json = &document["person"];
-        assert_eq!(person_json["id"], json!(person));
-        assert_eq!(person_json["merged_ids"], json!([merged]));
-        let count = |section: &str| person_json[section].as_array().unwrap().len();
-        assert_eq!(count("identities"), 3);
-        assert_eq!(count("source_records"), 3);
-        assert_eq!(count("events"), 2);
-        assert_eq!(count("consent"), 1);
-        assert_eq!(count("consent_history"), 2);
-        assert_eq!(count("lists"), 2);
-        assert_eq!(count("list_history"), 2);
-        assert_eq!(
-            count("segments"),
-            2,
-            "the open row and the merged person's closed one"
-        );
-        assert_eq!(count("merges"), 1);
-        assert_eq!(count("identity_conflicts"), 1);
-        assert_eq!(count("enrollments"), 2);
-        assert_eq!(count("step_executions"), 2);
-        assert_eq!(count("enrollment_waits"), 2);
-        assert_eq!(count("flow_entries"), 2);
-        assert_eq!(
-            count("messages"),
-            2,
-            "the survivor's and the merged person's"
-        );
-        assert_eq!(count("message_links"), 1);
-        assert_eq!(
-            count("forwarding_outbox"),
-            3,
-            "pending, dead and the merged one"
-        );
-        assert_eq!(count("erasure_handled_markers"), 1);
-        assert_eq!(count("template_preview_people"), 2);
-        for (section, _) in EXPORT_SECTIONS {
-            if *section != "profile" {
-                assert!(person_json[*section].is_array(), "{section} is missing");
+            assert!(matches!(outcome, BuildOutcome::Built { .. }), "{outcome:?}");
+            let ExportDownload::Content(bytes) =
+                download_export(&pool, ws, export.id).await.unwrap()
+            else {
+                panic!("not ready");
+            };
+            let document = unzip(&bytes);
+            assert_eq!(document["format"], EXPORT_FORMAT);
+            assert!(document["generated_at"].is_string());
+            let person_json = &document["person"];
+            assert_eq!(person_json["id"], json!(person));
+            assert_eq!(person_json["merged_ids"], json!([merged]));
+            let count = |section: &str| person_json[section].as_array().unwrap().len();
+            assert_eq!(count("identities"), 3);
+            assert_eq!(count("source_records"), 3);
+            assert_eq!(count("events"), 2);
+            assert_eq!(count("consent"), 1);
+            assert_eq!(count("consent_history"), 2);
+            assert_eq!(count("lists"), 2);
+            assert_eq!(count("list_history"), 2);
+            assert_eq!(
+                count("segments"),
+                2,
+                "the open row and the merged person's closed one"
+            );
+            assert_eq!(count("merges"), 1);
+            assert_eq!(count("identity_conflicts"), 1);
+            assert_eq!(count("enrollments"), 2);
+            assert_eq!(count("step_executions"), 2);
+            assert_eq!(count("enrollment_waits"), 2);
+            assert_eq!(count("flow_entries"), 2);
+            assert_eq!(
+                count("messages"),
+                2,
+                "the survivor's and the merged person's"
+            );
+            assert_eq!(count("message_links"), 1);
+            assert_eq!(
+                count("forwarding_outbox"),
+                3,
+                "pending, dead and the merged one"
+            );
+            assert_eq!(count("erasure_handled_markers"), 1);
+            assert_eq!(count("template_preview_people"), 2);
+            for (section, _) in EXPORT_SECTIONS {
+                if *section != "profile" {
+                    assert!(person_json[*section].is_array(), "{section} is missing");
+                }
             }
-        }
-        assert!(person_json["profile"].is_object());
-        let in_section =
-            |section: &str, needle: &str| person_json[section].to_string().contains(needle);
-        assert!(in_section("ingest_rejects", "survivor-reject"));
-        assert!(in_section("decision_records", "survivor-decision"));
-        assert!(in_section("decision_records", "merged-decision"));
-        assert_eq!(person_json["messages"][0]["status"], "skipped");
-        assert_eq!(
-            person_json["message_links"][0]["url"],
-            "https://example.com/seeded-link"
-        );
-        // The profile carries the traits, and events come oldest first.
-        assert_eq!(person_json["profile"]["traits"]["plan"], "pro");
-        let times: Vec<&str> = person_json["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|event| event["occurred_at"].as_str().unwrap())
-            .collect();
-        assert!(times[0] < times[1]);
-        // Values are in the export, and the bystander's identity is not.
-        let text = document.to_string();
-        assert!(text.contains(EMAIL));
-        assert!(!text.contains(BYSTANDER_EMAIL));
-        // Nothing of the bystander's rows, and no recipient hash anywhere.
-        for needle in [
-            "bystander-reject",
-            "bystander-decision",
-            "bystander-node",
-            "address_hash",
-            "abababab",
-        ] {
-            assert!(!text.contains(needle), "{needle} is in the export");
-        }
-        let stored = find_privacy_export(&pool, ws, export.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ExportStatus::Ready);
-        let window = stored.expires_at.unwrap() - stored.ready_at.unwrap();
-        assert_eq!(window, time::Duration::hours(24));
-        assert_eq!(stored.size_bytes, Some(i64::try_from(bytes.len()).unwrap()));
+            assert!(person_json["profile"].is_object());
+            let in_section =
+                |section: &str, needle: &str| person_json[section].to_string().contains(needle);
+            assert!(in_section("ingest_rejects", "survivor-reject"));
+            assert!(in_section("decision_records", "survivor_decision"));
+            assert!(in_section("decision_records", "merged_decision"));
+            assert_eq!(person_json["messages"][0]["status"], "skipped");
+            assert_eq!(
+                person_json["message_links"][0]["url"],
+                "https://example.com/seeded-link"
+            );
+            // The profile carries the traits, and events come oldest first.
+            assert_eq!(person_json["profile"]["traits"]["plan"], "pro");
+            let times: Vec<&str> = person_json["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["occurred_at"].as_str().unwrap())
+                .collect();
+            assert!(times[0] < times[1]);
+            // Values are in the export, and the bystander's identity is not.
+            let text = document.to_string();
+            assert!(text.contains(EMAIL));
+            assert!(!text.contains(BYSTANDER_EMAIL));
+            // Nothing of the bystander's rows, and no recipient hash anywhere.
+            for needle in [
+                "bystander-reject",
+                "bystander_decision",
+                "bystander-node",
+                "address_hash",
+                "abababab",
+            ] {
+                assert!(!text.contains(needle), "{needle} is in the export");
+            }
+            let stored = find_privacy_export(&pool, ws, export.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, ExportStatus::Ready);
+            let window = stored.expires_at.unwrap() - stored.ready_at.unwrap();
+            assert_eq!(window, time::Duration::hours(24));
+            assert_eq!(stored.size_bytes, Some(i64::try_from(bytes.len()).unwrap()));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn every_table_with_a_person_column_is_exported_or_excluded_with_a_reason(pool: PgPool) {
-        let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
 
-        assert_eq!(checked, Ok(()));
-        let known: Vec<String> = sqlx::query_scalar(
-            "SELECT table_name::text FROM information_schema.tables \
+            assert_eq!(checked, Ok(()));
+            let known: Vec<String> = sqlx::query_scalar(
+                "SELECT table_name::text FROM information_schema.tables \
              WHERE table_schema = current_schema()",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        for (table, _) in EXPORT_EXCLUDED {
-            assert!(
-                known.contains(&(*table).to_owned()),
-                "{table} is not a table"
-            );
-        }
-        for (section, tables) in EXPORT_SECTIONS {
-            for table in *tables {
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            for (table, _) in EXPORT_EXCLUDED {
                 assert!(
                     known.contains(&(*table).to_owned()),
-                    "{section} reads {table}, which is not a table"
+                    "{table} is not a table"
                 );
             }
-        }
+            for (section, tables) in EXPORT_SECTIONS {
+                for table in *tables {
+                    assert!(
+                        known.contains(&(*table).to_owned()),
+                        "{section} reads {table}, which is not a table"
+                    );
+                }
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_table_with_a_person_column_that_is_not_classified_fails_the_catalog(pool: PgPool) {
-        sqlx::query("CREATE TABLE unclassified_scratch (id uuid, person_id uuid)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            sqlx::query("CREATE TABLE unclassified_scratch (id uuid, person_id uuid)")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
+            let checked = check_catalog(&pool, EXPORT_SECTIONS).await;
 
-        let error = checked.unwrap_err();
-        assert!(error.contains("unclassified_scratch"), "{error}");
-        assert!(!error.contains("identities"), "{error}");
+            let error = checked.unwrap_err();
+            assert!(error.contains("unclassified_scratch"), "{error}");
+            assert!(!error.contains("identities"), "{error}");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_person_over_the_cap_fails_with_export_too_large_and_leaves_no_content(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let export = requested(&pool, ws, person).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let export = requested(&pool, ws, person).await;
 
-        let outcome = built_with_cap(&pool, ws, export.id, 200).await;
+            let outcome = built_with_cap(&pool, ws, export.id, 200).await;
 
-        assert_eq!(outcome, BuildOutcome::TooLarge);
-        let stored = find_privacy_export(&pool, ws, export.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, ExportStatus::Failed);
-        assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
-        assert_eq!(stored.size_bytes, None);
-        assert_eq!(stored.ready_at, None);
-        let content: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT content FROM privacy_exports WHERE id = $1")
-                .bind(export.id)
-                .fetch_one(&pool)
+            assert_eq!(outcome, BuildOutcome::TooLarge);
+            let stored = find_privacy_export(&pool, ws, export.id)
                 .await
+                .unwrap()
                 .unwrap();
-        assert_eq!(content, None);
-        assert_eq!(
-            download_export(&pool, ws, export.id).await.unwrap(),
-            ExportDownload::NotReady
-        );
-        assert_eq!(built(&pool, ws, export.id).await, BuildOutcome::NotPending);
+            assert_eq!(stored.status, ExportStatus::Failed);
+            assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
+            assert_eq!(stored.size_bytes, None);
+            assert_eq!(stored.ready_at, None);
+            let content: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT content FROM privacy_exports WHERE id = $1")
+                    .bind(export.id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(content, None);
+            assert_eq!(
+                download_export(&pool, ws, export.id).await.unwrap(),
+                ExportDownload::NotReady
+            );
+            assert_eq!(built(&pool, ws, export.id).await, BuildOutcome::NotPending);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1136,27 +1149,30 @@ mod tests {
     async fn the_catalog_reads_the_people_and_decision_tables_from_the_shared_discovery(
         pool: PgPool,
     ) {
-        let discovered = crate::people::person_reference_places(&pool).await;
-        let tables: Vec<&str> = discovered.iter().map(|(table, _)| table.as_str()).collect();
-        assert!(tables.contains(&"people"));
-        assert!(tables.contains(&"decision_records"));
+        crate::decision_testing::checked(pool, |pool| async move {
+            let discovered = crate::people::person_reference_places(&pool).await;
+            let tables: Vec<&str> = discovered.iter().map(|(table, _)| table.as_str()).collect();
+            assert!(tables.contains(&"people"));
+            assert!(tables.contains(&"decision_records"));
 
-        let without_decisions: Vec<(&str, &[&str])> = EXPORT_SECTIONS
-            .iter()
-            .filter(|(section, _)| *section != "decision_records")
-            .copied()
-            .collect();
-        let error = check_catalog(&pool, &without_decisions).await.unwrap_err();
+            let without_decisions: Vec<(&str, &[&str])> = EXPORT_SECTIONS
+                .iter()
+                .filter(|(section, _)| *section != "decision_records")
+                .copied()
+                .collect();
+            let error = check_catalog(&pool, &without_decisions).await.unwrap_err();
 
-        assert!(error.contains("decision_records"), "{error}");
-        assert!(!error.contains("people"), "{error}");
-        let without_profile: Vec<(&str, &[&str])> = EXPORT_SECTIONS
-            .iter()
-            .filter(|(section, _)| *section != "profile")
-            .copied()
-            .collect();
-        let error = check_catalog(&pool, &without_profile).await.unwrap_err();
-        assert!(error.contains("people"), "{error}");
+            assert!(error.contains("decision_records"), "{error}");
+            assert!(!error.contains("people"), "{error}");
+            let without_profile: Vec<(&str, &[&str])> = EXPORT_SECTIONS
+                .iter()
+                .filter(|(section, _)| *section != "profile")
+                .copied()
+                .collect();
+            let error = check_catalog(&pool, &without_profile).await.unwrap_err();
+            assert!(error.contains("people"), "{error}");
+        })
+        .await;
     }
 
     async fn seed_many_events(pool: &PgPool, ws: WorkspaceId, person: Uuid, count: i64) {
@@ -1219,17 +1235,20 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_document_over_the_cap_only_by_its_keys_fails_with_export_too_large(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let mut connection = pool.acquire().await.unwrap();
-        let document = person_document(&mut connection, ws, person, u64::MAX)
-            .await
-            .unwrap()
-            .unwrap();
-        let size = serde_json::to_vec(&document).unwrap().len() as u64;
-        // The rows alone charge well under the document: the keys and delimiters make the rest.
-        let under = person_document(&mut connection, ws, person, size - 1).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let mut connection = pool.acquire().await.unwrap();
+            let document = person_document(&mut connection, ws, person, u64::MAX)
+                .await
+                .unwrap()
+                .unwrap();
+            let size = serde_json::to_vec(&document).unwrap().len() as u64;
+            // The rows alone charge well under the document: the keys and delimiters make the rest.
+            let under = person_document(&mut connection, ws, person, size - 1).await;
 
-        assert!(matches!(under, Err(Abort::TooLarge)));
+            assert!(matches!(under, Err(Abort::TooLarge)));
+        })
+        .await;
     }
 
     #[test]
@@ -1249,48 +1268,56 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_person_whose_events_pass_the_cap_fails_with_export_too_large(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        seed_many_events(&pool, ws, person, 2500).await;
-        let export = requested(&pool, ws, person).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            seed_many_events(&pool, ws, person, 2500).await;
+            let export = requested(&pool, ws, person).await;
 
-        let outcome = built_with_cap(&pool, ws, export.id, 100_000).await;
+            let outcome = built_with_cap(&pool, ws, export.id, 100_000).await;
 
-        assert_eq!(outcome, BuildOutcome::TooLarge);
-        let stored = find_privacy_export(&pool, ws, export.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
+            assert_eq!(outcome, BuildOutcome::TooLarge);
+            let stored = find_privacy_export(&pool, ws, export.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.failure_code.as_deref(), Some(EXPORT_TOO_LARGE));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn merged_ids_alone_past_the_cap_fail_with_export_too_large(pool: PgPool) {
-        let ws = crate::privacy::testing::workspace(&pool, "merged-cap").await;
-        let survivor = Uuid::now_v7();
-        sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
-            .bind(survivor)
-            .bind(ws.as_uuid())
-            .execute(&pool)
-            .await
-            .unwrap();
-        let alone = requested(&pool, ws, survivor).await;
-        let fits = built_with_cap(&pool, ws, alone.id, 1500).await;
-        for _ in 0..30 {
-            sqlx::query("INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)")
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = crate::privacy::testing::workspace(&pool, "merged-cap").await;
+            let survivor = Uuid::now_v7();
+            sqlx::query("INSERT INTO people (id, workspace_id) VALUES ($1, $2)")
+                .bind(survivor)
+                .bind(ws.as_uuid())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let alone = requested(&pool, ws, survivor).await;
+            let fits = built_with_cap(&pool, ws, alone.id, 1500).await;
+            for _ in 0..30 {
+                sqlx::query(
+                    "INSERT INTO people (id, workspace_id, merged_into) VALUES ($1, $2, $3)",
+                )
                 .bind(Uuid::now_v7())
                 .bind(ws.as_uuid())
                 .bind(survivor)
                 .execute(&pool)
                 .await
                 .unwrap();
-        }
-        let with_merged = requested(&pool, ws, survivor).await;
+            }
+            let with_merged = requested(&pool, ws, survivor).await;
 
-        let too_large = built_with_cap(&pool, ws, with_merged.id, 1500).await;
+            let too_large = built_with_cap(&pool, ws, with_merged.id, 1500).await;
 
-        assert!(matches!(fits, BuildOutcome::Built { .. }), "{fits:?}");
-        assert_eq!(too_large, BuildOutcome::TooLarge);
+            assert!(matches!(fits, BuildOutcome::Built { .. }), "{fits:?}");
+            assert_eq!(too_large, BuildOutcome::TooLarge);
+        })
+        .await;
     }
 
     #[test]
@@ -1325,19 +1352,22 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_pending_export_is_not_downloadable_and_a_second_build_does_nothing(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let export = requested(&pool, ws, person).await;
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let export = requested(&pool, ws, person).await;
 
-        let before = download_export(&pool, ws, export.id).await.unwrap();
-        built(&pool, ws, export.id).await;
-        let again = built(&pool, ws, export.id).await;
-        let missing = built(&pool, ws, Uuid::now_v7()).await;
-        let unknown = download_export(&pool, ws, Uuid::now_v7()).await.unwrap();
+            let before = download_export(&pool, ws, export.id).await.unwrap();
+            built(&pool, ws, export.id).await;
+            let again = built(&pool, ws, export.id).await;
+            let missing = built(&pool, ws, Uuid::now_v7()).await;
+            let unknown = download_export(&pool, ws, Uuid::now_v7()).await.unwrap();
 
-        assert_eq!(before, ExportDownload::NotReady);
-        assert_eq!(again, BuildOutcome::NotPending);
-        assert_eq!(missing, BuildOutcome::NoSuchExport);
-        assert_eq!(unknown, ExportDownload::NotFound);
+            assert_eq!(before, ExportDownload::NotReady);
+            assert_eq!(again, BuildOutcome::NotPending);
+            assert_eq!(missing, BuildOutcome::NoSuchExport);
+            assert_eq!(unknown, ExportDownload::NotFound);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1345,64 +1375,71 @@ mod tests {
     async fn an_export_past_its_time_is_gone_even_before_the_upkeep_and_the_upkeep_drops_it(
         pool: PgPool,
     ) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let export = requested(&pool, ws, person).await;
-        built(&pool, ws, export.id).await;
-        sqlx::query("UPDATE privacy_exports SET expires_at = now() - interval '1 minute'")
-            .execute(&pool)
-            .await
-            .unwrap();
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let export = requested(&pool, ws, person).await;
+            built(&pool, ws, export.id).await;
+            sqlx::query("UPDATE privacy_exports SET expires_at = now() - interval '1 minute'")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        let download = download_export(&pool, ws, export.id).await.unwrap();
-        let listed = find_privacy_export(&pool, ws, export.id)
-            .await
-            .unwrap()
-            .unwrap();
-        let expired = expire_exports(&pool).await.unwrap();
-        let after = download_export(&pool, ws, export.id).await.unwrap();
+            let download = download_export(&pool, ws, export.id).await.unwrap();
+            let listed = find_privacy_export(&pool, ws, export.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let expired = expire_exports(&pool).await.unwrap();
+            let after = download_export(&pool, ws, export.id).await.unwrap();
 
-        assert_eq!(download, ExportDownload::Expired);
-        assert_eq!(listed.status, ExportStatus::Expired);
-        assert_eq!(expired, 1);
-        assert_eq!(after, ExportDownload::Expired);
-        let content: Option<Vec<u8>> = sqlx::query_scalar("SELECT content FROM privacy_exports")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert!(content.is_none());
-        assert_eq!(expire_exports(&pool).await.unwrap(), 0);
+            assert_eq!(download, ExportDownload::Expired);
+            assert_eq!(listed.status, ExportStatus::Expired);
+            assert_eq!(expired, 1);
+            assert_eq!(after, ExportDownload::Expired);
+            let content: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT content FROM privacy_exports")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert!(content.is_none());
+            assert_eq!(expire_exports(&pool).await.unwrap(), 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn exports_page_newest_first_and_a_dead_job_reads_as_failed(pool: PgPool) {
-        let Seeded { ws, person, .. } = seed_everything(&pool).await;
-        let first = requested(&pool, ws, person).await;
-        let second = requested(&pool, ws, person).await;
-        sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE unique_key = $1")
-            .bind(format!("privacy.export:{}", first.id))
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let (page, more) = list_privacy_exports(&pool, ws, 1, None).await.unwrap();
-        let (rest, more_after) =
-            list_privacy_exports(&pool, ws, 1, Some((page[0].requested_at, page[0].id)))
+        crate::decision_testing::checked(pool, |pool| async move {
+            let Seeded { ws, person, .. } = seed_everything(&pool).await;
+            let first = requested(&pool, ws, person).await;
+            let second = requested(&pool, ws, person).await;
+            sqlx::query("UPDATE jobs SET state = 'dead', dead_at = now() WHERE unique_key = $1")
+                .bind(format!("privacy.export:{}", first.id))
+                .execute(&pool)
                 .await
                 .unwrap();
 
-        assert_eq!(page[0].id, second.id);
-        assert!(more);
-        assert_eq!(rest[0].id, first.id);
-        assert_eq!(rest[0].status, ExportStatus::Failed);
-        // The export the seed made is the third.
-        assert!(more_after);
-        let none = {
-            let mut tx = begin(&pool).await.unwrap();
-            request_export(&mut tx, ws, Uuid::now_v7(), None, &trace())
-                .await
-                .unwrap()
-        };
-        assert!(none.is_none());
+            let (page, more) = list_privacy_exports(&pool, ws, 1, None).await.unwrap();
+            let (rest, more_after) =
+                list_privacy_exports(&pool, ws, 1, Some((page[0].requested_at, page[0].id)))
+                    .await
+                    .unwrap();
+
+            assert_eq!(page[0].id, second.id);
+            assert!(more);
+            assert_eq!(rest[0].id, first.id);
+            assert_eq!(rest[0].status, ExportStatus::Failed);
+            // The export the seed made is the third.
+            assert!(more_after);
+            let none = {
+                let mut tx = begin(&pool).await.unwrap();
+                request_export(&mut tx, ws, Uuid::now_v7(), None, &trace())
+                    .await
+                    .unwrap()
+            };
+            assert!(none.is_none());
+        })
+        .await;
     }
 }

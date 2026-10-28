@@ -395,7 +395,8 @@ pub async fn complete_job<'e>(
 /// are used up. `None` means the lease was lost and nothing changed.
 ///
 /// `error` is truncated to 2 KB and must never contain payload values. For a workspace
-/// job the same statement appends a `job.attempt` decision, `failed` or `exhausted`.
+/// job the same statement appends a `job.attempt` decision, `failed` or `exhausted`,
+/// with reason `job_error`; the diagnostic stays in `last_error`.
 ///
 /// The `locked` CTE takes the row first: when an erasure's `purge_on_release` mark commits while
 /// this waits, the lock rechecks against the newest row version, so the flag it returns (not the
@@ -441,7 +442,7 @@ pub async fn fail_job<'e>(
                  job_id, attempt) \
              SELECT gen_random_uuid(), workspace_id, trace_id, $5::text, \
                     CASE WHEN state = 'dead' THEN $6::text ELSE $7::text END, \
-                    $4, cause_kind, cause_id, id, attempts \
+                    'job_error', cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
@@ -534,7 +535,7 @@ pub async fn reap_expired<'e>(executor: impl PgExecutor<'e>) -> Result<Reaped, S
                  job_id, attempt) \
              SELECT gen_random_uuid(), workspace_id, trace_id, $1::text, \
                     CASE WHEN state = 'dead' THEN $2::text ELSE $3::text END, \
-                    'lease expired', cause_kind, cause_id, id, attempts \
+                    'lease_expired', cause_kind, cause_id, id, attempts \
              FROM updated WHERE workspace_id IS NOT NULL) \
          SELECT state FROM updated UNION ALL SELECT 'purged' FROM purged",
     )
@@ -1151,12 +1152,22 @@ mod tests {
         assert_eq!(
             seen,
             [
-                ("job.attempt", "failed", Some("boom"), Some(1)),
-                ("job.attempt", "exhausted", Some("boom"), Some(2)),
+                ("job.attempt", "failed", Some("job_error"), Some(1)),
+                ("job.attempt", "exhausted", Some("job_error"), Some(2)),
             ]
         );
         assert_eq!(records[0].cause, trace.cause);
         assert_eq!(records[0].job_id, Some(first.id));
+        assert_eq!(
+            find_job(&pool, second.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_error
+                .as_deref(),
+            Some("boom")
+        );
+        crate::decision_testing::assert_decisions_hold_no_personal_data(&pool).await;
         let total: i64 = sqlx::query_scalar("SELECT count(*) FROM decision_records")
             .fetch_one(&pool)
             .await
@@ -1196,7 +1207,7 @@ mod tests {
                 .unwrap();
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].action, "job.attempt");
-            assert_eq!(records[0].reason.as_deref(), Some("lease expired"));
+            assert_eq!(records[0].reason.as_deref(), Some("lease_expired"));
             outcomes.push(records[0].outcome.clone());
         }
         assert_eq!(outcomes, ["lease_expired", "exhausted"]);

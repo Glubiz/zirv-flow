@@ -164,6 +164,126 @@ mod tests {
         }
     }
 
+    const DECISION_ACCEPTANCE_SUITES: &[&str] = &[
+        "crates/zirv-flow-api/src/flows/acceptance.rs",
+        "crates/zirv-flow-jobs/src/kinds/delivery_send/mod.rs",
+        "crates/zirv-flow-jobs/src/kinds/delivery_sync.rs",
+        "crates/zirv-flow-jobs/src/kinds/event_forward.rs",
+        "crates/zirv-flow-jobs/src/kinds/flow_enroll.rs",
+        "crates/zirv-flow-jobs/src/kinds/flow_step.rs",
+        "crates/zirv-flow-jobs/src/kinds/import_run.rs",
+        "crates/zirv-flow-jobs/src/kinds/ingest_drain.rs",
+        "crates/zirv-flow-jobs/src/kinds/privacy_erase.rs",
+        "crates/zirv-flow-jobs/src/kinds/privacy_export.rs",
+        "crates/zirv-flow-jobs/src/kinds/segment_reevaluate.rs",
+        "crates/zirv-flow-jobs/src/kinds/segment_refresh.rs",
+        "crates/zirv-flow-jobs/src/kinds/sync_run.rs",
+        "crates/zirv-flow-store/src/consent/state.rs",
+        "crates/zirv-flow-store/src/feedback.rs",
+        "crates/zirv-flow-store/src/forwarding/outbox.rs",
+        "crates/zirv-flow-store/src/imports/job.rs",
+        "crates/zirv-flow-store/src/ingest.rs",
+        "crates/zirv-flow-store/src/privacy/delete.rs",
+        "crates/zirv-flow-store/src/privacy/erasure.rs",
+        "crates/zirv-flow-store/src/privacy/export.rs",
+        "crates/zirv-flow-store/src/segments/reevaluate.rs",
+        "crates/zirv-flow-store/src/segments/refresh.rs",
+        "crates/zirv-flow-store/src/sync_runs/batch.rs",
+        "crates/zirv-flow/src/e2e/mod.rs",
+    ];
+
+    fn checked_test_body(body: &str, pool: &str) -> bool {
+        let Some(open) = body.find('{') else {
+            return false;
+        };
+        let prefix: String = body[..open].split_whitespace().collect();
+        if !["crate", "zirv_flow_store"].iter().any(|path| {
+            prefix == format!("{path}::decision_testing::checked({pool},|{pool}|asyncmove")
+        }) {
+            return false;
+        }
+        let end = after_block(body, open);
+        body[end..].split_whitespace().collect::<String>() == ").await;"
+    }
+
+    fn unchecked_database_tests(mut source: &str) -> Vec<&str> {
+        let mut unchecked = Vec::new();
+        while let Some(attribute) = source.find("#[sqlx::test") {
+            let function = source[attribute..]
+                .split_once("fn ")
+                .expect("a database test is a function")
+                .1;
+            let (name, signature) = function.split_once('(').expect("a test has parameters");
+            let (parameters, body) = signature.split_once(')').expect("parameters end");
+            let (pool, _) = parameters.split_once(':').expect("a test takes a pool");
+            let open = body.find('{').expect("a test has a body");
+            let end = after_block(body, open);
+            if !checked_test_body(&body[open + 1..end - 1], pool.trim()) {
+                unchecked.push(name.trim());
+            }
+            source = &body[end..];
+        }
+        unchecked
+    }
+
+    #[test]
+    fn decision_acceptance_suites_keep_the_invariant_on_new_database_tests() {
+        for file in DECISION_ACCEPTANCE_SUITES {
+            let source = std::fs::read_to_string(workspace_dir().join(file))
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+            assert!(source.contains("#[sqlx::test"), "{file}: no database tests");
+            let unchecked = unchecked_database_tests(&source);
+            assert!(
+                unchecked.is_empty(),
+                "{file}: each database test must contain only decision_testing::checked(...).await;: {unchecked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_invariant_scan_requires_the_wrapper_to_be_the_whole_test_body() {
+        let source = r##"
+            #[sqlx::test]
+            #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+            async fn wrapped(pool: PgPool) {
+                crate::decision_testing::checked(pool, |pool| async move {
+                    let braces = r#"{ ) }.await; }"#;
+                    /* } */
+                    if braces.is_empty() { return; }
+                }).await;
+            }
+            #[sqlx::test]
+            async fn unwrapped(pool: PgPool) {
+                write(&pool).await;
+            }
+            #[sqlx::test]
+            async fn before(pool: PgPool) {
+                write(&pool).await;
+                crate::decision_testing::checked(pool, |pool| async move {}).await;
+            }
+            #[sqlx::test]
+            async fn after(pool: PgPool) {
+                crate::decision_testing::checked(pool, |pool| async move {}).await;
+                write(&pool).await;
+            }
+            #[sqlx::test]
+            async fn nested(pool: PgPool) {
+                if true {
+                    crate::decision_testing::checked(pool, |pool| async move {}).await;
+                }
+            }
+        "##;
+        for source in [
+            source.to_owned(),
+            source.replace("crate::", "zirv_flow_store::"),
+        ] {
+            assert_eq!(
+                unchecked_database_tests(&source),
+                ["unwrapped", "before", "after", "nested"]
+            );
+        }
+    }
+
     /// Whether the byte before `at` continues an identifier, so a `b` or `r` at `at` is part of
     /// a name and not a literal prefix.
     fn after_identifier(bytes: &[u8], at: usize) -> bool {

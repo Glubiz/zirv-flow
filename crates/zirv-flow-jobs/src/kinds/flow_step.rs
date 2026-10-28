@@ -632,9 +632,10 @@ async fn apply(
         let ends_here = visit.node == transition.state.node;
         let (spec, reason) = match (enqueued.get(&visit.node), &transition.outcome) {
             (Some(label), _) => (&decision_actions::FLOW_STEP_ENQUEUED, Some(*label)),
-            (None, Outcome::Failed { .. }) if ends_here => {
-                (&decision_actions::FLOW_STEP_FAILED, failure_text)
-            }
+            (None, Outcome::Failed { failure, .. }) if ends_here => (
+                &decision_actions::FLOW_STEP_FAILED,
+                Some(failure_code(*failure)),
+            ),
             (None, Outcome::Waiting) if ends_here => (
                 &decision_actions::FLOW_STEP_WAITING,
                 Some(if transition.zone_fallback.is_some() {
@@ -1055,12 +1056,13 @@ async fn finish(
             step,
             Some(&state.node),
         ),
-        _ => walk.decision(
+        Outcome::Failed { failure, .. } => walk.decision(
             &decision_actions::FLOW_ENROLLMENT_FAILED,
-            error,
+            Some(failure_code(*failure)),
             step,
             Some(&state.node),
         ),
+        _ => unreachable!("the walk ended above"),
     };
     append_decisions(&mut *conn, &[decision]).await?;
     Ok(())
@@ -1112,7 +1114,7 @@ async fn fail_enrollment(
         workspace_id: job.workspace,
         trace: enrollment.trace.clone(),
         spec: &decision_actions::FLOW_ENROLLMENT_FAILED,
-        detail: Some(message),
+        detail: Some("step_failed"),
         subject_ids: vec![
             ("flow", enrollment.flow_id),
             ("enrollment", enrollment.id),
@@ -1134,6 +1136,14 @@ pub(super) const fn exit_reason_text(reason: ExitReason) -> &'static str {
     }
 }
 
+const fn failure_code(failure: Failure) -> &'static str {
+    match failure {
+        Failure::InvalidTime => "invalid_time",
+        Failure::OutOfRange => "duration_out_of_range",
+        Failure::EmptySplit => "empty_split",
+    }
+}
+
 /// What an operator reads of a failure the engine reported.
 const fn describe(failure: Failure) -> &'static str {
     match failure {
@@ -1145,6 +1155,8 @@ const fn describe(failure: Failure) -> &'static str {
 
 #[cfg(test)]
 pub(super) mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use std::time::Duration;
 
     use serde_json::json;
@@ -1829,136 +1841,147 @@ pub(super) mod tests {
     async fn a_published_flow_enrolls_a_person_who_walks_a_wait_a_branch_and_an_internal_action_to_the_end(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_trait("tier", TraitType::String).await;
-        let list = env.list("Golden").await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let flow = env.flow("Walk", walk_graph(list)).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("tier", TraitType::String).await;
+            let list = env.list("Golden").await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let flow = env.flow("Walk", walk_graph(list)).await;
 
-        let enrolled = env.enroll(flow, 1, &[ada]).await;
-        let id = enrolled.enrolled[0].enrollment;
-        env.run_due().await;
-        let asleep = env.enrollment(id).await;
-        env.advance(61);
-        env.run_due().await;
-        let done = env.enrollment(id).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
+            let id = enrolled.enrolled[0].enrollment;
+            env.run_due().await;
+            let asleep = env.enrollment(id).await;
+            env.advance(61);
+            env.run_due().await;
+            let done = env.enrollment(id).await;
 
-        assert_eq!(asleep.status, EnrollmentStatus::Waiting);
-        assert_eq!(asleep.node, "w");
-        assert_eq!(asleep.state_version, 1);
-        assert_eq!(done.status, EnrollmentStatus::Completed);
-        assert_eq!(done.node, "won");
-        assert_eq!(done.flow_version, 1);
-        assert!(done.ended_at.is_some());
-        assert_eq!(env.traits(ada).await["tier"], "gold");
-        let sources: Vec<String> = sqlx::query_scalar("SELECT source FROM list_members")
+            assert_eq!(asleep.status, EnrollmentStatus::Waiting);
+            assert_eq!(asleep.node, "w");
+            assert_eq!(asleep.state_version, 1);
+            assert_eq!(done.status, EnrollmentStatus::Completed);
+            assert_eq!(done.node, "won");
+            assert_eq!(done.flow_version, 1);
+            assert!(done.ended_at.is_some());
+            assert_eq!(env.traits(ada).await["tier"], "gold");
+            let sources: Vec<String> = sqlx::query_scalar("SELECT source FROM list_members")
+                .fetch_all(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(sources, ["flow"]);
+            let mut nodes: Vec<String> = sqlx::query_scalar(
+                "SELECT node_id FROM step_executions WHERE enrollment_id = $1 AND outcome = 'done'",
+            )
+            .bind(id)
             .fetch_all(&env.pool)
             .await
             .unwrap();
-        assert_eq!(sources, ["flow"]);
-        let mut nodes: Vec<String> = sqlx::query_scalar(
-            "SELECT node_id FROM step_executions WHERE enrollment_id = $1 AND outcome = 'done'",
-        )
-        .bind(id)
-        .fetch_all(&env.pool)
-        .await
-        .unwrap();
-        nodes.sort();
-        assert_eq!(nodes, ["b", "l", "t", "w", "won"]);
-        let source: String = sqlx::query_scalar(
-            "SELECT source FROM source_records WHERE person_id = $1 AND source LIKE 'flow:%'",
-        )
-        .bind(ada)
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(source, format!("flow:{flow}"));
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
-                .await,
-            0
-        );
+            nodes.sort();
+            assert_eq!(nodes, ["b", "l", "t", "w", "won"]);
+            let source: String = sqlx::query_scalar(
+                "SELECT source FROM source_records WHERE person_id = $1 AND source LIKE 'flow:%'",
+            )
+            .bind(ada)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(source, format!("flow:{flow}"));
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                    .await,
+                0
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_wake_records_how_late_it_ran_and_the_start_records_nothing(pool: PgPool) {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = ::metrics::set_default_local_recorder(&recorder);
-        let env = Env::new(pool).await;
-        env.define_trait("tier", TraitType::String).await;
-        let list = env.list("Golden").await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let flow = env.flow("Late", walk_graph(list)).await;
-        env.enroll(flow, 1, &[ada]).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = ::metrics::set_default_local_recorder(&recorder);
+            let env = Env::new(pool).await;
+            env.define_trait("tier", TraitType::String).await;
+            let list = env.list("Golden").await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let flow = env.flow("Late", walk_graph(list)).await;
+            env.enroll(flow, 1, &[ada]).await;
 
-        env.run_due().await;
-        let after_start = handle.render();
-        env.advance(100);
-        env.run_due().await;
+            env.run_due().await;
+            let after_start = handle.render();
+            env.advance(100);
+            env.run_due().await;
 
-        assert!(
-            !after_start.contains("zirv_flow_timer_wake_lateness_seconds"),
-            "{after_start}"
-        );
-        let output = handle.render();
-        let sample = |name: &str| {
-            output.lines().find_map(|line| {
-                line.strip_prefix(name)?
-                    .strip_prefix(' ')?
-                    .parse::<f64>()
-                    .ok()
-            })
-        };
-        assert_eq!(
-            sample("zirv_flow_timer_wake_lateness_seconds_count"),
-            Some(1.0),
-            "{output}"
-        );
-        let late = sample("zirv_flow_timer_wake_lateness_seconds_sum").unwrap();
-        assert!((39.0..41.0).contains(&late), "{output}");
+            assert!(
+                !after_start.contains("zirv_flow_timer_wake_lateness_seconds"),
+                "{after_start}"
+            );
+            let output = handle.render();
+            let sample = |name: &str| {
+                output.lines().find_map(|line| {
+                    line.strip_prefix(name)?
+                        .strip_prefix(' ')?
+                        .parse::<f64>()
+                        .ok()
+                })
+            };
+            assert_eq!(
+                sample("zirv_flow_timer_wake_lateness_seconds_count"),
+                Some(1.0),
+                "{output}"
+            );
+            let late = sample("zirv_flow_timer_wake_lateness_seconds_sum").unwrap();
+            assert!((39.0..41.0).contains(&late), "{output}");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_retried_wake_records_its_lateness_once(pool: PgPool) {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = ::metrics::set_default_local_recorder(&recorder);
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let _guard = ::metrics::set_default_local_recorder(&recorder);
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "w", "type": "wait.duration", "seconds": 60},
             {"id": "bump", "type": "action.update_trait", "key": "plan",
              "change": {"op": "increment", "by": 1.0}},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "w", "next", "bump"), edge("e2", "bump", "next", "end")]});
-        let flow = env.flow("Retried", graph).await;
-        env.enroll(flow, 1, &[ada]).await;
-        env.run_due().await;
-        sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE kind = 'flow.step'")
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        env.advance(100);
+            let flow = env.flow("Retried", graph).await;
+            env.enroll(flow, 1, &[ada]).await;
+            env.run_due().await;
+            sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE kind = 'flow.step'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            env.advance(100);
 
-        let mut attempts = Vec::new();
-        for _ in 0..2 {
-            env.hold_others(None, None).await;
-            let claimed = env.claim().await.unwrap();
-            env.release().await;
-            attempts.push(claimed.attempts);
-            let _ = env.execute(claimed).await;
-        }
+            let mut attempts = Vec::new();
+            for _ in 0..2 {
+                env.hold_others(None, None).await;
+                let claimed = env.claim().await.unwrap();
+                env.release().await;
+                attempts.push(claimed.attempts);
+                let _ = env.execute(claimed).await;
+            }
 
-        assert_eq!(attempts, [1, 2]);
-        let output = handle.render();
-        let count = output
-            .lines()
-            .find_map(|line| line.strip_prefix("zirv_flow_timer_wake_lateness_seconds_count "));
-        assert_eq!(count, Some("1"), "{output}");
+            assert_eq!(attempts, [1, 2]);
+            let output = handle.render();
+            let count = output
+                .lines()
+                .find_map(|line| line.strip_prefix("zirv_flow_timer_wake_lateness_seconds_count "));
+            assert_eq!(count, Some("1"), "{output}");
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1966,6 +1989,7 @@ pub(super) mod tests {
     async fn the_leader_publishes_the_enrollment_gauges_and_the_lateness_of_a_seeded_timer(
         pool: PgPool,
     ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _guard = ::metrics::set_default_local_recorder(&recorder);
@@ -1973,7 +1997,7 @@ pub(super) mod tests {
         env.define_trait("tier", TraitType::String).await;
         let list = env.list("Golden").await;
         let flow = env.flow("Sampled", walk_graph(list)).await;
-        for email in ["ada@example.com", "bob@example.com"] {
+        for email in [PERSONAL_DATA.email, "bob@example.com"] {
             let person = env.person(email, json!({})).await;
             env.enroll(flow, 1, &[person]).await;
         }
@@ -2012,90 +2036,98 @@ pub(super) mod tests {
         );
         let late = gauge("zirv_flow_timer_lateness_seconds").unwrap();
         assert!((90.0..100.0).contains(&late), "{output}");
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_branch_sees_the_internal_effect_applied_earlier_in_the_same_step(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("tier", TraitType::String).await;
-        let list = env.list("Golden").await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let graph = json!({"v": 1, "nodes": [
-            {"id": "t", "type": "action.update_trait", "key": "tier",
-             "change": {"op": "set", "value": "gold"}},
-            {"id": "b", "type": "branch",
-             "conditions": [{"trait": "tier", "op": "eq", "value": "gold"}]},
-            {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
-            {"id": "won", "type": "exit"},
-            {"id": "lost", "type": "exit"}
-        ], "edges": [
-            edge("e1", "t", "next", "b"),
-            edge("e2", "b", "case_0", "l"),
-            edge("e3", "b", "else", "lost"),
-            edge("e4", "l", "next", "won")
-        ]});
-        let flow = env.flow("Same step", graph).await;
-        let enrolled = env.enroll(flow, 1, &[ada]).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("tier", TraitType::String).await;
+            let list = env.list("Golden").await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let graph = json!({"v": 1, "nodes": [
+                {"id": "t", "type": "action.update_trait", "key": "tier",
+                 "change": {"op": "set", "value": "gold"}},
+                {"id": "b", "type": "branch",
+                 "conditions": [{"trait": "tier", "op": "eq", "value": "gold"}]},
+                {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
+                {"id": "won", "type": "exit"},
+                {"id": "lost", "type": "exit"}
+            ], "edges": [
+                edge("e1", "t", "next", "b"),
+                edge("e2", "b", "case_0", "l"),
+                edge("e3", "b", "else", "lost"),
+                edge("e4", "l", "next", "won")
+            ]});
+            let flow = env.flow("Same step", graph).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
 
-        let ran = env.run_due().await;
+            let ran = env.run_due().await;
 
-        let done = env.enrollment(enrolled.enrolled[0].enrollment).await;
-        assert_eq!(ran, 1, "one job walked the whole flow");
-        assert_eq!(
-            (done.status, done.node.as_str()),
-            (EnrollmentStatus::Completed, "won")
-        );
-        let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
-        assert!(decisions.contains(&("flow.branch".into(), "case_0".into())));
-        assert!(decisions.contains(&("flow.branch.condition".into(), "matched".into())));
+            let done = env.enrollment(enrolled.enrolled[0].enrollment).await;
+            assert_eq!(ran, 1, "one job walked the whole flow");
+            assert_eq!(
+                (done.status, done.node.as_str()),
+                (EnrollmentStatus::Completed, "won")
+            );
+            let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
+            assert!(decisions.contains(&("flow.branch".into(), "case_0".into())));
+            assert!(decisions.contains(&("flow.branch.condition".into(), "matched".into())));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn publishing_v2_leaves_a_v1_enrollment_on_v1_while_new_enrollments_use_v2(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("path", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let bob = env.person("bob@example.com", json!({})).await;
-        let v1 = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("path", TraitType::String).await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let bob = env.person("bob@example.com", json!({})).await;
+            let v1 = json!({"v": 1, "nodes": [
             {"id": "w", "type": "wait.duration", "seconds": 60},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "w", "next", "end")]});
-        let v2 = json!({"v": 1, "nodes": [
+            let v2 = json!({"v": 1, "nodes": [
             {"id": "w", "type": "wait.duration", "seconds": 60},
             {"id": "t", "type": "action.update_trait", "key": "path",
              "change": {"op": "set", "value": "v2"}},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "w", "next", "t"), edge("e2", "t", "next", "end")]});
-        let flow = env.flow("Versions", v1).await;
-        let first = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
-        env.run_due().await;
-        let in_flight = {
-            let mut connection = env.pool.acquire().await.unwrap();
-            zirv_flow_store::count_in_flight_enrollments(&mut connection, env.ws, flow)
-                .await
-                .unwrap()
-        };
+            let flow = env.flow("Versions", v1).await;
+            let first = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+            env.run_due().await;
+            let in_flight = {
+                let mut connection = env.pool.acquire().await.unwrap();
+                zirv_flow_store::count_in_flight_enrollments(&mut connection, env.ws, flow)
+                    .await
+                    .unwrap()
+            };
 
-        let version = env.republish(flow, v2).await;
-        let second = env.enroll(flow, version, &[bob]).await.enrolled[0].enrollment;
-        env.run_due().await;
-        env.advance(61);
-        env.run_due().await;
+            let version = env.republish(flow, v2).await;
+            let second = env.enroll(flow, version, &[bob]).await.enrolled[0].enrollment;
+            env.run_due().await;
+            env.advance(61);
+            env.run_due().await;
 
-        assert_eq!((version, in_flight), (2, 1));
-        let (one, two) = (env.enrollment(first).await, env.enrollment(second).await);
-        assert_eq!(
-            (one.flow_version, one.status),
-            (1, EnrollmentStatus::Completed)
-        );
-        assert_eq!(
-            (two.flow_version, two.status),
-            (2, EnrollmentStatus::Completed)
-        );
-        assert_eq!(path_of(&env, ada).await, None, "v1 has no trait step");
-        assert_eq!(path_of(&env, bob).await.as_deref(), Some("v2"));
+            assert_eq!((version, in_flight), (2, 1));
+            let (one, two) = (env.enrollment(first).await, env.enrollment(second).await);
+            assert_eq!(
+                (one.flow_version, one.status),
+                (1, EnrollmentStatus::Completed)
+            );
+            assert_eq!(
+                (two.flow_version, two.status),
+                (2, EnrollmentStatus::Completed)
+            );
+            assert_eq!(path_of(&env, ada).await, None, "v1 has no trait step");
+            assert_eq!(path_of(&env, bob).await.as_deref(), Some("v2"));
+        })
+        .await;
     }
 
     /// Enrolls a person and runs the start, so the enrollment waits for an order.
@@ -2114,34 +2146,38 @@ pub(super) mod tests {
     async fn an_event_that_commits_before_the_timeout_takes_the_event_path_and_the_timer_is_stale(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_trait("path", TraitType::String).await;
-        let flow = env.flow("Race", race_graph(json!([]))).await;
-        let (id, ada) = waiting_for_an_order(&env, "ada@example.com", flow).await;
-        env.apply_event("ada@example.com", "order", json!({})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("path", TraitType::String).await;
+            let flow = env.flow("Race", race_graph(json!([]))).await;
+            let (id, ada) = waiting_for_an_order(&env, PERSONAL_DATA.email, flow).await;
+            env.apply_event(PERSONAL_DATA.email, "order", json!({}))
+                .await;
 
-        env.run_matching(Some("event"), Some(id)).await;
-        env.advance(3601);
-        env.run_matching(Some("wake"), Some(id)).await;
+            env.run_matching(Some("event"), Some(id)).await;
+            env.advance(3601);
+            env.run_matching(Some("wake"), Some(id)).await;
 
-        let done = env.enrollment(id).await;
-        assert_eq!(path_of(&env, ada).await.as_deref(), Some("event"));
-        assert_eq!(
-            (done.status, done.node.as_str()),
-            (EnrollmentStatus::Completed, "end_event")
-        );
-        assert_eq!(done.state_version, 2);
-        assert_eq!(
-            env.count("SELECT count(*) FROM decision_records WHERE action = 'flow.wake'")
-                .await,
-            1
-        );
-        assert_eq!(env.count("SELECT count(*) FROM enrollment_waits").await, 0);
-        assert_eq!(
-            env.count("SELECT count(*) FROM step_executions WHERE node_id = 'by_timeout'")
-                .await,
-            0
-        );
+            let done = env.enrollment(id).await;
+            assert_eq!(path_of(&env, ada).await.as_deref(), Some("event"));
+            assert_eq!(
+                (done.status, done.node.as_str()),
+                (EnrollmentStatus::Completed, "end_event")
+            );
+            assert_eq!(done.state_version, 2);
+            assert_eq!(
+                env.count("SELECT count(*) FROM decision_records WHERE action = 'flow.wake'")
+                    .await,
+                1
+            );
+            assert_eq!(env.count("SELECT count(*) FROM enrollment_waits").await, 0);
+            assert_eq!(
+                env.count("SELECT count(*) FROM step_executions WHERE node_id = 'by_timeout'")
+                    .await,
+                0
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2149,34 +2185,38 @@ pub(super) mod tests {
     async fn a_timeout_that_commits_before_the_event_takes_the_timeout_path_and_the_event_is_stale(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_trait("path", TraitType::String).await;
-        let flow = env.flow("Race", race_graph(json!([]))).await;
-        let (id, ada) = waiting_for_an_order(&env, "ada@example.com", flow).await;
-        env.apply_event("ada@example.com", "order", json!({})).await;
-        env.advance(3601);
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("path", TraitType::String).await;
+            let flow = env.flow("Race", race_graph(json!([]))).await;
+            let (id, ada) = waiting_for_an_order(&env, PERSONAL_DATA.email, flow).await;
+            env.apply_event(PERSONAL_DATA.email, "order", json!({}))
+                .await;
+            env.advance(3601);
 
-        env.run_matching(Some("wake"), Some(id)).await;
-        let after_timeout = env.enrollment(id).await;
-        env.run_matching(Some("event"), Some(id)).await;
+            env.run_matching(Some("wake"), Some(id)).await;
+            let after_timeout = env.enrollment(id).await;
+            env.run_matching(Some("event"), Some(id)).await;
 
-        let done = env.enrollment(id).await;
-        assert_eq!(path_of(&env, ada).await.as_deref(), Some("timeout"));
-        assert_eq!(done, after_timeout, "the late event changed nothing");
-        assert_eq!(
-            (done.status, done.node.as_str()),
-            (EnrollmentStatus::Completed, "end_timeout")
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM step_executions WHERE node_id = 'by_event'")
-                .await,
-            0
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
-                .await,
-            0
-        );
+            let done = env.enrollment(id).await;
+            assert_eq!(path_of(&env, ada).await.as_deref(), Some("timeout"));
+            assert_eq!(done, after_timeout, "the late event changed nothing");
+            assert_eq!(
+                (done.status, done.node.as_str()),
+                (EnrollmentStatus::Completed, "end_timeout")
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM step_executions WHERE node_id = 'by_event'")
+                    .await,
+                0
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                    .await,
+                0
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2184,134 +2224,143 @@ pub(super) mod tests {
     async fn an_event_and_its_timeout_running_at_the_same_moment_take_exactly_one_path(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_trait("path", TraitType::String).await;
-        let flow = env.flow("Race", race_graph(json!([]))).await;
-        for round in 0..6 {
-            let email = format!("p{round}@example.com");
-            let (id, person) = waiting_for_an_order(&env, &email, flow).await;
-            env.apply_event(&email, "order", json!({})).await;
-            env.advance(3601);
-            // Both jobs are claimed before either runs.
-            env.hold_others(None, Some(id)).await;
-            let first = env.claim().await.unwrap();
-            let second = env.claim().await.unwrap();
-            env.release().await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("path", TraitType::String).await;
+            let flow = env.flow("Race", race_graph(json!([]))).await;
+            for round in 0..6 {
+                let email = format!("p{round}@example.com");
+                let (id, person) = waiting_for_an_order(&env, &email, flow).await;
+                env.apply_event(&email, "order", json!({})).await;
+                env.advance(3601);
+                // Both jobs are claimed before either runs.
+                env.hold_others(None, Some(id)).await;
+                let first = env.claim().await.unwrap();
+                let second = env.claim().await.unwrap();
+                env.release().await;
 
-            let (one, two) = tokio::join!(env.execute(first), env.execute(second));
+                let (one, two) = tokio::join!(env.execute(first), env.execute(second));
 
-            assert!(one.is_ok() && two.is_ok());
-            let done = env.enrollment(id).await;
-            let path = path_of(&env, person).await.unwrap();
-            assert!(path == "event" || path == "timeout", "{path}");
-            assert_eq!(done.status, EnrollmentStatus::Completed);
-            assert_eq!(done.state_version, 2, "one transition after the wait");
-            let ran: Vec<String> = sqlx::query_scalar(
-                "SELECT node_id FROM step_executions WHERE enrollment_id = $1 \
+                assert!(one.is_ok() && two.is_ok());
+                let done = env.enrollment(id).await;
+                let path = path_of(&env, person).await.unwrap();
+                assert!(path == "event" || path == "timeout", "{path}");
+                assert_eq!(done.status, EnrollmentStatus::Completed);
+                assert_eq!(done.state_version, 2, "one transition after the wait");
+                let ran: Vec<String> = sqlx::query_scalar(
+                    "SELECT node_id FROM step_executions WHERE enrollment_id = $1 \
                  AND node_id IN ('by_event', 'by_timeout')",
-            )
-            .bind(id)
-            .fetch_all(&env.pool)
-            .await
-            .unwrap();
-            assert_eq!(ran.len(), 1, "{ran:?}");
-            assert!(ran[0].ends_with(path.as_str()), "{ran:?} {path}");
-            let wakes: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM decision_records WHERE action = 'flow.wake' \
+                )
+                .bind(id)
+                .fetch_all(&env.pool)
+                .await
+                .unwrap();
+                assert_eq!(ran.len(), 1, "{ran:?}");
+                assert!(ran[0].ends_with(path.as_str()), "{ran:?} {path}");
+                let wakes: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM decision_records WHERE action = 'flow.wake' \
                  AND subject_ids ->> 'enrollment' = $1",
-            )
-            .bind(id.to_string())
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
-            assert_eq!(wakes, 1);
-        }
+                )
+                .bind(id.to_string())
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+                assert_eq!(wakes, 1);
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_event_that_fails_the_waits_filters_leaves_the_enrollment_asleep(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("path", TraitType::String).await;
-        env.define_event("order").await;
-        let filters = json!([{"prop": "total", "op": "gt", "value": 100}]);
-        let flow = env.flow("Filtered", race_graph(filters)).await;
-        let (id, ada) = waiting_for_an_order(&env, "ada@example.com", flow).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("path", TraitType::String).await;
+            env.define_event("order").await;
+            let filters = json!([{"prop": "total", "op": "gt", "value": 100}]);
+            let flow = env.flow("Filtered", race_graph(filters)).await;
+            let (id, ada) = waiting_for_an_order(&env, PERSONAL_DATA.email, flow).await;
 
-        env.apply_event("ada@example.com", "order", json!({"total": 5}))
-            .await;
-        let ran = env.run_matching(Some("event"), Some(id)).await;
-        let still = env.enrollment(id).await;
-        env.apply_event("ada@example.com", "order", json!({"total": 500}))
-            .await;
-        env.run_matching(Some("event"), Some(id)).await;
-        let woken = env.enrollment(id).await;
+            env.apply_event(PERSONAL_DATA.email, "order", json!({"total": 5}))
+                .await;
+            let ran = env.run_matching(Some("event"), Some(id)).await;
+            let still = env.enrollment(id).await;
+            env.apply_event(PERSONAL_DATA.email, "order", json!({"total": 500}))
+                .await;
+            env.run_matching(Some("event"), Some(id)).await;
+            let woken = env.enrollment(id).await;
 
-        assert_eq!(ran, 1);
-        assert_eq!(
-            (still.status, still.state_version),
-            (EnrollmentStatus::Waiting, 1)
-        );
-        assert_eq!(still.awaiting.as_deref(), Some("order"));
-        assert_eq!(woken.status, EnrollmentStatus::Completed);
-        assert_eq!(path_of(&env, ada).await.as_deref(), Some("event"));
+            assert_eq!(ran, 1);
+            assert_eq!(
+                (still.status, still.state_version),
+                (EnrollmentStatus::Waiting, 1)
+            );
+            assert_eq!(still.awaiting.as_deref(), Some("order"));
+            assert_eq!(woken.status, EnrollmentStatus::Completed);
+            assert_eq!(path_of(&env, ada).await.as_deref(), Some("event"));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn stale_and_orphaned_jobs_change_nothing_at_all(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("path", TraitType::String).await;
-        let flow = env.flow("Race", race_graph(json!([]))).await;
-        let (id, _) = waiting_for_an_order(&env, "ada@example.com", flow).await;
-        let before = env.enrollment(id).await;
-        let decisions = env.count("SELECT count(*) FROM decision_records").await;
-        let steps = env.count("SELECT count(*) FROM step_executions").await;
-        sqlx::query("DELETE FROM jobs")
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let mut payloads = vec![
-            (id, 0, StepJobInput::Start),
-            (id, 0, StepJobInput::Wake),
-            (id, 7, StepJobInput::Wake),
-            (Uuid::now_v7(), 0, StepJobInput::Start),
-        ];
-        payloads.push((
-            id,
-            1,
-            StepJobInput::Event {
-                event_id: Uuid::now_v7(),
-                name: "refund".into(),
-            },
-        ));
-        for (enrollment, version, input) in payloads {
-            let payload = StepJobPayload {
-                workspace: env.ws,
-                enrollment,
-                state_version: version,
-                input,
-            };
-            let key = format!("test:{}", Uuid::now_v7());
-            zirv_flow_store::enqueue(&env.pool, &payload.job(&before.trace, None, key))
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("path", TraitType::String).await;
+            let flow = env.flow("Race", race_graph(json!([]))).await;
+            let (id, _) = waiting_for_an_order(&env, PERSONAL_DATA.email, flow).await;
+            let before = env.enrollment(id).await;
+            let decisions = env.count("SELECT count(*) FROM decision_records").await;
+            let steps = env.count("SELECT count(*) FROM step_executions").await;
+            sqlx::query("DELETE FROM jobs")
+                .execute(&env.pool)
                 .await
                 .unwrap();
-        }
-        env.advance(10_000);
+            let mut payloads = vec![
+                (id, 0, StepJobInput::Start),
+                (id, 0, StepJobInput::Wake),
+                (id, 7, StepJobInput::Wake),
+                (Uuid::now_v7(), 0, StepJobInput::Start),
+            ];
+            payloads.push((
+                id,
+                1,
+                StepJobInput::Event {
+                    event_id: Uuid::now_v7(),
+                    name: "refund".into(),
+                },
+            ));
+            for (enrollment, version, input) in payloads {
+                let payload = StepJobPayload {
+                    workspace: env.ws,
+                    enrollment,
+                    state_version: version,
+                    input,
+                };
+                let key = format!("test:{}", Uuid::now_v7());
+                zirv_flow_store::enqueue(&env.pool, &payload.job(&before.trace, None, key))
+                    .await
+                    .unwrap();
+            }
+            env.advance(10_000);
 
-        let ran = env.run_due().await;
+            let ran = env.run_due().await;
 
-        assert_eq!(ran, 5);
-        assert_eq!(env.enrollment(id).await, before);
-        assert_eq!(
-            env.count("SELECT count(*) FROM decision_records").await,
-            decisions
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM step_executions").await,
-            steps
-        );
-        assert_eq!(env.count("SELECT count(*) FROM jobs").await, 0);
+            assert_eq!(ran, 5);
+            assert_eq!(env.enrollment(id).await, before);
+            assert_eq!(
+                env.count("SELECT count(*) FROM decision_records").await,
+                decisions
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM step_executions").await,
+                steps
+            );
+            assert_eq!(env.count("SELECT count(*) FROM jobs").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2319,97 +2368,107 @@ pub(super) mod tests {
     async fn a_step_that_keeps_failing_is_retried_and_ends_failed_with_its_error_visible(
         pool: PgPool,
     ) {
-        const MESSAGE: &str = "an increment needs a trait whose value is a number";
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "bump", "type": "action.update_trait", "key": "plan",
              "change": {"op": "increment", "by": 1.0}},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "bump", "next", "end")]});
-        let flow = env.flow("Failing", graph).await;
-        let enrolled = env.enroll(flow, 1, &[ada]).await;
-        let id = enrolled.enrolled[0].enrollment;
-        sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE kind = 'flow.step'")
-            .execute(&env.pool)
-            .await
-            .unwrap();
+            let flow = env.flow("Failing", graph).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
+            let id = enrolled.enrolled[0].enrollment;
+            sqlx::query("UPDATE jobs SET max_attempts = 2 WHERE kind = 'flow.step'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
 
-        let first = env.claim().await.unwrap();
-        let first = env.execute(first).await;
-        let after_first = env.enrollment(id).await;
-        let steps_after_first = env.count("SELECT count(*) FROM step_executions").await;
-        let second = env.claim().await.unwrap();
-        let attempts = second.attempts;
-        let second = env.execute(second).await;
+            let first = env.claim().await.unwrap();
+            let first = env.execute(first).await;
+            let after_first = env.enrollment(id).await;
+            let steps_after_first = env.count("SELECT count(*) FROM step_executions").await;
+            let second = env.claim().await.unwrap();
+            let attempts = second.attempts;
+            let second = env.execute(second).await;
 
-        assert_eq!(first.unwrap_err().message(), MESSAGE);
-        assert_eq!(
-            (after_first.status, after_first.state_version),
-            (EnrollmentStatus::Active, 0)
-        );
-        assert_eq!(steps_after_first, 0, "the first attempt left nothing");
-        assert_eq!(attempts, 2);
-        assert!(
-            second.is_ok(),
-            "the last attempt records the failure: {second:?}"
-        );
-        let failed = env.enrollment(id).await;
-        assert_eq!(failed.status, EnrollmentStatus::Failed);
-        assert_eq!(failed.node, "bump", "the node the step started from");
-        assert_eq!(failed.failed_node.as_deref(), Some("bump"));
-        assert_eq!(failed.state_version, 0, "the version the job started from");
-        assert_eq!(failed.error.as_deref(), Some(MESSAGE));
-        assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
-        let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
-        assert!(decisions.contains(&("flow.enrollment".into(), "failed".into())));
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
-                .await,
-            0
-        );
-        let again = env.enroll(flow, 1, &[ada]).await;
-        assert_eq!(again.skipped, [(ada, "already_active")]);
+            assert_eq!(first.unwrap_err().message(), MESSAGE);
+            assert_eq!(
+                (after_first.status, after_first.state_version),
+                (EnrollmentStatus::Active, 0)
+            );
+            assert_eq!(steps_after_first, 0, "the first attempt left nothing");
+            assert_eq!(attempts, 2);
+            assert!(
+                second.is_ok(),
+                "the last attempt records the failure: {second:?}"
+            );
+            let failed = env.enrollment(id).await;
+            assert_eq!(failed.status, EnrollmentStatus::Failed);
+            assert_eq!(failed.node, "bump", "the node the step started from");
+            assert_eq!(failed.failed_node.as_deref(), Some("bump"));
+            assert_eq!(failed.state_version, 0, "the version the job started from");
+            assert_eq!(failed.error.as_deref(), Some(MESSAGE));
+            assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
+            let decisions = env.decisions(&enrolled.enrolled[0].trace).await;
+            assert!(decisions.contains(&("flow.enrollment".into(), "failed".into())));
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'flow.step'")
+                    .await,
+                0
+            );
+            let again = env.enroll(flow, 1, &[ada]).await;
+            assert_eq!(again.skipped, [(ada, "already_active")]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_failure_late_in_a_chain_keeps_the_state_the_step_started_from(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        env.define_trait("tier", TraitType::String).await;
-        let list = env.list("Golden").await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let graph = json!({"v": 1, "nodes": [
-            {"id": "a", "type": "action.update_trait", "key": "tier",
-             "change": {"op": "set", "value": "gold"}},
-            {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
-            {"id": "inc", "type": "action.update_trait", "key": "plan",
-             "change": {"op": "increment", "by": 1.0}},
-            {"id": "end", "type": "exit"}
-        ], "edges": [
-            edge("e1", "a", "next", "l"),
-            edge("e2", "l", "next", "inc"),
-            edge("e3", "inc", "next", "end")
-        ]});
-        let flow = env.flow("Chain", graph).await;
-        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
-        sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
-            .execute(&env.pool)
-            .await
-            .unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            env.define_trait("tier", TraitType::String).await;
+            let list = env.list("Golden").await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
+                {"id": "a", "type": "action.update_trait", "key": "tier",
+                 "change": {"op": "set", "value": "gold"}},
+                {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
+                {"id": "inc", "type": "action.update_trait", "key": "plan",
+                 "change": {"op": "increment", "by": 1.0}},
+                {"id": "end", "type": "exit"}
+            ], "edges": [
+                edge("e1", "a", "next", "l"),
+                edge("e2", "l", "next", "inc"),
+                edge("e3", "inc", "next", "end")
+            ]});
+            let flow = env.flow("Chain", graph).await;
+            let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+            sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
 
-        env.run_due().await;
+            env.run_due().await;
 
-        let failed = env.enrollment(id).await;
-        assert_eq!(failed.status, EnrollmentStatus::Failed);
-        assert_eq!(failed.node, "a", "the step started at the entry node");
-        assert_eq!(failed.failed_node.as_deref(), Some("inc"));
-        assert_eq!(failed.state_version, 0);
-        assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
-        assert_eq!(env.count("SELECT count(*) FROM list_members").await, 0);
-        assert_eq!(env.traits(ada).await["tier"], Value::Null);
+            let failed = env.enrollment(id).await;
+            assert_eq!(failed.status, EnrollmentStatus::Failed);
+            assert_eq!(failed.node, "a", "the step started at the entry node");
+            assert_eq!(failed.failed_node.as_deref(), Some("inc"));
+            assert_eq!(failed.state_version, 0);
+            assert_eq!(env.count("SELECT count(*) FROM step_executions").await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM list_members").await, 0);
+            assert_eq!(env.traits(ada).await["tier"], Value::Null);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2417,41 +2476,44 @@ pub(super) mod tests {
     async fn a_timer_that_fires_before_this_clock_reaches_it_is_deferred_not_failed_or_lost(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "w", "type": "wait.duration", "seconds": 60},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "w", "next", "end")]});
-        let flow = env.flow("Early", graph).await;
-        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
-        env.run_due().await;
-        let asleep = env.enrollment(id).await;
-        sqlx::query("UPDATE jobs SET run_at = now() - interval '1 second', max_attempts = 1")
-            .execute(&env.pool)
+            let flow = env.flow("Early", graph).await;
+            let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+            env.run_due().await;
+            let asleep = env.enrollment(id).await;
+            sqlx::query("UPDATE jobs SET run_at = now() - interval '1 second', max_attempts = 1")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+
+            let early = env.claim().await.unwrap();
+            let early = env.execute(early).await;
+
+            assert!(early.is_ok(), "an early wake ends cleanly");
+            assert_eq!(env.enrollment(id).await, asleep, "nothing moved");
+            let (jobs, attempts, due): (i64, i32, OffsetDateTime) = sqlx::query_as(
+                "SELECT count(*), max(attempts), min(run_at) FROM jobs WHERE kind = 'flow.step'",
+            )
+            .fetch_one(&env.pool)
             .await
             .unwrap();
-
-        let early = env.claim().await.unwrap();
-        let early = env.execute(early).await;
-
-        assert!(early.is_ok(), "an early wake ends cleanly");
-        assert_eq!(env.enrollment(id).await, asleep, "nothing moved");
-        let (jobs, attempts, due): (i64, i32, OffsetDateTime) = sqlx::query_as(
-            "SELECT count(*), max(attempts), min(run_at) FROM jobs WHERE kind = 'flow.step'",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            (jobs, attempts),
-            (1, 0),
-            "a fresh wake replaces the old one"
-        );
-        assert!(due >= asleep.wake_at.unwrap());
-        env.advance(61);
-        env.run_due().await;
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+            assert_eq!(
+                (jobs, attempts),
+                (1, 0),
+                "a fresh wake replaces the old one"
+            );
+            assert!(due >= asleep.wake_at.unwrap());
+            env.advance(61);
+            env.run_due().await;
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2459,56 +2521,61 @@ pub(super) mod tests {
     async fn the_decisions_of_a_three_node_path_are_complete_and_on_the_enrollments_trace(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let list = env.list("Welcomed").await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let list = env.list(PERSONAL_DATA.list_name).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!(PERSONAL_DATA.traits()))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "w", "type": "wait.duration", "seconds": 30},
             {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "w", "next", "l"), edge("e2", "l", "next", "end")]});
-        let flow = env.flow("Three", graph).await;
-        let enrolled = env.enroll(flow, 1, &[ada]).await;
-        let trace = enrolled.enrolled[0].trace.clone();
+            let flow = env.flow("Three", graph).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
+            let trace = enrolled.enrolled[0].trace.clone();
 
-        env.run_due().await;
-        env.advance(31);
-        env.run_due().await;
+            env.run_due().await;
+            env.advance(31);
+            env.run_due().await;
 
-        let expected: Vec<(String, String)> = [
-            ("flow.enroll", "enrolled"),
-            ("flow.enrollment", "completed"),
-            ("flow.step", "done"),
-            ("flow.step", "done"),
-            ("flow.step", "waiting"),
-            ("flow.wait", "waiting"),
-            ("flow.wake", "timer"),
-            ("list.membership", "added"),
-        ]
-        .into_iter()
-        .map(|(action, outcome)| (action.to_owned(), outcome.to_owned()))
-        .collect();
-        assert_eq!(env.decisions(&trace).await, expected);
-        let causes: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM decision_records WHERE trace_id = $1 AND cause_kind = 'api'",
-        )
-        .bind(trace.trace_id.as_uuid())
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            causes, 8,
-            "every decision carries the cause that enrolled the person"
-        );
-        let linked: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM decision_records WHERE trace_id = $1 \
+            let expected: Vec<(String, String)> = [
+                ("flow.enroll", "enrolled"),
+                ("flow.enrollment", "completed"),
+                ("flow.step", "done"),
+                ("flow.step", "done"),
+                ("flow.step", "waiting"),
+                ("flow.wait", "waiting"),
+                ("flow.wake", "timer"),
+                ("list.membership", "added"),
+            ]
+            .into_iter()
+            .map(|(action, outcome)| (action.to_owned(), outcome.to_owned()))
+            .collect();
+            assert_eq!(env.decisions(&trace).await, expected);
+            let causes: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM decision_records WHERE trace_id = $1 AND cause_kind = 'api'",
+            )
+            .bind(trace.trace_id.as_uuid())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                causes, 8,
+                "every decision carries the cause that enrolled the person"
+            );
+            let linked: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM decision_records WHERE trace_id = $1 \
              AND action LIKE 'flow.%' AND subject_ids ? 'enrollment' AND subject_ids ? 'person'",
-        )
-        .bind(trace.trace_id.as_uuid())
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(linked, 7);
+            )
+            .bind(trace.trace_id.as_uuid())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(linked, 7);
+        })
+        .await;
     }
 
     fn webhook_graph() -> Value {
@@ -2553,24 +2620,29 @@ pub(super) mod tests {
     async fn a_webhook_step_enqueues_its_job_under_the_stable_key_and_records_fresh_inputs(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let flow = env.flow("Hook", webhook_graph()).await;
-        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let flow = env.flow("Hook", webhook_graph()).await;
+            let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
 
-        env.run_due().await;
+            env.run_due().await;
 
-        let (reason, jobs) = webhook_outcome(&env, id).await;
-        assert_eq!(reason.as_deref(), Some("inputs_fresh"));
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].0, format!("{id}:hook:webhook"));
-        assert_eq!(jobs[0].1["url"], "https://hooks.example.com/pro");
-        assert_eq!(jobs[0].1["node_id"], "hook");
-        assert_eq!(jobs[0].1["person_id"], ada.to_string());
-        assert_eq!(jobs[0].1["idempotency_key"], format!("{id}:hook:webhook"));
-        assert_eq!(jobs[0].1["trait_keys"], json!(["plan"]));
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+            let (reason, jobs) = webhook_outcome(&env, id).await;
+            assert_eq!(reason.as_deref(), Some("inputs_fresh"));
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].0, format!("{id}:hook:webhook"));
+            assert_eq!(jobs[0].1["url"], "https://hooks.example.com/pro");
+            assert_eq!(jobs[0].1["node_id"], "hook");
+            assert_eq!(jobs[0].1["person_id"], ada.to_string());
+            assert_eq!(jobs[0].1["idempotency_key"], format!("{id}:hook:webhook"));
+            assert_eq!(jobs[0].1["trait_keys"], json!(["plan"]));
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2578,131 +2650,142 @@ pub(super) mod tests {
     async fn a_sync_step_enqueues_its_job_under_the_stable_key_with_ids_and_keys_only(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env
-            .person("ada@example.com", json!({"plan": "SENTINEL"}))
-            .await;
-        let destination = Uuid::from_u128(500);
-        let flow = env
-            .flow(
-                "Sync",
-                json!({"v": 1, "nodes": [
-                    {"id": "push", "type": "action.sync", "destination": destination,
-                     "operation": "upsert", "trait_keys": ["plan"]},
-                    {"id": "drop", "type": "action.sync", "destination": destination,
-                     "operation": "remove"},
-                    {"id": "end", "type": "exit"}
-                ], "edges": [
-                    edge("e1", "push", "next", "drop"),
-                    edge("e2", "drop", "next", "end")
-                ]}),
-            )
-            .await;
-        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "SENTINEL"}))
+                .await;
+            let destination = Uuid::from_u128(500);
+            let flow = env
+                .flow(
+                    "Sync",
+                    json!({"v": 1, "nodes": [
+                        {"id": "push", "type": "action.sync", "destination": destination,
+                         "operation": "upsert", "trait_keys": ["plan"]},
+                        {"id": "drop", "type": "action.sync", "destination": destination,
+                         "operation": "remove"},
+                        {"id": "end", "type": "exit"}
+                    ], "edges": [
+                        edge("e1", "push", "next", "drop"),
+                        edge("e2", "drop", "next", "end")
+                    ]}),
+                )
+                .await;
+            let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
 
-        env.run_due().await;
+            env.run_due().await;
 
-        let mut jobs: Vec<(String, Value)> = sqlx::query_as(
+            let mut jobs: Vec<(String, Value)> = sqlx::query_as(
             "SELECT unique_key, payload FROM jobs WHERE kind = 'delivery.sync' ORDER BY unique_key",
         )
         .fetch_all(&env.pool)
         .await
         .unwrap();
-        assert_eq!(jobs.len(), 2);
-        let (drop_key, drop_payload) = jobs.remove(0);
-        let (push_key, push_payload) = jobs.remove(0);
-        assert_eq!(drop_key, format!("{id}:drop:sync"));
-        assert_eq!(push_key, format!("{id}:push:sync"));
-        assert_eq!(push_payload["operation"], "upsert");
-        assert_eq!(push_payload["trait_keys"], json!(["plan"]));
-        assert_eq!(push_payload["destination_id"], destination.to_string());
-        assert_eq!(push_payload["idempotency_key"], push_key);
-        assert_eq!(push_payload["enrollment_id"], id.to_string());
-        assert_eq!(drop_payload["operation"], "remove");
-        assert_eq!(drop_payload["trait_keys"], json!([]));
-        assert_ne!(push_payload["sync_id"], drop_payload["sync_id"]);
-        let queued = format!("{push_payload}{drop_payload}");
-        assert!(
-            !queued.contains("SENTINEL") && !queued.contains("ada@"),
-            "{queued}"
-        );
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+            assert_eq!(jobs.len(), 2);
+            let (drop_key, drop_payload) = jobs.remove(0);
+            let (push_key, push_payload) = jobs.remove(0);
+            assert_eq!(drop_key, format!("{id}:drop:sync"));
+            assert_eq!(push_key, format!("{id}:push:sync"));
+            assert_eq!(push_payload["operation"], "upsert");
+            assert_eq!(push_payload["trait_keys"], json!(["plan"]));
+            assert_eq!(push_payload["destination_id"], destination.to_string());
+            assert_eq!(push_payload["idempotency_key"], push_key);
+            assert_eq!(push_payload["enrollment_id"], id.to_string());
+            assert_eq!(drop_payload["operation"], "remove");
+            assert_eq!(drop_payload["trait_keys"], json!([]));
+            assert_ne!(push_payload["sync_id"], drop_payload["sync_id"]);
+            let queued = format!("{push_payload}{drop_payload}");
+            assert!(
+                !queued.contains("SENTINEL") && !queued.contains("ada@"),
+                "{queued}"
+            );
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_webhook_step_records_that_an_input_is_failing_and_still_runs(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let source = Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO sources (id, workspace_id, name, kind, config, enabled) \
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let source = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO sources (id, workspace_id, name, kind, config, enabled) \
              VALUES ($1, $2, 'CRM', 'postgres', '{}', true)",
-        )
-        .bind(source)
-        .bind(env.ws.as_uuid())
-        .execute(&env.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO streams (id, workspace_id, source_id, name, enabled, sync_mode, \
+            )
+            .bind(source)
+            .bind(env.ws.as_uuid())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO streams (id, workspace_id, source_id, name, enabled, sync_mode, \
                 mapping, discovered, enabled_at, last_success_at, last_run_failed) \
              VALUES ($1, $2, $3, 'contacts', true, 'full_refresh', $4, '{}', $5, $5, true)",
-        )
-        .bind(Uuid::now_v7())
-        .bind(env.ws.as_uuid())
-        .bind(source)
-        .bind(json!({"columns": [
-            {"column": "e", "target": {"type": "identifier", "kind": "email"}},
-            {"column": "p", "target": {"type": "trait", "key": "plan"}}
-        ]}))
-        .bind(env.clock.now())
-        .execute(&env.pool)
-        .await
-        .unwrap();
-        let flow = env.flow("Hook", webhook_graph()).await;
-        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+            )
+            .bind(Uuid::now_v7())
+            .bind(env.ws.as_uuid())
+            .bind(source)
+            .bind(json!({"columns": [
+                {"column": "e", "target": {"type": "identifier", "kind": "email"}},
+                {"column": "p", "target": {"type": "trait", "key": "plan"}}
+            ]}))
+            .bind(env.clock.now())
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let flow = env.flow("Hook", webhook_graph()).await;
+            let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
 
-        env.run_due().await;
+            env.run_due().await;
 
-        let (reason, jobs) = webhook_outcome(&env, id).await;
-        assert_eq!(reason.as_deref(), Some("inputs_failing"));
-        assert_eq!(jobs.len(), 1, "a failing input never pauses the flow");
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+            let (reason, jobs) = webhook_outcome(&env, id).await;
+            assert_eq!(reason.as_deref(), Some("inputs_failing"));
+            assert_eq!(jobs.len(), 1, "a failing input never pauses the flow");
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_wait_until_a_time_falls_back_to_the_workspace_zone_and_says_so(pool: PgPool) {
-        let env = Env::new(pool).await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        sqlx::query("UPDATE people SET traits = '{\"timezone\": \"Not/AZone\"}' WHERE id = $1")
-            .bind(ada)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            sqlx::query("UPDATE people SET traits = '{\"timezone\": \"Not/AZone\"}' WHERE id = $1")
+                .bind(ada)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let graph = json!({"v": 1, "nodes": [
             {"id": "until", "type": "wait.until_time",
              "when": {"kind": "date_time", "at": "2999-01-01T09:00:00"}},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "until", "next", "end")]});
-        let flow = env.flow("Zones", graph).await;
-        let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
+            let flow = env.flow("Zones", graph).await;
+            let id = env.enroll(flow, 1, &[ada]).await.enrolled[0].enrollment;
 
-        env.run_due().await;
+            env.run_due().await;
 
-        let reason: String = sqlx::query_scalar(
-            "SELECT reason FROM decision_records WHERE action = 'flow.step' \
+            let reason: String = sqlx::query_scalar(
+                "SELECT reason FROM decision_records WHERE action = 'flow.step' \
              AND outcome = 'waiting' AND subject_ids ->> 'enrollment' = $1",
-        )
-        .bind(id.to_string())
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(reason, "timezone_fallback");
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Waiting);
+            )
+            .bind(id.to_string())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(reason, "timezone_fallback");
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Waiting);
+        })
+        .await;
     }
 
     /// The subject ids of every flow decision on `trace`, with the action and outcome.
@@ -2724,78 +2807,86 @@ pub(super) mod tests {
     async fn every_flow_decision_of_a_path_names_the_flow_version_node_enrollment_and_person(
         pool: PgPool,
     ) {
-        let env = Env::new(pool).await;
-        let list = env.list("Welcomed").await;
-        let ada = env.person("ada@example.com", json!({})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let list = env.list(PERSONAL_DATA.list_name).await;
+            let ada = env.person(PERSONAL_DATA.email, json!({})).await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "w", "type": "wait.duration", "seconds": 30},
             {"id": "l", "type": "action.list", "list_id": list, "change": "add"},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "w", "next", "l"), edge("e2", "l", "next", "end")]});
-        let flow = env.flow("Three", graph).await;
-        let enrolled = env.enroll(flow, 1, &[ada]).await;
-        let id = enrolled.enrolled[0].enrollment;
-        let trace = enrolled.enrolled[0].trace.clone();
-        env.run_due().await;
-        env.advance(31);
-        env.run_due().await;
+            let flow = env.flow("Three", graph).await;
+            let enrolled = env.enroll(flow, 1, &[ada]).await;
+            let id = enrolled.enrolled[0].enrollment;
+            let trace = enrolled.enrolled[0].trace.clone();
+            env.run_due().await;
+            env.advance(31);
+            env.run_due().await;
 
-        let decisions = flow_subjects(&env, &trace).await;
+            let decisions = flow_subjects(&env, &trace).await;
 
-        assert!(decisions.len() >= 7, "{decisions:?}");
-        for (action, outcome, subjects) in &decisions {
-            let label = format!("{action}/{outcome}: {subjects}");
-            assert_eq!(subjects["flow"], json!(flow.to_string()), "{label}");
-            assert_eq!(subjects["version"], json!(1), "{label}");
-            assert_eq!(subjects["enrollment"], json!(id.to_string()), "{label}");
-            assert_eq!(subjects["person"], json!(ada.to_string()), "{label}");
-            if action == "flow.enroll" {
-                assert!(subjects.get("node").is_none(), "{label}");
-            } else {
-                assert!(subjects["node"].is_string(), "{label}");
+            assert!(decisions.len() >= 7, "{decisions:?}");
+            for (action, outcome, subjects) in &decisions {
+                let label = format!("{action}/{outcome}: {subjects}");
+                assert_eq!(subjects["flow"], json!(flow.to_string()), "{label}");
+                assert_eq!(subjects["version"], json!(1), "{label}");
+                assert_eq!(subjects["enrollment"], json!(id.to_string()), "{label}");
+                assert_eq!(subjects["person"], json!(ada.to_string()), "{label}");
+                if action == "flow.enroll" {
+                    assert!(subjects.get("node").is_none(), "{label}");
+                } else {
+                    assert!(subjects["node"].is_string(), "{label}");
+                }
             }
-        }
-        let node_of = |action: &str, outcome: &str| -> Vec<String> {
-            decisions
-                .iter()
-                .filter(|(a, o, _)| a == action && o == outcome)
-                .map(|(_, _, subjects)| subjects["node"].as_str().unwrap().to_owned())
-                .collect()
-        };
-        assert_eq!(node_of("flow.wait", "waiting"), ["w"]);
-        assert_eq!(node_of("flow.wake", "timer"), ["w"]);
-        assert_eq!(node_of("flow.enrollment", "completed"), ["end"]);
-        let mut done = node_of("flow.step", "done");
-        done.sort();
-        assert_eq!(done, ["end", "l"]);
+            let node_of = |action: &str, outcome: &str| -> Vec<String> {
+                decisions
+                    .iter()
+                    .filter(|(a, o, _)| a == action && o == outcome)
+                    .map(|(_, _, subjects)| subjects["node"].as_str().unwrap().to_owned())
+                    .collect()
+            };
+            assert_eq!(node_of("flow.wait", "waiting"), ["w"]);
+            assert_eq!(node_of("flow.wake", "timer"), ["w"]);
+            assert_eq!(node_of("flow.enrollment", "completed"), ["end"]);
+            let mut done = node_of("flow.step", "done");
+            done.sort();
+            assert_eq!(done, ["end", "l"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_branch_decision_names_the_branch_node(pool: PgPool) {
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "pick", "type": "branch",
              "conditions": [{"trait": "plan", "op": "eq", "value": "pro"}]},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "pick", "case_0", "end"), edge("e2", "pick", "else", "end")]});
-        let flow = env.flow("Branching", graph).await;
-        let trace = env.enroll(flow, 1, &[ada]).await.enrolled[0].trace.clone();
+            let flow = env.flow("Branching", graph).await;
+            let trace = env.enroll(flow, 1, &[ada]).await.enrolled[0].trace.clone();
 
-        env.run_due().await;
+            env.run_due().await;
 
-        let decisions = flow_subjects(&env, &trace).await;
-        let branches: Vec<_> = decisions
-            .iter()
-            .filter(|(action, _, _)| action.starts_with("flow.branch"))
-            .collect();
-        assert!(!branches.is_empty(), "{decisions:?}");
-        for (action, _, subjects) in branches {
-            assert_eq!(subjects["node"], "pick", "{action}");
-            assert_eq!(subjects["version"], json!(1), "{action}");
-        }
+            let decisions = flow_subjects(&env, &trace).await;
+            let branches: Vec<_> = decisions
+                .iter()
+                .filter(|(action, _, _)| action.starts_with("flow.branch"))
+                .collect();
+            assert!(!branches.is_empty(), "{decisions:?}");
+            for (action, _, subjects) in branches {
+                assert_eq!(subjects["node"], "pick", "{action}");
+                assert_eq!(subjects["version"], json!(1), "{action}");
+            }
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2803,244 +2894,258 @@ pub(super) mod tests {
     async fn a_segment_triggered_enrollment_that_fails_is_retried_and_skipped_on_one_trace(
         pool: PgPool,
     ) {
-        const MESSAGE: &str = "an increment needs a trait whose value is a number";
-        let env = Env::new(pool).await;
-        env.define_trait("plan", TraitType::String).await;
-        let ada = env.person("ada@example.com", json!({"plan": "pro"})).await;
-        let graph = json!({"v": 1, "nodes": [
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            const MESSAGE: &str = "an increment needs a trait whose value is a number";
+            let env = Env::new(pool).await;
+            env.define_trait("plan", TraitType::String).await;
+            let ada = env
+                .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
             {"id": "bump", "type": "action.update_trait", "key": "plan",
              "change": {"op": "increment", "by": 1.0}},
             {"id": "end", "type": "exit"}
         ], "edges": [edge("e1", "bump", "next", "end")]});
-        let flow = env.flow("Failing", graph).await;
-        // The segment change that triggers the enrollment: its cause is the upstream event.
-        let change = Cause::event(Uuid::now_v7());
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let enrolled = zirv_flow_store::enroll(
-            &mut tx,
-            &EnrollRequest {
-                workspace: env.ws,
-                flow,
-                version: 1,
-                people: &[ada],
-                occurrence: Occurrence {
-                    trigger: "segment",
-                    id: Uuid::now_v7(),
+            let flow = env.flow("Failing", graph).await;
+            // The segment change that triggers the enrollment: its cause is the upstream event.
+            let change = Cause::event(Uuid::now_v7());
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let enrolled = zirv_flow_store::enroll(
+                &mut tx,
+                &EnrollRequest {
+                    workspace: env.ws,
+                    flow,
+                    version: 1,
+                    people: &[ada],
+                    occurrence: Occurrence {
+                        trigger: "segment",
+                        id: Uuid::now_v7(),
+                    },
+                    now: env.clock.now(),
+                    trace: &TraceContext::root(change.clone()),
                 },
-                now: env.clock.now(),
-                trace: &TraceContext::root(change.clone()),
-            },
-        )
-        .await
-        .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        let id = enrolled.enrolled[0].enrollment;
-        let trace = enrolled.enrolled[0].trace.clone();
-        let one_attempt = || async {
-            sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
-                .execute(&env.pool)
-                .await
-                .unwrap();
-        };
-        one_attempt().await;
-        env.run_due().await;
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
-
-        let operator = TraceContext::root(Cause::manual(zirv_flow_core::UserId::from_uuid(
-            Uuid::new_v4(),
-        )));
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let retried = zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, false, &operator)
+            )
             .await
             .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        one_attempt().await;
-        env.run_due().await;
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let skipped = zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, true, &operator)
-            .await
-            .unwrap();
-        zirv_flow_store::commit(tx).await.unwrap();
-        one_attempt().await;
-        env.run_due().await;
+            zirv_flow_store::commit(tx).await.unwrap();
+            let id = enrolled.enrolled[0].enrollment;
+            let trace = enrolled.enrolled[0].trace.clone();
+            let one_attempt = || async {
+                sqlx::query("UPDATE jobs SET max_attempts = 1 WHERE kind = 'flow.step'")
+                    .execute(&env.pool)
+                    .await
+                    .unwrap();
+            };
+            one_attempt().await;
+            env.run_due().await;
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
+            assert_eq!(env.enrollment(id).await.error.as_deref(), Some(MESSAGE));
 
-        assert_eq!(
-            retried, trace.trace_id,
-            "the retry is on the enrollment's trace"
-        );
-        assert_eq!(skipped, trace.trace_id, "so is the skip");
-        assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
-        // Nothing of the enrollment is on any other trace.
-        let elsewhere: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM decision_records \
+            let operator = TraceContext::root(Cause::manual(zirv_flow_core::UserId::from_uuid(
+                Uuid::new_v4(),
+            )));
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let retried =
+                zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, false, &operator)
+                    .await
+                    .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            one_attempt().await;
+            env.run_due().await;
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Failed);
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let skipped =
+                zirv_flow_store::resume_failed(&mut tx, env.ws, flow, id, true, &operator)
+                    .await
+                    .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+            one_attempt().await;
+            env.run_due().await;
+
+            assert_eq!(
+                retried, trace.trace_id,
+                "the retry is on the enrollment's trace"
+            );
+            assert_eq!(skipped, trace.trace_id, "so is the skip");
+            assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Completed);
+            // Nothing of the enrollment is on any other trace.
+            let elsewhere: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM decision_records \
              WHERE subject_ids ->> 'enrollment' = $1 AND trace_id <> $2",
-        )
-        .bind(id.to_string())
-        .bind(trace.trace_id.as_uuid())
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert_eq!(elsewhere, 0);
-        // The trace read, as the trace endpoint reads it.
-        let (records, truncated) =
-            zirv_flow_store::list_trace(&env.pool, env.ws, trace.trace_id, 1000)
-                .await
-                .unwrap();
-        assert!(!truncated);
-        let flow_records: Vec<_> = records
-            .iter()
-            .filter(|record| record.action.starts_with("flow."))
-            .collect();
-        for record in &flow_records {
-            for key in ["flow", "version", "enrollment", "person"] {
-                assert!(
-                    record.subject_ids.get(key).is_some(),
-                    "{} {} lacks {key}",
-                    record.action,
-                    record.outcome
+            )
+            .bind(id.to_string())
+            .bind(trace.trace_id.as_uuid())
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(elsewhere, 0);
+            // The trace read, as the trace endpoint reads it.
+            let (records, truncated) =
+                zirv_flow_store::list_trace(&env.pool, env.ws, trace.trace_id, 1000)
+                    .await
+                    .unwrap();
+            assert!(!truncated);
+            let flow_records: Vec<_> = records
+                .iter()
+                .filter(|record| record.action.starts_with("flow."))
+                .collect();
+            for record in &flow_records {
+                for key in ["flow", "version", "enrollment", "person"] {
+                    assert!(
+                        record.subject_ids.get(key).is_some(),
+                        "{} {} lacks {key}",
+                        record.action,
+                        record.outcome
+                    );
+                }
+            }
+            let of = |outcome: &str| -> Vec<_> {
+                flow_records
+                    .iter()
+                    .filter(|record| {
+                        record.action == "flow.enrollment" && record.outcome == outcome
+                    })
+                    .collect()
+            };
+            let failures = of("failed");
+            assert_eq!(
+                failures.len(),
+                2,
+                "the step failed, and failed again on the retry"
+            );
+            for failure in failures {
+                assert_eq!(failure.reason.as_deref(), Some("step_failed"));
+                assert_eq!(failure.subject_ids["node"], "bump");
+            }
+            for outcome in ["retried", "skipped"] {
+                let records = of(outcome);
+                assert_eq!(records.len(), 1, "{outcome}");
+                assert_eq!(records[0].reason.as_deref(), Some("operator"));
+                assert_eq!(records[0].subject_ids["node"], "bump");
+                assert_eq!(
+                    records[0].cause, operator.cause,
+                    "the operator is the cause"
                 );
             }
-        }
-        let of = |outcome: &str| -> Vec<_> {
-            flow_records
-                .iter()
-                .filter(|record| record.action == "flow.enrollment" && record.outcome == outcome)
-                .collect()
-        };
-        let failures = of("failed");
-        assert_eq!(
-            failures.len(),
-            2,
-            "the step failed, and failed again on the retry"
-        );
-        for failure in failures {
-            assert_eq!(failure.reason.as_deref(), Some(MESSAGE), "not truncated");
-            assert_eq!(failure.subject_ids["node"], "bump");
-        }
-        for outcome in ["retried", "skipped"] {
-            let records = of(outcome);
-            assert_eq!(records.len(), 1, "{outcome}");
-            assert_eq!(records[0].reason.as_deref(), Some("operator"));
-            assert_eq!(records[0].subject_ids["node"], "bump");
-            assert_eq!(
-                records[0].cause, operator.cause,
-                "the operator is the cause"
+            assert!(
+                flow_records
+                    .iter()
+                    .any(|r| r.cause == Cause::from_stored(change.kind, change.id.clone()))
             );
-        }
-        assert!(
-            flow_records
+            // The enrollment's path carries the same decisions.
+            let path = zirv_flow_store::load_enrollment_path(&env.pool, env.ws, flow, id)
+                .await
+                .unwrap()
+                .unwrap();
+            let on_trace: Vec<Uuid> = flow_records.iter().map(|r| r.id).collect();
+            let on_path: Vec<Uuid> = path
+                .decisions
                 .iter()
-                .any(|r| r.cause == Cause::from_stored(change.kind, change.id.clone()))
-        );
-        // The enrollment's path carries the same decisions.
-        let path = zirv_flow_store::load_enrollment_path(&env.pool, env.ws, flow, id)
+                .filter(|r| r.action.starts_with("flow."))
+                .map(|r| r.id)
+                .collect();
+            assert_eq!(on_path, on_trace);
+            assert_eq!(path.enrollment.trace_id, trace.trace_id.as_uuid());
+            // Both reads agree, but they share an ORDER BY, so check the order itself: it is the
+            // order the walk wrote the records in, which the ids follow.
+            let mut by_id = on_path.clone();
+            by_id.sort();
+            assert_eq!(on_path, by_id, "the path is in the order the walk wrote");
+            let walk: Vec<&str> = path
+                .decisions
+                .iter()
+                .filter(|r| r.action == "flow.enrollment" && r.outcome != "enrolled")
+                .map(|r| r.outcome.as_str())
+                .collect();
+            assert_eq!(
+                walk,
+                ["failed", "retried", "failed", "skipped", "completed"]
+            );
+            // The person's timeline shows the same flow decisions, each with the version and node
+            // the walk wrote.
+            let timeline = zirv_flow_store::load_timeline(
+                &env.pool,
+                env.ws,
+                ada,
+                zirv_flow_store::TimelineFilter::default(),
+                100,
+                None,
+            )
             .await
             .unwrap()
             .unwrap();
-        let on_trace: Vec<Uuid> = flow_records.iter().map(|r| r.id).collect();
-        let on_path: Vec<Uuid> = path
-            .decisions
-            .iter()
-            .filter(|r| r.action.starts_with("flow."))
-            .map(|r| r.id)
-            .collect();
-        assert_eq!(on_path, on_trace);
-        assert_eq!(path.enrollment.trace_id, trace.trace_id.as_uuid());
-        // Both reads agree, but they share an ORDER BY, so check the order itself: it is the
-        // order the walk wrote the records in, which the ids follow.
-        let mut by_id = on_path.clone();
-        by_id.sort();
-        assert_eq!(on_path, by_id, "the path is in the order the walk wrote");
-        let walk: Vec<&str> = path
-            .decisions
-            .iter()
-            .filter(|r| r.action == "flow.enrollment" && r.outcome != "enrolled")
-            .map(|r| r.outcome.as_str())
-            .collect();
-        assert_eq!(
-            walk,
-            ["failed", "retried", "failed", "skipped", "completed"]
-        );
-        // The person's timeline shows the same flow decisions, each with the version and node
-        // the walk wrote.
-        let timeline = zirv_flow_store::load_timeline(
-            &env.pool,
-            env.ws,
-            ada,
-            zirv_flow_store::TimelineFilter::default(),
-            100,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let mut on_timeline: Vec<(Uuid, Option<i64>, Option<String>)> = timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                zirv_flow_store::TimelineEntry::Decision(d) if d.action.starts_with("flow.") => {
-                    Some((
-                        d.id,
-                        d.subject_ids["version"].as_i64(),
-                        d.subject_ids["node"].as_str().map(str::to_owned),
-                    ))
-                }
-                _ => None,
-            })
-            .collect();
-        on_timeline.sort();
-        let mut written: Vec<(Uuid, Option<i64>, Option<String>)> = flow_records
-            .iter()
-            .map(|r| {
-                (
-                    r.id,
-                    r.subject_ids["version"].as_i64(),
-                    r.subject_ids["node"].as_str().map(str::to_owned),
-                )
-            })
-            .collect();
-        written.sort();
-        assert_eq!(on_timeline, written);
-        // Each carries the enrollment's trace and names the enrollment.
-        let timeline_flow: Vec<_> = timeline
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                zirv_flow_store::TimelineEntry::Decision(d) if d.action.starts_with("flow.") => {
-                    Some(d)
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(timeline_flow.len(), flow_records.len());
-        for d in timeline_flow {
-            assert_eq!(
-                d.trace_id,
-                trace.trace_id.as_uuid(),
-                "{} {} is on the enrollment's trace",
-                d.action,
-                d.outcome
-            );
-            assert_eq!(
-                d.subject_ids["enrollment"].as_str(),
-                Some(id.to_string().as_str()),
-                "{} {} names the enrollment",
-                d.action,
-                d.outcome
-            );
-        }
-        assert!(
-            on_timeline
+            let mut on_timeline: Vec<(Uuid, Option<i64>, Option<String>)> = timeline
+                .entries
                 .iter()
-                .all(|(_, version, _)| *version == Some(1)),
-            "every flow decision carries the pinned version"
-        );
-        assert!(
-            on_timeline
+                .filter_map(|entry| match entry {
+                    zirv_flow_store::TimelineEntry::Decision(d)
+                        if d.action.starts_with("flow.") =>
+                    {
+                        Some((
+                            d.id,
+                            d.subject_ids["version"].as_i64(),
+                            d.subject_ids["node"].as_str().map(str::to_owned),
+                        ))
+                    }
+                    _ => None,
+                })
+                .collect();
+            on_timeline.sort();
+            let mut written: Vec<(Uuid, Option<i64>, Option<String>)> = flow_records
                 .iter()
-                .any(|(_, _, node)| node.as_deref() == Some("bump")),
-            "step decisions carry their node"
-        );
+                .map(|r| {
+                    (
+                        r.id,
+                        r.subject_ids["version"].as_i64(),
+                        r.subject_ids["node"].as_str().map(str::to_owned),
+                    )
+                })
+                .collect();
+            written.sort();
+            assert_eq!(on_timeline, written);
+            // Each carries the enrollment's trace and names the enrollment.
+            let timeline_flow: Vec<_> = timeline
+                .entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    zirv_flow_store::TimelineEntry::Decision(d)
+                        if d.action.starts_with("flow.") =>
+                    {
+                        Some(d)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(timeline_flow.len(), flow_records.len());
+            for d in timeline_flow {
+                assert_eq!(
+                    d.trace_id,
+                    trace.trace_id.as_uuid(),
+                    "{} {} is on the enrollment's trace",
+                    d.action,
+                    d.outcome
+                );
+                assert_eq!(
+                    d.subject_ids["enrollment"].as_str(),
+                    Some(id.to_string().as_str()),
+                    "{} {} names the enrollment",
+                    d.action,
+                    d.outcome
+                );
+            }
+            assert!(
+                on_timeline
+                    .iter()
+                    .all(|(_, version, _)| *version == Some(1)),
+                "every flow decision carries the pinned version"
+            );
+            assert!(
+                on_timeline
+                    .iter()
+                    .any(|(_, _, node)| node.as_deref() == Some("bump")),
+                "step decisions carry their node"
+            );
+        })
+        .await;
     }
 }

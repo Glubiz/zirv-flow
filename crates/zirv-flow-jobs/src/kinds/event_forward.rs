@@ -349,6 +349,8 @@ async fn call(
 
 #[cfg(test)]
 mod tests {
+    use zirv_flow_store::decision_testing::PERSONAL_DATA;
+
     use time::macros::datetime;
 
     use super::*;
@@ -446,52 +448,55 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_private_webhook_is_dead_lettered_with_a_fixed_code(pool: PgPool) {
-        use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_core::{Keyring, SecretId, SecretPurpose, seal, secret_aad};
 
-        let env = Env::with(
-            pool,
-            "private-webhook",
-            "webhook",
-            json!({"url": "http://169.254.169.254/secret-path?token=secret-query"}),
-            100,
-            100,
-        )
+            let env = Env::with(
+                pool,
+                "private-webhook",
+                "webhook",
+                json!({"url": "http://169.254.169.254/secret-path?token=secret-query"}),
+                100,
+                100,
+            )
+            .await;
+            let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+            let secret = SecretId::new();
+            let purpose = SecretPurpose::ConnectorCredential;
+            let sealed = seal(
+                &keys,
+                br#"{"signing_secret":"secret"}"#,
+                &secret_aad(env.ws, secret, purpose),
+            );
+            zirv_flow_store::secrets::insert_unchecked(&env.pool, env.ws, purpose, secret, &sealed)
+                .await
+                .unwrap();
+            let credential = zirv_flow_store::import_secret_as_credential(
+                &env.pool,
+                env.ws,
+                "Signing",
+                secret,
+                &["signing_secret"],
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE destinations SET credential_id = $2 WHERE id = $1")
+                .bind(env.destination)
+                .bind(credential.id)
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            env.order().await;
+            env.execute_with_keys(env.claim().await.unwrap(), Some(keys))
+                .await
+                .unwrap();
+            assert_eq!(
+                env.rows().await,
+                [("dead".to_owned(), 1, Some("egress_denied".to_owned()))]
+            );
+            assert!(env.claim().await.is_none(), "the refusal is terminal");
+        })
         .await;
-        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
-        let secret = SecretId::new();
-        let purpose = SecretPurpose::ConnectorCredential;
-        let sealed = seal(
-            &keys,
-            br#"{"signing_secret":"secret"}"#,
-            &secret_aad(env.ws, secret, purpose),
-        );
-        zirv_flow_store::secrets::insert_unchecked(&env.pool, env.ws, purpose, secret, &sealed)
-            .await
-            .unwrap();
-        let credential = zirv_flow_store::import_secret_as_credential(
-            &env.pool,
-            env.ws,
-            "Signing",
-            secret,
-            &["signing_secret"],
-        )
-        .await
-        .unwrap();
-        sqlx::query("UPDATE destinations SET credential_id = $2 WHERE id = $1")
-            .bind(env.destination)
-            .bind(credential.id)
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        env.order().await;
-        env.execute_with_keys(env.claim().await.unwrap(), Some(keys))
-            .await
-            .unwrap();
-        assert_eq!(
-            env.rows().await,
-            [("dead".to_owned(), 1, Some("egress_denied".to_owned()))]
-        );
-        assert!(env.claim().await.is_none(), "the refusal is terminal");
     }
 
     impl Env {
@@ -581,9 +586,12 @@ mod tests {
                 &[EventRecord {
                     source_record_id: None,
                     source: "web".into(),
-                    identifiers: vec![("email".into(), "ada@example.com".into())],
+                    identifiers: vec![("email".into(), PERSONAL_DATA.email.into())],
                     name: "order".into(),
-                    properties: json!({"plan": "pro"}).as_object().cloned().unwrap(),
+                    properties: json!({"plan": "pro", "private_note": PERSONAL_DATA.property})
+                        .as_object()
+                        .cloned()
+                        .unwrap(),
                     timestamp: None,
                     received_at: OffsetDateTime::now_utc(),
                     message_id: Some(format!("m-{n}")),
@@ -718,37 +726,40 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_purge_commits_its_rows_and_markers_before_the_job_transaction_ends(pool: PgPool) {
-        let env = Env::new(pool, "purge", "ok").await;
-        env.order().await;
-        sqlx::query(
-            "UPDATE forwarding_outbox SET state = 'delivered', payload = '{}',
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "purge", "ok").await;
+            env.order().await;
+            sqlx::query(
+                "UPDATE forwarding_outbox SET state = 'delivered', payload = '{}',
              updated_at = now() - interval '8 days'",
-        )
-        .execute(&env.pool)
-        .await
-        .unwrap();
-        let claimed = env.claim().await.unwrap();
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(IngestSettings {
-            pool: env.pool.clone(),
-            redaction_key: None,
-            batch_size: 1,
-            shards: 1,
-        });
-
-        EventForward
-            .run(&mut ctx, claimed.payload.clone())
+            )
+            .execute(&env.pool)
             .await
             .unwrap();
+            let claimed = env.claim().await.unwrap();
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed).with_ingest(IngestSettings {
+                pool: env.pool.clone(),
+                redaction_key: None,
+                batch_size: 1,
+                shards: 1,
+            });
 
-        assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
-        assert_eq!(
-            env.count("SELECT count(*) FROM erasure_handled_markers")
-                .await,
-            1
-        );
-        tx.rollback().await.unwrap();
-        assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
+            EventForward
+                .run(&mut ctx, claimed.payload.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
+            assert_eq!(
+                env.count("SELECT count(*) FROM erasure_handled_markers")
+                    .await,
+                1
+            );
+            tx.rollback().await.unwrap();
+            assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -756,95 +767,105 @@ mod tests {
     async fn a_mapped_event_is_delivered_under_its_stable_key_and_the_attempt_is_recorded(
         pool: PgPool,
     ) {
-        let env = Env::new(pool, "deliver", "ok").await;
-        let event = env.order().await;
-        let events_before = env.count("SELECT count(*) FROM events").await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "deliver", "ok").await;
+            let event = env.order().await;
+            let events_before = env.count("SELECT count(*) FROM events").await;
 
-        env.run().await;
+            env.run().await;
 
-        let key = idempotency_key(event, env.destination);
-        let sent = fake_ledger_sent(&env.ledger);
-        assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].key, key);
-        let body: Value = serde_json::from_str(sent[0].payload["body"].as_str().unwrap()).unwrap();
-        assert_eq!(body, json!({"name": "order", "plan": "pro"}));
-        assert_eq!(env.rows().await, [("delivered".to_owned(), 1, None)]);
-        let payload: Value = sqlx::query_scalar("SELECT payload FROM forwarding_outbox")
-            .fetch_one(&env.pool)
-            .await
-            .unwrap();
-        assert_eq!(payload, json!({}), "a delivered row keeps no payload");
-        assert_eq!(env.attempts().await, [(1, "delivered".to_owned())]);
-        assert!(
-            env.decisions().await.is_empty(),
-            "a delivery is not a decision"
-        );
-        // The job writes no event and starts no flow.
-        assert_eq!(
-            env.count("SELECT count(*) FROM events").await,
-            events_before
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
+            let key = idempotency_key(event, env.destination);
+            let sent = fake_ledger_sent(&env.ledger);
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0].key, key);
+            let body: Value =
+                serde_json::from_str(sent[0].payload["body"].as_str().unwrap()).unwrap();
+            assert_eq!(body, json!({"name": "order", "plan": "pro"}));
+            assert_eq!(env.rows().await, [("delivered".to_owned(), 1, None)]);
+            let payload: Value = sqlx::query_scalar("SELECT payload FROM forwarding_outbox")
+                .fetch_one(&env.pool)
+                .await
+                .unwrap();
+            assert_eq!(payload, json!({}), "a delivered row keeps no payload");
+            assert_eq!(env.attempts().await, [(1, "delivered".to_owned())]);
+            assert!(
+                env.decisions().await.is_empty(),
+                "a delivery is not a decision"
+            );
+            // The job writes no event and starts no flow.
+            assert_eq!(
+                env.count("SELECT count(*) FROM events").await,
+                events_before
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
+                    .await,
+                0
+            );
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'"
+                )
                 .await,
-            0
-        );
-        assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'")
-                .await,
-            0,
-            "nothing is left to deliver"
-        );
+                0,
+                "nothing is left to deliver"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_retry_reuses_the_key_backs_off_and_leaves_a_job_for_the_next_attempt(pool: PgPool) {
-        let env = Env::new(pool, "retry", "lose_first_answer").await;
-        let event = env.order().await;
-        let key = idempotency_key(event, env.destination);
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "retry", "lose_first_answer").await;
+            let event = env.order().await;
+            let key = idempotency_key(event, env.destination);
 
-        env.run().await;
+            env.run().await;
 
-        assert_eq!(
-            env.rows().await,
-            [("pending".to_owned(), 1, Some("http_5xx".to_owned()))]
-        );
-        let wait: f64 = sqlx::query_scalar(
-            "SELECT EXTRACT(EPOCH FROM next_attempt_at - now())::float8 FROM forwarding_outbox",
-        )
-        .fetch_one(&env.pool)
-        .await
-        .unwrap();
-        assert!(
-            (1.0..=10.5).contains(&wait),
-            "the first backoff is about 5 s: {wait}"
-        );
-        assert_eq!(
-            env.decisions().await,
-            [("retry".to_owned(), Some("http_5xx".to_owned()))]
-        );
-        let successor: (String, bool) =
-            sqlx::query_as("SELECT state, run_at > now() FROM jobs WHERE kind = 'event.forward'")
-                .fetch_one(&env.pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            successor,
-            ("ready".to_owned(), true),
-            "the next attempt waits for its time"
-        );
+            assert_eq!(
+                env.rows().await,
+                [("pending".to_owned(), 1, Some("http_5xx".to_owned()))]
+            );
+            let wait: f64 = sqlx::query_scalar(
+                "SELECT EXTRACT(EPOCH FROM next_attempt_at - now())::float8 FROM forwarding_outbox",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert!(
+                (1.0..=10.5).contains(&wait),
+                "the first backoff is about 5 s: {wait}"
+            );
+            assert_eq!(
+                env.decisions().await,
+                [("retry".to_owned(), Some("http_5xx".to_owned()))]
+            );
+            let successor: (String, bool) = sqlx::query_as(
+                "SELECT state, run_at > now() FROM jobs WHERE kind = 'event.forward'",
+            )
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                successor,
+                ("ready".to_owned(), true),
+                "the next attempt waits for its time"
+            );
 
-        env.run().await;
+            env.run().await;
 
-        assert_eq!(fake_ledger_calls(&env.ledger), [key.clone(), key.clone()]);
-        assert_eq!(fake_ledger_sent(&env.ledger).len(), 1);
-        assert_eq!(env.rows().await, [("delivered".to_owned(), 2, None)]);
-        assert_eq!(
-            env.attempts().await,
-            [(1, "retryable".to_owned()), (2, "delivered".to_owned())]
-        );
+            assert_eq!(fake_ledger_calls(&env.ledger), [key.clone(), key.clone()]);
+            assert_eq!(fake_ledger_sent(&env.ledger).len(), 1);
+            assert_eq!(env.rows().await, [("delivered".to_owned(), 2, None)]);
+            assert_eq!(
+                env.attempts().await,
+                [(1, "retryable".to_owned()), (2, "delivered".to_owned())]
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -852,39 +873,44 @@ mod tests {
     async fn after_the_last_attempt_the_row_is_a_dead_letter_with_a_decision_for_each_step(
         pool: PgPool,
     ) {
-        let env = Env::new(pool, "dead", "server_error").await;
-        env.order().await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "dead", "server_error").await;
+            env.order().await;
 
-        for _ in 0..MAX_ATTEMPTS {
-            env.run().await;
-        }
+            for _ in 0..MAX_ATTEMPTS {
+                env.run().await;
+            }
 
-        assert_eq!(
-            env.rows().await,
-            [("dead".to_owned(), MAX_ATTEMPTS, Some("http_5xx".to_owned()))]
-        );
-        let decisions = env.decisions().await;
-        assert_eq!(decisions.len(), MAX_ATTEMPTS as usize);
-        assert_eq!(decisions.last().unwrap().0, "dead");
-        assert!(
-            decisions[..decisions.len() - 1]
-                .iter()
-                .all(|(outcome, _)| outcome == "retry")
-        );
-        assert_eq!(env.attempts().await.len(), MAX_ATTEMPTS as usize);
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'")
+            assert_eq!(
+                env.rows().await,
+                [("dead".to_owned(), MAX_ATTEMPTS, Some("http_5xx".to_owned()))]
+            );
+            let decisions = env.decisions().await;
+            assert_eq!(decisions.len(), MAX_ATTEMPTS as usize);
+            assert_eq!(decisions.last().unwrap().0, "dead");
+            assert!(
+                decisions[..decisions.len() - 1]
+                    .iter()
+                    .all(|(outcome, _)| outcome == "retry")
+            );
+            assert_eq!(env.attempts().await.len(), MAX_ATTEMPTS as usize);
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'"
+                )
                 .await,
-            0,
-            "a dead letter schedules nothing"
-        );
-        // Nothing of the payload reached a decision.
-        let text: Vec<String> =
-            sqlx::query_scalar("SELECT subject_ids::text FROM decision_records")
-                .fetch_all(&env.pool)
-                .await
-                .unwrap();
-        assert!(text.iter().all(|row| !row.contains("pro")));
+                0,
+                "a dead letter schedules nothing"
+            );
+            // Nothing of the payload reached a decision.
+            let text: Vec<String> =
+                sqlx::query_scalar("SELECT subject_ids::text FROM decision_records")
+                    .fetch_all(&env.pool)
+                    .await
+                    .unwrap();
+            assert!(text.iter().all(|row| !row.contains("pro")));
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -892,96 +918,107 @@ mod tests {
     async fn a_terminal_answer_is_dead_at_once_and_a_redrive_delivers_it_without_a_flow(
         pool: PgPool,
     ) {
-        let env = Env::new(pool, "redrive", "rejected").await;
-        let event = env.order().await;
-        let events_before = env.count("SELECT count(*) FROM events").await;
-        env.run().await;
-        assert_eq!(
-            env.rows().await,
-            [("dead".to_owned(), 1, Some("http_4xx".to_owned()))]
-        );
-        assert_eq!(
-            env.decisions().await,
-            [("dead".to_owned(), Some("http_4xx".to_owned()))]
-        );
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "redrive", "rejected").await;
+            let event = env.order().await;
+            let events_before = env.count("SELECT count(*) FROM events").await;
+            env.run().await;
+            assert_eq!(
+                env.rows().await,
+                [("dead".to_owned(), 1, Some("http_4xx".to_owned()))]
+            );
+            assert_eq!(
+                env.decisions().await,
+                [("dead".to_owned(), Some("http_4xx".to_owned()))]
+            );
 
-        env.set_mode("ok").await;
-        let mut connection = env.pool.acquire().await.unwrap();
-        let redriven = redrive(
-            &mut connection,
-            env.ws,
-            Redrive::Destination(env.destination),
-        )
-        .await
-        .unwrap();
-        drop(connection);
-        assert_eq!(redriven, 1);
-        env.run().await;
+            env.set_mode("ok").await;
+            let mut connection = env.pool.acquire().await.unwrap();
+            let redriven = redrive(
+                &mut connection,
+                env.ws,
+                Redrive::Destination(env.destination),
+            )
+            .await
+            .unwrap();
+            drop(connection);
+            assert_eq!(redriven, 1);
+            env.run().await;
 
-        assert_eq!(env.rows().await, [("delivered".to_owned(), 1, None)]);
-        assert_eq!(
-            env.attempts().await,
-            [(1, "terminal".to_owned()), (2, "delivered".to_owned())],
-            "the attempt numbers continue past the re-drive"
-        );
-        assert_eq!(
-            fake_ledger_sent(&env.ledger)[0].key,
-            idempotency_key(event, env.destination)
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM events").await,
-            events_before
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
-                .await,
-            0
-        );
-        assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+            assert_eq!(env.rows().await, [("delivered".to_owned(), 1, None)]);
+            assert_eq!(
+                env.attempts().await,
+                [(1, "terminal".to_owned()), (2, "delivered".to_owned())],
+                "the attempt numbers continue past the re-drive"
+            );
+            assert_eq!(
+                fake_ledger_sent(&env.ledger)[0].key,
+                idempotency_key(event, env.destination)
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM events").await,
+                events_before
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind LIKE 'flow.%'")
+                    .await,
+                0
+            );
+            assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_rate_limit_wait_gives_the_row_back_without_spending_an_attempt(pool: PgPool) {
-        let env = Env::with(pool, "rate", "fake", json!({"mode": "ok"}), 1, 1).await;
-        env.order().await;
-        env.order().await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, "rate", "fake", json!({"mode": "ok"}), 1, 1).await;
+            env.order().await;
+            env.order().await;
 
-        env.run().await;
+            env.run().await;
 
-        let rows = env.rows().await;
-        let delivered = rows.iter().filter(|row| row.0 == "delivered").count();
-        assert_eq!(delivered, 1, "{rows:?}");
-        assert!(
-            rows.contains(&("pending".to_owned(), 0, None)),
-            "the second row waits for a token and spends no attempt: {rows:?}"
-        );
-        assert_eq!(env.attempts().await.len(), 1);
-        assert_eq!(fake_ledger_calls(&env.ledger).len(), 1);
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'")
+            let rows = env.rows().await;
+            let delivered = rows.iter().filter(|row| row.0 == "delivered").count();
+            assert_eq!(delivered, 1, "{rows:?}");
+            assert!(
+                rows.contains(&("pending".to_owned(), 0, None)),
+                "the second row waits for a token and spends no attempt: {rows:?}"
+            );
+            assert_eq!(env.attempts().await.len(), 1);
+            assert_eq!(fake_ledger_calls(&env.ledger).len(), 1);
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'event.forward' AND state = 'ready'"
+                )
                 .await,
-            1,
-            "a job is left for the waiting row"
-        );
+                1,
+                "a job is left for the waiting row"
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_destination_that_cannot_carry_events_kills_its_rows_with_a_fixed_code(pool: PgPool) {
-        let env = Env::with(pool, "mail", "smtp", json!({}), 10, 10).await;
-        env.order().await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::with(pool, "mail", "smtp", json!({}), 10, 10).await;
+            env.order().await;
 
-        env.run().await;
+            env.run().await;
 
-        assert_eq!(
-            env.rows().await,
-            [(
-                "dead".to_owned(),
-                1,
-                Some("destination_unsupported".to_owned())
-            )]
-        );
+            assert_eq!(
+                env.rows().await,
+                [(
+                    "dead".to_owned(),
+                    1,
+                    Some("destination_unsupported".to_owned())
+                )]
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -989,115 +1026,122 @@ mod tests {
     async fn an_archived_destination_is_left_alone_and_a_payload_for_another_workspace_fails(
         pool: PgPool,
     ) {
-        let env = Env::new(pool, "archived", "ok").await;
-        env.order().await;
-        sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
-            .bind(env.destination)
-            .execute(&env.pool)
-            .await
-            .unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "archived", "ok").await;
+            env.order().await;
+            sqlx::query("UPDATE destinations SET archived_at = now() WHERE id = $1")
+                .bind(env.destination)
+                .execute(&env.pool)
+                .await
+                .unwrap();
 
-        env.run().await;
+            env.run().await;
 
-        assert_eq!(env.rows().await, [("pending".to_owned(), 0, None)]);
-        assert!(fake_ledger_calls(&env.ledger).is_empty());
+            assert_eq!(env.rows().await, [("pending".to_owned(), 0, None)]);
+            assert!(fake_ledger_calls(&env.ledger).is_empty());
 
-        let mut connection = env.pool.acquire().await.unwrap();
-        ensure_forward_job(&mut connection, env.ws, env.destination, None)
-            .await
-            .unwrap();
-        drop(connection);
-        sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let claimed = env.claim().await.expect("a job is ready");
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed);
-        let refused = EventForward
-            .run(
-                &mut ctx,
-                json!({"workspace_id": WorkspaceId::new().to_string(),
+            let mut connection = env.pool.acquire().await.unwrap();
+            ensure_forward_job(&mut connection, env.ws, env.destination, None)
+                .await
+                .unwrap();
+            drop(connection);
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let claimed = env.claim().await.expect("a job is ready");
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed);
+            let refused = EventForward
+                .run(
+                    &mut ctx,
+                    json!({"workspace_id": WorkspaceId::new().to_string(),
                        "destination_id": env.destination.to_string()}),
-            )
-            .await;
-        assert!(refused.is_err());
+                )
+                .await;
+            assert!(refused.is_err());
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_row_whose_claim_was_taken_over_is_skipped_and_no_call_is_made(pool: PgPool) {
-        let env = Env::new(pool, "takeover", "ok").await;
-        env.order().await;
-        let mut connection = env.pool.acquire().await.unwrap();
-        let first = zirv_flow_store::claim_due(
-            &mut connection,
-            env.ws,
-            env.destination,
-            BATCH,
-            Duration::from_secs(300),
-        )
-        .await
-        .unwrap()
-        .remove(0);
-        // The lease ran out and another job generation claimed the row.
-        sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now()")
-            .execute(&mut *connection)
-            .await
-            .unwrap();
-        let second = zirv_flow_store::claim_due(
-            &mut connection,
-            env.ws,
-            env.destination,
-            BATCH,
-            Duration::from_secs(300),
-        )
-        .await
-        .unwrap()
-        .remove(0);
-        drop(connection);
-        assert_ne!(first.claim_token, second.claim_token);
-
-        sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
-            .execute(&env.pool)
-            .await
-            .unwrap();
-        let claimed = env.claim().await.expect("an event.forward job is ready");
-        let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
-        let mut ctx = JobContext::new(&mut tx, &claimed)
-            .with_rate_gates(Arc::clone(&env.gates))
-            .with_outbound(
-                None,
-                Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap()),
-                Arc::default(),
-            );
-        let destination = find_destination(ctx.conn(), env.ws, env.destination)
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "takeover", "ok").await;
+            env.order().await;
+            let mut connection = env.pool.acquire().await.unwrap();
+            let first = zirv_flow_store::claim_due(
+                &mut connection,
+                env.ws,
+                env.destination,
+                BATCH,
+                Duration::from_secs(300),
+            )
             .await
             .unwrap()
-            .unwrap();
-        let driver = Registry::built_in().get(&destination.kind);
-        let mut credential = None;
+            .remove(0);
+            // The lease ran out and another job generation claimed the row.
+            sqlx::query("UPDATE forwarding_outbox SET next_attempt_at = now()")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            let second = zirv_flow_store::claim_due(
+                &mut connection,
+                env.ws,
+                env.destination,
+                BATCH,
+                Duration::from_secs(300),
+            )
+            .await
+            .unwrap()
+            .remove(0);
+            drop(connection);
+            assert_ne!(first.claim_token, second.claim_token);
 
-        forward_one(
-            &mut ctx,
-            &env.pool,
-            &destination,
-            driver,
-            &mut credential,
-            &first,
-        )
-        .await
-        .unwrap();
-        drop(ctx);
-        drop(tx);
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE kind = 'event.forward'")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            let claimed = env.claim().await.expect("an event.forward job is ready");
+            let mut tx = zirv_flow_store::begin(&env.pool).await.unwrap();
+            let mut ctx = JobContext::new(&mut tx, &claimed)
+                .with_rate_gates(Arc::clone(&env.gates))
+                .with_outbound(
+                    None,
+                    Arc::new(EgressPolicy::parse(&["127.0.0.1/32".to_owned()]).unwrap()),
+                    Arc::default(),
+                );
+            let destination = find_destination(ctx.conn(), env.ws, env.destination)
+                .await
+                .unwrap()
+                .unwrap();
+            let driver = Registry::built_in().get(&destination.kind);
+            let mut credential = None;
 
-        assert!(fake_ledger_calls(&env.ledger).is_empty(), "no call is made");
-        assert!(env.attempts().await.is_empty());
-        assert_eq!(env.rows().await, [("pending".to_owned(), 2, None)]);
-        let token: Option<Uuid> = sqlx::query_scalar("SELECT claim_token FROM forwarding_outbox")
-            .fetch_one(&env.pool)
+            forward_one(
+                &mut ctx,
+                &env.pool,
+                &destination,
+                driver,
+                &mut credential,
+                &first,
+            )
             .await
             .unwrap();
-        assert_eq!(token, Some(second.claim_token), "the newer claim is intact");
+            drop(ctx);
+            drop(tx);
+
+            assert!(fake_ledger_calls(&env.ledger).is_empty(), "no call is made");
+            assert!(env.attempts().await.is_empty());
+            assert_eq!(env.rows().await, [("pending".to_owned(), 2, None)]);
+            let token: Option<Uuid> =
+                sqlx::query_scalar("SELECT claim_token FROM forwarding_outbox")
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(token, Some(second.claim_token), "the newer claim is intact");
+        })
+        .await;
     }
 }

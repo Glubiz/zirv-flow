@@ -1329,7 +1329,10 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_private_http_manifest_records_a_fixed_run_error_without_connecting(pool: PgPool) {
-        refused_http_run(pool, false).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            refused_http_run(pool, false).await;
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1337,7 +1340,10 @@ mod tests {
     async fn a_private_oauth_token_endpoint_records_a_fixed_run_error_without_connecting(
         pool: PgPool,
     ) {
-        refused_http_run(pool, true).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            refused_http_run(pool, true).await;
+        })
+        .await;
     }
 
     fn hook<F>(f: F) -> Probe
@@ -1366,6 +1372,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_sync_shows_applied_rejected_and_deleted_records_under_one_trace(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = setup(
             &pool,
             json!({"records": 7, "batch": 3, "deleted": "1", "invalid": "2"}),
@@ -1382,8 +1389,8 @@ mod tests {
                     source: env.source.to_string(),
                     stream: "stream_1".into(),
                     record_key: "stream_1-1".into(),
-                    identifiers: vec![("email".into(), "old@example.com".into())],
-                    traits: serde_json::Map::new(),
+                    identifiers: vec![("email".into(), zirv_flow_store::decision_testing::PERSONAL_DATA.email.into())],
+                    traits: zirv_flow_store::decision_testing::PERSONAL_DATA.traits(),
                     observed_at: OffsetDateTime::now_utc(),
                     trace: seed,
                 }],
@@ -1399,7 +1406,7 @@ mod tests {
                     stream: "stream_1".into(),
                     record_key: "stream_1-2".into(),
                     identifiers: vec![("email".into(), "two@example.com".into())],
-                    traits: serde_json::Map::new(),
+                    traits: zirv_flow_store::decision_testing::PERSONAL_DATA.traits(),
                     observed_at: OffsetDateTime::now_utc(),
                     trace: TraceContext::root(Cause::api("seed")),
                 }],
@@ -1415,7 +1422,7 @@ mod tests {
                     stream: "stream_1".into(),
                     record_key: "stale".into(),
                     identifiers: vec![("email".into(), "stale@example.com".into())],
-                    traits: serde_json::Map::new(),
+                    traits: zirv_flow_store::decision_testing::PERSONAL_DATA.traits(),
                     observed_at: OffsetDateTime::now_utc(),
                     trace: TraceContext::root(Cause::api("seed")),
                 }],
@@ -1590,53 +1597,58 @@ mod tests {
         }
         // The job queue holds nothing back: the run finished in one attempt.
         assert_eq!(done.checkpoint, Some(json!({"offset": 7})));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_crashed_attempt_resumes_from_the_checkpoint_without_reapplying(pool: PgPool) {
-        let env = setup(
-            &pool,
-            json!({"records": 1500, "batch": 100}),
-            "full_refresh",
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 1500, "batch": 100}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+
+            let first = attempt(
+                &env,
+                &job,
+                &Probe {
+                    stop_after: Some(1),
+                    before_commit: None,
+                },
+            )
+            .await;
+            assert!(first.is_err());
+            let mid = env.run(run.id).await;
+            assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
+            assert_eq!(mid.checkpoint, Some(json!({"offset": 500})));
+
+            attempt(&env, &job, &Probe::default()).await.unwrap();
+
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "succeeded");
+            assert_eq!(done.attempt, 2);
+            // Committed batches were not read or applied again.
+            assert_eq!(
+                (
+                    done.records_read,
+                    done.records_applied,
+                    done.records_unchanged
+                ),
+                (1500, 1500, 0)
+            );
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1500);
+            assert_eq!(
+                env.count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
+                    .await,
+                1500
+            );
+        })
         .await;
-        let (run, job) = env.queue().await;
-
-        let first = attempt(
-            &env,
-            &job,
-            &Probe {
-                stop_after: Some(1),
-                before_commit: None,
-            },
-        )
-        .await;
-        assert!(first.is_err());
-        let mid = env.run(run.id).await;
-        assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
-        assert_eq!(mid.checkpoint, Some(json!({"offset": 500})));
-
-        attempt(&env, &job, &Probe::default()).await.unwrap();
-
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "succeeded");
-        assert_eq!(done.attempt, 2);
-        // Committed batches were not read or applied again.
-        assert_eq!(
-            (
-                done.records_read,
-                done.records_applied,
-                done.records_unchanged
-            ),
-            (1500, 1500, 0)
-        );
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1500);
-        assert_eq!(
-            env.count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
-                .await,
-            1500
-        );
     }
 
     #[sqlx::test]
@@ -1644,145 +1656,157 @@ mod tests {
     async fn a_worker_that_lost_its_lease_commits_nothing_and_the_next_attempt_resumes(
         pool: PgPool,
     ) {
-        let env = setup(
-            &pool,
-            json!({"records": 1000, "batch": 100}),
-            "full_refresh",
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 1000, "batch": 100}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+            let stolen = Probe {
+                stop_after: None,
+                before_commit: Some(Box::new({
+                    let pool = pool.clone();
+                    let taken = Arc::new(AtomicUsize::new(0));
+                    let job_id = job.id;
+                    move || {
+                        let (pool, taken) = (pool.clone(), Arc::clone(&taken));
+                        Box::pin(async move {
+                            // Between the second unit being read and being committed, the lease is
+                            // taken over.
+                            if taken.fetch_add(1, Ordering::SeqCst) == 1 {
+                                sqlx::query(
+                                    "UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1",
+                                )
+                                .bind(job_id)
+                                .execute(&pool)
+                                .await
+                                .unwrap();
+                            }
+                        })
+                    }
+                })),
+            };
+
+            let lost = attempt(&env, &job, &stolen).await;
+
+            assert_eq!(lost, Err(LEASE_LOST));
+            let mid = env.run(run.id).await;
+            assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 500);
+
+            let next = env.reclaim(&job).await;
+            attempt(&env, &next, &Probe::default()).await.unwrap();
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "succeeded");
+            assert_eq!((done.records_read, done.records_applied), (1000, 1000));
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1000);
+        })
         .await;
-        let (run, job) = env.queue().await;
-        let stolen = Probe {
-            stop_after: None,
-            before_commit: Some(Box::new({
-                let pool = pool.clone();
-                let taken = Arc::new(AtomicUsize::new(0));
-                let job_id = job.id;
-                move || {
-                    let (pool, taken) = (pool.clone(), Arc::clone(&taken));
-                    Box::pin(async move {
-                        // Between the second unit being read and being committed, the lease is
-                        // taken over.
-                        if taken.fetch_add(1, Ordering::SeqCst) == 1 {
-                            sqlx::query(
-                                "UPDATE jobs SET lease_token = gen_random_uuid() WHERE id = $1",
-                            )
-                            .bind(job_id)
-                            .execute(&pool)
-                            .await
-                            .unwrap();
-                        }
-                    })
-                }
-            })),
-        };
-
-        let lost = attempt(&env, &job, &stolen).await;
-
-        assert_eq!(lost, Err(LEASE_LOST));
-        let mid = env.run(run.id).await;
-        assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 500);
-
-        let next = env.reclaim(&job).await;
-        attempt(&env, &next, &Probe::default()).await.unwrap();
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "succeeded");
-        assert_eq!((done.records_read, done.records_applied), (1000, 1000));
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1000);
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_cancel_stops_at_the_batch_boundary_and_leaves_the_checkpoint(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 1500, "batch": 100}), "incremental").await;
-        let (run, job) = env.queue().await;
-        let cancelling = hook({
-            let pool = pool.clone();
-            let (ws, source, run_id) = (env.ws, env.source, run.id);
-            move |call| {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 1500, "batch": 100}), "incremental").await;
+            let (run, job) = env.queue().await;
+            let cancelling = hook({
                 let pool = pool.clone();
-                Box::pin(async move {
-                    if call == 2 {
-                        let mut connection = pool.acquire().await.unwrap();
-                        let outcome = cancel_run(&mut connection, ws, source, run_id)
-                            .await
-                            .unwrap();
-                        assert!(matches!(outcome, CancelOutcome::Cancelled(_)));
-                    }
-                })
-            }
-        });
+                let (ws, source, run_id) = (env.ws, env.source, run.id);
+                move |call| {
+                    let pool = pool.clone();
+                    Box::pin(async move {
+                        if call == 2 {
+                            let mut connection = pool.acquire().await.unwrap();
+                            let outcome = cancel_run(&mut connection, ws, source, run_id)
+                                .await
+                                .unwrap();
+                            assert!(matches!(outcome, CancelOutcome::Cancelled(_)));
+                        }
+                    })
+                }
+            });
 
-        attempt(&env, &job, &cancelling).await.unwrap();
+            attempt(&env, &job, &cancelling).await.unwrap();
 
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "cancelled");
-        // The unit in flight when the cancel arrived was not applied.
-        assert_eq!(done.records_read, 500);
-        assert_eq!(done.checkpoint, Some(json!({"offset": 500})));
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 500);
-        let stream: Option<Value> =
-            sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
-                .bind(env.stream)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stream, Some(json!({"offset": 500})));
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "cancelled");
+            // The unit in flight when the cancel arrived was not applied.
+            assert_eq!(done.records_read, 500);
+            assert_eq!(done.checkpoint, Some(json!({"offset": 500})));
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 500);
+            let stream: Option<Value> =
+                sqlx::query_scalar("SELECT checkpoint FROM streams WHERE id = $1")
+                    .bind(env.stream)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(stream, Some(json!({"offset": 500})));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_run_cancelled_before_it_starts_reads_nothing(pool: PgPool) {
-        let env = setup(&pool, json!({}), "full_refresh").await;
-        let (run, job) = env.queue().await;
-        let mut connection = pool.acquire().await.unwrap();
-        cancel_run(&mut connection, env.ws, env.source, run.id)
-            .await
-            .unwrap();
-        drop(connection);
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            let (run, job) = env.queue().await;
+            let mut connection = pool.acquire().await.unwrap();
+            cancel_run(&mut connection, env.ws, env.source, run.id)
+                .await
+                .unwrap();
+            drop(connection);
 
-        attempt(&env, &job, &Probe::default()).await.unwrap();
+            attempt(&env, &job, &Probe::default()).await.unwrap();
 
-        assert_eq!(env.run(run.id).await.state, "cancelled");
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
+            assert_eq!(env.run(run.id).await.state, "cancelled");
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn too_many_rejects_fail_the_run_and_keep_what_was_applied(pool: PgPool) {
-        let invalid: Vec<usize> = (0..60).collect();
-        let env = setup(
-            &pool,
-            json!({"records": 1000, "batch": 100, "invalid": ids(&invalid)}),
-            "full_refresh",
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let invalid: Vec<usize> = (0..60).collect();
+            let env = setup(
+                &pool,
+                json!({"records": 1000, "batch": 100, "invalid": ids(&invalid)}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+
+            attempt(&env, &job, &Probe::default()).await.unwrap();
+
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "failed");
+            assert_eq!(done.error_code.as_deref(), Some("reject_threshold"));
+            // The first unit of 500 had 60 rejects (12%), over the 5% threshold: the rest was not read.
+            assert_eq!(
+                (
+                    done.records_read,
+                    done.records_applied,
+                    done.records_rejected
+                ),
+                (500, 440, 60)
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM source_records WHERE deleted_at IS NULL")
+                    .await,
+                440
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM source_records WHERE deleted_at IS NOT NULL")
+                    .await,
+                0
+            );
+        })
         .await;
-        let (run, job) = env.queue().await;
-
-        attempt(&env, &job, &Probe::default()).await.unwrap();
-
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "failed");
-        assert_eq!(done.error_code.as_deref(), Some("reject_threshold"));
-        // The first unit of 500 had 60 rejects (12%), over the 5% threshold: the rest was not read.
-        assert_eq!(
-            (
-                done.records_read,
-                done.records_applied,
-                done.records_rejected
-            ),
-            (500, 440, 60)
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM source_records WHERE deleted_at IS NULL")
-                .await,
-            440
-        );
-        assert_eq!(
-            env.count("SELECT count(*) FROM source_records WHERE deleted_at IS NOT NULL")
-                .await,
-            0
-        );
     }
 
     #[sqlx::test]
@@ -1790,24 +1814,27 @@ mod tests {
     async fn an_incremental_run_starts_from_the_streams_checkpoint_and_a_full_refresh_from_the_start(
         pool: PgPool,
     ) {
-        for (mode, second_read) in [("incremental", 3), ("full_refresh", 8)] {
-            let env = setup_again(&pool, mode).await;
-            let (first, job) = env.queue().await;
-            attempt(&env, &job, &Probe::default()).await.unwrap();
-            assert_eq!(env.run(first.id).await.records_read, 5);
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            for (mode, second_read) in [("incremental", 3), ("full_refresh", 8)] {
+                let env = setup_again(&pool, mode).await;
+                let (first, job) = env.queue().await;
+                attempt(&env, &job, &Probe::default()).await.unwrap();
+                assert_eq!(env.run(first.id).await.records_read, 5);
 
-            sqlx::query("UPDATE sources SET config = '{\"records\": 8}'::jsonb")
-                .execute(&pool)
-                .await
-                .unwrap();
-            let (second, job) = env.queue().await;
-            attempt(&env, &job, &Probe::default()).await.unwrap();
+                sqlx::query("UPDATE sources SET config = '{\"records\": 8}'::jsonb")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let (second, job) = env.queue().await;
+                attempt(&env, &job, &Probe::default()).await.unwrap();
 
-            let done = env.run(second.id).await;
-            assert_eq!(done.state, "succeeded", "{mode}");
-            assert_eq!(done.records_read, second_read, "{mode}");
-            cleanup(&pool).await;
-        }
+                let done = env.run(second.id).await;
+                assert_eq!(done.state, "succeeded", "{mode}");
+                assert_eq!(done.records_read, second_read, "{mode}");
+                cleanup(&pool).await;
+            }
+        })
+        .await;
     }
 
     /// A fresh environment for each mode of one test, in a database that is cleaned between.
@@ -1830,42 +1857,48 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn stale_settings_fail_the_run_before_anything_is_read(pool: PgPool) {
-        let env = setup(&pool, json!({}), "incremental").await;
-        // Discovery ran again and the stream no longer has its cursor field.
-        sqlx::query(
-            "UPDATE streams SET discovered = jsonb_set(discovered, '{fields}', \
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({}), "incremental").await;
+            // Discovery ran again and the stream no longer has its cursor field.
+            sqlx::query(
+                "UPDATE streams SET discovered = jsonb_set(discovered, '{fields}', \
                 (SELECT jsonb_agg(f) FROM jsonb_array_elements(discovered->'fields') f \
                  WHERE f->>'name' <> 'updated_at'))",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let (run, job) = env.queue().await;
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let (run, job) = env.queue().await;
 
-        attempt(&env, &job, &Probe::default()).await.unwrap();
+            attempt(&env, &job, &Probe::default()).await.unwrap();
 
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "failed");
-        assert_eq!(done.error_code.as_deref(), Some("stream_settings_invalid"));
-        assert_eq!(done.records_read, 0);
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "failed");
+            assert_eq!(done.error_code.as_deref(), Some("stream_settings_invalid"));
+            assert_eq!(done.records_read, 0);
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_stream_without_a_mapping_fails_the_run(pool: PgPool) {
-        let env = setup(&pool, json!({}), "full_refresh").await;
-        let (run, job) = env.queue().await;
-        sqlx::query("UPDATE streams SET mapping = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            let (run, job) = env.queue().await;
+            sqlx::query("UPDATE streams SET mapping = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        attempt(&env, &job, &Probe::default()).await.unwrap();
+            attempt(&env, &job, &Probe::default()).await.unwrap();
 
-        let done = env.run(run.id).await;
-        assert_eq!(done.error_code.as_deref(), Some("stream_not_mapped"));
-        assert_eq!(done.state, "failed");
+            let done = env.run(run.id).await;
+            assert_eq!(done.error_code.as_deref(), Some("stream_not_mapped"));
+            assert_eq!(done.state, "failed");
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1873,32 +1906,35 @@ mod tests {
     async fn a_read_error_is_retried_and_the_last_attempt_fails_the_run_with_source_error(
         pool: PgPool,
     ) {
-        let env = setup(
-            &pool,
-            json!({"records": 600, "batch": 100, "fail_after_batches": 1}),
-            "full_refresh",
-        )
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 600, "batch": 100, "fail_after_batches": 1}),
+                "full_refresh",
+            )
+            .await;
+            let (run, job) = env.queue().await;
+
+            let first = attempt(&env, &job, &Probe::default()).await;
+
+            assert!(first.is_err());
+            let after_first = env.run(run.id).await;
+            // Nothing was committed: the source failed before a unit was gathered.
+            assert_eq!(after_first.state, "running");
+            assert_eq!(after_first.records_read, 0);
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..env.reclaim(&job).await
+            };
+
+            let result = attempt(&env, &last, &Probe::default()).await;
+
+            assert!(result.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+        })
         .await;
-        let (run, job) = env.queue().await;
-
-        let first = attempt(&env, &job, &Probe::default()).await;
-
-        assert!(first.is_err());
-        let after_first = env.run(run.id).await;
-        // Nothing was committed: the source failed before a unit was gathered.
-        assert_eq!(after_first.state, "running");
-        assert_eq!(after_first.records_read, 0);
-        let last = ClaimedJob {
-            attempts: job.max_attempts,
-            ..env.reclaim(&job).await
-        };
-
-        let result = attempt(&env, &last, &Probe::default()).await;
-
-        assert!(result.is_err());
-        let failed = env.run(run.id).await;
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
     }
 
     #[sqlx::test]
@@ -1906,72 +1942,75 @@ mod tests {
     async fn a_failure_that_is_not_a_read_error_ends_the_run_as_job_failed_on_the_last_attempt(
         pool: PgPool,
     ) {
-        let env = setup(&pool, json!({}), "full_refresh").await;
-        let (run, job) = env.queue().await;
-        // The source has a credential, but the worker has no master key to open it.
-        let secret = zirv_flow_core::SecretId::new();
-        let keys = Keyring::new(MasterKey::generate(), None).unwrap();
-        let sealed = seal(
-            &keys,
-            br#"{"token":"ok"}"#,
-            &secret_aad(env.ws, secret, SecretPurpose::ConnectorCredential),
-        );
-        zirv_flow_store::secrets::insert_unchecked(
-            &pool,
-            env.ws,
-            SecretPurpose::ConnectorCredential,
-            secret,
-            &sealed,
-        )
-        .await
-        .unwrap();
-        let credential = zirv_flow_store::import_secret_as_credential(
-            &pool,
-            env.ws,
-            "source credential",
-            secret,
-            &["token"],
-        )
-        .await
-        .unwrap();
-        sqlx::query("UPDATE sources SET credential_id = $1")
-            .bind(credential.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let last = ClaimedJob {
-            attempts: job.max_attempts,
-            ..job.clone()
-        };
-
-        let result = attempt_as(&env, &last, &Probe::default(), None, false).await;
-
-        assert!(result.is_err());
-        let failed = env.run(run.id).await;
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error_code.as_deref(), Some("job_failed"));
-        // With the key, the credential opens and the run goes through.
-        let (second, job) = {
-            let mut connection = pool.acquire().await.unwrap();
-            let run = queue_run(
-                &mut connection,
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            let (run, job) = env.queue().await;
+            // The source has a credential, but the worker has no master key to open it.
+            let secret = zirv_flow_core::SecretId::new();
+            let keys = Keyring::new(MasterKey::generate(), None).unwrap();
+            let sealed = seal(
+                &keys,
+                br#"{"token":"ok"}"#,
+                &secret_aad(env.ws, secret, SecretPurpose::ConnectorCredential),
+            );
+            zirv_flow_store::secrets::insert_unchecked(
+                &pool,
                 env.ws,
-                env.source,
-                env.stream,
-                RunKind::Sync,
-                RunTrigger::Manual,
-                None,
+                SecretPurpose::ConnectorCredential,
+                secret,
+                &sealed,
             )
             .await
-            .unwrap()
             .unwrap();
-            drop(connection);
-            (run, env.claim().await)
-        };
-        attempt_as(&env, &job, &Probe::default(), Some(Arc::new(keys)), false)
+            let credential = zirv_flow_store::import_secret_as_credential(
+                &pool,
+                env.ws,
+                "source credential",
+                secret,
+                &["token"],
+            )
             .await
             .unwrap();
-        assert_eq!(env.run(second.id).await.state, "succeeded");
+            sqlx::query("UPDATE sources SET credential_id = $1")
+                .bind(credential.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..job.clone()
+            };
+
+            let result = attempt_as(&env, &last, &Probe::default(), None, false).await;
+
+            assert!(result.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("job_failed"));
+            // With the key, the credential opens and the run goes through.
+            let (second, job) = {
+                let mut connection = pool.acquire().await.unwrap();
+                let run = queue_run(
+                    &mut connection,
+                    env.ws,
+                    env.source,
+                    env.stream,
+                    RunKind::Sync,
+                    RunTrigger::Manual,
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                drop(connection);
+                (run, env.claim().await)
+            };
+            attempt_as(&env, &job, &Probe::default(), Some(Arc::new(keys)), false)
+                .await
+                .unwrap();
+            assert_eq!(env.run(second.id).await.state, "succeeded");
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -1979,157 +2018,163 @@ mod tests {
     async fn two_sources_share_one_credential_and_a_rotation_reaches_both_on_their_next_open(
         pool: PgPool,
     ) {
-        use zirv_flow_core::WorkspaceId;
-        use zirv_flow_store::secrets::insert_unchecked;
-        use zirv_flow_store::{NewWorkspaceCredential, create_credential, swap_credential_secret};
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_core::WorkspaceId;
+            use zirv_flow_store::secrets::insert_unchecked;
+            use zirv_flow_store::{
+                NewWorkspaceCredential, create_credential, swap_credential_secret,
+            };
 
-        async fn sealed_secret(
-            pool: &PgPool,
-            keys: &Keyring,
-            ws: WorkspaceId,
-            plaintext: &[u8],
-        ) -> SecretId {
-            let id = SecretId::new();
-            let purpose = SecretPurpose::WorkspaceCredential;
-            let sealed = seal(keys, plaintext, &secret_aad(ws, id, purpose));
-            insert_unchecked(pool, ws, purpose, id, &sealed)
-                .await
-                .unwrap();
-            id
-        }
+            async fn sealed_secret(
+                pool: &PgPool,
+                keys: &Keyring,
+                ws: WorkspaceId,
+                plaintext: &[u8],
+            ) -> SecretId {
+                let id = SecretId::new();
+                let purpose = SecretPurpose::WorkspaceCredential;
+                let sealed = seal(keys, plaintext, &secret_aad(ws, id, purpose));
+                insert_unchecked(pool, ws, purpose, id, &sealed)
+                    .await
+                    .unwrap();
+                id
+            }
 
-        let env = setup(&pool, json!({}), "full_refresh").await;
-        let (_, job) = env.queue().await;
-        let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
-        let old = sealed_secret(&pool, &keys, env.ws, br#"{"token":"old"}"#).await;
-        let credential = create_credential(
-            &pool,
-            env.ws,
-            &NewWorkspaceCredential {
-                id: Uuid::now_v7(),
-                key: "shared",
-                name: "Shared",
-                kind: "custom",
-                schema: None,
-                fields: &json!({"region": "eu"}),
-                secret_id: old,
-                hints: &json!({"token": ""}),
-                fingerprint: None,
-                created_by: None,
-            },
-        )
-        .await
-        .unwrap();
-        let config = json!({});
-        let mut sources = vec![env.source];
-        let second = create_source(
-            &pool,
-            env.ws,
-            &NewSource {
-                id: Uuid::now_v7(),
-                kind: "fake",
-                name: "erp",
-                config: &config,
-                credential_id: Some(credential.id),
-                schedule: None,
-                created_by: None,
-            },
-        )
-        .await
-        .unwrap();
-        sqlx::query("UPDATE sources SET credential_id = $1 WHERE id = $2")
-            .bind(credential.id)
-            .bind(env.source)
-            .execute(&pool)
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            let (_, job) = env.queue().await;
+            let keys = Arc::new(Keyring::new(MasterKey::generate(), None).unwrap());
+            let old = sealed_secret(&pool, &keys, env.ws, br#"{"token":"old"}"#).await;
+            let credential = create_credential(
+                &pool,
+                env.ws,
+                &NewWorkspaceCredential {
+                    id: Uuid::now_v7(),
+                    key: "shared",
+                    name: "Shared",
+                    kind: "custom",
+                    schema: None,
+                    fields: &json!({"region": "eu"}),
+                    secret_id: old,
+                    hints: &json!({"token": ""}),
+                    fingerprint: None,
+                    created_by: None,
+                },
+            )
             .await
             .unwrap();
-        sources.push(second.id);
-
-        async fn token_of(
-            env: &Env,
-            job: &ClaimedJob,
-            keys: &Arc<Keyring>,
-            source: Uuid,
-        ) -> String {
-            let found = zirv_flow_store::find_source(&env.pool, env.ws, source)
-                .await
-                .unwrap()
-                .unwrap();
-            let mut connection = env.pool.acquire().await.unwrap();
-            let ctx = JobContext::new(&mut connection, job).with_outbound(
-                Some(keys.clone()),
-                Arc::default(),
-                Arc::default(),
-            );
-            let credential = open_credential(&ctx, &env.pool, env.ws, found.credential_id, None)
-                .await
-                .unwrap_or_else(|_| panic!("the credential did not open"));
-            assert_eq!(credential.get("region").unwrap().expose(), "eu");
-            credential.get("token").unwrap().expose().to_owned()
-        }
-
-        for source in &sources {
-            assert_eq!(token_of(&env, &job, &keys, *source).await, "old");
-        }
-        let new = sealed_secret(&pool, &keys, env.ws, br#"{"token":"new"}"#).await;
-        let mut tx = begin(&pool).await.unwrap();
-        let replaced = swap_credential_secret(
-            &mut tx,
-            env.ws,
-            credential.id,
-            new,
-            &json!({"token": ""}),
-            None,
-            None,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        zirv_flow_store::secrets::delete(&mut *tx, env.ws, replaced)
+            let config = json!({});
+            let mut sources = vec![env.source];
+            let second = create_source(
+                &pool,
+                env.ws,
+                &NewSource {
+                    id: Uuid::now_v7(),
+                    kind: "fake",
+                    name: "erp",
+                    config: &config,
+                    credential_id: Some(credential.id),
+                    schedule: None,
+                    created_by: None,
+                },
+            )
             .await
             .unwrap();
-        commit(tx).await.unwrap();
+            sqlx::query("UPDATE sources SET credential_id = $1 WHERE id = $2")
+                .bind(credential.id)
+                .bind(env.source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sources.push(second.id);
 
-        for source in &sources {
-            assert_eq!(token_of(&env, &job, &keys, *source).await, "new");
-        }
+            async fn token_of(
+                env: &Env,
+                job: &ClaimedJob,
+                keys: &Arc<Keyring>,
+                source: Uuid,
+            ) -> String {
+                let found = zirv_flow_store::find_source(&env.pool, env.ws, source)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut connection = env.pool.acquire().await.unwrap();
+                let ctx = JobContext::new(&mut connection, job).with_outbound(
+                    Some(keys.clone()),
+                    Arc::default(),
+                    Arc::default(),
+                );
+                let credential =
+                    open_credential(&ctx, &env.pool, env.ws, found.credential_id, None)
+                        .await
+                        .unwrap_or_else(|_| panic!("the credential did not open"));
+                assert_eq!(credential.get("region").unwrap().expose(), "eu");
+                credential.get("token").unwrap().expose().to_owned()
+            }
 
-        // Every open left a system row naming the credential and the use, and nothing else.
-        let rows: Vec<(String, Option<Uuid>, Value)> = sqlx::query_as(
+            for source in &sources {
+                assert_eq!(token_of(&env, &job, &keys, *source).await, "old");
+            }
+            let new = sealed_secret(&pool, &keys, env.ws, br#"{"token":"new"}"#).await;
+            let mut tx = begin(&pool).await.unwrap();
+            let replaced = swap_credential_secret(
+                &mut tx,
+                env.ws,
+                credential.id,
+                new,
+                &json!({"token": ""}),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            zirv_flow_store::secrets::delete(&mut *tx, env.ws, replaced)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+
+            for source in &sources {
+                assert_eq!(token_of(&env, &job, &keys, *source).await, "new");
+            }
+
+            // Every open left a system row naming the credential and the use, and nothing else.
+            let rows: Vec<(String, Option<Uuid>, Value)> = sqlx::query_as(
             "SELECT actor_kind, object_id, summary FROM audit_log WHERE action = 'credential.used'",
         )
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert!(rows.len() >= 2 * sources.len(), "{}", rows.len());
-        for (actor, object, summary) in rows {
-            assert_eq!(actor, "system");
-            assert_eq!(object, Some(credential.id));
-            assert_eq!(summary, json!({"use": "sync"}));
-        }
+            assert!(rows.len() >= 2 * sources.len(), "{}", rows.len());
+            for (actor, object, summary) in rows {
+                assert_eq!(actor, "system");
+                assert_eq!(object, Some(credential.id));
+                assert_eq!(summary, json!({"use": "sync"}));
+            }
 
-        // A consumer opens the credential every slice: with a window, the rows above already
-        // cover the hour, so further opens write none.
-        let count = "SELECT count(*) FROM audit_log WHERE action = 'credential.used'";
-        let before: i64 = sqlx::query_scalar(count).fetch_one(&pool).await.unwrap();
-        let hour = Some(Duration::from_secs(3600));
-        for _ in 0..2 {
-            let found = zirv_flow_store::find_source(&pool, env.ws, env.source)
-                .await
-                .unwrap()
-                .unwrap();
-            let mut connection = pool.acquire().await.unwrap();
-            let ctx = JobContext::new(&mut connection, &job).with_outbound(
-                Some(keys.clone()),
-                Arc::default(),
-                Arc::default(),
-            );
-            open_credential(&ctx, &pool, env.ws, found.credential_id, hour)
-                .await
-                .unwrap_or_else(|_| panic!("the credential did not open"));
-        }
-        let after: i64 = sqlx::query_scalar(count).fetch_one(&pool).await.unwrap();
-        assert_eq!(after, before);
+            // A consumer opens the credential every slice: with a window, the rows above already
+            // cover the hour, so further opens write none.
+            let count = "SELECT count(*) FROM audit_log WHERE action = 'credential.used'";
+            let before: i64 = sqlx::query_scalar(count).fetch_one(&pool).await.unwrap();
+            let hour = Some(Duration::from_secs(3600));
+            for _ in 0..2 {
+                let found = zirv_flow_store::find_source(&pool, env.ws, env.source)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut connection = pool.acquire().await.unwrap();
+                let ctx = JobContext::new(&mut connection, &job).with_outbound(
+                    Some(keys.clone()),
+                    Arc::default(),
+                    Arc::default(),
+                );
+                open_credential(&ctx, &pool, env.ws, found.credential_id, hour)
+                    .await
+                    .unwrap_or_else(|_| panic!("the credential did not open"));
+            }
+            let after: i64 = sqlx::query_scalar(count).fetch_one(&pool).await.unwrap();
+            assert_eq!(after, before);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -2137,6 +2182,7 @@ mod tests {
     async fn a_schedule_firing_queues_a_run_per_eligible_stream_and_skips_an_active_one(
         pool: PgPool,
     ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = setup(&pool, json!({"streams": 3}), "full_refresh").await;
         // stream_2 has an active run; stream_3 is disabled; stream_1 is free.
         let streams = zirv_flow_store::list_streams(&pool, env.ws, env.source)
@@ -2216,25 +2262,30 @@ mod tests {
                 Some(env.source)
             )]
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_schedule_firing_for_a_disabled_source_queues_nothing(pool: PgPool) {
-        let env = setup(&pool, json!({}), "full_refresh").await;
-        sqlx::query("UPDATE sources SET enabled = false")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut fire = NewJobFor::new(&env);
-        let fired = fire.claim(&env).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            sqlx::query("UPDATE sources SET enabled = false")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut fire = NewJobFor::new(&env);
+            let fired = fire.claim(&env).await;
 
-        attempt_as(&env, &fired, &Probe::default(), None, true)
-            .await
-            .unwrap();
+            attempt_as(&env, &fired, &Probe::default(), None, true)
+                .await
+                .unwrap();
 
-        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
-        assert_eq!(env.count("SELECT count(*) FROM audit_log").await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM audit_log").await, 0);
+        })
+        .await;
     }
 
     /// The job the scheduler leader enqueues for a source's schedule.
@@ -2275,84 +2326,90 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_fires_a_sources_schedule_and_the_worker_runs_the_streams(pool: PgPool) {
-        use crate::{Scheduler, SchedulerConfig, Worker, WorkerConfig};
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use crate::{Scheduler, SchedulerConfig, Worker, WorkerConfig};
 
-        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
-        sqlx::query("UPDATE sources SET schedule = '* * * * *' WHERE id = $1")
-            .bind(env.source)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut tx = begin(&pool).await.unwrap();
-        zirv_flow_store::sync_schedule(&mut tx, env.ws, env.source, Some("* * * * *"), true)
-            .await
-            .unwrap();
-        commit(tx).await.unwrap();
-        // Make the first slot due.
-        sqlx::query("UPDATE schedules SET next_run_at = now() - interval '1 minute'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
-        leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
+            let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+            sqlx::query("UPDATE sources SET schedule = '* * * * *' WHERE id = $1")
+                .bind(env.source)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = begin(&pool).await.unwrap();
+            zirv_flow_store::sync_schedule(&mut tx, env.ws, env.source, Some("* * * * *"), true)
+                .await
+                .unwrap();
+            commit(tx).await.unwrap();
+            // Make the first slot due.
+            sqlx::query("UPDATE schedules SET next_run_at = now() - interval '1 minute'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
+            leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
 
-        let (stop, stopped) = tokio::sync::watch::channel(false);
-        let worker = Worker::new(
-            pool.clone(),
-            crate::Registry::built_in(),
-            WorkerConfig::new(2),
-        );
-        let handle = tokio::spawn(worker.run(stopped));
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let states: Vec<(String, String)> =
-                sqlx::query_as("SELECT trigger, state FROM sync_runs")
-                    .fetch_all(&pool)
-                    .await
-                    .unwrap();
-            if states == [("schedule".to_owned(), "succeeded".to_owned())] {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out: {states:?}"
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            let worker = Worker::new(
+                pool.clone(),
+                crate::Registry::built_in(),
+                WorkerConfig::new(2),
             );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        stop.send(true).unwrap();
-        handle.await.unwrap();
+            let handle = tokio::spawn(worker.run(stopped));
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                let states: Vec<(String, String)> =
+                    sqlx::query_as("SELECT trigger, state FROM sync_runs")
+                        .fetch_all(&pool)
+                        .await
+                        .unwrap();
+                if states == [("schedule".to_owned(), "succeeded".to_owned())] {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out: {states:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            stop.send(true).unwrap();
+            handle.await.unwrap();
 
-        assert_eq!(env.count("SELECT count(*) FROM source_records").await, 5);
-        // The worker completed both jobs: the fan-out and the run.
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'sync.run'")
-                .await,
-            0
-        );
+            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 5);
+            // The worker completed both jobs: the fan-out and the run.
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'sync.run'")
+                    .await,
+                0
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_fails_a_run_whose_job_died_and_frees_its_stream(pool: PgPool) {
-        use crate::{Scheduler, SchedulerConfig};
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use crate::{Scheduler, SchedulerConfig};
 
-        let env = setup(&pool, json!({}), "full_refresh").await;
-        let (run, job) = env.queue().await;
-        sqlx::query("UPDATE jobs SET state = 'dead' WHERE id = $1")
-            .bind(job.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert_eq!(env.run(run.id).await.state, "queued");
-        let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
+            let env = setup(&pool, json!({}), "full_refresh").await;
+            let (run, job) = env.queue().await;
+            sqlx::query("UPDATE jobs SET state = 'dead' WHERE id = $1")
+                .bind(job.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            assert_eq!(env.run(run.id).await.state, "queued");
+            let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
 
-        leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
+            leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
 
-        let failed = env.run(run.id).await;
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error_code.as_deref(), Some("job_failed"));
-        let (next, _) = env.queue().await;
-        assert_ne!(next.id, run.id, "the stream takes a new run");
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("job_failed"));
+            let (next, _) = env.queue().await;
+            assert_ne!(next.id, run.id, "the stream takes a new run");
+        })
+        .await;
     }
 
     fn duplicate_planner<'a>(
@@ -2832,55 +2889,60 @@ mod tests {
         async fn a_run_stopped_after_its_first_unit_resumes_and_applies_every_row_once(
             pool: PgPool,
         ) {
-            let db = setup_database(&pool, "full_refresh").await;
-            let (run, job) = db.env.queue().await;
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let db = setup_database(&pool, "full_refresh").await;
+                let (run, job) = db.env.queue().await;
 
-            let first = db
-                .attempt(
-                    &job,
-                    &Probe {
-                        stop_after: Some(1),
-                        before_commit: None,
-                    },
-                    loopback(),
-                )
-                .await;
-            assert!(first.is_err());
-            let mid = db.env.run(run.id).await;
-            assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
-            assert_eq!(mid.checkpoint, Some(json!({"v": 1, "key": ["500"]})));
+                let first = db
+                    .attempt(
+                        &job,
+                        &Probe {
+                            stop_after: Some(1),
+                            before_commit: None,
+                        },
+                        loopback(),
+                    )
+                    .await;
+                assert!(first.is_err());
+                let mid = db.env.run(run.id).await;
+                assert_eq!((mid.state.as_str(), mid.records_read), ("running", 500));
+                assert_eq!(mid.checkpoint, Some(json!({"v": 1, "key": ["500"]})));
 
-            db.attempt(&job, &Probe::default(), loopback())
-                .await
-                .unwrap();
+                db.attempt(&job, &Probe::default(), loopback())
+                    .await
+                    .unwrap();
 
-            let done = db.env.run(run.id).await;
-            assert_eq!(done.state, "succeeded");
-            assert_eq!(done.attempt, 2);
-            assert_eq!(
-                (
-                    done.records_read,
-                    done.records_applied,
-                    done.records_unchanged
-                ),
-                (1500, 1500, 0)
-            );
-            assert_eq!(done.checkpoint, Some(json!({"v": 1, "key": ["1500"]})));
-            let env = &db.env;
-            assert_eq!(env.count("SELECT count(*) FROM people").await, 1500);
-            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1500);
-            assert_eq!(
-                env.count("SELECT count(*) - count(DISTINCT record_key) FROM source_records")
+                let done = db.env.run(run.id).await;
+                assert_eq!(done.state, "succeeded");
+                assert_eq!(done.attempt, 2);
+                assert_eq!(
+                    (
+                        done.records_read,
+                        done.records_applied,
+                        done.records_unchanged
+                    ),
+                    (1500, 1500, 0)
+                );
+                assert_eq!(done.checkpoint, Some(json!({"v": 1, "key": ["1500"]})));
+                let env = &db.env;
+                assert_eq!(env.count("SELECT count(*) FROM people").await, 1500);
+                assert_eq!(env.count("SELECT count(*) FROM source_records").await, 1500);
+                assert_eq!(
+                    env.count("SELECT count(*) - count(DISTINCT record_key) FROM source_records")
+                        .await,
+                    0,
+                    "no key was applied twice"
+                );
+                assert_eq!(
+                    env.count(
+                        "SELECT count(*) FROM decision_records WHERE action = 'person.created'"
+                    )
                     .await,
-                0,
-                "no key was applied twice"
-            );
-            assert_eq!(
-                env.count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
-                    .await,
-                1500
-            );
-            db.drop_role().await;
+                    1500
+                );
+                db.drop_role().await;
+            })
+            .await;
         }
 
         #[sqlx::test]
@@ -2888,6 +2950,7 @@ mod tests {
         async fn an_incremental_run_reads_nothing_when_nothing_changed_and_exactly_the_new_rows_after(
             pool: PgPool,
         ) {
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
             let db = setup_database(&pool, "incremental").await;
             let env = &db.env;
             let (first, job) = env.queue().await;
@@ -2925,6 +2988,8 @@ mod tests {
             assert_eq!(new.records_applied, 10);
             assert_eq!(env.count("SELECT count(*) FROM people").await, 1510);
             db.drop_role().await;
+            })
+            .await;
         }
 
         /// A TCP forwarder to the real database that counts the connections it accepts.
@@ -2953,91 +3018,97 @@ mod tests {
         #[sqlx::test]
         #[ignore = "requires PostgreSQL; set DATABASE_URL"]
         async fn the_workers_egress_policy_decides_whether_the_run_connects(pool: PgPool) {
-            let db = setup_database(&pool, "full_refresh").await;
-            let options = pool.connect_options();
-            let (port, accepted) =
-                counting_proxy((options.get_host().to_owned(), options.get_port())).await;
-            sqlx::query(
-                "UPDATE sources SET config = config || jsonb_build_object('host', '127.0.0.1', \
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let db = setup_database(&pool, "full_refresh").await;
+                let options = pool.connect_options();
+                let (port, accepted) =
+                    counting_proxy((options.get_host().to_owned(), options.get_port())).await;
+                sqlx::query(
+                    "UPDATE sources SET config = config || jsonb_build_object('host', '127.0.0.1', \
                     'port', $1::int)",
-            )
-            .bind(i32::from(port))
-            .execute(&pool)
-            .await
-            .unwrap();
-            let (denied_run, job) = db.env.queue().await;
-            let last = ClaimedJob {
-                attempts: job.max_attempts,
-                ..job.clone()
-            };
-
-            let denied = db.attempt(&last, &Probe::default(), Arc::default()).await;
-
-            assert!(denied.is_err());
-            let failed = db.env.run(denied_run.id).await;
-            assert_eq!(failed.state, "failed");
-            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
-            assert_eq!(failed.records_read, 0);
-            assert_eq!(
-                accepted.load(Ordering::SeqCst),
-                0,
-                "a refused address is never dialled"
-            );
-
-            let (allowed_run, job) = db.env.queue().await;
-            db.attempt(&job, &Probe::default(), loopback())
+                )
+                .bind(i32::from(port))
+                .execute(&pool)
                 .await
                 .unwrap();
+                let (denied_run, job) = db.env.queue().await;
+                let last = ClaimedJob {
+                    attempts: job.max_attempts,
+                    ..job.clone()
+                };
 
-            let done = db.env.run(allowed_run.id).await;
-            assert_eq!(
-                (done.state.as_str(), done.records_read),
-                ("succeeded", 1500)
-            );
-            assert!(accepted.load(Ordering::SeqCst) >= 1);
-            db.drop_role().await;
+                let denied = db.attempt(&last, &Probe::default(), Arc::default()).await;
+
+                assert!(denied.is_err());
+                let failed = db.env.run(denied_run.id).await;
+                assert_eq!(failed.state, "failed");
+                assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+                assert_eq!(failed.records_read, 0);
+                assert_eq!(
+                    accepted.load(Ordering::SeqCst),
+                    0,
+                    "a refused address is never dialled"
+                );
+
+                let (allowed_run, job) = db.env.queue().await;
+                db.attempt(&job, &Probe::default(), loopback())
+                    .await
+                    .unwrap();
+
+                let done = db.env.run(allowed_run.id).await;
+                assert_eq!(
+                    (done.state.as_str(), done.records_read),
+                    ("succeeded", 1500)
+                );
+                assert!(accepted.load(Ordering::SeqCst) >= 1);
+                db.drop_role().await;
+            })
+            .await;
         }
 
         #[sqlx::test]
         #[ignore = "requires PostgreSQL; set DATABASE_URL"]
         async fn a_dropped_cursor_column_fails_the_run_and_never_applies_part_of_it(pool: PgPool) {
-            let db = setup_database(&pool, "incremental").await;
-            let env = &db.env;
-            sqlx::query("ALTER TABLE items DROP COLUMN updated_at")
-                .execute(&pool)
-                .await
-                .unwrap();
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let db = setup_database(&pool, "incremental").await;
+                let env = &db.env;
+                sqlx::query("ALTER TABLE items DROP COLUMN updated_at")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
 
-            // The stored descriptor is stale: the read finds the column gone and fails with a
-            // fixed source error.
-            let (stale, job) = env.queue().await;
-            let last = ClaimedJob {
-                attempts: job.max_attempts,
-                ..job
-            };
-            let result = db.attempt(&last, &Probe::default(), loopback()).await;
-            assert!(result.is_err());
-            let failed = env.run(stale.id).await;
-            assert_eq!(failed.state, "failed");
-            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
-            assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
+                // The stored descriptor is stale: the read finds the column gone and fails with a
+                // fixed source error.
+                let (stale, job) = env.queue().await;
+                let last = ClaimedJob {
+                    attempts: job.max_attempts,
+                    ..job
+                };
+                let result = db.attempt(&last, &Probe::default(), loopback()).await;
+                assert!(result.is_err());
+                let failed = env.run(stale.id).await;
+                assert_eq!(failed.state, "failed");
+                assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+                assert_eq!(env.count("SELECT count(*) FROM source_records").await, 0);
 
-            // After discovery ran again, the settings are checked against the new descriptor
-            // before anything is read.
-            discover_and_configure(env, &db.role, "incremental").await;
-            let (fresh, job) = env.queue().await;
-            db.attempt(&job, &Probe::default(), loopback())
-                .await
-                .unwrap();
-            let rejected = env.run(fresh.id).await;
-            assert_eq!(rejected.state, "failed");
-            assert_eq!(
-                rejected.error_code.as_deref(),
-                Some("stream_settings_invalid")
-            );
-            assert_eq!((rejected.records_read, rejected.records_applied), (0, 0));
-            assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
-            db.drop_role().await;
+                // After discovery ran again, the settings are checked against the new descriptor
+                // before anything is read.
+                discover_and_configure(env, &db.role, "incremental").await;
+                let (fresh, job) = env.queue().await;
+                db.attempt(&job, &Probe::default(), loopback())
+                    .await
+                    .unwrap();
+                let rejected = env.run(fresh.id).await;
+                assert_eq!(rejected.state, "failed");
+                assert_eq!(
+                    rejected.error_code.as_deref(),
+                    Some("stream_settings_invalid")
+                );
+                assert_eq!((rejected.records_read, rejected.records_applied), (0, 0));
+                assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+                db.drop_role().await;
+            })
+            .await;
         }
 
         /// A measurement, not a check: with `ZIRV_FLOW_MEASURE_ROWS` set it seeds that many rows,
@@ -3048,28 +3119,32 @@ mod tests {
         #[sqlx::test]
         #[ignore = "a measurement; set ZIRV_FLOW_MEASURE_ROWS to run it"]
         async fn measure_records_per_second(pool: PgPool) {
-            let Some(rows) = std::env::var("ZIRV_FLOW_MEASURE_ROWS")
-                .ok()
-                .and_then(|text| text.parse::<u32>().ok())
-            else {
-                return;
-            };
-            let db = setup_rows(&pool, "full_refresh", rows).await;
-            let (run, job) = db.env.queue().await;
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let Some(rows) = std::env::var("ZIRV_FLOW_MEASURE_ROWS")
+                    .ok()
+                    .and_then(|text| text.parse::<u32>().ok())
+                else {
+                    return;
+                };
+                let db = setup_rows(&pool, "full_refresh", rows).await;
+                let (run, job) = db.env.queue().await;
 
-            db.attempt(&job, &Probe::default(), loopback())
-                .await
-                .unwrap();
+                db.attempt(&job, &Probe::default(), loopback())
+                    .await
+                    .unwrap();
 
-            let done = db.env.run(run.id).await;
-            let seconds = (done.finished_at.unwrap() - done.started_at.unwrap()).as_seconds_f64();
-            println!(
-                "MEASURE rows={} state={} seconds={seconds:.2} records_per_second={:.0}",
-                done.records_read,
-                done.state,
-                done.records_read as f64 / seconds
-            );
-            db.drop_role().await;
+                let done = db.env.run(run.id).await;
+                let seconds =
+                    (done.finished_at.unwrap() - done.started_at.unwrap()).as_seconds_f64();
+                println!(
+                    "MEASURE rows={} state={} seconds={seconds:.2} records_per_second={:.0}",
+                    done.records_read,
+                    done.state,
+                    done.records_read as f64 / seconds
+                );
+                db.drop_role().await;
+            })
+            .await;
         }
     }
 
@@ -3194,6 +3269,7 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_full_refresh_sweeps_the_records_the_source_dropped_with_their_events(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
         let first = env.finish(RunKind::Sync).await;
         assert_eq!(first.state, "succeeded");
@@ -3260,36 +3336,39 @@ mod tests {
             .await,
             2
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_sweep_removes_the_sync_written_event_of_a_dropped_record_and_no_other(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
-        let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
-        mapping.event = Some(zirv_flow_core::mapping::EventRule {
-            name: "synced".into(),
-            timestamp: None,
-            properties: Vec::new(),
-        });
-        set_stream_mapping(
-            &pool,
-            env.ws,
-            env.source,
-            "stream_1",
-            &serde_json::to_value(mapping).unwrap(),
-        )
-        .await
-        .unwrap();
-        let key = redaction_key();
-        let (first, job) = env.queue_kind(RunKind::Sync).await;
-        attempt_file(&env, &job, &Probe::default(), false, Some(Arc::clone(&key)))
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+            let mut mapping: Mapping = serde_json::from_value(mapping()).unwrap();
+            mapping.event = Some(zirv_flow_core::mapping::EventRule {
+                name: "synced".into(),
+                timestamp: None,
+                properties: Vec::new(),
+            });
+            set_stream_mapping(
+                &pool,
+                env.ws,
+                env.source,
+                "stream_1",
+                &serde_json::to_value(mapping).unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(env.run(first.id).await.state, "succeeded");
-        // Every sync-written event names the ledger row of its record.
-        assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
-        assert_eq!(
+            let key = redaction_key();
+            let (first, job) = env.queue_kind(RunKind::Sync).await;
+            attempt_file(&env, &job, &Probe::default(), false, Some(Arc::clone(&key)))
+                .await
+                .unwrap();
+            assert_eq!(env.run(first.id).await.state, "succeeded");
+            // Every sync-written event names the ledger row of its record.
+            assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
+            assert_eq!(
             env.count(
                 "SELECT count(*) FROM events e JOIN source_records r ON r.id = e.source_record_id \
                  WHERE e.person_id = r.person_id"
@@ -3297,27 +3376,27 @@ mod tests {
             .await,
             5
         );
-        // A first-party event of the person of the record that will be dropped.
-        env.event_of("stream_1-4", false).await;
-        env.config(json!({"records": 4})).await;
+            // A first-party event of the person of the record that will be dropped.
+            env.event_of("stream_1-4", false).await;
+            env.config(json!({"records": 4})).await;
 
-        let (second, job) = env.queue_kind(RunKind::Sync).await;
-        attempt_file(&env, &job, &Probe::default(), false, Some(key))
-            .await
-            .unwrap();
+            let (second, job) = env.queue_kind(RunKind::Sync).await;
+            attempt_file(&env, &job, &Probe::default(), false, Some(key))
+                .await
+                .unwrap();
 
-        let second = env.run(second.id).await;
-        assert_eq!(second.state, "succeeded");
-        assert_eq!(second.records_deleted, 1);
-        assert_eq!(env.live_keys().await, keys(0..4));
-        // The dropped record's own event went; the other four and the first-party one stay.
-        assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
-        assert_eq!(
-            env.count("SELECT count(*) FROM events WHERE source_record_id IS NULL")
-                .await,
-            1
-        );
-        assert_eq!(
+            let second = env.run(second.id).await;
+            assert_eq!(second.state, "succeeded");
+            assert_eq!(second.records_deleted, 1);
+            assert_eq!(env.live_keys().await, keys(0..4));
+            // The dropped record's own event went; the other four and the first-party one stay.
+            assert_eq!(env.count("SELECT count(*) FROM events").await, 5);
+            assert_eq!(
+                env.count("SELECT count(*) FROM events WHERE source_record_id IS NULL")
+                    .await,
+                1
+            );
+            assert_eq!(
             env.count(
                 "SELECT count(*) FROM events e JOIN source_records r ON r.id = e.source_record_id \
                  WHERE r.deleted_at IS NOT NULL"
@@ -3325,119 +3404,136 @@ mod tests {
             .await,
             0
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_run_that_fails_on_the_source_sweeps_nothing(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        // The second read fails after its first batch, before anything is committed.
-        env.config(json!({"records": 5, "batch": 2, "fail_after_batches": 1}))
-            .await;
-        let (run, job) = env.queue_kind(RunKind::Sync).await;
-        let last = ClaimedJob {
-            attempts: job.max_attempts,
-            ..job
-        };
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            // The second read fails after its first batch, before anything is committed.
+            env.config(json!({"records": 5, "batch": 2, "fail_after_batches": 1}))
+                .await;
+            let (run, job) = env.queue_kind(RunKind::Sync).await;
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..job
+            };
 
-        let result = attempt(&env, &last, &Probe::default()).await;
+            let result = attempt(&env, &last, &Probe::default()).await;
 
-        assert!(result.is_err());
-        let failed = env.run(run.id).await;
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
-        assert_eq!(env.live_keys().await, keys(0..5));
-        assert_eq!(failed.records_deleted, 0);
+            assert!(result.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            assert_eq!(env.live_keys().await, keys(0..5));
+            assert_eq!(failed.records_deleted, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_run_cancelled_mid_stream_sweeps_nothing(pool: PgPool) {
-        let env = setup(
-            &pool,
-            json!({"records": 1000, "batch": 100}),
-            "full_refresh",
-        )
-        .await;
-        env.finish(RunKind::Sync).await;
-        // The second run is cancelled after its first unit: the 500 records it did not reach are
-        // unseen, and stay live because the run never sweeps.
-        let (run, job) = env.queue_kind(RunKind::Sync).await;
-        let cancelling = hook({
-            let pool = pool.clone();
-            let (ws, source, run_id) = (env.ws, env.source, run.id);
-            move |call| {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 1000, "batch": 100}),
+                "full_refresh",
+            )
+            .await;
+            env.finish(RunKind::Sync).await;
+            // The second run is cancelled after its first unit: the 500 records it did not reach are
+            // unseen, and stay live because the run never sweeps.
+            let (run, job) = env.queue_kind(RunKind::Sync).await;
+            let cancelling = hook({
                 let pool = pool.clone();
-                Box::pin(async move {
-                    if call == 2 {
-                        let mut connection = pool.acquire().await.unwrap();
-                        cancel_run(&mut connection, ws, source, run_id)
-                            .await
-                            .unwrap();
-                    }
-                })
-            }
-        });
+                let (ws, source, run_id) = (env.ws, env.source, run.id);
+                move |call| {
+                    let pool = pool.clone();
+                    Box::pin(async move {
+                        if call == 2 {
+                            let mut connection = pool.acquire().await.unwrap();
+                            cancel_run(&mut connection, ws, source, run_id)
+                                .await
+                                .unwrap();
+                        }
+                    })
+                }
+            });
 
-        attempt(&env, &job, &cancelling).await.unwrap();
+            attempt(&env, &job, &cancelling).await.unwrap();
 
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "cancelled");
-        assert_eq!(done.records_deleted, 0);
-        assert_eq!(env.live_keys().await.len(), 1000);
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "cancelled");
+            assert_eq!(done.records_deleted, 0);
+            assert_eq!(env.live_keys().await.len(), 1000);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_run_stopped_by_the_reject_threshold_sweeps_nothing(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 600, "batch": 100}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        let invalid: Vec<usize> = (0..60).collect();
-        env.config(json!({"records": 600, "batch": 100, "invalid": ids(&invalid)}))
-            .await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 600, "batch": 100}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            let invalid: Vec<usize> = (0..60).collect();
+            env.config(json!({"records": 600, "batch": 100, "invalid": ids(&invalid)}))
+                .await;
 
-        let failed = env.finish(RunKind::Sync).await;
+            let failed = env.finish(RunKind::Sync).await;
 
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error_code.as_deref(), Some("reject_threshold"));
-        // The run stopped after the first unit, so 100 records were never reached; all 600 are
-        // live, rejected ones included.
-        assert_eq!(env.live_keys().await.len(), 600);
-        assert_eq!(failed.records_deleted, 0);
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("reject_threshold"));
+            // The run stopped after the first unit, so 100 records were never reached; all 600 are
+            // live, rejected ones included.
+            assert_eq!(env.live_keys().await.len(), 600);
+            assert_eq!(failed.records_deleted, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_record_the_mapping_rejects_keeps_its_earlier_contribution(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        // Records 1 and 2 now come with a bad email: the mapping rejects them, but they still
-        // exist in the source.
-        env.config(json!({"records": 5, "invalid": "1,2"})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            // Records 1 and 2 now come with a bad email: the mapping rejects them, but they still
+            // exist in the source.
+            env.config(json!({"records": 5, "invalid": "1,2"})).await;
 
-        let second = env.finish(RunKind::Sync).await;
+            let second = env.finish(RunKind::Sync).await;
 
-        assert_eq!(second.state, "succeeded");
-        assert_eq!(second.records_rejected, 2);
-        assert_eq!(second.records_deleted, 0);
-        assert_eq!(env.live_keys().await, keys(0..5));
+            assert_eq!(second.state, "succeeded");
+            assert_eq!(second.records_rejected, 2);
+            assert_eq!(second.records_deleted, 0);
+            assert_eq!(env.live_keys().await, keys(0..5));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_incremental_run_never_sweeps(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 5}), "incremental").await;
-        env.finish(RunKind::Sync).await;
-        // The source now lists fewer records and the cursor sits past them: an incremental
-        // stream cannot tell dropped from unchanged.
-        env.config(json!({"records": 3})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "incremental").await;
+            env.finish(RunKind::Sync).await;
+            // The source now lists fewer records and the cursor sits past them: an incremental
+            // stream cannot tell dropped from unchanged.
+            env.config(json!({"records": 3})).await;
 
-        let second = env.finish(RunKind::Sync).await;
+            let second = env.finish(RunKind::Sync).await;
 
-        assert_eq!(second.state, "succeeded");
-        assert_eq!((second.records_read, second.records_deleted), (0, 0));
-        assert_eq!(env.live_keys().await, keys(0..5));
+            assert_eq!(second.state, "succeeded");
+            assert_eq!((second.records_read, second.records_deleted), (0, 0));
+            assert_eq!(env.live_keys().await, keys(0..5));
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -3445,77 +3541,86 @@ mod tests {
     async fn the_truthy_delete_signal_removes_a_flagged_record_even_if_it_is_malformed(
         pool: PgPool,
     ) {
-        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        env.delete_signal("deleted_flag", zirv_flow_core::mapping::DeleteRule::Truthy)
-            .await;
-        // Records 1 and 3 are soft-deleted, and 1 also has a bad email: it is removed, not
-        // rejected, because the signal is read before the mapping runs.
-        env.config(json!({"records": 5, "soft_deleted": "1,3", "invalid": "1"}))
-            .await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            env.delete_signal("deleted_flag", zirv_flow_core::mapping::DeleteRule::Truthy)
+                .await;
+            // Records 1 and 3 are soft-deleted, and 1 also has a bad email: it is removed, not
+            // rejected, because the signal is read before the mapping runs.
+            env.config(json!({"records": 5, "soft_deleted": "1,3", "invalid": "1"}))
+                .await;
 
-        let second = env.finish(RunKind::Sync).await;
+            let second = env.finish(RunKind::Sync).await;
 
-        assert_eq!(second.state, "succeeded");
-        assert_eq!(
-            (
-                second.records_read,
-                second.records_unchanged,
-                second.records_rejected,
-                second.records_deleted
-            ),
-            (5, 3, 0, 2)
-        );
-        let mut expected = keys(0..5);
-        expected.retain(|key| key != "stream_1-1" && key != "stream_1-3");
-        assert_eq!(env.live_keys().await, expected);
-        assert_eq!(env.deletions(&second).await, ["signal", "signal"]);
+            assert_eq!(second.state, "succeeded");
+            assert_eq!(
+                (
+                    second.records_read,
+                    second.records_unchanged,
+                    second.records_rejected,
+                    second.records_deleted
+                ),
+                (5, 3, 0, 2)
+            );
+            let mut expected = keys(0..5);
+            expected.retain(|key| key != "stream_1-1" && key != "stream_1-3");
+            assert_eq!(env.live_keys().await, expected);
+            assert_eq!(env.deletions(&second).await, ["signal", "signal"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_present_delete_signal_removes_a_record_with_a_deleted_at_value(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 4}), "incremental").await;
-        env.finish(RunKind::Sync).await;
-        env.delete_signal("deleted_at", zirv_flow_core::mapping::DeleteRule::Present)
-            .await;
-        // An incremental stream re-reads from its cursor, which the fake ignores here: reset it
-        // so the run reads everything, and soft-delete record 2.
-        sqlx::query("UPDATE streams SET checkpoint = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-        env.config(json!({"records": 4, "soft_deleted": "2"})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 4}), "incremental").await;
+            env.finish(RunKind::Sync).await;
+            env.delete_signal("deleted_at", zirv_flow_core::mapping::DeleteRule::Present)
+                .await;
+            // An incremental stream re-reads from its cursor, which the fake ignores here: reset it
+            // so the run reads everything, and soft-delete record 2.
+            sqlx::query("UPDATE streams SET checkpoint = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
+            env.config(json!({"records": 4, "soft_deleted": "2"})).await;
 
-        let second = env.finish(RunKind::Sync).await;
+            let second = env.finish(RunKind::Sync).await;
 
-        assert_eq!(second.records_deleted, 1);
-        let mut expected = keys(0..4);
-        expected.retain(|key| key != "stream_1-2");
-        assert_eq!(env.live_keys().await, expected);
-        assert_eq!(env.deletions(&second).await, ["signal"]);
-        // A soft-deleted record that was never synced is simply not applied.
-        env.config(json!({"records": 4, "soft_deleted": "2"})).await;
-        sqlx::query("UPDATE streams SET checkpoint = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let third = env.finish(RunKind::Sync).await;
-        assert_eq!((third.records_deleted, third.records_unchanged), (0, 4));
+            assert_eq!(second.records_deleted, 1);
+            let mut expected = keys(0..4);
+            expected.retain(|key| key != "stream_1-2");
+            assert_eq!(env.live_keys().await, expected);
+            assert_eq!(env.deletions(&second).await, ["signal"]);
+            // A soft-deleted record that was never synced is simply not applied.
+            env.config(json!({"records": 4, "soft_deleted": "2"})).await;
+            sqlx::query("UPDATE streams SET checkpoint = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let third = env.finish(RunKind::Sync).await;
+            assert_eq!((third.records_deleted, third.records_unchanged), (0, 4));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_connector_delete_flag_still_removes_with_the_reason_source(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 3}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        env.config(json!({"records": 3, "deleted": "0"})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 3}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            env.config(json!({"records": 3, "deleted": "0"})).await;
 
-        let second = env.finish(RunKind::Sync).await;
+            let second = env.finish(RunKind::Sync).await;
 
-        assert_eq!(second.records_deleted, 1);
-        assert_eq!(env.deletions(&second).await, ["source"]);
-        assert_eq!(env.live_keys().await, keys(1..3));
+            assert_eq!(second.records_deleted, 1);
+            assert_eq!(env.deletions(&second).await, ["source"]);
+            assert_eq!(env.live_keys().await, keys(1..3));
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -3523,6 +3628,7 @@ mod tests {
     async fn a_reconciliation_removes_the_missing_record_applies_nothing_and_keeps_the_cursor(
         pool: PgPool,
     ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let env = setup(&pool, json!({"records": 5}), "incremental").await;
         env.finish(RunKind::Sync).await;
         let cursor: Option<Value> = sqlx::query_scalar("SELECT checkpoint FROM streams")
@@ -3558,146 +3664,163 @@ mod tests {
             .unwrap();
         assert_eq!(after, cursor, "a reconciliation never moves the cursor");
         assert_eq!(env.deletions(&reconcile).await, ["swept", "swept"]);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reconciliation_honours_the_delete_signal_and_the_connector_flag(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 5}), "incremental").await;
-        env.finish(RunKind::Sync).await;
-        env.delete_signal("deleted_flag", zirv_flow_core::mapping::DeleteRule::Truthy)
-            .await;
-        env.config(json!({"records": 5, "soft_deleted": "1", "deleted": "2"}))
-            .await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "incremental").await;
+            env.finish(RunKind::Sync).await;
+            env.delete_signal("deleted_flag", zirv_flow_core::mapping::DeleteRule::Truthy)
+                .await;
+            env.config(json!({"records": 5, "soft_deleted": "1", "deleted": "2"}))
+                .await;
 
-        let reconcile = env.finish(RunKind::Reconcile).await;
+            let reconcile = env.finish(RunKind::Reconcile).await;
 
-        assert_eq!(reconcile.records_deleted, 2);
-        assert_eq!(env.deletions(&reconcile).await, ["signal", "source"]);
-        let mut expected = keys(0..5);
-        expected.retain(|key| key != "stream_1-1" && key != "stream_1-2");
-        assert_eq!(env.live_keys().await, expected);
+            assert_eq!(reconcile.records_deleted, 2);
+            assert_eq!(env.deletions(&reconcile).await, ["signal", "source"]);
+            let mut expected = keys(0..5);
+            expected.retain(|key| key != "stream_1-1" && key != "stream_1-2");
+            assert_eq!(env.live_keys().await, expected);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_crash_mid_sweep_resumes_and_removes_each_record_once(pool: PgPool) {
-        let env = setup(
-            &pool,
-            json!({"records": 450, "batch": 1000}),
-            "full_refresh",
-        )
-        .await;
-        env.finish(RunKind::Sync).await;
-        // 350 of 450 are dropped, which only a raised limit allows.
-        env.limit(1.0).await;
-        env.config(json!({"records": 100, "batch": 1000})).await;
-        let (run, job) = env.queue_kind(RunKind::Sync).await;
-
-        // The attempt dies after the read unit and the first sweep unit of 200.
-        let first = attempt(
-            &env,
-            &job,
-            &Probe {
-                stop_after: Some(2),
-                before_commit: None,
-            },
-        )
-        .await;
-        assert!(first.is_err());
-        let mid = env.run(run.id).await;
-        assert_eq!((mid.state.as_str(), mid.records_deleted), ("running", 200));
-
-        attempt(&env, &job, &Probe::default()).await.unwrap();
-
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "succeeded");
-        assert_eq!(done.records_deleted, 350);
-        assert_eq!(env.live_keys().await.len(), 100);
-        assert_eq!(env.deletions(&done).await.len(), 350);
-        assert_eq!(
-            env.count(
-                "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(
+                &pool,
+                json!({"records": 450, "batch": 1000}),
+                "full_refresh",
             )
-            .await,
-            350
-        );
+            .await;
+            env.finish(RunKind::Sync).await;
+            // 350 of 450 are dropped, which only a raised limit allows.
+            env.limit(1.0).await;
+            env.config(json!({"records": 100, "batch": 1000})).await;
+            let (run, job) = env.queue_kind(RunKind::Sync).await;
+
+            // The attempt dies after the read unit and the first sweep unit of 200.
+            let first = attempt(
+                &env,
+                &job,
+                &Probe {
+                    stop_after: Some(2),
+                    before_commit: None,
+                },
+            )
+            .await;
+            assert!(first.is_err());
+            let mid = env.run(run.id).await;
+            assert_eq!((mid.state.as_str(), mid.records_deleted), ("running", 200));
+
+            attempt(&env, &job, &Probe::default()).await.unwrap();
+
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "succeeded");
+            assert_eq!(done.records_deleted, 350);
+            assert_eq!(env.live_keys().await.len(), 100);
+            assert_eq!(env.deletions(&done).await.len(), 350);
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM decision_records WHERE action = 'contribution.removed'"
+                )
+                .await,
+                350
+            );
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_cancel_arriving_before_a_sweep_unit_removes_nothing(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 10}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        env.config(json!({"records": 6})).await;
-        let (run, job) = env.queue_kind(RunKind::Sync).await;
-        let cancelling = hook({
-            let pool = pool.clone();
-            let (ws, source, run_id) = (env.ws, env.source, run.id);
-            move |call| {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 10}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            env.config(json!({"records": 6})).await;
+            let (run, job) = env.queue_kind(RunKind::Sync).await;
+            let cancelling = hook({
                 let pool = pool.clone();
-                Box::pin(async move {
-                    // Call 1 is the read unit; call 2 is just before the first sweep unit.
-                    if call == 2 {
-                        let mut connection = pool.acquire().await.unwrap();
-                        cancel_run(&mut connection, ws, source, run_id)
-                            .await
-                            .unwrap();
-                    }
-                })
-            }
-        });
+                let (ws, source, run_id) = (env.ws, env.source, run.id);
+                move |call| {
+                    let pool = pool.clone();
+                    Box::pin(async move {
+                        // Call 1 is the read unit; call 2 is just before the first sweep unit.
+                        if call == 2 {
+                            let mut connection = pool.acquire().await.unwrap();
+                            cancel_run(&mut connection, ws, source, run_id)
+                                .await
+                                .unwrap();
+                        }
+                    })
+                }
+            });
 
-        attempt(&env, &job, &cancelling).await.unwrap();
+            attempt(&env, &job, &cancelling).await.unwrap();
 
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "cancelled");
-        assert_eq!(done.records_deleted, 0);
-        assert_eq!(env.live_keys().await.len(), 10);
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "cancelled");
+            assert_eq!(done.records_deleted, 0);
+            assert_eq!(env.live_keys().await.len(), 10);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_sweep_over_the_streams_limit_removes_nothing_and_fails_the_run(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        // Three of four records are gone: 75% is over the default 50%.
-        env.config(json!({"records": 1})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            // Three of four records are gone: 75% is over the default 50%.
+            env.config(json!({"records": 1})).await;
 
-        let refused = env.finish(RunKind::Sync).await;
+            let refused = env.finish(RunKind::Sync).await;
 
-        assert_eq!(refused.state, "failed");
-        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
-        assert_eq!(refused.records_deleted, 0);
-        assert!(refused.finished_at.is_some());
-        assert_eq!(env.live_keys().await, keys(0..4));
+            assert_eq!(refused.state, "failed");
+            assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+            assert_eq!(refused.records_deleted, 0);
+            assert!(refused.finished_at.is_some());
+            assert_eq!(env.live_keys().await, keys(0..4));
 
-        // An admin who raises the limit to 1 authorizes it, and the next run removes them.
-        env.limit(1.0).await;
-        let allowed = env.finish(RunKind::Sync).await;
-        assert_eq!(allowed.state, "succeeded");
-        assert_eq!(allowed.records_deleted, 3);
-        assert_eq!(env.live_keys().await, keys(0..1));
+            // An admin who raises the limit to 1 authorizes it, and the next run removes them.
+            env.limit(1.0).await;
+            let allowed = env.finish(RunKind::Sync).await;
+            assert_eq!(allowed.state, "succeeded");
+            assert_eq!(allowed.records_deleted, 3);
+            assert_eq!(env.live_keys().await, keys(0..1));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_changed_primary_key_is_refused_by_the_limit_and_removes_nothing(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        // The source now names the same four records by new keys: the ledger's old keys stay
-        // behind as four unseen rows next to the four the run inserts and sees.
-        sqlx::query("UPDATE source_records SET record_key = 'old-' || record_key")
-            .execute(&pool)
-            .await
-            .unwrap();
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            // The source now names the same four records by new keys: the ledger's old keys stay
+            // behind as four unseen rows next to the four the run inserts and sees.
+            sqlx::query("UPDATE source_records SET record_key = 'old-' || record_key")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        let refused = env.finish(RunKind::Sync).await;
+            let refused = env.finish(RunKind::Sync).await;
 
-        assert_eq!(refused.state, "failed");
-        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
-        assert_eq!(refused.records_deleted, 0);
-        assert_eq!(env.live_keys().await.len(), 8);
+            assert_eq!(refused.state, "failed");
+            assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+            assert_eq!(refused.records_deleted, 0);
+            assert_eq!(env.live_keys().await.len(), 8);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -3705,35 +3828,41 @@ mod tests {
     async fn a_read_of_nothing_over_live_records_is_refused_and_a_drop_at_the_limit_sweeps(
         pool: PgPool,
     ) {
-        let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
-        env.finish(RunKind::Sync).await;
-        env.config(json!({"records": 0})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 4}), "full_refresh").await;
+            env.finish(RunKind::Sync).await;
+            env.config(json!({"records": 0})).await;
 
-        let empty = env.finish(RunKind::Sync).await;
+            let empty = env.finish(RunKind::Sync).await;
 
-        assert_eq!(empty.state, "failed");
-        assert_eq!(empty.error_code.as_deref(), Some("sweep_limit"));
-        assert_eq!(env.live_keys().await, keys(0..4));
+            assert_eq!(empty.state, "failed");
+            assert_eq!(empty.error_code.as_deref(), Some("sweep_limit"));
+            assert_eq!(env.live_keys().await, keys(0..4));
 
-        // Exactly at the limit (2 of 4 at 50%) sweeps.
-        env.config(json!({"records": 2})).await;
-        let at_limit = env.finish(RunKind::Sync).await;
-        assert_eq!(at_limit.state, "succeeded");
-        assert_eq!(at_limit.records_deleted, 2);
-        assert_eq!(env.live_keys().await, keys(0..2));
+            // Exactly at the limit (2 of 4 at 50%) sweeps.
+            env.config(json!({"records": 2})).await;
+            let at_limit = env.finish(RunKind::Sync).await;
+            assert_eq!(at_limit.state, "succeeded");
+            assert_eq!(at_limit.records_deleted, 2);
+            assert_eq!(env.live_keys().await, keys(0..2));
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reconciliation_over_the_limit_removes_nothing_either(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 4}), "incremental").await;
-        env.finish(RunKind::Sync).await;
-        env.config(json!({"records": 1})).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 4}), "incremental").await;
+            env.finish(RunKind::Sync).await;
+            env.config(json!({"records": 1})).await;
 
-        let refused = env.finish(RunKind::Reconcile).await;
+            let refused = env.finish(RunKind::Reconcile).await;
 
-        assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
-        assert_eq!(env.live_keys().await, keys(0..4));
+            assert_eq!(refused.error_code.as_deref(), Some("sweep_limit"));
+            assert_eq!(env.live_keys().await, keys(0..4));
+        })
+        .await;
     }
 
     /// The payload the scheduler enqueues for a stream's reconciliation schedule.
@@ -3762,146 +3891,159 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reconcile_schedule_firing_queues_one_run_and_skips_an_active_one(pool: PgPool) {
-        let env = setup(&pool, json!({"records": 5}), "incremental").await;
-        let fired = fire_reconcile(&env, 1).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = setup(&pool, json!({"records": 5}), "incremental").await;
+            let fired = fire_reconcile(&env, 1).await;
 
-        attempt_as(&env, &fired, &Probe::default(), None, true)
-            .await
-            .unwrap();
-
-        let runs: Vec<(String, String, String)> =
-            sqlx::query_as("SELECT run_kind, trigger, state FROM sync_runs")
-                .fetch_all(&pool)
+            attempt_as(&env, &fired, &Probe::default(), None, true)
                 .await
                 .unwrap();
-        assert_eq!(
-            runs,
-            [(
-                "reconcile".to_owned(),
-                "schedule".to_owned(),
-                "queued".to_owned()
-            )]
-        );
-        // The queued run has its own job under the run's trace; the next firing skips it.
-        assert_eq!(
-            env.count("SELECT count(*) FROM jobs WHERE kind = 'sync.run' AND payload ? 'run_id'")
+
+            let runs: Vec<(String, String, String)> =
+                sqlx::query_as("SELECT run_kind, trigger, state FROM sync_runs")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                runs,
+                [(
+                    "reconcile".to_owned(),
+                    "schedule".to_owned(),
+                    "queued".to_owned()
+                )]
+            );
+            // The queued run has its own job under the run's trace; the next firing skips it.
+            assert_eq!(
+                env.count(
+                    "SELECT count(*) FROM jobs WHERE kind = 'sync.run' AND payload ? 'run_id'"
+                )
                 .await,
-            1
-        );
-        let again = fire_reconcile(&env, 2).await;
-        attempt_as(&env, &again, &Probe::default(), None, true)
-            .await
-            .unwrap();
-        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 1);
+                1
+            );
+            let again = fire_reconcile(&env, 2).await;
+            attempt_as(&env, &again, &Probe::default(), None, true)
+                .await
+                .unwrap();
+            assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 1);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn a_reconcile_schedule_firing_queues_nothing_for_what_cannot_reconcile(pool: PgPool) {
-        // A full-refresh stream, a disabled stream and a disabled source are all left alone.
-        let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
-        let fired = fire_reconcile(&env, 1).await;
-        attempt_as(&env, &fired, &Probe::default(), None, true)
-            .await
-            .unwrap();
-        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            // A full-refresh stream, a disabled stream and a disabled source are all left alone.
+            let env = setup(&pool, json!({"records": 5}), "full_refresh").await;
+            let fired = fire_reconcile(&env, 1).await;
+            attempt_as(&env, &fired, &Probe::default(), None, true)
+                .await
+                .unwrap();
+            assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
 
-        sqlx::query("UPDATE streams SET sync_mode = 'incremental', cursor_field = 'updated_at'")
+            sqlx::query(
+                "UPDATE streams SET sync_mode = 'incremental', cursor_field = 'updated_at'",
+            )
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let fired = fire_reconcile(&env, 2).await;
-        attempt_as(&env, &fired, &Probe::default(), None, true)
-            .await
-            .unwrap();
-        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+            sqlx::query("UPDATE streams SET enabled = false, enabled_at = NULL")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let fired = fire_reconcile(&env, 2).await;
+            attempt_as(&env, &fired, &Probe::default(), None, true)
+                .await
+                .unwrap();
+            assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
 
-        sqlx::query("UPDATE streams SET enabled = true")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE sources SET enabled = false")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let fired = fire_reconcile(&env, 3).await;
-        attempt_as(&env, &fired, &Probe::default(), None, true)
-            .await
-            .unwrap();
-        assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+            sqlx::query("UPDATE streams SET enabled = true")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE sources SET enabled = false")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let fired = fire_reconcile(&env, 3).await;
+            attempt_as(&env, &fired, &Probe::default(), None, true)
+                .await
+                .unwrap();
+            assert_eq!(env.count("SELECT count(*) FROM sync_runs").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn the_leader_fires_a_streams_reconcile_schedule_and_the_worker_reconciles(pool: PgPool) {
-        use crate::{Scheduler, SchedulerConfig, Worker, WorkerConfig};
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use crate::{Scheduler, SchedulerConfig, Worker, WorkerConfig};
 
-        let env = setup(&pool, json!({"records": 5}), "incremental").await;
-        env.finish(RunKind::Sync).await;
-        env.config(json!({"records": 3})).await;
-        let mut tx = begin(&pool).await.unwrap();
-        zirv_flow_store::sync_reconcile_schedule(
-            &mut tx,
-            env.ws,
-            env.source,
-            env.stream,
-            Some("* * * * *"),
-            true,
-        )
-        .await
-        .unwrap();
-        commit(tx).await.unwrap();
-        // The first run's job is claimed and abandoned; free the stream's slot is not needed as
-        // it succeeded. Make the slot due.
-        sqlx::query("UPDATE schedules SET next_run_at = now() - interval '1 minute'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM jobs")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
-        leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
-
-        let (stop, stopped) = tokio::sync::watch::channel(false);
-        let worker = Worker::new(
-            pool.clone(),
-            crate::Registry::built_in(),
-            WorkerConfig::new(2),
-        );
-        let handle = tokio::spawn(worker.run(stopped));
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let states: Vec<(String, String, String)> = sqlx::query_as(
-                "SELECT run_kind, trigger, state FROM sync_runs WHERE trigger = 'schedule'",
+            let env = setup(&pool, json!({"records": 5}), "incremental").await;
+            env.finish(RunKind::Sync).await;
+            env.config(json!({"records": 3})).await;
+            let mut tx = begin(&pool).await.unwrap();
+            zirv_flow_store::sync_reconcile_schedule(
+                &mut tx,
+                env.ws,
+                env.source,
+                env.stream,
+                Some("* * * * *"),
+                true,
             )
-            .fetch_all(&pool)
             .await
             .unwrap();
-            if states
-                == [(
-                    "reconcile".to_owned(),
-                    "schedule".to_owned(),
-                    "succeeded".to_owned(),
-                )]
-            {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "timed out: {states:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        stop.send(true).unwrap();
-        handle.await.unwrap();
+            commit(tx).await.unwrap();
+            // The first run's job is claimed and abandoned; free the stream's slot is not needed as
+            // it succeeded. Make the slot due.
+            sqlx::query("UPDATE schedules SET next_run_at = now() - interval '1 minute'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM jobs")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut leader = Scheduler::new(pool.clone(), SchedulerConfig::default());
+            leader.tick_at(OffsetDateTime::now_utc()).await.unwrap();
 
-        assert_eq!(env.live_keys().await, keys(0..3));
+            let (stop, stopped) = tokio::sync::watch::channel(false);
+            let worker = Worker::new(
+                pool.clone(),
+                crate::Registry::built_in(),
+                WorkerConfig::new(2),
+            );
+            let handle = tokio::spawn(worker.run(stopped));
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            loop {
+                let states: Vec<(String, String, String)> = sqlx::query_as(
+                    "SELECT run_kind, trigger, state FROM sync_runs WHERE trigger = 'schedule'",
+                )
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+                if states
+                    == [(
+                        "reconcile".to_owned(),
+                        "schedule".to_owned(),
+                        "succeeded".to_owned(),
+                    )]
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out: {states:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            stop.send(true).unwrap();
+            handle.await.unwrap();
+
+            assert_eq!(env.live_keys().await, keys(0..3));
+        })
+        .await;
     }
 
     // The file source end to end: a real `file` source against a local server.
@@ -4191,6 +4333,7 @@ mod tests {
     async fn a_nested_json_file_gives_people_traits_events_and_list_members_and_a_second_run_changes_nothing(
         pool: PgPool,
     ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
         let records = nested_records(40);
         let (url, _) = serve_file(
             format!(
@@ -4300,6 +4443,8 @@ mod tests {
                 .await,
             40
         );
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -4307,55 +4452,58 @@ mod tests {
     async fn a_crashed_file_run_resumes_at_the_checkpoint_offset_and_ends_as_an_uninterrupted_run(
         pool: PgPool,
     ) {
-        let records = nested_records(1500);
-        let body = ndjson(&records);
-        let size = body.len();
-        let (url, _) = serve_file(body, usize::MAX).await;
-        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
-        let key = redaction_key();
-        let (run, job) = env.queue().await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let records = nested_records(1500);
+            let body = ndjson(&records);
+            let size = body.len();
+            let (url, _) = serve_file(body, usize::MAX).await;
+            let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+            let key = redaction_key();
+            let (run, job) = env.queue().await;
 
-        let first = attempt_file(
-            &env,
-            &job,
-            &Probe {
-                stop_after: Some(1),
-                before_commit: None,
-            },
-            true,
-            Some(Arc::clone(&key)),
-        )
+            let first = attempt_file(
+                &env,
+                &job,
+                &Probe {
+                    stop_after: Some(1),
+                    before_commit: None,
+                },
+                true,
+                Some(Arc::clone(&key)),
+            )
+            .await;
+            assert!(first.is_err());
+            let mid = env.run(run.id).await;
+            assert_eq!(mid.state, "running");
+            let offset = mid.checkpoint.as_ref().unwrap()["offset"].as_u64().unwrap();
+            assert!(offset > 0 && (offset as usize) < size, "{offset} of {size}");
+            assert!(mid.records_read > 0 && mid.records_read < 1500);
+
+            attempt_file(&env, &job, &Probe::default(), true, Some(Arc::clone(&key)))
+                .await
+                .unwrap();
+
+            let done = env.run(run.id).await;
+            assert_eq!(done.state, "succeeded");
+            assert_eq!(
+                (
+                    done.records_read,
+                    done.records_applied,
+                    done.records_rejected
+                ),
+                (1500, 1500, 0),
+                "no row twice, none missing"
+            );
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 1500);
+            assert_eq!(env.count("SELECT count(*) FROM events").await, 1500);
+            assert_eq!(
+                env.count("SELECT count(DISTINCT message_id) FROM events")
+                    .await,
+                1500
+            );
+            assert_eq!(done.checkpoint.unwrap()["offset"], json!(size));
+        })
         .await;
-        assert!(first.is_err());
-        let mid = env.run(run.id).await;
-        assert_eq!(mid.state, "running");
-        let offset = mid.checkpoint.as_ref().unwrap()["offset"].as_u64().unwrap();
-        assert!(offset > 0 && (offset as usize) < size, "{offset} of {size}");
-        assert!(mid.records_read > 0 && mid.records_read < 1500);
-
-        attempt_file(&env, &job, &Probe::default(), true, Some(Arc::clone(&key)))
-            .await
-            .unwrap();
-
-        let done = env.run(run.id).await;
-        assert_eq!(done.state, "succeeded");
-        assert_eq!(
-            (
-                done.records_read,
-                done.records_applied,
-                done.records_rejected
-            ),
-            (1500, 1500, 0),
-            "no row twice, none missing"
-        );
-        assert_eq!(env.count("SELECT count(*) FROM people").await, 1500);
-        assert_eq!(env.count("SELECT count(*) FROM events").await, 1500);
-        assert_eq!(
-            env.count("SELECT count(DISTINCT message_id) FROM events")
-                .await,
-            1500
-        );
-        assert_eq!(done.checkpoint.unwrap()["offset"], json!(size));
     }
 
     #[sqlx::test]
@@ -4363,43 +4511,46 @@ mod tests {
     async fn a_file_that_changes_between_windows_fails_the_run_and_keeps_the_committed_windows(
         pool: PgPool,
     ) {
-        // Over two 4 MiB windows; the server's ETag changes at its third request (discovery was the
-        // first, the first window the second).
-        let record = json!({
-            "id": 0,
-            "profile": {"email": "a@example.com", "name": "x"},
-            "pad": "x".repeat(8000),
-            "flags": {"news": false},
-            "order": {"at": "2026-03-02", "total": "1", "items": [{"sku": "s"}]}
-        });
-        let records: Vec<Value> = (0..700)
-            .map(|n| {
-                let mut record = record.clone();
-                record["id"] = json!(n);
-                record["profile"]["email"] = json!(format!("u{n}@example.com"));
-                record
-            })
-            .collect();
-        let body = ndjson(&records);
-        assert!(body.len() > 5 * 1024 * 1024);
-        let (url, _) = serve_file(body, 2).await;
-        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
-        let key = redaction_key();
-        let (run, job) = env.queue().await;
-        let last = ClaimedJob {
-            attempts: job.max_attempts,
-            ..job.clone()
-        };
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            // Over two 4 MiB windows; the server's ETag changes at its third request (discovery was the
+            // first, the first window the second).
+            let record = json!({
+                "id": 0,
+                "profile": {"email": "a@example.com", "name": "x"},
+                "pad": "x".repeat(8000),
+                "flags": {"news": false},
+                "order": {"at": "2026-03-02", "total": "1", "items": [{"sku": "s"}]}
+            });
+            let records: Vec<Value> = (0..700)
+                .map(|n| {
+                    let mut record = record.clone();
+                    record["id"] = json!(n);
+                    record["profile"]["email"] = json!(format!("u{n}@example.com"));
+                    record
+                })
+                .collect();
+            let body = ndjson(&records);
+            assert!(body.len() > 5 * 1024 * 1024);
+            let (url, _) = serve_file(body, 2).await;
+            let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+            let key = redaction_key();
+            let (run, job) = env.queue().await;
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..job.clone()
+            };
 
-        let result = attempt_file(&env, &last, &Probe::default(), true, Some(key)).await;
+            let result = attempt_file(&env, &last, &Probe::default(), true, Some(key)).await;
 
-        assert!(result.is_err());
-        let failed = env.run(run.id).await;
-        assert_eq!(failed.state, "failed");
-        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
-        let applied = env.count("SELECT count(*) FROM source_records").await;
-        assert!(applied > 0 && applied < 700, "{applied}");
-        assert_eq!(failed.records_applied, applied);
+            assert!(result.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.state, "failed");
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            let applied = env.count("SELECT count(*) FROM source_records").await;
+            assert!(applied > 0 && applied < 700, "{applied}");
+            assert_eq!(failed.records_applied, applied);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -4407,23 +4558,26 @@ mod tests {
     async fn a_file_whose_address_the_egress_policy_blocks_fails_the_run_and_nothing_is_asked(
         pool: PgPool,
     ) {
-        let (url, served) = serve_file(ndjson(&nested_records(3)), usize::MAX).await;
-        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
-        let (run, job) = env.queue().await;
-        let hits_before = served.hits.load(Ordering::SeqCst);
-        let last = ClaimedJob {
-            attempts: job.max_attempts,
-            ..job.clone()
-        };
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (url, served) = serve_file(ndjson(&nested_records(3)), usize::MAX).await;
+            let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+            let (run, job) = env.queue().await;
+            let hits_before = served.hits.load(Ordering::SeqCst);
+            let last = ClaimedJob {
+                attempts: job.max_attempts,
+                ..job.clone()
+            };
 
-        let result =
-            attempt_file(&env, &last, &Probe::default(), false, Some(redaction_key())).await;
+            let result =
+                attempt_file(&env, &last, &Probe::default(), false, Some(redaction_key())).await;
 
-        assert!(result.is_err());
-        let failed = env.run(run.id).await;
-        assert_eq!(failed.error_code.as_deref(), Some("source_error"));
-        assert_eq!(served.hits.load(Ordering::SeqCst), hits_before);
-        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+            assert!(result.is_err());
+            let failed = env.run(run.id).await;
+            assert_eq!(failed.error_code.as_deref(), Some("source_error"));
+            assert_eq!(served.hits.load(Ordering::SeqCst), hits_before);
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+        })
+        .await;
     }
 
     /// Runs the one queued run of `env` once and returns the ended run.
@@ -4443,39 +4597,42 @@ mod tests {
     async fn an_event_needs_a_keyed_stream_a_redaction_key_and_a_mapping_the_descriptor_still_fits(
         pool: PgPool,
     ) {
-        let (url, _) = serve_file(ndjson(&nested_records(5)), usize::MAX).await;
-        let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (url, _) = serve_file(ndjson(&nested_records(5)), usize::MAX).await;
+            let (env, _) = setup_file(&pool, &url, "ndjson", &["id"]).await;
 
-        // No redaction key on the worker.
-        let run = ended(&env, None).await;
-        assert_eq!(run.error_code.as_deref(), Some("event_key_unavailable"));
-        assert_eq!(run.records_read, 0);
+            // No redaction key on the worker.
+            let run = ended(&env, None).await;
+            assert_eq!(run.error_code.as_deref(), Some("event_key_unavailable"));
+            assert_eq!(run.records_read, 0);
 
-        // The stream's key was cleared since the mapping was saved.
-        sqlx::query("UPDATE streams SET primary_key = '{}'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let run = ended(&env, Some(redaction_key())).await;
-        assert_eq!(run.error_code.as_deref(), Some("stream_not_keyed"));
-        sqlx::query("UPDATE streams SET primary_key = '{id}'")
-            .execute(&pool)
-            .await
-            .unwrap();
+            // The stream's key was cleared since the mapping was saved.
+            sqlx::query("UPDATE streams SET primary_key = '{}'")
+                .execute(&pool)
+                .await
+                .unwrap();
+            let run = ended(&env, Some(redaction_key())).await;
+            assert_eq!(run.error_code.as_deref(), Some("stream_not_keyed"));
+            sqlx::query("UPDATE streams SET primary_key = '{id}'")
+                .execute(&pool)
+                .await
+                .unwrap();
 
-        // The descriptor lost a field the mapping reads.
-        sqlx::query(
-            "UPDATE streams SET discovered = jsonb_set(discovered, '{fields}', \
+            // The descriptor lost a field the mapping reads.
+            sqlx::query(
+                "UPDATE streams SET discovered = jsonb_set(discovered, '{fields}', \
                 (SELECT jsonb_agg(f) FROM jsonb_array_elements(discovered->'fields') f \
                   WHERE f->>'name' <> 'order'))",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        let run = ended(&env, Some(redaction_key())).await;
-        assert_eq!(run.error_code.as_deref(), Some("mapping_invalid"));
-        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
-        assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            let run = ended(&env, Some(redaction_key())).await;
+            assert_eq!(run.error_code.as_deref(), Some("mapping_invalid"));
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
+        })
+        .await;
     }
 
     #[sqlx::test]
@@ -4483,21 +4640,24 @@ mod tests {
     async fn a_list_deleted_since_the_mapping_was_saved_fails_the_run_before_more_is_read(
         pool: PgPool,
     ) {
-        let (url, served) = serve_file(ndjson(&nested_records(10)), usize::MAX).await;
-        let (env, news) = setup_file(&pool, &url, "ndjson", &["id"]).await;
-        sqlx::query("DELETE FROM lists WHERE id = $1")
-            .bind(news)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let _ = served;
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let (url, served) = serve_file(ndjson(&nested_records(10)), usize::MAX).await;
+            let (env, news) = setup_file(&pool, &url, "ndjson", &["id"]).await;
+            sqlx::query("DELETE FROM lists WHERE id = $1")
+                .bind(news)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let _ = served;
 
-        let run = ended(&env, Some(redaction_key())).await;
+            let run = ended(&env, Some(redaction_key())).await;
 
-        assert_eq!(run.state, "failed");
-        assert_eq!(run.error_code.as_deref(), Some("list_missing"));
-        assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
-        assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
+            assert_eq!(run.state, "failed");
+            assert_eq!(run.error_code.as_deref(), Some("list_missing"));
+            assert_eq!(env.count("SELECT count(*) FROM people").await, 0);
+            assert_eq!(env.count("SELECT count(*) FROM events").await, 0);
+        })
+        .await;
     }
 
     // The http source end to end: a real `http` source with an OAuth2 authorization-code
@@ -5017,80 +5177,86 @@ mod tests {
         async fn a_token_revoked_mid_sync_is_refreshed_once_and_the_rotated_refresh_token_is_stored(
             pool: PgPool,
         ) {
-            let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
-            let account = setup_http(&pool, records, "incremental", 2).await;
-            // The API stops accepting the first access token on its second data request.
-            account.api.revoke_at.store(2, Ordering::SeqCst);
-            let limits = Arc::<RateLimits>::default();
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
+                let account = setup_http(&pool, records, "incremental", 2).await;
+                // The API stops accepting the first access token on its second data request.
+                account.api.revoke_at.store(2, Ordering::SeqCst);
+                let limits = Arc::<RateLimits>::default();
 
-            let first = account.run(&limits).await;
+                let first = account.run(&limits).await;
 
-            assert_eq!(first.state, "succeeded", "{:?}", first.error_code);
-            assert_eq!(first.records_read, 5);
-            // One refresh for the stale token, exactly one more for the revoked one.
-            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 2);
-            // Three pages, and the second asked twice.
-            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 4);
-            // The rotated refresh token is what is stored, and the provider would refuse rt-0.
-            let stored = account.tokens().await;
-            assert_eq!(stored.refresh_token.expose(), "rt-2");
-            assert_eq!(stored.access_token.expose(), "acc-2");
-            assert_eq!(
-                account.checkpoint().await,
-                Some(json!({"since": "2026-01-05T00:00:00Z"}))
-            );
+                assert_eq!(first.state, "succeeded", "{:?}", first.error_code);
+                assert_eq!(first.records_read, 5);
+                // One refresh for the stale token, exactly one more for the revoked one.
+                assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 2);
+                // Three pages, and the second asked twice.
+                assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 4);
+                // The rotated refresh token is what is stored, and the provider would refuse rt-0.
+                let stored = account.tokens().await;
+                assert_eq!(stored.refresh_token.expose(), "rt-2");
+                assert_eq!(stored.access_token.expose(), "acc-2");
+                assert_eq!(
+                    account.checkpoint().await,
+                    Some(json!({"since": "2026-01-05T00:00:00Z"}))
+                );
 
-            // Run 2 reads only what is newer and needs no refresh: the stored token is good.
-            account
-                .api
-                .records
-                .lock()
-                .unwrap()
-                .push(contact(6, "active", 6));
-            account.api.queries.lock().unwrap().clear();
-            let second = account.run(&limits).await;
-
-            assert_eq!(second.state, "succeeded", "{:?}", second.error_code);
-            assert_eq!(second.records_read, 1);
-            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 2);
-            assert!(
+                // Run 2 reads only what is newer and needs no refresh: the stored token is good.
                 account
                     .api
-                    .queries
+                    .records
                     .lock()
                     .unwrap()
-                    .iter()
-                    .all(|query| query.contains("since=2026-01-05T00%3A00%3A00Z"))
-            );
-            assert_eq!(
-                account.checkpoint().await,
-                Some(json!({"since": "2026-01-06T00:00:00Z"}))
-            );
-            assert_eq!(
-                account
-                    .env
-                    .count("SELECT count(*) FROM source_records")
-                    .await,
-                6
-            );
+                    .push(contact(6, "active", 6));
+                account.api.queries.lock().unwrap().clear();
+                let second = account.run(&limits).await;
+
+                assert_eq!(second.state, "succeeded", "{:?}", second.error_code);
+                assert_eq!(second.records_read, 1);
+                assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 2);
+                assert!(
+                    account
+                        .api
+                        .queries
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|query| query.contains("since=2026-01-05T00%3A00%3A00Z"))
+                );
+                assert_eq!(
+                    account.checkpoint().await,
+                    Some(json!({"since": "2026-01-06T00:00:00Z"}))
+                );
+                assert_eq!(
+                    account
+                        .env
+                        .count("SELECT count(*) FROM source_records")
+                        .await,
+                    6
+                );
+            })
+            .await;
         }
 
         #[sqlx::test]
         #[ignore = "requires PostgreSQL; set DATABASE_URL"]
         async fn a_429_with_retry_after_is_waited_out_and_the_run_succeeds(pool: PgPool) {
-            let records: Vec<Value> = (1..=4).map(|id| contact(id, "active", id)).collect();
-            let account = setup_http(&pool, records, "incremental", 2).await;
-            *account.api.rate_limit_once.lock().unwrap() = true;
-            let started = std::time::Instant::now();
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let records: Vec<Value> = (1..=4).map(|id| contact(id, "active", id)).collect();
+                let account = setup_http(&pool, records, "incremental", 2).await;
+                *account.api.rate_limit_once.lock().unwrap() = true;
+                let started = std::time::Instant::now();
 
-            let run = account.run(&Arc::default()).await;
+                let run = account.run(&Arc::default()).await;
 
-            assert_eq!(run.state, "succeeded", "{:?}", run.error_code);
-            assert_eq!(run.records_read, 4);
-            assert!(started.elapsed() >= Duration::from_millis(900));
-            // The 429 cost one extra request, not a run attempt.
-            assert_eq!(run.attempt, 1);
-            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 3);
+                assert_eq!(run.state, "succeeded", "{:?}", run.error_code);
+                assert_eq!(run.records_read, 4);
+                assert!(started.elapsed() >= Duration::from_millis(900));
+                // The 429 cost one extra request, not a run attempt.
+                assert_eq!(run.attempt, 1);
+                assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 3);
+            })
+            .await;
         }
 
         #[sqlx::test]
@@ -5098,67 +5264,72 @@ mod tests {
         async fn a_lease_lost_mid_stream_rereads_from_the_start_checkpoint_without_duplicates(
             pool: PgPool,
         ) {
-            let records: Vec<Value> = (1..=1200)
-                .map(|id| {
-                    let mut row = contact(1, "active", 1);
-                    row["id"] = json!(format!("c{id}"));
-                    row["email"] = json!(format!("person{id}@example.com"));
-                    row["updated_at"] =
-                        json!(format!("2026-01-01T{:02}:{:02}:00Z", id / 60 % 24, id % 60));
-                    row
-                })
-                .collect();
-            let account = setup_http(&pool, records, "incremental", 500).await;
-            let (run, job) = account.env.queue().await;
-            let limits = Arc::<RateLimits>::default();
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let records: Vec<Value> = (1..=1200)
+                    .map(|id| {
+                        let mut row = contact(1, "active", 1);
+                        row["id"] = json!(format!("c{id}"));
+                        row["email"] = json!(format!("person{id}@example.com"));
+                        row["updated_at"] =
+                            json!(format!("2026-01-01T{:02}:{:02}:00Z", id / 60 % 24, id % 60));
+                        row
+                    })
+                    .collect();
+                let account = setup_http(&pool, records, "incremental", 500).await;
+                let (run, job) = account.env.queue().await;
+                let limits = Arc::<RateLimits>::default();
 
-            // The first attempt dies after its first unit was committed.
-            let first = account
-                .attempt(
-                    &job,
-                    &Probe {
-                        stop_after: Some(1),
-                        before_commit: None,
-                    },
-                    &limits,
-                )
-                .await;
-            assert!(first.is_err());
-            let mid = account.env.run(run.id).await;
-            assert_eq!(mid.state, "running");
-            // Only the end of the stream moves the checkpoint: the committed unit carries the
-            // checkpoint the run started with.
-            assert_eq!(mid.checkpoint, Some(json!({"since": null})));
+                // The first attempt dies after its first unit was committed.
+                let first = account
+                    .attempt(
+                        &job,
+                        &Probe {
+                            stop_after: Some(1),
+                            before_commit: None,
+                        },
+                        &limits,
+                    )
+                    .await;
+                assert!(first.is_err());
+                let mid = account.env.run(run.id).await;
+                assert_eq!(mid.state, "running");
+                // Only the end of the stream moves the checkpoint: the committed unit carries the
+                // checkpoint the run started with.
+                assert_eq!(mid.checkpoint, Some(json!({"since": null})));
 
-            account
-                .attempt(&job, &Probe::default(), &limits)
-                .await
-                .unwrap();
-
-            let done = account.env.run(run.id).await;
-            assert_eq!(done.state, "succeeded", "{:?}", done.error_code);
-            assert_eq!(done.attempt, 2);
-            // The first 500 were read again, and applying them again changed nothing.
-            assert_eq!(
                 account
-                    .env
-                    .count("SELECT count(*) FROM source_records")
-                    .await,
-                1200
-            );
-            assert_eq!(
-                account
-                    .env
-                    .count("SELECT count(*) FROM decision_records WHERE action = 'person.created'")
-                    .await,
-                1200
-            );
-            assert_eq!(done.records_applied, 1200);
-            assert_eq!(done.records_unchanged, 500);
-            assert_eq!(
-                account.checkpoint().await,
-                Some(json!({"since": "2026-01-01T20:00:00Z"}))
-            );
+                    .attempt(&job, &Probe::default(), &limits)
+                    .await
+                    .unwrap();
+
+                let done = account.env.run(run.id).await;
+                assert_eq!(done.state, "succeeded", "{:?}", done.error_code);
+                assert_eq!(done.attempt, 2);
+                // The first 500 were read again, and applying them again changed nothing.
+                assert_eq!(
+                    account
+                        .env
+                        .count("SELECT count(*) FROM source_records")
+                        .await,
+                    1200
+                );
+                assert_eq!(
+                    account
+                        .env
+                        .count(
+                            "SELECT count(*) FROM decision_records WHERE action = 'person.created'"
+                        )
+                        .await,
+                    1200
+                );
+                assert_eq!(done.records_applied, 1200);
+                assert_eq!(done.records_unchanged, 500);
+                assert_eq!(
+                    account.checkpoint().await,
+                    Some(json!({"since": "2026-01-01T20:00:00Z"}))
+                );
+            })
+            .await;
         }
 
         #[sqlx::test]
@@ -5166,79 +5337,89 @@ mod tests {
         async fn a_delete_signal_in_the_manifest_removes_the_record_through_the_batch_path(
             pool: PgPool,
         ) {
-            let records: Vec<Value> = (1..=3).map(|id| contact(id, "active", id)).collect();
-            let account = setup_http(&pool, records, "incremental", 10).await;
-            let limits = Arc::<RateLimits>::default();
-            let first = account.run(&limits).await;
-            assert_eq!(first.records_deleted, 0);
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let records: Vec<Value> = (1..=3).map(|id| contact(id, "active", id)).collect();
+                let account = setup_http(&pool, records, "incremental", 10).await;
+                let limits = Arc::<RateLimits>::default();
+                let first = account.run(&limits).await;
+                assert_eq!(first.records_deleted, 0);
 
-            // The API now reports c2 as deleted, with a newer cursor value.
-            account.api.records.lock().unwrap()[1] = contact(2, "deleted", 9);
-            let second = account.run(&limits).await;
+                // The API now reports c2 as deleted, with a newer cursor value.
+                account.api.records.lock().unwrap()[1] = contact(2, "deleted", 9);
+                let second = account.run(&limits).await;
 
-            assert_eq!(second.state, "succeeded", "{:?}", second.error_code);
-            assert_eq!(second.records_read, 1);
-            assert_eq!(second.records_deleted, 1);
-            assert_eq!(
-                account
-                    .env
-                    .count("SELECT count(*) FROM source_records WHERE deleted_at IS NOT NULL")
-                    .await,
-                1
-            );
+                assert_eq!(second.state, "succeeded", "{:?}", second.error_code);
+                assert_eq!(second.records_read, 1);
+                assert_eq!(second.records_deleted, 1);
+                assert_eq!(
+                    account
+                        .env
+                        .count("SELECT count(*) FROM source_records WHERE deleted_at IS NOT NULL")
+                        .await,
+                    1
+                );
+            })
+            .await;
         }
 
         #[sqlx::test]
         #[ignore = "requires PostgreSQL; set DATABASE_URL"]
         async fn a_changed_manifest_rate_is_used_by_the_next_context(pool: PgPool) {
-            let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
-            let account = setup_http(&pool, records, "full_refresh", 2).await;
-            // One process-wide registry of buckets, as the worker has.
-            let limits = Arc::<RateLimits>::default();
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let records: Vec<Value> = (1..=5).map(|id| contact(id, "active", id)).collect();
+                let account = setup_http(&pool, records, "full_refresh", 2).await;
+                // One process-wide registry of buckets, as the worker has.
+                let limits = Arc::<RateLimits>::default();
 
-            let started = std::time::Instant::now();
-            let fast = account.run(&limits).await;
-            assert_eq!(fast.state, "succeeded", "{:?}", fast.error_code);
-            let fast_time = started.elapsed();
-            assert!(fast_time < Duration::from_secs(2), "{fast_time:?}");
+                let started = std::time::Instant::now();
+                let fast = account.run(&limits).await;
+                assert_eq!(fast.state, "succeeded", "{:?}", fast.error_code);
+                let fast_time = started.elapsed();
+                assert!(fast_time < Duration::from_secs(2), "{fast_time:?}");
 
-            // An admin edits the rate: one request every two seconds. Three pages follow.
-            sqlx::query(
-                "UPDATE sources SET config = jsonb_set(config, \
+                // An admin edits the rate: one request every two seconds. Three pages follow.
+                sqlx::query(
+                    "UPDATE sources SET config = jsonb_set(config, \
                     '{manifest,rate_limit}', '{\"requests\": 1, \"per_seconds\": 2}')",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
-            let started = std::time::Instant::now();
-            let slow = account.run(&limits).await;
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                let started = std::time::Instant::now();
+                let slow = account.run(&limits).await;
 
-            assert_eq!(slow.state, "succeeded", "{:?}", slow.error_code);
-            assert!(
-                started.elapsed() >= Duration::from_millis(3500),
-                "{:?}",
-                started.elapsed()
-            );
+                assert_eq!(slow.state, "succeeded", "{:?}", slow.error_code);
+                assert!(
+                    started.elapsed() >= Duration::from_millis(3500),
+                    "{:?}",
+                    started.elapsed()
+                );
+            })
+            .await;
         }
 
         #[sqlx::test]
         #[ignore = "requires PostgreSQL; set DATABASE_URL"]
         async fn an_invalid_stored_manifest_fails_the_run_before_any_request(pool: PgPool) {
-            let account = setup_http(&pool, vec![contact(1, "active", 1)], "full_refresh", 2).await;
-            sqlx::query(
-                "UPDATE sources SET config = jsonb_set(config, \
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let account =
+                    setup_http(&pool, vec![contact(1, "active", 1)], "full_refresh", 2).await;
+                sqlx::query(
+                    "UPDATE sources SET config = jsonb_set(config, \
                     '{manifest,streams,0,path}', '\"no-slash\"')",
-            )
-            .execute(&pool)
-            .await
-            .unwrap();
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
 
-            let run = account.run(&Arc::default()).await;
+                let run = account.run(&Arc::default()).await;
 
-            assert_eq!(run.state, "failed");
-            assert_eq!(run.error_code.as_deref(), Some("source_config_invalid"));
-            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
-            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
+                assert_eq!(run.state, "failed");
+                assert_eq!(run.error_code.as_deref(), Some("source_config_invalid"));
+                assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
+                assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
+            })
+            .await;
         }
 
         #[sqlx::test]
@@ -5246,22 +5427,26 @@ mod tests {
         async fn a_source_whose_account_was_never_connected_fails_without_any_request(
             pool: PgPool,
         ) {
-            let account = setup_http(&pool, vec![contact(1, "active", 1)], "full_refresh", 2).await;
-            sqlx::query("UPDATE sources SET oauth_secret_id = NULL, oauth_connected_at = NULL")
-                .execute(&pool)
-                .await
-                .unwrap();
+            zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+                let account =
+                    setup_http(&pool, vec![contact(1, "active", 1)], "full_refresh", 2).await;
+                sqlx::query("UPDATE sources SET oauth_secret_id = NULL, oauth_connected_at = NULL")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
 
-            let (run, job) = account.env.queue().await;
-            // The last attempt ends the run as failed.
-            let result = account
-                .attempt(&job, &Probe::default(), &Arc::default())
-                .await;
+                let (run, job) = account.env.queue().await;
+                // The last attempt ends the run as failed.
+                let result = account
+                    .attempt(&job, &Probe::default(), &Arc::default())
+                    .await;
 
-            assert!(result.is_err());
-            assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
-            assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
-            let _ = run;
+                assert!(result.is_err());
+                assert_eq!(account.api.data_requests.load(Ordering::SeqCst), 0);
+                assert_eq!(account.api.refreshes.load(Ordering::SeqCst), 0);
+                let _ = run;
+            })
+            .await;
         }
     }
 }
