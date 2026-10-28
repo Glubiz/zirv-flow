@@ -2931,7 +2931,11 @@ pub(super) mod tests {
             "the step failed, and failed again on the retry"
         );
         for failure in failures {
-            assert_eq!(failure.reason.as_deref(), Some(MESSAGE), "not truncated");
+            assert_eq!(
+                failure.reason.as_deref(),
+                Some(decision_actions::reason_code_of(MESSAGE).as_str()),
+                "the code of the message, not truncated"
+            );
             assert_eq!(failure.subject_ids["node"], "bump");
         }
         for outcome in ["retried", "skipped"] {
