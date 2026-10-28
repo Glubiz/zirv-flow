@@ -1,5 +1,7 @@
 # Security policy
 
+Threat model: [boundaries, controls, test evidence and accepted risks](docs/threat-model.md).
+
 ## Supported versions
 
 Only the [latest release](https://github.com/Glubiz/zirv-flow/releases) is supported

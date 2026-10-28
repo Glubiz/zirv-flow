@@ -2848,5 +2848,6 @@ ZIRV_FLOW_TEST_MYSQL_URL=mysql://root:mysql@127.0.0.1:53306/mysql DATABASE_URL=p
 
 - [Contributing](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md) -- report vulnerabilities privately
+- [Threat model](docs/threat-model.md) -- trust boundaries, controls, test evidence and accepted risks
 - [Disclaimer](DISCLAIMER.md) -- operator responsibilities for a self-hosted tool
 - [MIT License](LICENSE)

@@ -46,6 +46,12 @@ jobs:
       - name: Test-presence gate self-test
         run: bash scripts/check-test-presence.sh --self-test
 
+      - name: Threat model evidence
+        run: bash scripts/check-threat-model.sh
+
+      - name: Threat model evidence self-test
+        run: bash scripts/check-threat-model.sh --self-test
+
       - name: Set Up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
