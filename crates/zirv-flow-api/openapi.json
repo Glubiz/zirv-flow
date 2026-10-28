@@ -29307,7 +29307,7 @@
         }
       },
       "ConflictProblem": {
-        "oneOf": [
+        "anyOf": [
           {
             "$ref": "#/components/schemas/Problem"
           },
@@ -29315,7 +29315,7 @@
             "$ref": "#/components/schemas/ReplayedProblem"
           }
         ],
-        "description": "The two shapes a `409` of an idempotent create may have: a problem of the route, or the\nreplay of its key."
+        "description": "The two shapes a `409` of an idempotent create may have: a problem of the route, or the replay of its key, which is a problem with `resource_id`."
       },
       "ConflictsBody": {
         "type": "object",

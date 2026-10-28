@@ -16,6 +16,7 @@ use crate::feedback;
 use crate::flows::{self, FlowSchemas};
 use crate::forwarding;
 use crate::health::{self, StatusBody};
+use crate::idempotency::ConflictSchema;
 use crate::imports;
 use crate::ingest::{
     self, AcceptedBody, BatchItemRequest, BatchRequest, IdentifyRequest, TrackRequest,
@@ -801,7 +802,12 @@ use crate::workspaces::{
         retention::LastRunBody,
         retention::PutRetentionRequest,
     )),
-    modifiers(&SecuritySchemes, &SegmentSchemas, &FlowSchemas)
+    modifiers(
+        &SecuritySchemes,
+        &SegmentSchemas,
+        &FlowSchemas,
+        &ConflictSchema
+    )
 )]
 struct ApiDoc;
 
@@ -1041,13 +1047,17 @@ mod tests {
     }
 
     #[test]
-    fn the_conflict_schema_is_one_of_the_problem_and_the_replay() {
+    fn the_conflict_schema_is_any_of_the_problem_and_the_replay() {
         let document = serde_json::to_value(openapi()).unwrap();
 
-        let one_of = &document["components"]["schemas"]["ConflictProblem"]["oneOf"];
+        let schema = &document["components"]["schemas"]["ConflictProblem"];
 
+        assert!(
+            schema.get("oneOf").is_none(),
+            "a replay matches both shapes"
+        );
         assert_eq!(
-            one_of,
+            &schema["anyOf"],
             &serde_json::json!([
                 {"$ref": "#/components/schemas/Problem"},
                 {"$ref": "#/components/schemas/ReplayedProblem"}

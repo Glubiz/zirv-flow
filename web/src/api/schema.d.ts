@@ -5116,10 +5116,7 @@ export interface components {
              */
             people: components["schemas"]["PersonIdentitiesBody"][];
         };
-        /**
-         * @description The two shapes a `409` of an idempotent create may have: a problem of the route, or the
-         *     replay of its key.
-         */
+        /** @description The two shapes a `409` of an idempotent create may have: a problem of the route, or the replay of its key, which is a problem with `resource_id`. */
         ConflictProblem: components["schemas"]["Problem"] | components["schemas"]["ReplayedProblem"];
         ConflictsBody: {
             /** @description Newest first. */

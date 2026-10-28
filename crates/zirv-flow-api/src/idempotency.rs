@@ -107,6 +107,28 @@ impl From<ReplayedProblem> for ConflictProblem {
     }
 }
 
+/// Declares `ConflictProblem` as `anyOf` its two shapes. A replay body is a problem with one
+/// more field, and a problem allows extra properties, so it matches both: `oneOf` would reject it.
+pub(crate) struct ConflictSchema;
+
+impl utoipa::Modify for ConflictSchema {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::schema::{AnyOfBuilder, Schema};
+        use utoipa::openapi::{Ref, RefOr};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        let any_of = AnyOfBuilder::new()
+            .description(Some(
+                "The two shapes a `409` of an idempotent create may have: a problem of the route, or the replay of its key, which is a problem with `resource_id`.",
+            ))
+            .item(Ref::from_schema_name("Problem"))
+            .item(Ref::from_schema_name("ReplayedProblem"))
+            .build();
+        components
+            .schemas
+            .insert("ConflictProblem".into(), RefOr::T(Schema::AnyOf(any_of)));
+    }
+}
+
 /// The key a request sent, for one route and one caller.
 pub(crate) struct Keyed {
     route: &'static str,
@@ -526,6 +548,7 @@ mod tests {
         let body = body_of(response).await;
         assert_eq!(body["code"], "idempotency_key_replayed");
         assert_eq!(body["resource_id"], id.to_string());
+        assert_eq!(body["status"], 409);
     }
 
     #[test]
@@ -618,7 +641,13 @@ mod acceptance {
         let admin = key(Scope::Admin).await;
         Fixture {
             pool: pool.clone(),
-            router: router(AppState::new(serving.clone(), Arc::new(String::new))),
+            router: router(
+                AppState::new(serving.clone(), Arc::new(String::new)).with_hmac_root(
+                    &zirv_flow_core::HmacRoot::bootstrap_from(
+                        &zirv_flow_core::MasterKey::generate(),
+                    ),
+                ),
+            ),
             ws,
             admin_id: admin.key.id,
             admin: admin.plaintext,
@@ -708,6 +737,35 @@ mod acceptance {
                 sender,
                 tokio::spawn(async move { reply(&router, request).await }),
             )
+        }
+
+        /// A person the privacy requests can name.
+        async fn person(&self) -> Uuid {
+            let outcome = zirv_flow_store::apply_profile_batch(
+                &self.pool,
+                self.ws,
+                &[zirv_flow_store::ProfileRecord {
+                    source: "crm".into(),
+                    stream: "contacts".into(),
+                    record_key: "p-1".into(),
+                    identifiers: vec![("external:crm".into(), "p-1-ext".into())],
+                    traits: serde_json::Map::new(),
+                    observed_at: time::macros::datetime!(2026-01-01 00:00 UTC),
+                    trace: zirv_flow_core::TraceContext::root(zirv_flow_core::Cause::api("test")),
+                }],
+            )
+            .await
+            .unwrap();
+            match &outcome[0] {
+                zirv_flow_store::ProfileOutcome::Applied { person_id, .. } => *person_id,
+                other => panic!("not applied: {other:?}"),
+            }
+        }
+
+        async fn privacy(&self, path: &str, person: Uuid, key: Option<&str>) -> Reply {
+            let body = json!({ "person_id": person }).to_string();
+            self.send(self.request(&self.admin, path, "application/json", key, Body::from(body)))
+                .await
         }
 
         async fn count(&self, sql: &str) -> i64 {
@@ -836,6 +894,9 @@ mod acceptance {
         assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.text);
         assert_eq!(again.json()["code"], "idempotency_key_replayed");
         assert_eq!(again.json()["resource_id"], id);
+        for field in ["type", "title", "status", "detail", "request_id"] {
+            assert!(again.json().get(field).is_some(), "{field}");
+        }
         assert!(!again.text.contains(&secret));
         let stored: Vec<String> =
             sqlx::query_scalar("SELECT to_jsonb(t)::text FROM api_idempotency t")
@@ -1053,6 +1114,101 @@ mod acceptance {
         assert_eq!(other.status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(other.json()["code"], "idempotency_key_reused");
         assert_eq!(f.count("SELECT count(*) FROM imports").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replayed_erasure_request_is_409_with_the_same_id_and_adds_no_request_or_job(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let person = f.person().await;
+        let first = f.privacy("privacy/erasures", person, Some("k-1")).await;
+        let requests = f.count("SELECT count(*) FROM erasure_requests").await;
+        let jobs = f.count("SELECT count(*) FROM jobs").await;
+
+        let again = f.privacy("privacy/erasures", person, Some("k-1")).await;
+
+        assert_eq!(first.status, StatusCode::ACCEPTED, "{}", first.text);
+        assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.text);
+        assert_eq!(again.json()["code"], "idempotency_key_replayed");
+        assert_eq!(again.json()["resource_id"], first.json()["id"]);
+        assert!(!again.text.contains(&person.to_string()));
+        assert_eq!(
+            f.count("SELECT count(*) FROM erasure_requests").await,
+            requests
+        );
+        assert_eq!(f.count("SELECT count(*) FROM jobs").await, jobs);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_erasure_request_with_another_body_under_the_key_is_422_idempotency_key_reused(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let person = f.person().await;
+        f.privacy("privacy/erasures", person, Some("k-1")).await;
+
+        let other = f
+            .privacy("privacy/erasures", Uuid::now_v7(), Some("k-1"))
+            .await;
+
+        assert_eq!(
+            other.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            other.text
+        );
+        assert_eq!(other.json()["code"], "idempotency_key_reused");
+        assert_eq!(f.count("SELECT count(*) FROM erasure_requests").await, 1);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_replayed_export_request_is_409_with_the_same_id_and_adds_no_export_or_job(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let person = f.person().await;
+        let first = f.privacy("privacy/exports", person, Some("k-1")).await;
+        let exports = f.count("SELECT count(*) FROM privacy_exports").await;
+        let jobs = f.count("SELECT count(*) FROM jobs").await;
+
+        let again = f.privacy("privacy/exports", person, Some("k-1")).await;
+
+        assert_eq!(first.status, StatusCode::ACCEPTED, "{}", first.text);
+        assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.text);
+        assert_eq!(again.json()["code"], "idempotency_key_replayed");
+        assert_eq!(again.json()["resource_id"], first.json()["id"]);
+        assert_eq!(
+            f.count("SELECT count(*) FROM privacy_exports").await,
+            exports
+        );
+        assert_eq!(f.count("SELECT count(*) FROM jobs").await, jobs);
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn an_export_request_with_another_body_under_the_key_is_422_idempotency_key_reused(
+        pool: PgPool,
+    ) {
+        let f = fixture(&pool).await;
+        let person = f.person().await;
+        f.privacy("privacy/exports", person, Some("k-1")).await;
+
+        let other = f
+            .privacy("privacy/exports", Uuid::now_v7(), Some("k-1"))
+            .await;
+
+        assert_eq!(
+            other.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            other.text
+        );
+        assert_eq!(other.json()["code"], "idempotency_key_reused");
+        assert_eq!(f.count("SELECT count(*) FROM privacy_exports").await, 1);
     }
 
     #[sqlx::test]
