@@ -139,7 +139,7 @@ fn ids_of(record: &Value) -> Vec<&str> {
 /// a subject (an event, a segment, an enrollment) that another record is about. The first record
 /// is the root, started by a cause outside the response; every other record must be reached from
 /// it by following those links.
-fn one_tree(records: &[Value]) -> Result<(), String> {
+pub(super) fn one_tree(records: &[Value]) -> Result<(), String> {
     let Some(root) = records.first() else {
         return Err("the trace is not one tree: it has no records".to_owned());
     };

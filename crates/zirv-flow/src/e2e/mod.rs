@@ -8,6 +8,7 @@ mod decisions;
 mod harness;
 mod mail;
 mod privacy;
+mod propagation;
 mod restore;
 mod trace;
 

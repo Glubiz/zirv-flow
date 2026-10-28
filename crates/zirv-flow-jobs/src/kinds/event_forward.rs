@@ -33,9 +33,9 @@ use zirv_flow_connectors::destinations::{
 };
 use zirv_flow_connectors::http::HttpLimits;
 use zirv_flow_connectors::sources::Credential;
-use zirv_flow_core::WorkspaceId;
 use zirv_flow_core::decision_actions;
 use zirv_flow_core::schedule::backoff;
+use zirv_flow_core::{Cause, TraceContext, TraceId, WorkspaceId};
 use zirv_flow_store::{
     Admission, ClaimedRow, DELIVERED_RETENTION, Destination, FORWARD_JOB_KIND, NewDecision, PgPool,
     Settled, SubjectKind, append_decision, claim_due, defer_row, ensure_forward_job, extend_lease,
@@ -275,7 +275,13 @@ async fn forward_one(
             &NewDecision {
                 graph: None,
                 workspace_id: workspace,
-                trace: ctx.trace().clone(),
+                trace: row.trace_id.map_or_else(
+                    || ctx.trace().clone(),
+                    |id| TraceContext {
+                        trace_id: TraceId::from_uuid(id),
+                        cause: Cause::event(row.event_id),
+                    },
+                ),
                 spec,
                 detail: Some(reason),
                 subject_ids: vec![
@@ -758,6 +764,109 @@ mod tests {
             );
             tx.rollback().await.unwrap();
             assert_eq!(env.count("SELECT count(*) FROM forwarding_outbox").await, 0);
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn migration_0084_preserves_legacy_forwarding_and_separates_event_and_job_traces(
+        pool: PgPool,
+    ) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool, "trace-migration", "rejected").await;
+            let legacy = env.order().await;
+            // Reconstruct the pre-0084 table with a pending row, then apply the actual migration.
+            sqlx::query("ALTER TABLE forwarding_outbox DROP COLUMN trace_id")
+                .execute(&env.pool)
+                .await
+                .unwrap();
+            sqlx::query(include_str!(
+                "../../../zirv-flow-store/migrations/0084_forwarding_trace.sql"
+            ))
+            .execute(&env.pool)
+            .await
+            .unwrap();
+            let held: Option<Uuid> =
+                sqlx::query_scalar("SELECT trace_id FROM forwarding_outbox WHERE event_id = $1")
+                    .bind(legacy)
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(held, None, "existing rows are not backfilled");
+
+            let current = env.order().await;
+            let (event_trace, copied): (Uuid, Option<Uuid>) = sqlx::query_as(
+                "SELECT e.trace_id, o.trace_id FROM events e JOIN forwarding_outbox o \
+                 ON o.event_id = e.id WHERE e.id = $1",
+            )
+            .bind(current)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(copied, Some(event_trace));
+            let claimed = env.claim().await.unwrap();
+            let job_trace = claimed.trace.clone();
+            assert_ne!(job_trace.trace_id.as_uuid(), event_trace);
+            assert_eq!(job_trace.cause, Cause::schedule(env.destination));
+            // A failure of the destination job still belongs to that job, not either event.
+            assert_eq!(
+                zirv_flow_store::fail_job(
+                    &env.pool,
+                    claimed.id,
+                    claimed.lease_token,
+                    Duration::ZERO,
+                    "forwarding interrupted",
+                )
+                .await
+                .unwrap(),
+                Some(zirv_flow_store::FailOutcome::Retried),
+            );
+            env.run().await;
+            let decisions: Vec<(Uuid, String, String, String, Value)> = sqlx::query_as(
+                "SELECT trace_id, action, cause_kind, cause_id, subject_ids FROM decision_records \
+                 WHERE action IN ('event.forward', 'job.attempt')",
+            )
+            .fetch_all(&env.pool)
+            .await
+            .unwrap();
+            assert_eq!(decisions.len(), 3);
+            for (trace, action, kind, id, subjects) in decisions {
+                if action == "event.forward" && subjects["event"] == current.to_string() {
+                    assert_eq!(trace, event_trace);
+                    assert_eq!((kind.as_str(), id), ("event", current.to_string()));
+                } else {
+                    assert_eq!(trace, job_trace.trace_id.as_uuid());
+                    assert_eq!(
+                        (kind.as_str(), id.as_str()),
+                        ("schedule", job_trace.cause.id.as_str())
+                    );
+                    if action == "event.forward" {
+                        assert_eq!(subjects["event"], legacy.to_string());
+                    } else {
+                        assert_eq!(action, "job.attempt");
+                    }
+                }
+            }
+            assert!(env.rows().await.iter().all(|row| row.0 == "dead"));
+            env.set_mode("ok").await;
+            assert_eq!(
+                redrive(
+                    &mut env.pool.acquire().await.unwrap(),
+                    env.ws,
+                    Redrive::Destination(env.destination)
+                )
+                .await
+                .unwrap(),
+                2
+            );
+            env.run().await;
+            assert!(env.rows().await.iter().all(|row| row.0 == "delivered"));
+            assert_eq!(
+                fake_ledger_sent(&env.ledger).len(),
+                2,
+                "both old and new rows still deliver"
+            );
         })
         .await;
     }

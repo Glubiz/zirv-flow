@@ -189,6 +189,7 @@ mod tests {
         "crates/zirv-flow-store/src/segments/refresh.rs",
         "crates/zirv-flow-store/src/sync_runs/batch.rs",
         "crates/zirv-flow/src/e2e/mod.rs",
+        "crates/zirv-flow/src/e2e/propagation.rs",
     ];
 
     fn checked_test_body(body: &str, pool: &str) -> bool {
