@@ -101,6 +101,23 @@ mod tests {
         jobs
     }
 
+    /// Audience fan-out keeps its job trace; each enrollment gets a fresh trace with its cause.
+    fn completed_audience_job(captured: &Captured, trace: &str, kind: &str, id: &str) {
+        let lines = captured.json_lines();
+        let jobs: Vec<_> = lines
+            .iter()
+            .filter(|line| {
+                line["fields"]["message"] == "job completed"
+                    && line["span"]["kind"] == "flow.enroll"
+            })
+            .collect();
+        assert_eq!(jobs.len(), 1, "{lines:#?}");
+        let job = &jobs[0]["span"];
+        assert_eq!(job["cause_kind"], kind, "{job}");
+        assert_eq!(job["cause_id"], id, "{job}");
+        assert_ne!(job["trace_id"].as_str().unwrap(), trace, "{job}");
+    }
+
     fn exit_graph() -> Value {
         json!({"v": 1, "nodes": [{"id": "end", "type": "exit"}], "edges": []})
     }
@@ -360,8 +377,8 @@ mod tests {
                 serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
                     .unwrap();
             world.settle().await;
-            // The manual start mints its own action trace. The occurrence in the response
-            // identifies that action independently of the request middleware's trace.
+            // Audience fan-out gives each enrollment its own trace. The occurrence in the
+            // response identifies the enrollment independently of the request and job traces.
             let trace: Uuid = sqlx::query_scalar(
                 "SELECT trace_id FROM enrollments WHERE flow_id = $1 AND occurrence_id = $2",
             )
@@ -384,8 +401,8 @@ mod tests {
                 "manual",
                 &operator,
             );
+            completed_audience_job(&captured, &trace, "manual", &operator);
             let jobs = completed_jobs(&captured, &trace, "manual", &operator);
-            assert!(jobs.iter().any(|job| job["kind"] == "flow.enroll"));
             assert!(jobs.iter().any(|job| job["kind"] == "flow.step"));
             world.finish().await;
         })
@@ -422,8 +439,9 @@ mod tests {
                 ("message.send", "sent"), ("flow.enrollment", "completed")] {
                 cause_at(&records, action, outcome, "schedule", &id);
             }
+            completed_audience_job(&captured, &trace, "schedule", &id);
             let jobs = completed_jobs(&captured, &trace, "schedule", &id);
-            for kind in ["flow.enroll", "flow.step", "delivery.send"] {
+            for kind in ["flow.step", "delivery.send"] {
                 assert!(jobs.iter().any(|job| job["kind"] == kind));
             }
             assert_eq!(world.sink.messages().len(), 1);
@@ -440,6 +458,9 @@ mod tests {
             let world = World::start(pool, PUBLIC_URL).await;
             world.subscribed_person(PERSONAL_DATA.email).await;
             world.event_schema("order_placed").await;
+            let ingest_key: Uuid = sqlx::query_scalar(
+                "SELECT id FROM api_keys WHERE workspace_id = $1 AND name = 'e2e ingest'")
+                .bind(world.ws.as_uuid()).fetch_one(&world.pool).await.unwrap();
             let destination = zirv_flow_store::create_destination(&world.pool, world.ws, &NewDestination {
                 id: Uuid::now_v7(), kind: "fake", name: "Forwarding", config: &json!({"mode": "rejected"}),
                 credential_id: None, rate: 100, burst: 100, created_by: None,
@@ -455,14 +476,20 @@ mod tests {
             assert_eq!(reply.status, StatusCode::ACCEPTED, "{}", reply.text);
             world.settle().await;
             let trace = header_of(&reply, "x-trace-id");
-            let (event, outbox, held, state): (Uuid, Uuid, Option<Uuid>, String) = sqlx::query_as(
-                "SELECT event_id, id, trace_id, state FROM forwarding_outbox")
-                .fetch_one(&world.pool).await.unwrap();
-            assert_eq!(held, Some(Uuid::parse_str(&trace).unwrap()));
+            let (event, event_trace, outbox, held, state): (Uuid, Uuid, Uuid, Option<Uuid>, String) = sqlx::query_as(
+                "SELECT e.id, e.trace_id, o.id, o.trace_id, o.state FROM events e \
+                 JOIN forwarding_outbox o ON o.workspace_id = e.workspace_id AND o.event_id = e.id \
+                 WHERE e.workspace_id = $1 AND e.message_id = 'forward-propagation'")
+                .bind(world.ws.as_uuid()).fetch_one(&world.pool).await.unwrap();
+            assert_eq!(event_trace, Uuid::parse_str(&trace).unwrap());
+            assert_eq!(held, Some(event_trace));
             assert_eq!(state, "dead");
             let records = records(&world, &trace).await;
             assert_eq!(one_tree(&records), Ok(()), "{records:#?}");
-            cause_at(&records, "event.accepted", "valid", "api", &header_of(&reply, "x-request-id"));
+            // The inbox preserves the request trace but reconstructs the cause from its API key.
+            assert_ne!(ingest_key.to_string(), header_of(&reply, "x-request-id"));
+            let accepted = cause_at(&records, "event.accepted", "valid", "api", &ingest_key.to_string());
+            assert_eq!(accepted["subject_ids"]["event"], event.to_string());
             let forwarded = cause_at(&records, "event.forward", "dead", "event", &event.to_string());
             assert_eq!(forwarded["subject_ids"]["outbox"], outbox.to_string());
             let lines = captured.json_lines();
