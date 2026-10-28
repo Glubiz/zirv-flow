@@ -24,6 +24,7 @@ a request into its jobs and a per-workspace decision log are implemented, as are
 
 - [Architecture](docs/architecture.md)
 - [Roadmap](docs/roadmap.md)
+- [Compliance guide](docs/guide/compliance.md): what Zirv Flow enforces and what stays your duty
 - [API contract policy](docs/api.md) and [freeze audit](docs/api-audit.md)
 
 ## Quickstart with Docker Compose

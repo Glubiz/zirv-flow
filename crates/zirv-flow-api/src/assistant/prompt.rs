@@ -535,6 +535,20 @@ mod tests {
     }
 
     #[test]
+    fn sample_records_stop_at_the_first_that_passes_the_byte_cap() {
+        let mut many = context();
+        let small = json!({"n": 1});
+        let big = json!({"blob": "x".repeat(MAX_SAMPLE_BYTES)});
+        many.samples = vec![small.clone(), big, small];
+
+        let parts = render_stream_context(&many, Privacy::PersonalAllowed);
+
+        let personal = parts.iter().find(|part| part.is_personal()).unwrap();
+        assert_eq!(personal.render().matches("{\"n\"").count(), 1);
+        assert!(!personal.render().contains("xxxx"));
+    }
+
+    #[test]
     fn source_field_names_are_fenced() {
         let mut hostile = context();
         hostile
