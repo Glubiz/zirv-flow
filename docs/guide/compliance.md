@@ -57,9 +57,10 @@ you tell it; it does not check that the person really agreed (duty 2).
 confirmation and changes nothing; the `POST /u/{token}` unsubscribes the scope of that message
 (its topic and verticals), or the whole channel when that scope no longer exists. The page at
 `/u/{token}/preferences` lets the person choose topics. Neither route needs a sign-in; the signed
-token authorizes the one message. A bad token shows a not-found page, and the next send to that
-person is skipped for lack of consent. *Limit:* the one-click header needs an `https` public URL, and
-the tokens die with the master key (see E17).
+token authorizes the one message. A bad token shows a not-found page. After a successful unsubscribe, the next send to that
+person is skipped for lack of consent. *Limit:* `server.public_url` may be `http` or `https`, but the
+one-click header is only useful over `https`, so set an `https` URL. The tokens die with the master
+key (see E17).
 
 ### Suppressions
 
@@ -109,6 +110,8 @@ rolls everything back and the request retries. What remains, by design and nothi
 
 - the keyed hash of each email and phone as an `erased` suppression (E4);
 - the ledger entry: person id, keyed hashes and times, never a value;
+- the outcome rows of the erase calls to destinations (E10): destination id, outcome and a fixed
+  error code, keyed to the ledger entry;
 - audit rows, which hold opaque ids only. They are references, not anonymous data, and erasure does
   not rewrite them.
 
@@ -116,9 +119,13 @@ A scan test reads every text, JSON and byte column of every table for planted va
 leftover. Data with no person column (rejects with no person, import files, import reject cells,
 idempotency keys) is deleted by value in the same transaction.
 *Limits:* erasure removes what was held or pending when it ran. Data that arrives later makes a new
-person, who stays suppressed. An identifier matches only as a whole field, ignoring case; an email
-also matches as a substring; assistant transcripts are matched by substring. A non-email identifier
-inside free text is not found, and a changed spelling is missed. The retention windows bound what
+person, who stays suppressed. For the data found by value, an identifier matches only as a whole
+field, ignoring case, in rejects with no person, import files, import reject cells and idempotency
+keys; an email also matches as a substring there, so a non-email identifier inside free text in those
+places is not found. Assistant transcripts are different: they are matched by case-insensitive
+substring on the person's id and identifier values, within that workspace only. A short identifier
+can therefore remove another person's transcript, and a spelling that is not among the person's
+identifiers is missed. A changed spelling is missed everywhere. The retention windows bound what
 the by-value search cannot reach. Deleting a person (`DELETE /api/v1/workspaces/{ws}/people/{id}`)
 is not erasure: it adds no suppression and no ledger entry.
 
@@ -182,11 +189,14 @@ window in the configuration, within fixed bounds, and refuses to start outside t
 | Test sends (`retention.test_send_months`) | 13 months | 1 to 36 | no |
 | Assistant transcripts | none stored | 1 to 30 days when an admin opts in | yes, through the AI settings |
 
-An admin reads the effective windows with `GET /api/v1/workspaces/{ws}/retention` and shortens
-messages and the decision log with `PUT /api/v1/workspaces/{ws}/retention`; a value outside the bounds
+An admin reads the effective windows with `GET /api/v1/workspaces/{ws}/retention`, which lists
+eight: events, messages, the decision log, audit, ingest rejects, import files, job history and
+assistant transcripts. Import rejects, person exports and test sends are set only in the
+configuration and are not in that list. An admin shortens messages and the decision log with `PUT /api/v1/workspaces/{ws}/retention`; a value outside the bounds
 is a 422, every change is audited, and a shorter window deletes that workspace's rows only. The
 decision log is dropped by whole monthly partitions, with no hard volume cap. Each run adds to
-`zirv_flow_retention_deleted_total`. *Limits:* a window counts from when a row was written. Consent
+`zirv_flow_retention_deleted_total`. The audit purge is recorded by a purge entry only when the run deleted something.
+*Limits:* a window counts from when a row was written. Consent
 records and the erasure ledger have no window; they stay until erasure or deletion.
 
 ### Personal data masking
@@ -224,10 +234,12 @@ that a person's data was handled by id, and ids are references, not anonymous da
 
 **E17. Secrets at rest.** Connector credentials, OAuth tokens, AI provider keys, webhook and signing
 secrets, DKIM private keys and test-send addresses are stored sealed: each has its own data key
-(XChaCha20-Poly1305), wrapped by the master key. A database dump without the key shows ciphertext,
-and the API never returns a secret. The master key also roots the keyed hashes of suppressions, the
-ledger and the tracking tokens, so losing it kills those too. *Limit:* everything else in the database
-is stored in the clear; encrypt the disk and the backups yourself (duty 6).
+(XChaCha20-Poly1305), wrapped by the master key. A database dump without the key shows ciphertext.
+The API never returns a stored connector, provider or signing secret; the one exception is a new API
+key, whose secret is shown once when you create it. The master key also roots the keyed hashes of suppressions, the
+ledger and the tracking tokens, so losing it kills those too. *Limit:* other application data is not encrypted at rest by the
+application; encrypt the disk and the backups yourself (duty 6). Local passwords are stored as
+one-way Argon2id hashes, which cannot be reversed.
 
 **E18. Egress policy.** Outbound HTTP for sources, destinations, webhooks and the assistant goes through
 a guarded client that refuses loopback, private, link-local, carrier-grade NAT, cloud metadata and
@@ -243,14 +255,19 @@ production without checking what you then collect.
 
 **E20. The assistant's privacy modes.** The assistant is off until the operator lists a provider and an
 admin turns it on for a workspace. In the default mode a request carries names, types, descriptions
-and counts only; a request that would carry personal values is refused. Static header and query values of
-a saved manifest are never sent, and webhook URLs are masked in both modes. An admin can turn on
-*Allow personal data in requests*; saved definitions then go out with their literals, and the mapping
-assistant may send up to five sample records, always fenced and labeled as data. The template
-assistant sends no person in either mode. The provider key is sealed (E17). No transcript is stored
+and counts; a request that would carry personal values is refused. Static header and query values of
+a saved manifest are never sent, and webhook URLs are masked in both modes. Two kinds of content go
+out in both modes: the template assistant sends the template's authored copy (html, text and
+blocks), and only the literals in `visible_if` conditions are masked. An admin can turn on *Allow
+personal data in requests*; saved definitions then go out with their literals, and the mapping
+assistant sends up to five sample records of a source (if they are over 8 KiB together, none are sent) that it reads for the
+model, always fenced and labeled as data. With the opt-in off it sends none. The template assistant
+sends no person in either mode. The provider key is sealed (E17). No transcript is stored
 unless an admin opts in to 1 to 30 days; an hourly job deletes expired ones and erasing a person
-deletes the transcripts that name them. The call log never holds a prompt or an answer.
-*Limit:* with the opt-in on, personal data does leave for the provider you chose.
+deletes the transcripts that name them (E8). The call log never holds a prompt or an answer.
+*Limits:* template text you ask the assistant to edit is sent to the provider in both modes, so keep
+personal data out of template text. With the opt-in on, personal data does leave for the provider you
+chose.
 
 ## Part 2: The operator's duty
 

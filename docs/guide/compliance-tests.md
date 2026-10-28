@@ -5,6 +5,7 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | Id | Claim | Test | File |
 | --- | --- | --- | --- |
 | E1 | Publish is admin only and each publish is a decision | `the_policy_draft_is_written_by_writers_published_by_admins_and_each_publish_is_a_definition_change_decision` | `crates/zirv-flow-api/src/acceptance.rs` |
+| E1 | A rule that no longer compiles denies the send | `a_rule_that_can_no_longer_be_compiled_denies_the_send_and_is_named` | `crates/zirv-flow-jobs/src/kinds/delivery_send/mod.rs` |
 | E1 | A published version is immutable | `a_published_version_is_immutable_and_each_publish_is_a_definition_change_decision` | `crates/zirv-flow-store/src/consent/policy.rs` |
 | E1 | The built-in rule cannot be removed | `an_invalid_policy_is_refused_with_every_issue_and_the_built_in_rule_cannot_be_removed` | `crates/zirv-flow-api/src/acceptance.rs` |
 | E1 | A rule denies a send and the skip names it | `a_policy_of_recorded_consent_a_cooldown_and_an_account_state_decides_sends_and_each_skip_names_its_rule` | `crates/zirv-flow-jobs/src/kinds/delivery_send/mod.rs` |
@@ -41,6 +42,7 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | E8 | Every data class goes, only the ledger stays | `erasing_a_person_with_every_data_class_leaves_only_the_ledger` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E8 | A failure rolls everything back | `a_failure_midway_rolls_everything_back_and_leaves_the_request_pending` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
 | E8 | A new person stays suppressed | `a_pending_row_cannot_recreate_the_person_and_the_new_person_stays_suppressed` | `crates/zirv-flow-store/src/privacy/erasure.rs` |
+| E8 | Transcripts are deleted by substring within the workspace | `erasure_deletes_only_the_transcripts_that_name_the_person_in_that_workspace` | `crates/zirv-flow-store/src/ai/transcripts.rs` |
 | E8 | No table holds a value outside the allowlist | `no_table_holds_a_value_of_an_erased_person_outside_the_allowlist` | `crates/zirv-flow-store/src/privacy/content_scan.rs` |
 | E8 | Every table is classified | `every_table_of_the_schema_is_classified` | `crates/zirv-flow-store/src/privacy/content_scan.rs` |
 | E8 | The job erases and completes the request | `the_job_erases_the_person_suppresses_the_email_and_completes_the_request` | `crates/zirv-flow-jobs/src/kinds/privacy_erase.rs` |
@@ -89,10 +91,10 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | E16 | Instance rows are for the owner | `the_instance_audit_routes_are_for_the_owner_only` | `crates/zirv-flow-api/src/audit/acceptance.rs` |
 | E16 | An export is audited | `both_export_formats_stream_and_are_audited` | `crates/zirv-flow-api/src/audit/acceptance.rs` |
 | E16 | Retention purges and records it | `a_scheduled_run_purges_old_rows_and_records_one_purge_row` | `crates/zirv-flow-jobs/src/kinds/audit_retention.rs` |
+| E14 | A run that deletes nothing writes no purge row | `a_run_that_deletes_nothing_writes_no_purge_row` | `crates/zirv-flow-jobs/src/kinds/audit_retention.rs` |
 | E17 | No table holds a stored secret in the clear | `no_table_holds_the_plaintext_of_a_stored_secret` | `crates/zirv-flow-store/src/secrets.rs` |
 | E17 | A credential is never returned or logged | `a_credential_is_sealed_with_its_own_purpose_and_never_returned_logged_or_audited` | `crates/zirv-flow-api/src/destinations/acceptance.rs` |
 | E17 | The provider key is never echoed | `enabling_probes_the_model_and_the_key_is_never_echoed_logged_or_stored_in_plaintext` | `crates/zirv-flow-api/src/acceptance.rs` |
-| E17 | The guide lists the purposes | `the_secrets_guide_lists_exactly_the_purposes` | `crates/zirv-flow-core/src/secrets.rs` |
 | E18 | Metadata needs the exact address | `a_broad_range_never_unlocks_metadata_but_the_exact_address_does` | `crates/zirv-flow-core/src/egress.rs` |
 | E18 | A mixed answer is refused whole | `a_mixed_set_is_denied_as_a_whole` | `crates/zirv-flow-core/src/egress.rs` |
 | E18 | Loopback is never contacted | `a_host_resolving_to_loopback_is_blocked_by_default_and_never_contacted` | `crates/zirv-flow-connectors/src/http/client.rs` |
@@ -102,6 +104,9 @@ Each enforced claim (E1 to E20) of the [compliance guide](compliance.md) maps to
 | E19 | Default-level logs hold no identifier | `default_level_logs_hold_no_identifier_value_through_the_whole_privacy_scenario` | `crates/zirv-flow/src/e2e/privacy.rs` |
 | E20 | Personal content is refused without the opt-in | `personal_content_is_refused_everywhere_without_the_opt_in` | `crates/zirv-flow-ai/src/request.rs` |
 | E20 | No person reaches the provider | `the_model_context_and_the_response_hold_no_person_even_with_the_pii_opt_in` | `crates/zirv-flow-api/src/assistant/acceptance.rs` |
+| E20 | At most five sample records go out, only with the opt-in | `sample_records_are_capped_by_count_and_bytes` | `crates/zirv-flow-api/src/assistant/prompt.rs` |
+| E20 | Without the opt-in the context has no personal part | `schema_only_context_has_no_personal_part` | `crates/zirv-flow-api/src/assistant/prompt.rs` |
+| E20 | With the opt-in the sample values are sent fenced | `with_the_opt_in_the_sample_values_are_sent_fenced` | `crates/zirv-flow-api/src/assistant/acceptance.rs` |
 | E20 | Webhook URLs are masked under the opt-in | `webhook_urls_are_masked_under_the_opt_in_too_and_a_placeholder_stays_with_its_node` | `crates/zirv-flow-api/src/assistant/acceptance.rs` |
 | E20 | Transcripts only when opted in | `transcripts_are_stored_only_when_opted_in_and_expire_after_the_window` | `crates/zirv-flow-api/src/acceptance.rs` |
 | E20 | Expired transcripts are purged | `the_job_purges_only_expired_transcripts_and_a_rerun_changes_nothing` | `crates/zirv-flow-jobs/src/kinds/ai_transcripts.rs` |
