@@ -323,6 +323,12 @@ statement timeout; at 11 million live rows the count takes about half a second a
 lookup well under a millisecond. A test fails when a `zirv_flow_` series is emitted in `crates/` and missing from this
 table.
 
+Example Prometheus alert rules are in [`docs/operations/alerts.rules.yml`](docs/operations/alerts.rules.yml),
+with one runbook per alert in [`docs/operations/runbooks.md`](docs/operations/runbooks.md). The
+thresholds are starting points. A unit test fails when a rule names a series or label the code
+does not emit, an alert lacks its runbook section, or a runbook names a configuration key that
+does not exist.
+
 | Series | Type | Labels | What it measures |
 |--------|------|--------|------------------|
 | `zirv_flow_http_requests_total` | counter | `method`, `route`, `status` | HTTP requests by matched route template |
