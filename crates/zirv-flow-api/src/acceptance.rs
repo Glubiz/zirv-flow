@@ -1922,11 +1922,13 @@ mod tests {
             ),
         ];
         for (uri, body) in bodies {
-            let mut old = body.clone();
-            old["after"] = json!("x");
-            let reply = call(&router, "POST", &uri, Some(old), Auth::Session(&owner)).await;
-            assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");
-            assert_eq!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+            for value in [json!("x"), Value::Null] {
+                let mut old = body.clone();
+                old["after"] = value;
+                let reply = call(&router, "POST", &uri, Some(old), Auth::Session(&owner)).await;
+                assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");
+                assert_eq!(reply.body["code"], "paging_parameter_renamed", "{uri}");
+            }
             let mut current = body.clone();
             current["cursor"] = json!("!");
             let reply = call(&router, "POST", &uri, Some(current), Auth::Session(&owner)).await;

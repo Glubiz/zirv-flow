@@ -323,9 +323,9 @@ pub(crate) struct ExploreListRequest {
     /// The `next_cursor` of the previous page.
     cursor: Option<String>,
     /// Removed: the old name of `cursor`, refused with `paging_parameter_renamed`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::problem::sent")]
     #[schema(ignore)]
-    after: Option<serde::de::IgnoredAny>,
+    after: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -407,7 +407,7 @@ fn decode_cursor(text: &str) -> Option<RowCursor> {
     request_body = ExploreListRequest,
     responses(
         (status = 200, description = "A page of events", body = ExploreListBody),
-        (status = 400, description = "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
+        (status = 400, description = "limit is out of range or cursor is malformed; the removed after answers paging_parameter_renamed", body = Problem, content_type = "application/problem+json"),
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "A key without the read scope, a missing CSRF token, or a probe of a PII property by a caller who may not see values (`code` is `pii_property_not_explorable`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
@@ -432,7 +432,7 @@ pub(crate) async fn list(
             )));
         }
     };
-    if request.after.is_some() {
+    if request.after {
         return Err(ApiError::paging_parameter_renamed());
     }
     let after = match &request.cursor {

@@ -8685,7 +8685,7 @@
             }
           },
           "400": {
-            "description": "limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed",
+            "description": "limit is out of range or cursor is malformed; the removed after answers paging_parameter_renamed",
             "content": {
               "application/problem+json": {
                 "schema": {

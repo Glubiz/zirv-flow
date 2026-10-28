@@ -17149,7 +17149,7 @@ export interface operations {
                     "application/json": components["schemas"]["ExploreListBody"];
                 };
             };
-            /** @description limit is out of range or cursor is malformed; the removed before and after answer paging_parameter_renamed */
+            /** @description limit is out of range or cursor is malformed; the removed after answers paging_parameter_renamed */
             400: {
                 headers: {
                     [name: string]: unknown;

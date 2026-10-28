@@ -249,7 +249,14 @@ impl ApiError {
         Self::bad_request("before and after were renamed: page with cursor, and pass the next_cursor of the previous page")
             .with_code("paging_parameter_renamed")
     }
+}
 
+/// For a removed body member: true when the member is sent, `null` included.
+pub(crate) fn sent<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    <serde::de::IgnoredAny as serde::Deserialize>::deserialize(deserializer).map(|_| true)
+}
+
+impl ApiError {
     /// A validation failure. The detail names the field and the rule, never the value.
     pub(crate) fn unprocessable(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, detail)

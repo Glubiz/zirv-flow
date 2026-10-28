@@ -51,9 +51,9 @@ pub(crate) struct SearchRequest {
     /// The `next_cursor` of the previous page.
     cursor: Option<Uuid>,
     /// Removed: the old name of `cursor`, refused with `paging_parameter_renamed`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::problem::sent")]
     #[schema(ignore)]
-    after: Option<serde::de::IgnoredAny>,
+    after: bool,
 }
 
 /// An identifier shown for a person. The value is null when `masked`: only workspace admins,
@@ -109,7 +109,7 @@ pub(crate) struct SearchBody {
 
 /// Turns the request into a store search, refusing a body that does not name exactly one.
 fn parse(body: SearchRequest) -> Result<(PersonSearch, u32, Option<Uuid>), ApiError> {
-    if body.after.is_some() {
+    if body.after {
         return Err(ApiError::paging_parameter_renamed());
     }
     let limit = match body.limit {

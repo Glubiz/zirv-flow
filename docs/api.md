@@ -219,6 +219,7 @@ A test reads the sources and fails when a code used there is missing from this l
 | `invalid_event_name` | A mapping event name is not valid |
 | `reserved_event_name` | A mapping event name is reserved |
 | `invalid_event_property` | A mapping event property is not valid |
+| `key_column_not_supported` | A mapping names a key column the stream's source cannot key on |
 | `duplicate_event_property` | A mapping writes one event property twice |
 | `too_many_event_properties` | A mapping has more event properties than allowed |
 | `trait_slots_full` | All index slots for the trait type are in use |
@@ -280,6 +281,11 @@ A test reads the sources and fails when a code used there is missing from this l
 | `flow_archived` | The flow is archived |
 | `flow_paused` | The flow is paused |
 | `enrollment_state` | The enrollment's state does not allow the change |
+| `flow_test_request_invalid` | A flow test request is malformed |
+| `flow_test_script_invalid` | A flow test script has a step that is not valid |
+| `flow_test_script_too_long` | A flow test script has more steps than allowed |
+| `flow_test_snapshot_too_large` | A flow test's starting snapshot is over the size limit |
+| `flow_test_step_limit` | A flow test ran more flow steps than allowed |
 | `flow_test_timeout` | A flow test ran over its time limit |
 | `flow_test_values_forbidden` | A flow test may not carry personal values |
 | `signing_secret_missing` | The flow has no signing secret to rotate |

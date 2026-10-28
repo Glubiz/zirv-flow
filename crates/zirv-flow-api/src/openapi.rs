@@ -1286,9 +1286,23 @@ mod tests {
         ("AdminError::Utm { code: ", 0),
     ];
 
-    /// The snake_case string literals in the code-carrying position of a call in `source`.
+    /// The value of `const NAME: &str = "..";` in a whitespace-collapsed `source`.
+    fn constant(source: &str, name: &str) -> Option<String> {
+        ["&str", "&'static str"].into_iter().find_map(|ty| {
+            let rest = source.split_once(&format!("const {name}: {ty} = \""))?.1;
+            rest.split('"').next().map(str::to_owned)
+        })
+    }
+
+    /// The snake_case codes in the code-carrying position of a call in `source`, given as a string
+    /// literal or as a constant of the same source. Comment lines are skipped.
     fn literals_in(source: &str) -> std::collections::BTreeSet<String> {
-        let source = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let source = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ");
         let mut codes = std::collections::BTreeSet::new();
         for (marker, position) in CODE_CALLS {
             for (at, _) in source.match_indices(marker) {
@@ -1305,16 +1319,30 @@ mod tests {
                     }
                     rest = after.trim_start();
                 }
-                let Some(rest) = rest.strip_prefix('"') else {
-                    continue;
+                let code = match rest.strip_prefix('"') {
+                    Some(rest) => rest.split('"').next().unwrap().to_owned(),
+                    None => {
+                        let name: String = rest
+                            .chars()
+                            .take_while(|c| {
+                                c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_'
+                            })
+                            .collect();
+                        let Some(value) = (!name.is_empty())
+                            .then(|| constant(&source, &name))
+                            .flatten()
+                        else {
+                            continue;
+                        };
+                        value
+                    }
                 };
-                let code = rest.split('"').next().unwrap();
                 if !code.is_empty()
                     && code
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 {
-                    codes.insert(code.to_owned());
+                    codes.insert(code);
                 }
             }
         }
@@ -1351,6 +1379,19 @@ mod tests {
             codes.extend(literals_in(source));
         }
         codes
+    }
+
+    #[test]
+    fn a_code_passed_as_a_constant_is_found_and_one_in_a_doc_comment_is_not() {
+        let source = r#"
+            /// Example: `conflict("zz_doc_example", "detail")`.
+            const ZZ_CODE: &str = "zz_constant_code";
+            Err(ApiError::unprocessable("x").with_code(ZZ_CODE))
+        "#;
+        assert_eq!(
+            literals_in(source),
+            std::collections::BTreeSet::from(["zz_constant_code".to_owned()])
+        );
     }
 
     #[test]
