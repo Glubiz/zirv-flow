@@ -1095,6 +1095,28 @@ mod tests {
                 .await
         }
 
+        /// A draft request that carries an `Idempotency-Key`.
+        async fn draft_keyed(&self, body: Value, key: &str) -> Reply {
+            let request = Request::builder()
+                .method("POST")
+                .uri(uri(self.ws, "/ai/drafts"))
+                .header(header::COOKIE, &self.admin.cookie)
+                .header("x-csrf-token", &self.admin.csrf)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", key)
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = self.router.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            Reply {
+                status,
+                headers,
+                body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            }
+        }
+
         async fn accept(&self, who: &Login, id: &str) -> Reply {
             self.path_as(who, "POST", &format!("/ai/drafts/{id}/accept"), None)
                 .await
@@ -1351,6 +1373,34 @@ mod tests {
                 "primary_key": ["id"]
             }]
         })
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn a_draft_retried_under_the_same_key_is_409_with_the_draft_id_and_spends_no_model_call(
+        pool: PgPool,
+    ) {
+        let fx = setup(&pool, false, 100_000_000).await;
+        let source = fx.pulled_source(json!({})).await;
+        fx.fake.push(answer("draft_mapping", good_mapping()));
+        let first = fx.draft_keyed(mapping_run(&source), "k-1").await;
+        let sent = fx.fake.call_count();
+        let drafts = fx.count("ai_drafts").await;
+
+        let again = fx.draft_keyed(mapping_run(&source), "k-1").await;
+        let mut other = mapping_run(&source);
+        other["prompt"] = json!("Map something else");
+        let reused = fx.draft_keyed(other, "k-1").await;
+
+        assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.body);
+        assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.body);
+        assert_eq!(again.body["code"], "idempotency_key_replayed");
+        assert_eq!(again.body["resource_id"], first.body["id"]);
+        assert!(again.body.get("content").is_none());
+        assert_eq!(reused.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reused.body["code"], "idempotency_key_reused");
+        assert_eq!(fx.fake.call_count(), sent, "no model call on a retry");
+        assert_eq!(fx.count("ai_drafts").await, drafts);
     }
 
     #[sqlx::test]
