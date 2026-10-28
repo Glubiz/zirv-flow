@@ -19,6 +19,7 @@ use sqlx::prelude::FromRow;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::events::{
     EventFlag, PropertyType, Reason, RedactionRules, UnplannedPolicy, ValidationState,
     apply_time_rules, check_properties, evaluate, redact,
@@ -799,9 +800,12 @@ async fn store_replayed(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "event.replayed",
-            outcome: state.as_str(),
-            reason: None,
+            spec: match state {
+                ValidationState::Valid => &decision_actions::EVENT_REPLAYED_VALID,
+                ValidationState::Flagged => &decision_actions::EVENT_REPLAYED_FLAGGED,
+                ValidationState::Unplanned => &decision_actions::EVENT_REPLAYED_UNPLANNED,
+            },
+            detail: None,
             subject_ids: vec![
                 ("reject", reject.id),
                 ("event", event_id),

@@ -10,6 +10,7 @@ use zirv_flow_core::consent::{
     ChangeSource, Channel, ConsentStatus, Dimensions, Read, Record, RecordedConsent, State,
     TOPIC_DIMENSION, TopicPolicy, read, recorded_consent,
 };
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::segment::ChangeClasses;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
@@ -377,9 +378,12 @@ pub(super) async fn write_state(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "consent.change",
-            outcome: if applied { "changed" } else { "superseded" },
-            reason: Some(write.source.as_str()),
+            spec: if applied {
+                &decision_actions::CONSENT_CHANGED
+            } else {
+                &decision_actions::CONSENT_SUPERSEDED
+            },
+            detail: Some(write.source.as_str()),
             subject_ids: vec![("person", person), ("consent_change", change_id)],
             job: None,
         },

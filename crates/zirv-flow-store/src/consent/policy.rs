@@ -12,6 +12,7 @@ use sqlx::{PgConnection, PgExecutor};
 use time::OffsetDateTime;
 use uuid::Uuid;
 use zirv_flow_core::consent::policy::{PolicyRule, default_rules};
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, UserId, WorkspaceId};
 
 use crate::people::current_person;
@@ -233,9 +234,8 @@ pub async fn publish_consent_policy(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action: "consent_policy.publish",
-            outcome: "published",
-            reason: None,
+            spec: &decision_actions::CONSENT_POLICY_PUBLISHED,
+            detail: None,
             subject_ids: vec![("consent_policy", locked.id)],
             job: None,
         },

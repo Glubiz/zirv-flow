@@ -480,4 +480,110 @@ mod tests {
             assert!(refused.is_err(), "{role}");
         }
     }
+
+    const CAUSES: [&str; 6] = [
+        "event",
+        "schedule",
+        "manual",
+        "api",
+        "definition_change",
+        "sync_run",
+    ];
+
+    const TABLES: [&str; 4] = ["jobs", "decision_records", "person_changes", "enrollments"];
+
+    /// One insert per table of `TABLES`, binding the cause kind as `$1`. The ids are made up:
+    /// the tests turn foreign keys off for the session.
+    const PLANTS: [&str; 4] = [
+        "INSERT INTO jobs (id, kind, trace_id, cause_kind, cause_id) \
+         VALUES (gen_random_uuid(), 'k', gen_random_uuid(), $1, 'c')",
+        "INSERT INTO decision_records (id, workspace_id, trace_id, action, outcome, \
+             cause_kind, cause_id) \
+         VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 'a', 'o', $1, 'c')",
+        "INSERT INTO person_changes (workspace_id, person_id, cause_kind) \
+         VALUES (gen_random_uuid(), gen_random_uuid(), $1)",
+        "INSERT INTO enrollments (id, workspace_id, flow_id, flow_version, person_id, state, \
+             node, occurrence_id, trace_id, cause_kind, cause_id) \
+         VALUES (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), 1, \
+             gen_random_uuid(), 'active', 'n', gen_random_uuid(), gen_random_uuid(), $1, 'c')",
+    ];
+
+    async fn without_foreign_keys(connection: &mut PgConnection) {
+        sqlx::raw_sql("SET session_replication_role = replica")
+            .execute(connection)
+            .await
+            .unwrap();
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trait_change_migration_keeps_rows_of_every_other_cause(pool: PgPool) {
+        let mut connection = pool.acquire().await.unwrap();
+        MIGRATOR.run_to(81, &mut *connection).await.unwrap();
+        without_foreign_keys(&mut connection).await;
+        for cause in CAUSES {
+            for plant in PLANTS {
+                sqlx::query(plant)
+                    .bind(cause)
+                    .execute(&mut *connection)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        MIGRATOR.run(&mut *connection).await.unwrap();
+
+        for table in TABLES {
+            let kept: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT count(DISTINCT cause_kind) FROM {table}"
+            )))
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+            assert_eq!(kept, 6, "{table}");
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_trait_change_migration_is_refused_while_a_row_holds_the_cause(pool: PgPool) {
+        let mut connection = pool.acquire().await.unwrap();
+        MIGRATOR.run_to(81, &mut *connection).await.unwrap();
+        without_foreign_keys(&mut connection).await;
+        sqlx::query(PLANTS[0])
+            .bind("trait_change")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+
+        let refused = MIGRATOR.run(&mut *connection).await;
+
+        let message = refused.expect_err("the migration is refused").to_string();
+        assert!(
+            message.contains("a row holds the cause kind trait_change, which has no producer"),
+            "{message}"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn each_of_the_four_checks_refuses_trait_change_and_accepts_the_others(pool: PgPool) {
+        let mut connection = pool.acquire().await.unwrap();
+        MIGRATOR.run(&mut *connection).await.unwrap();
+        without_foreign_keys(&mut connection).await;
+        for (table, plant) in TABLES.iter().zip(PLANTS) {
+            let refused = sqlx::query(plant)
+                .bind("trait_change")
+                .execute(&mut *connection)
+                .await;
+            assert!(refused.is_err(), "{table}");
+            for cause in CAUSES {
+                let accepted = sqlx::query(plant)
+                    .bind(cause)
+                    .execute(&mut *connection)
+                    .await;
+                assert!(accepted.is_ok(), "{table} {cause}");
+            }
+        }
+    }
 }

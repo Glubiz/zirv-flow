@@ -66,6 +66,7 @@ use tracing::warn;
 use uuid::Uuid;
 use zirv_flow_connectors::destinations::Registry;
 use zirv_flow_core::consent::{Dimensions, SuppressionReason};
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{HmacKey, TraceContext};
 use zirv_flow_store::{
     Admission, DELIVERY_UNCONFIRMED, Destination, FlowState, GateRecord, HARD_BOUNCE,
@@ -672,8 +673,12 @@ async fn dropped(
     job: &SendJob,
     reason: &'static str,
 ) -> Result<Step, JobError> {
-    ctx.record_decision("message.send", "dropped", Some(reason), decision_ids(job))
-        .await?;
+    ctx.record_decision(
+        &decision_actions::MESSAGE_SEND_DROPPED,
+        Some(reason),
+        decision_ids(job),
+    )
+    .await?;
     Ok(Step::Over)
 }
 
@@ -699,9 +704,8 @@ enum Wait {
 /// a decision says so (ids only), apart from the gate record's note.
 async fn note_zone_fallback(ctx: &mut JobContext<'_>, job: &SendJob) -> Result<(), JobError> {
     ctx.record_decision(
-        "message.send",
-        "noted",
-        Some(gates::TIMEZONE_FALLBACK),
+        &decision_actions::MESSAGE_SEND_NOTED,
+        None,
         decision_ids(job),
     )
     .await
@@ -751,8 +755,12 @@ async fn defer(
     next.max_attempts = (ctx.max_attempts() - (attempts - 1)).max(1);
     next.unique_key = Some(format!("{}:defer:{}", job.key, job.deferrals + 1));
     ctx.enqueue(&next).await?;
-    ctx.record_decision("message.send", "deferred", Some(reason), decision_ids(job))
-        .await?;
+    ctx.record_decision(
+        &decision_actions::MESSAGE_SEND_DEFERRED,
+        Some(reason),
+        decision_ids(job),
+    )
+    .await?;
     Ok(Step::Over)
 }
 

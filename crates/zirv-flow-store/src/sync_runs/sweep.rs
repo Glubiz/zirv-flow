@@ -11,6 +11,7 @@
 
 use sqlx::PgExecutor;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 
 use super::batch::{DELETE_BY_SWEEP, Unfenced, fence_run};
@@ -108,9 +109,8 @@ pub async fn sweep_unreached(
                 graph: None,
                 workspace_id: unit.workspace,
                 trace: unit.trace.clone(),
-                action: "sync.record",
-                outcome: "deleted",
-                reason: Some(DELETE_BY_SWEEP),
+                spec: &decision_actions::SYNC_RECORD_DELETED,
+                detail: Some(DELETE_BY_SWEEP),
                 subject_ids: vec![("source_record", removed.record_id)],
                 job: Some((unit.job_id, unit.attempt)),
             });

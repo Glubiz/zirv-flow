@@ -13,6 +13,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 use zirv_flow_core::contacts;
+use zirv_flow_core::decision_actions::{self, DecisionSpec};
 use zirv_flow_core::people::{
     Contribution, DropReason, Identifier, TraitValue, coerce, infer_type, resolve, validate_key,
 };
@@ -216,8 +217,7 @@ pub(crate) async fn remove_contribution_in(
             &mut *connection,
             workspace,
             trace,
-            "trait.change",
-            "changed",
+            &decision_actions::TRAIT_CHANGED,
             None,
             vec![("person", person_id), ("source_record", record_id)],
         )
@@ -245,8 +245,7 @@ pub(crate) async fn remove_contribution_in(
         &mut *connection,
         workspace,
         trace,
-        "contribution.removed",
-        "removed",
+        &decision_actions::CONTRIBUTION_REMOVED,
         None,
         vec![("person", person_id), ("source_record", record_id)],
     )
@@ -450,8 +449,7 @@ pub(crate) async fn apply_profile_record_into(
             decisions,
             workspace,
             &record.trace,
-            "person.created",
-            "created",
+            &decision_actions::PERSON_CREATED,
             None,
             vec![("person", person_id), ("source_record", record_id)],
         );
@@ -485,8 +483,7 @@ pub(crate) async fn apply_profile_record_into(
             decisions,
             workspace,
             &record.trace,
-            "trait.change",
-            "changed",
+            &decision_actions::TRAIT_CHANGED,
             None,
             vec![("person", previous), ("source_record", record_id)],
         );
@@ -514,8 +511,7 @@ pub(crate) async fn apply_profile_record_into(
             decisions,
             workspace,
             &record.trace,
-            "trait.change",
-            "changed",
+            &decision_actions::TRAIT_CHANGED,
             None,
             vec![("person", person_id), ("source_record", record_id)],
         );
@@ -550,9 +546,8 @@ pub(crate) async fn record_resolution(
             decisions,
             workspace,
             trace,
-            "identity.split",
-            "new_person",
-            Some("unique_kind"),
+            &decision_actions::IDENTITY_SPLIT,
+            None,
             with_source(vec![("person", person_id), ("previous_person", previous)]),
         );
     }
@@ -561,9 +556,8 @@ pub(crate) async fn record_resolution(
             decisions,
             workspace,
             trace,
-            "identity.limit",
-            "skipped",
-            Some("max_per_person"),
+            &decision_actions::IDENTITY_LIMIT,
+            None,
             with_source(vec![("person", person_id)]),
         );
     }
@@ -595,8 +589,7 @@ pub(crate) async fn record_resolution(
                 decisions,
                 workspace,
                 trace,
-                "identity.conflict",
-                "recorded",
+                &decision_actions::IDENTITY_CONFLICT_RECORDED,
                 Some(conflict.reason),
                 vec![
                     ("person", person_id),
@@ -1057,18 +1050,16 @@ pub(super) fn buffer_decision(
     decisions: &mut DecisionBuffer,
     workspace: WorkspaceId,
     trace: &TraceContext,
-    action: &'static str,
-    outcome: &'static str,
-    reason: Option<&'static str>,
+    spec: &'static DecisionSpec,
+    detail: Option<&'static str>,
     subject_ids: Vec<(&'static str, Uuid)>,
 ) {
     decisions.push(NewDecision {
         graph: None,
         workspace_id: workspace,
         trace: trace.clone(),
-        action,
-        outcome,
-        reason,
+        spec,
+        detail,
         subject_ids,
         job: None,
     });
@@ -1078,9 +1069,8 @@ pub(super) async fn record_decision(
     connection: &mut PgConnection,
     workspace: WorkspaceId,
     trace: &TraceContext,
-    action: &'static str,
-    outcome: &'static str,
-    reason: Option<&'static str>,
+    spec: &'static DecisionSpec,
+    detail: Option<&'static str>,
     subject_ids: Vec<(&'static str, Uuid)>,
 ) -> Result<(), StoreError> {
     append_decision(
@@ -1089,9 +1079,8 @@ pub(super) async fn record_decision(
             graph: None,
             workspace_id: workspace,
             trace: trace.clone(),
-            action,
-            outcome,
-            reason,
+            spec,
+            detail,
             subject_ids,
             job: None,
         },

@@ -7,6 +7,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use zirv_flow_connectors::dns::DnsResolver;
 use zirv_flow_connectors::runtime::RateLimits;
+use zirv_flow_core::decision_actions::DecisionSpec;
 use zirv_flow_core::egress::EgressPolicy;
 use zirv_flow_core::{TraceContext, WorkspaceId};
 use zirv_flow_render::RenderPool;
@@ -348,9 +349,8 @@ impl<'a> JobContext<'a> {
     /// has no workspace to record in and gets an error.
     pub async fn record_decision(
         &mut self,
-        action: &'static str,
-        outcome: &'static str,
-        reason: Option<&'static str>,
+        spec: &'static DecisionSpec,
+        detail: Option<&'static str>,
         subject_ids: Vec<(&'static str, Uuid)>,
     ) -> Result<(), JobError> {
         let Some(workspace_id) = self.workspace_id() else {
@@ -362,9 +362,8 @@ impl<'a> JobContext<'a> {
             graph: None,
             workspace_id,
             trace: self.job.trace.clone(),
-            action,
-            outcome,
-            reason,
+            spec,
+            detail,
             subject_ids,
             job: Some((self.job.id, self.job.attempts)),
         };
@@ -472,6 +471,7 @@ mod tests {
     use zirv_flow_core::Cause;
 
     use super::*;
+    use zirv_flow_core::decision_actions;
 
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
@@ -540,10 +540,9 @@ mod tests {
 
         let mut ctx = JobContext::new(&mut tx, &claimed);
         ctx.record_decision(
-            "segment.evaluated",
-            "matched",
+            &decision_actions::SEGMENT_REFRESH_SKIPPED,
             None,
-            vec![("segment_id", subject)],
+            vec![("segment", subject)],
         )
         .await
         .unwrap();
@@ -554,14 +553,15 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].action, "segment.evaluated");
-        assert_eq!(records[0].outcome, "matched");
+        assert_eq!(records[0].action, "segment.refresh");
+        assert_eq!(records[0].outcome, "skipped");
+        assert_eq!(records[0].reason.as_deref(), Some("archived_or_gone"));
         assert_eq!(records[0].cause, claimed.trace.cause);
         assert_eq!(records[0].job_id, Some(claimed.id));
         assert_eq!(records[0].attempt, Some(1));
         assert_eq!(
             records[0].subject_ids,
-            serde_json::json!({"segment_id": subject.to_string()})
+            serde_json::json!({"segment": subject.to_string()})
         );
     }
 
@@ -627,7 +627,7 @@ mod tests {
 
         let mut ctx = JobContext::new(&mut tx, &claimed);
         let error = ctx
-            .record_decision("anything", "done", None, Vec::new())
+            .record_decision(&decision_actions::FLOW_WAKE_TIMER, None, Vec::new())
             .await
             .unwrap_err();
 

@@ -9,7 +9,7 @@ function record(id: string, outcome: string, cause: { kind: string; id: string }
   return { id, recorded_at: "2026-10-20T09:00:00Z", action: "flow.enrollment", outcome, cause, reason, subject_ids: {} };
 }
 
-const START = { kind: "trait_change", id: "c1" };
+const START = { kind: "event", id: "c1" };
 const OPERATOR = { kind: "manual", id: "u1" };
 
 describe("trace tree", () => {
@@ -44,7 +44,7 @@ describe("trace tree", () => {
     const rows = Array.from(tree.querySelectorAll("li.trace-record"));
     expect(rows).toHaveLength(2);
     expect(rows[0]).toHaveTextContent("An operator");
-    expect(rows[1]).toHaveTextContent("A change of a field or segment");
+    expect(rows[1]).toHaveTextContent("An event");
   });
 
   it("draws nothing for no records", () => {

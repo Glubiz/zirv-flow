@@ -609,8 +609,12 @@ mod tests {
         const KIND: &'static str = "test.records";
 
         async fn run(&self, ctx: &mut JobContext<'_>, _payload: Value) -> Result<(), JobError> {
-            ctx.record_decision("fixture.step", "done", None, Vec::new())
-                .await?;
+            ctx.record_decision(
+                &zirv_flow_core::decision_actions::FLOW_WAKE_TIMER,
+                None,
+                Vec::new(),
+            )
+            .await?;
             if ctx.attempts() == 1 {
                 return Err(JobError::new("planned failure"));
             }
@@ -1006,7 +1010,7 @@ mod tests {
                     "failed".to_owned(),
                     Some("planned failure".to_owned())
                 ),
-                ("fixture.step".to_owned(), "done".to_owned(), None),
+                ("flow.wake".to_owned(), "timer".to_owned(), None),
             ]
         );
     }

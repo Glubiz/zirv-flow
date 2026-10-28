@@ -2232,9 +2232,12 @@ mod tests {
             trace_id: TraceId::from_uuid(mine_id),
             cause: Cause::api("t"),
         };
-        for (action, outcome, reason) in [
-            ("flow.step", "waiting", Some("wait.duration")),
-            ("flow.wait", "waiting", Some("duration")),
+        for (spec, detail) in [
+            (
+                &zirv_flow_core::decision_actions::FLOW_STEP_WAITING,
+                Some("wait.duration"),
+            ),
+            (&zirv_flow_core::decision_actions::FLOW_WAIT_DURATION, None),
         ] {
             append_decision(
                 &pool,
@@ -2245,9 +2248,8 @@ mod tests {
                     }),
                     workspace_id: f.ws,
                     trace: trace.clone(),
-                    action,
-                    outcome,
-                    reason,
+                    spec,
+                    detail,
                     subject_ids: vec![("flow", flow_id), ("enrollment", mine_id)],
                     job: None,
                 },

@@ -15,6 +15,7 @@
 use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use zirv_flow_core::decision_actions;
 use zirv_flow_core::flow::{FlowSettings, Trigger};
 use zirv_flow_core::{Cause, TraceId};
 use zirv_flow_segments::{
@@ -100,8 +101,7 @@ async fn skip_whole(
     };
     metrics::record_enroll_skips(job.trigger.as_str(), reason, 1);
     ctx.record_decision(
-        "flow.enroll",
-        "skipped",
+        &decision_actions::FLOW_ENROLL_SKIPPED,
         Some(reason),
         vec![("flow", job.flow)],
     )

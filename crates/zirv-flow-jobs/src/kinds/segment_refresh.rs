@@ -9,6 +9,7 @@
 use std::time::Instant;
 
 use serde_json::Value;
+use zirv_flow_core::decision_actions;
 use zirv_flow_segments::{Catalog, Param, TraitStorage, compile, parse_and_validate};
 use zirv_flow_store::{
     CatalogSnapshot, REFRESH_JOB_KIND, RefreshApply, RefreshTrigger, SqlParam, SqlQuery,
@@ -20,8 +21,6 @@ use super::workspace_and_id;
 use crate::{JobContext, JobError, JobKind};
 
 pub(crate) struct SegmentRefresh;
-
-const ACTION: &str = "segment.refresh";
 
 impl JobKind for SegmentRefresh {
     const KIND: &'static str = REFRESH_JOB_KIND;
@@ -52,9 +51,8 @@ impl JobKind for SegmentRefresh {
         let Some(segment) = segment.filter(|segment| segment.archived_at.is_none()) else {
             return ctx
                 .record_decision(
-                    ACTION,
-                    "skipped",
-                    Some("archived_or_gone"),
+                    &decision_actions::SEGMENT_REFRESH_SKIPPED,
+                    None,
                     vec![("segment", segment_id)],
                 )
                 .await;
@@ -80,9 +78,8 @@ impl JobKind for SegmentRefresh {
             Err(_) => {
                 return ctx
                     .record_decision(
-                        ACTION,
-                        "failed",
-                        Some("definition_invalid"),
+                        &decision_actions::SEGMENT_REFRESH_FAILED,
+                        None,
                         vec![("segment", segment_id)],
                     )
                     .await;
