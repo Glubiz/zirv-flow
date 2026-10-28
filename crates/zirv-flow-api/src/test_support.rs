@@ -210,6 +210,38 @@ pub(crate) fn labels_hold_no(output: &str, seeded: &[&str]) {
     }
 }
 
+/// The rows of `audit_log` that break the audit rules, as `id action: why` (never a value): an
+/// action outside the catalogue, or a summary `validate_summary` refuses. Criterion 2: the log
+/// holds opaque ids and counts only.
+pub(crate) async fn audit_log_breaches(pool: &PgPool) -> Vec<String> {
+    let rows: Vec<(i64, String, Value)> =
+        sqlx::query_as("SELECT id, action, summary FROM audit_log ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    let mut breaches = Vec::new();
+    for (id, action, summary) in rows {
+        if !zirv_flow_core::audit::is_known(&action) {
+            breaches.push(format!("{id} {action}: not in the catalogue"));
+        }
+        if let Err(issue) = zirv_flow_core::audit::validate_summary(&summary) {
+            breaches.push(format!("{id} {action}: {issue}"));
+        }
+    }
+    breaches
+}
+
+/// Runs the validator over every `audit_log` row of the test database and fails on any breach.
+/// Called at the end of the large acceptance suites.
+pub(crate) async fn assert_audit_log_holds_ids_only(pool: &PgPool) {
+    let breaches = audit_log_breaches(pool).await;
+    assert!(
+        breaches.is_empty(),
+        "audit rows break the redaction rules:\n{}",
+        breaches.join("\n")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +292,34 @@ zirv_flow_x 2
             futures_util::FutureExt::catch_unwind(caught).await.is_err(),
             "the scan must detect a marker stored as bytea"
         );
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_audit_scan_reports_a_row_written_around_the_guard(pool: PgPool) {
+        zirv_flow_store::migrate(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO audit_log (actor_kind, action, summary) VALUES ('system', 'flow.created', '{\"count\": 1}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(audit_log_breaches(&pool).await, Vec::<String>::new());
+        assert_audit_log_holds_ids_only(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO audit_log (actor_kind, action, summary) VALUES ('system', 'made.up', '{\"email\": \"a\"}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let breaches = audit_log_breaches(&pool).await;
+        assert_eq!(breaches.len(), 2, "{breaches:?}");
+        assert!(
+            breaches
+                .iter()
+                .any(|line| line.contains("not in the catalogue"))
+        );
+        assert!(breaches.iter().any(|line| line.contains("$.email")));
     }
 }

@@ -17,7 +17,7 @@ use zirv_flow_core::{SecretId, SecretPurpose, WorkspaceId};
 use zirv_flow_store::secrets::OpenError;
 use zirv_flow_store::{Destination, VerifiedSender, find_sending_domain};
 
-use crate::delivery::credential::{credential_unavailable, open_credential};
+use crate::delivery::credential::{Usage, credential_unavailable, open_credential};
 use crate::delivery::{self, Attempt, Verdict};
 use crate::{JobContext, JobError};
 
@@ -42,16 +42,17 @@ pub(crate) async fn deliver(
     call: &Call<'_>,
     now: OffsetDateTime,
 ) -> Result<Attempt, JobError> {
-    let credential = match open_credential(ctx, call.workspace, call.destination).await? {
-        Ok(credential) => credential,
-        Err(verdict) => {
-            return Ok(Attempt {
-                verdict,
-                elapsed: Duration::ZERO,
-                may_have_arrived: false,
-            });
-        }
-    };
+    let credential =
+        match open_credential(ctx, call.workspace, call.destination, Usage::Send).await? {
+            Ok(credential) => credential,
+            Err(verdict) => {
+                return Ok(Attempt {
+                    verdict,
+                    elapsed: Duration::ZERO,
+                    may_have_arrived: false,
+                });
+            }
+        };
     // The sender domain's key is opened only for a destination type that signs.
     let signer = if call.driver.spec().capabilities.signs_dkim {
         match open_signer(ctx, call.workspace, call.sender).await? {

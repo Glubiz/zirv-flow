@@ -779,7 +779,7 @@ mod tests {
             .into_iter()
             .find(|entry| entry.action == "source.created")
             .unwrap();
-        assert_eq!(created.summary["credential_fields"], json!(["token"]));
+        assert_eq!(created.summary["credential_fields"], Value::Null);
     }
 
     #[derive(Clone, Default)]

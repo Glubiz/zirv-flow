@@ -3715,7 +3715,14 @@ mod tests {
             .map(|node| node.as_str().unwrap())
             .collect();
         assert_eq!(tested_path, simulated);
-        assert_eq!(fx.flow_writes().await, writes, "so is test mode");
+        // Test mode writes its one audit row (the eighth count) and nothing else.
+        let mut after_test = writes.clone();
+        after_test[7] += 1;
+        assert_eq!(
+            fx.flow_writes().await,
+            after_test,
+            "so is test mode, bar its audit row"
+        );
         assert_eq!(simulation["unreached_nodes"], json!([]));
     }
 

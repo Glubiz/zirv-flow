@@ -1011,7 +1011,7 @@ pub async fn save_ai_settings(
             Some(workspace),
             "ai.settings.updated",
             Some(("ai_settings", workspace.as_uuid())),
-            json!({"changed": changed, "values": values}),
+            json!({"changed": changed, "after": values}),
         )
         .await?;
     }
@@ -1678,14 +1678,14 @@ mod tests {
         // Newest first: the key replacement, the budget change, then the first save.
         assert_eq!(updates[0]["changed"], json!(["provider_key"]));
         assert_eq!(updates[1]["changed"], json!(["monthly_budget_micros"]));
-        assert_eq!(updates[1]["values"]["monthly_budget_micros"], 9_000_000);
+        assert_eq!(updates[1]["after"]["monthly_budget_micros"], 9_000_000);
         assert!(
             updates[2]["changed"]
                 .as_array()
                 .unwrap()
                 .contains(&json!("transcript_days"))
         );
-        assert_eq!(updates[2]["values"]["transcript_days"], 7);
+        assert_eq!(updates[2]["after"]["transcript_days"], 7);
         let text = format!("{entries:?}");
         assert!(!text.contains("hunter"), "{text}");
     }
