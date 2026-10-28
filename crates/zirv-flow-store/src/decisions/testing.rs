@@ -119,7 +119,15 @@ pub fn assert_no_personal_data(value: &Value) {
     }
 }
 
-fn check_decision(row: &Value) -> Result<(), &'static str> {
+fn diagnostic_name(name: &str) -> &str {
+    if code(name) && personal_data(&json!(name)).is_ok() {
+        name
+    } else {
+        "<invalid>"
+    }
+}
+
+fn check_decision(row: &Value) -> Result<(), String> {
     let subjects = row["subject_ids"]
         .as_object()
         .ok_or("subject_ids is not an object")?;
@@ -127,12 +135,12 @@ fn check_decision(row: &Value) -> Result<(), &'static str> {
         match key.as_str() {
             "node" => {
                 if !value.as_str().is_some_and(zirv_flow_core::flow::valid_id) {
-                    return Err("node is not a valid graph id");
+                    return Err("subject_ids.node: node is not a valid graph id".into());
                 }
             }
             "version" => {
                 if !value.is_number() {
-                    return Err("version is not a number");
+                    return Err("subject_ids.version: version is not a number".into());
                 }
             }
             _ => {
@@ -140,10 +148,16 @@ fn check_decision(row: &Value) -> Result<(), &'static str> {
                     .iter()
                     .any(|spec| spec.subjects().contains(&key.as_str()))
                 {
-                    return Err("unknown subject key");
+                    return Err(format!(
+                        "subject_ids.{}: unknown subject key",
+                        diagnostic_name(key)
+                    ));
                 }
                 if !value.as_str().is_some_and(|id| Uuid::parse_str(id).is_ok()) {
-                    return Err("subject is not a UUID");
+                    return Err(format!(
+                        "subject_ids.{}: subject is not a UUID",
+                        diagnostic_name(key)
+                    ));
                 }
             }
         }
@@ -153,11 +167,7 @@ fn check_decision(row: &Value) -> Result<(), &'static str> {
             continue;
         }
         if !row[column].as_str().is_some_and(code) {
-            return Err(match column {
-                "action" => "action is not a code",
-                "outcome" => "outcome is not a code",
-                _ => "reason is not a code",
-            });
+            return Err(format!("{column} is not a code"));
         }
     }
     let reason = row["reason"].as_str();
@@ -170,10 +180,15 @@ fn check_decision(row: &Value) -> Result<(), &'static str> {
                 Reason::Detail(_) => true,
             }
     }) {
-        return Err("triple is outside the decision registry");
+        return Err("action/outcome/reason: triple is outside the decision registry".into());
     }
-    let cause = row["cause_id"].as_str().ok_or("cause_id is not text")?;
     let kind = row["cause_kind"].as_str().ok_or("cause_kind is not text")?;
+    let cause = row["cause_id"].as_str().ok_or_else(|| {
+        format!(
+            "cause_id (cause_kind={}): cause_id is not text",
+            diagnostic_name(kind)
+        )
+    })?;
     let valid_cause = match kind {
         // The API's request_id::is_valid rule. The store cannot depend on the API crate.
         "api" => {
@@ -185,12 +200,25 @@ fn check_decision(row: &Value) -> Result<(), &'static str> {
         "event" | "schedule" | "manual" | "definition_change" | "sync_run" => {
             Uuid::parse_str(cause).is_ok()
         }
-        _ => false,
+        _ => {
+            return Err(format!(
+                "cause_kind: unknown cause kind {}",
+                diagnostic_name(kind)
+            ));
+        }
     };
     if !valid_cause {
-        return Err("cause_id is not a UUID, request id or schedule id");
+        return Err(format!(
+            "cause_id (cause_kind={}): cause_id is not a UUID, request id or schedule id",
+            diagnostic_name(kind)
+        ));
     }
-    personal_data(row)
+    for (column, value) in row.as_object().expect("a decision has subject_ids") {
+        personal_data(&json!(column))
+            .and_then(|()| personal_data(value))
+            .map_err(|reason| format!("{}: {reason}", diagnostic_name(column)))?;
+    }
+    Ok(())
 }
 
 /// Reads the partitioned parent (including DEFAULT and every monthly partition), without a
@@ -202,17 +230,17 @@ pub async fn assert_decisions_hold_no_personal_data(pool: &PgPool) {
         sqlx::query_scalar::<_, Value>("SELECT to_jsonb(d) FROM decision_records d").fetch(pool);
     while let Some(row) = decisions.try_next().await.expect("read decision records") {
         if let Err(reason) = check_decision(&row) {
-            panic!("decision {}: {reason}", row["id"]);
+            panic!("decision_records: {reason}");
         }
     }
-    let mut jobs = sqlx::query_as::<_, (Uuid, Value, Option<String>)>(
-        "SELECT id, payload, last_error FROM jobs WHERE state = 'dead'",
+    let mut jobs = sqlx::query_as::<_, (Value, Option<String>)>(
+        "SELECT payload, last_error FROM jobs WHERE state = 'dead'",
     )
     .fetch(pool);
-    while let Some((id, payload, error)) = jobs.try_next().await.expect("read dead jobs") {
+    while let Some((payload, error)) = jobs.try_next().await.expect("read dead jobs") {
         for (column, value) in [("payload", payload), ("last_error", json!(error))] {
             if let Err(reason) = personal_data(&value) {
-                panic!("dead job {id} {column}: {reason}");
+                panic!("dead job {column}: {reason}");
             }
         }
     }
@@ -257,14 +285,24 @@ pub async fn assert_fixture(
                 && record.subject_ids == subjects
         })
         .collect();
-    assert_eq!(matching.len(), 1, "{triple:?} {subjects}: {records:?}");
-    assert_eq!(matching[0].cause, trace.cause);
+    assert_eq!(
+        matching.len(),
+        1,
+        "the fixture must have one matching decision"
+    );
+    assert!(
+        matching[0].cause == trace.cause,
+        "the fixture cause differs"
+    );
     let mut known = hashbrown::HashSet::from([trace.cause.id.clone()]);
     let mut remaining: Vec<_> = records.iter().collect();
     while !remaining.is_empty() {
         let before = remaining.len();
         remaining.retain(|record| {
-            assert_eq!(record.trace_id, trace.trace_id);
+            assert!(
+                record.trace_id == trace.trace_id,
+                "the fixture trace differs"
+            );
             if !known.contains(&record.cause.id) {
                 return true;
             }
@@ -282,7 +320,7 @@ pub async fn assert_fixture(
         });
         assert!(
             remaining.len() < before,
-            "disconnected fixture: {remaining:?}"
+            "the fixture has disconnected decisions"
         );
     }
 }
@@ -443,7 +481,11 @@ mod tests {
             .map(String::as_str)
             .or_else(|| panic.downcast_ref::<&str>().copied())
             .unwrap();
-        assert!(message.contains(expected), "{message}");
+        assert_no_personal_data(&json!(message));
+        assert!(
+            message.contains(expected),
+            "the diagnostic lacks its expected context"
+        );
     }
 
     #[sqlx::test]
@@ -453,7 +495,7 @@ mod tests {
         let mut row = valid_row();
         row["subject_ids"]["person"] = json!(PERSONAL_DATA.email);
         insert(&pool, ws, row, false).await;
-        rejection(&pool, "subject is not a UUID").await;
+        rejection(&pool, "subject_ids.person: subject is not a UUID").await;
     }
 
     #[sqlx::test]
@@ -473,7 +515,7 @@ mod tests {
         let mut row = valid_row();
         row["subject_ids"]["unregistered"] = json!(Uuid::now_v7());
         insert(&pool, ws, row, false).await;
-        rejection(&pool, "unknown subject key").await;
+        rejection(&pool, "subject_ids.unregistered: unknown subject key").await;
     }
 
     #[sqlx::test]
@@ -508,7 +550,7 @@ mod tests {
         row["outcome"] = json!("failed");
         row["reason"] = json!(PERSONAL_DATA.property);
         insert(&pool, ws, row, true).await;
-        rejection(&pool, "cell contains a seeded marker").await;
+        rejection(&pool, "reason: cell contains a seeded marker").await;
     }
 
     #[sqlx::test]
@@ -595,44 +637,116 @@ mod tests {
     }
 
     #[test]
+    fn send_gate_consent_evidence_is_registered() {
+        for spec in [
+            &decision_actions::SEND_GATE_PASSED,
+            &decision_actions::SEND_GATE_BLOCKED,
+        ] {
+            let mut row = valid_row();
+            row["action"] = json!(spec.action());
+            row["outcome"] = json!(spec.outcome());
+            row["reason"] = json!("consent");
+            for key in ["change", "rule"] {
+                assert!(spec.subjects().contains(&key));
+                row["subject_ids"][key] = json!(Uuid::now_v7());
+                assert_eq!(check_decision(&row), Ok(()));
+                row["subject_ids"].as_object_mut().unwrap().remove(key);
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostics_name_columns_keys_and_cause_kinds_without_values() {
+        for (column, value, expected) in [
+            (
+                "subject_ids",
+                json!({"person": PERSONAL_DATA.email}),
+                "subject_ids.person: subject is not a UUID",
+            ),
+            (
+                "cause_id",
+                json!(PERSONAL_DATA.phone),
+                "cause_id (cause_kind=api): cause_id is not a UUID, request id or schedule id",
+            ),
+            (
+                "cause_kind",
+                json!(PERSONAL_DATA.email),
+                "cause_kind: unknown cause kind <invalid>",
+            ),
+            (
+                "cause_id",
+                json!(format!("webhook:{}", Uuid::now_v7())),
+                "cause_id (cause_kind=api): cause_id is not a UUID, request id or schedule id",
+            ),
+            (
+                "reason",
+                json!(PERSONAL_DATA.skip_reason),
+                "reason is not a code",
+            ),
+            (
+                "future_column",
+                json!({"nested": [PERSONAL_DATA.property]}),
+                "future_column: cell contains a seeded marker",
+            ),
+        ] {
+            let mut row = valid_row();
+            row[column] = value;
+            let error = check_decision(&row).unwrap_err();
+            assert_no_personal_data(&json!(&error));
+            assert_eq!(error, expected);
+        }
+        for key in [PERSONAL_DATA.email, PERSONAL_DATA.property] {
+            let mut row = valid_row();
+            row["subject_ids"][key] = json!(Uuid::now_v7());
+            let error = check_decision(&row).unwrap_err();
+            assert_no_personal_data(&json!(&error));
+            assert_eq!(error, "subject_ids.<invalid>: unknown subject key");
+        }
+    }
+
+    #[test]
     fn malformed_graph_points_causes_and_triples_are_rejected() {
         for (key, value, expected) in [
             (
                 "node",
                 json!("private node"),
-                "node is not a valid graph id",
+                "subject_ids.node: node is not a valid graph id",
             ),
             (
                 "node",
                 json!("x".repeat(65)),
-                "node is not a valid graph id",
+                "subject_ids.node: node is not a valid graph id",
             ),
-            ("version", json!("1"), "version is not a number"),
+            (
+                "version",
+                json!("1"),
+                "subject_ids.version: version is not a number",
+            ),
         ] {
             let mut row = valid_row();
             row["subject_ids"][key] = value;
-            assert_eq!(check_decision(&row), Err(expected));
+            assert_eq!(check_decision(&row), Err(expected.to_owned()));
         }
         for (key, value, expected) in [
             (
                 "cause_id",
                 "free text",
-                "cause_id is not a UUID, request id or schedule id",
+                "cause_id (cause_kind=api): cause_id is not a UUID, request id or schedule id",
             ),
             (
                 "outcome",
                 "unregistered",
-                "triple is outside the decision registry",
+                "action/outcome/reason: triple is outside the decision registry",
             ),
             (
                 "reason",
                 "unregistered",
-                "triple is outside the decision registry",
+                "action/outcome/reason: triple is outside the decision registry",
             ),
         ] {
             let mut row = valid_row();
             row[key] = json!(value);
-            assert_eq!(check_decision(&row), Err(expected));
+            assert_eq!(check_decision(&row), Err(expected.to_owned()));
         }
         for kind in [
             "event",

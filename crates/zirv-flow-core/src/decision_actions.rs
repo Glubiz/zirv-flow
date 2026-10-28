@@ -119,6 +119,17 @@ const MESSAGE: &[&str] = &[
     "event",
     "flow",
 ];
+const SEND_GATE: &[&str] = &[
+    "message",
+    "enrollment",
+    "person",
+    "template",
+    "destination",
+    "event",
+    "flow",
+    "change",
+    "rule",
+];
 const CALL: &[&str] = &["enrollment", "person", "event", "flow", "destination"];
 const FORWARD: &[&str] = &["destination", "rule", "event", "outbox"];
 
@@ -215,8 +226,8 @@ registry! {
     FLOW_BRANCH_CONDITION_MATCHED: "flow.branch.condition", "matched", Reason::Detail("the case"), ANY, FLOW;
     FLOW_BRANCH_CONDITION_UNMATCHED: "flow.branch.condition", "unmatched", Reason::Detail("the case"), ANY, FLOW;
 
-    SEND_GATE_PASSED: "send.gate", "passed", Reason::Detail("the gate"), ANY, MESSAGE;
-    SEND_GATE_BLOCKED: "send.gate", "blocked", Reason::Detail("the gate"), ANY, MESSAGE;
+    SEND_GATE_PASSED: "send.gate", "passed", Reason::Detail("the gate"), ANY, SEND_GATE;
+    SEND_GATE_BLOCKED: "send.gate", "blocked", Reason::Detail("the gate"), ANY, SEND_GATE;
     MESSAGE_SEND_SENT: "message.send", "sent", Reason::Detail("the send code"), ANY, MESSAGE;
     MESSAGE_SEND_SKIPPED: "message.send", "skipped", Reason::Detail("the gate that stopped it"), ANY, MESSAGE;
     MESSAGE_SEND_FAILED: "message.send", "failed", Reason::Detail("the failure code"), ANY, MESSAGE;

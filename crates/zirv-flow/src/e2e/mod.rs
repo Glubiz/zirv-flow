@@ -648,7 +648,23 @@ mod tests {
                        "reentry": {"mode": "once"}}),
                 )
                 .await;
-            let person = world.subscribed_person(ADDRESS).await;
+            let person = world
+                .subscribed_person_with_identifiers(json!({
+                    "email": ADDRESS,
+                    "external:trace_canary": PERSONAL_DATA.external_id
+                }))
+                .await;
+            let phones: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM identities WHERE person_id = $1 AND kind = 'phone'",
+            )
+            .bind(person)
+            .fetch_one(&world.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                phones, 0,
+                "the hidden block requires an absent phone identifier"
+            );
             world.track_order(ADDRESS).await;
             world.settle().await;
 

@@ -367,7 +367,7 @@ pub(crate) struct InboxRow {
 impl InboxRow {
     pub(crate) fn trace(&self) -> TraceContext {
         let cause = match (self.webhook_id, self.api_key_id) {
-            (Some(hook), _) => Cause::api(format!("webhook:{hook}")),
+            (Some(hook), _) => Cause::api(hook.to_string()),
             (None, Some(key)) => Cause::api(key.to_string()),
             (None, None) => Cause::api("unknown"),
         };
@@ -991,6 +991,20 @@ mod tests {
             received_at: datetime!(2026-02-03 04:05:06 UTC),
             trace_id: Uuid::nil(),
         }
+    }
+
+    #[test]
+    fn a_webhook_cause_is_its_uuid_and_keeps_the_inbox_trace() {
+        let mut inbox = row("webhook", json!({}));
+        let hook = Uuid::now_v7();
+        inbox.webhook_id = Some(hook);
+        inbox.trace_id = Uuid::now_v7();
+
+        let trace = inbox.trace();
+
+        assert_eq!(trace.trace_id.as_uuid(), inbox.trace_id);
+        assert_eq!(trace.cause, Cause::api(hook.to_string()));
+        assert_eq!(Uuid::parse_str(&trace.cause.id).unwrap(), hook);
     }
 
     async fn workspace(pool: &PgPool, slug: &str) -> WorkspaceId {
