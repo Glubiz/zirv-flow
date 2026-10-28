@@ -30,7 +30,7 @@ describe("trace tree", () => {
     const rows = Array.from(tree.querySelectorAll("li.trace-record")).map((row) => row.firstElementChild?.nextElementSibling?.textContent);
     expect(rows).toEqual(["enrolled", "failed", "retried", "failed"]);
     const retried = Array.from(tree.querySelectorAll("li.trace-record"))[2] as HTMLElement;
-    expect(within(retried).getByRole("list")).toHaveTextContent("failed · boom");
+    expect(within(retried).getByRole("list")).toHaveTextContent("failed An enrollment changed state · boom");
   });
 
   it("roots a truncated trace on no cause, so an operator's decision is never the root", () => {
@@ -131,6 +131,7 @@ describe("trace tree", () => {
     expect(labelled("email.clicked", "recorded", null)).toBe("A link was clicked");
     expect(labelled("email.unsubscribed", "recorded", null)).toBe("Unsubscribed");
     expect(labelled("message.send", "deferred", "quiet_hours")).toBe("Message held for later");
-    expect(labelled("flow.enrollment", "enrolled", null)).toBeNull();
+    expect(labelled("flow.enrollment", "enrolled", null)).toBe("An enrollment changed state");
+    expect(labelled("unknown.action", "unknown", null)).toBeNull();
   });
 });

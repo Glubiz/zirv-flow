@@ -768,6 +768,15 @@ mod tests {
                 (records[0].outcome.as_str(), records[0].reason.as_deref()),
                 ("failed", Some("definition_invalid"))
             );
+
+            zirv_flow_store::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &job,
+                ("segment.refresh", "failed", Some("definition_invalid")),
+                json!({"segment": seg.id}),
+            )
+            .await;
         })
         .await;
     }
@@ -807,6 +816,15 @@ mod tests {
                 (records[0].outcome.as_str(), records[0].reason.as_deref()),
                 ("skipped", Some("archived_or_gone"))
             );
+
+            zirv_flow_store::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &job,
+                ("segment.refresh", "skipped", Some("archived_or_gone")),
+                json!({"segment": seg.id}),
+            )
+            .await;
         })
         .await;
     }

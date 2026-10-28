@@ -29,11 +29,9 @@ mod tests {
         Test(&'static str),
         /// No test can make it, and why.
         Untestable(&'static str),
-        /// A fixture that issue #384 supplies.
-        Pending(u32),
     }
 
-    use Coverage::{Pending, Test};
+    use Coverage::Test;
 
     const SEND_PATH: &str = "the_send_path_and_its_trace_hold_end_to_end";
 
@@ -41,108 +39,108 @@ mod tests {
     #[rustfmt::skip]
     const COVERAGE: &[(&str, Coverage)] = &[
         ("EVENT_ACCEPTED_VALID", Test(SEND_PATH)),
-        ("EVENT_ACCEPTED_FLAGGED", Pending(384)),
-        ("EVENT_ACCEPTED_UNPLANNED", Pending(384)),
-        ("EVENT_REJECTED", Pending(384)),
-        ("RECORD_REJECTED_APPLY_FAILED", Pending(384)),
-        ("EVENT_REPLAYED_VALID", Pending(384)),
-        ("EVENT_REPLAYED_FLAGGED", Pending(384)),
-        ("EVENT_REPLAYED_UNPLANNED", Pending(384)),
-        ("PERSON_CREATED", Pending(384)),
-        ("TRAIT_CHANGED", Pending(384)),
-        ("TRAIT_CHANGED_DEFINITION", Pending(384)),
-        ("TRAIT_CHANGED_MERGED", Pending(384)),
-        ("CONTRIBUTION_REMOVED", Pending(384)),
-        ("IDENTITY_SPLIT", Pending(384)),
-        ("IDENTITY_LIMIT", Pending(384)),
-        ("IDENTITY_CONFLICT_RECORDED", Pending(384)),
-        ("IDENTITY_CONFLICT_RESOLVED_KEPT_SEPARATE", Pending(384)),
-        ("IDENTITY_CONFLICT_RESOLVED_IDENTIFIER_MOVED", Pending(384)),
-        ("PERSON_MERGED", Pending(384)),
-        ("PERSON_MERGE_REWRITE_COMPLETED", Pending(384)),
-        ("PERSON_DELETED", Pending(384)),
+        ("EVENT_ACCEPTED_FLAGGED", Test("event_accepted_flagged")),
+        ("EVENT_ACCEPTED_UNPLANNED", Test("event_accepted_unplanned")),
+        ("EVENT_REJECTED", Test("decisions_name_ids_and_codes_only")),
+        ("RECORD_REJECTED_APPLY_FAILED", Test("an_unmappable_identify_row_becomes_a_record_reject")),
+        ("EVENT_REPLAYED_VALID", Test("a_replay_after_a_schema_fix_stores_the_event_once_and_a_second_changes_nothing")),
+        ("EVENT_REPLAYED_FLAGGED", Test("event_replayed_flagged")),
+        ("EVENT_REPLAYED_UNPLANNED", Test("event_replayed_unplanned")),
+        ("PERSON_CREATED", Test("the_first_record_creates_a_person_with_identities_traits_and_decisions")),
+        ("TRAIT_CHANGED", Test("the_first_record_creates_a_person_with_identities_traits_and_decisions")),
+        ("TRAIT_CHANGED_DEFINITION", Test("a_precedence_change_is_applied_to_existing_people_by_the_batch")),
+        ("TRAIT_CHANGED_MERGED", Test("an_anonymous_person_is_merged_into_the_identified_one")),
+        ("CONTRIBUTION_REMOVED", Test("removing_a_contribution_deletes_only_the_identities_no_other_record_lists")),
+        ("IDENTITY_SPLIT", Test("a_split_with_no_matching_owner_is_recorded")),
+        ("IDENTITY_LIMIT", Test("identifiers_beyond_the_maximum_of_a_kind_are_skipped_and_the_rest_applies")),
+        ("IDENTITY_CONFLICT_RECORDED", Test("a_merge_the_rules_forbid_attaches_to_the_strongest_identifier_and_records_a_conflict")),
+        ("IDENTITY_CONFLICT_RESOLVED_KEPT_SEPARATE", Test("keeping_two_people_separate_closes_the_conflict_and_changes_nothing_else")),
+        ("IDENTITY_CONFLICT_RESOLVED_IDENTIFIER_MOVED", Test("moving_the_identifier_gives_it_to_the_chosen_person_and_audits_ids_only")),
+        ("PERSON_MERGED", Test("an_anonymous_person_is_merged_into_the_identified_one")),
+        ("PERSON_MERGE_REWRITE_COMPLETED", Test("the_rewrite_re_points_in_batches_and_a_second_run_moves_nothing")),
+        ("PERSON_DELETED", Test("a_deletion_adds_no_suppression_and_records_its_reason_without_a_person")),
         ("CONSENT_CHANGED", Test(SEND_PATH)),
-        ("CONSENT_SUPERSEDED", Pending(384)),
-        ("CONSENT_POLICY_PUBLISHED", Pending(384)),
-        ("LIST_MEMBERSHIP_ADDED", Pending(384)),
-        ("LIST_MEMBERSHIP_REMOVED", Pending(384)),
-        ("LIST_MEMBERSHIP_MOVED", Pending(384)),
-        ("TEMPLATE_PUBLISHED", Pending(384)),
-        ("SENDING_DOMAIN_VERIFIED", Pending(384)),
-        ("SENDING_DOMAIN_UNVERIFIED", Pending(384)),
-        ("FLOW_PUBLISHED", Pending(384)),
-        ("FLOW_PAUSED", Pending(384)),
-        ("FLOW_RESUMED", Pending(384)),
-        ("FLOW_ARCHIVED", Pending(384)),
+        ("CONSENT_SUPERSEDED", Test("consent_superseded")),
+        ("CONSENT_POLICY_PUBLISHED", Test("a_published_version_is_immutable_and_each_publish_is_a_definition_change_decision")),
+        ("LIST_MEMBERSHIP_ADDED", Test("decisions_are_written_for_real_changes_only_and_hold_ids")),
+        ("LIST_MEMBERSHIP_REMOVED", Test("decisions_are_written_for_real_changes_only_and_hold_ids")),
+        ("LIST_MEMBERSHIP_MOVED", Test("a_merge_leaves_the_survivor_in_the_union_of_both_peoples_lists")),
+        ("TEMPLATE_PUBLISHED", Test("publish_records_a_definition_change_decision_and_the_validation")),
+        ("SENDING_DOMAIN_VERIFIED", Test("a_failed_recheck_drops_a_verified_domain_and_appends_a_decision")),
+        ("SENDING_DOMAIN_UNVERIFIED", Test("a_failed_recheck_drops_a_verified_domain_and_appends_a_decision")),
+        ("FLOW_PUBLISHED", Test("the_lifecycle_moves_through_its_states_and_records_a_decision_for_each")),
+        ("FLOW_PAUSED", Test("the_lifecycle_moves_through_its_states_and_records_a_decision_for_each")),
+        ("FLOW_RESUMED", Test("the_lifecycle_moves_through_its_states_and_records_a_decision_for_each")),
+        ("FLOW_ARCHIVED", Test("the_lifecycle_moves_through_its_states_and_records_a_decision_for_each")),
         ("FLOW_ENROLLED", Test(SEND_PATH)),
-        ("FLOW_ENROLL_SKIPPED", Pending(384)),
+        ("FLOW_ENROLL_SKIPPED", Test("once_refuses_a_person_who_entered_before_even_after_the_enrollment_ended")),
         ("FLOW_ENROLLMENT_COMPLETED", Test(SEND_PATH)),
-        ("FLOW_ENROLLMENT_EXITED", Pending(384)),
-        ("FLOW_ENROLLMENT_FAILED", Pending(384)),
-        ("FLOW_ENROLLMENT_HELD", Pending(384)),
-        ("FLOW_ENROLLMENT_RESUMED", Pending(384)),
-        ("FLOW_ENROLLMENT_RETRIED", Pending(384)),
-        ("FLOW_ENROLLMENT_SKIPPED", Pending(384)),
+        ("FLOW_ENROLLMENT_EXITED", Test("an_exit_works_in_batches_and_leaves_ended_enrollments_alone")),
+        ("FLOW_ENROLLMENT_FAILED", Test("a_step_that_keeps_failing_is_retried_and_ends_failed_with_its_error_visible")),
+        ("FLOW_ENROLLMENT_HELD", Test("a_paused_flow_holds_a_due_timer_and_resume_runs_it_once")),
+        ("FLOW_ENROLLMENT_RESUMED", Test("a_paused_flow_holds_a_due_timer_and_resume_runs_it_once")),
+        ("FLOW_ENROLLMENT_RETRIED", Test("a_segment_triggered_enrollment_that_fails_is_retried_and_skipped_on_one_trace")),
+        ("FLOW_ENROLLMENT_SKIPPED", Test("a_segment_triggered_enrollment_that_fails_is_retried_and_skipped_on_one_trace")),
         ("FLOW_STEP_DONE", Test(SEND_PATH)),
         ("FLOW_STEP_ENQUEUED", Test(SEND_PATH)),
         ("FLOW_STEP_WAITING", Test(SEND_PATH)),
-        ("FLOW_STEP_FAILED", Pending(384)),
-        ("FLOW_WAKE_EVENT", Pending(384)),
-        ("FLOW_WAKE_TIMEOUT", Pending(384)),
+        ("FLOW_STEP_FAILED", Test("flow_step_failed")),
+        ("FLOW_WAKE_EVENT", Test("an_event_that_commits_before_the_timeout_takes_the_event_path_and_the_timer_is_stale")),
+        ("FLOW_WAKE_TIMEOUT", Test("a_timeout_that_commits_before_the_event_takes_the_timeout_path_and_the_event_is_stale")),
         ("FLOW_WAKE_TIMER", Test(SEND_PATH)),
-        ("FLOW_WAIT_UNTIL_EVENT", Pending(384)),
-        ("FLOW_WAIT_UNTIL_TIME", Pending(384)),
-        ("FLOW_WAIT_DURATION", Pending(384)),
-        ("FLOW_GOAL_CONVERTED", Pending(384)),
-        ("FLOW_BRANCH_CASE_0", Pending(384)),
-        ("FLOW_BRANCH_CASE_1", Pending(384)),
-        ("FLOW_BRANCH_CASE_2", Pending(384)),
-        ("FLOW_BRANCH_CASE_3", Pending(384)),
-        ("FLOW_BRANCH_CASE_4", Pending(384)),
-        ("FLOW_BRANCH_CASE_5", Pending(384)),
-        ("FLOW_BRANCH_CASE_6", Pending(384)),
-        ("FLOW_BRANCH_CASE_7", Pending(384)),
-        ("FLOW_BRANCH_CASE_8", Pending(384)),
-        ("FLOW_BRANCH_CASE_9", Pending(384)),
-        ("FLOW_BRANCH_CASE_MORE", Pending(384)),
-        ("FLOW_BRANCH_ELSE", Pending(384)),
-        ("FLOW_BRANCH_CONDITION_MATCHED", Pending(384)),
-        ("FLOW_BRANCH_CONDITION_UNMATCHED", Pending(384)),
+        ("FLOW_WAIT_UNTIL_EVENT", Test("an_event_that_commits_before_the_timeout_takes_the_event_path_and_the_timer_is_stale")),
+        ("FLOW_WAIT_UNTIL_TIME", Test("a_wait_until_a_time_falls_back_to_the_workspace_zone_and_says_so")),
+        ("FLOW_WAIT_DURATION", Test("the_decisions_of_a_three_node_path_are_complete_and_on_the_enrollments_trace")),
+        ("FLOW_GOAL_CONVERTED", Test("a_goal_converts_once_and_leaves_the_enrollment_running")),
+        ("FLOW_BRANCH_CASE_0", Test("a_branch_sees_the_internal_effect_applied_earlier_in_the_same_step")),
+        ("FLOW_BRANCH_CASE_1", Test("flow_branch_case_1")),
+        ("FLOW_BRANCH_CASE_2", Test("flow_branch_case_2")),
+        ("FLOW_BRANCH_CASE_3", Test("flow_branch_case_3")),
+        ("FLOW_BRANCH_CASE_4", Test("flow_branch_case_4")),
+        ("FLOW_BRANCH_CASE_5", Test("flow_branch_case_5")),
+        ("FLOW_BRANCH_CASE_6", Test("flow_branch_case_6")),
+        ("FLOW_BRANCH_CASE_7", Test("flow_branch_case_7")),
+        ("FLOW_BRANCH_CASE_8", Test("flow_branch_case_8")),
+        ("FLOW_BRANCH_CASE_9", Test("flow_branch_case_9")),
+        ("FLOW_BRANCH_CASE_MORE", Test("flow_branch_case_more")),
+        ("FLOW_BRANCH_ELSE", Test("flow_branch_else")),
+        ("FLOW_BRANCH_CONDITION_MATCHED", Test("a_branch_sees_the_internal_effect_applied_earlier_in_the_same_step")),
+        ("FLOW_BRANCH_CONDITION_UNMATCHED", Test("flow_branch_else")),
         ("SEND_GATE_PASSED", Test(SEND_PATH)),
         ("SEND_GATE_BLOCKED", Test(SEND_PATH)),
         ("MESSAGE_SEND_SENT", Test(SEND_PATH)),
         ("MESSAGE_SEND_SKIPPED", Test(SEND_PATH)),
-        ("MESSAGE_SEND_FAILED", Pending(384)),
-        ("MESSAGE_SEND_DROPPED", Pending(384)),
-        ("MESSAGE_SEND_DEFERRED", Pending(384)),
-        ("MESSAGE_SEND_NOTED", Pending(384)),
+        ("MESSAGE_SEND_FAILED", Test("message_send_retry_exhausted")),
+        ("MESSAGE_SEND_DROPPED", Test("a_send_for_an_ended_enrollment_or_a_paused_flow_is_dropped_with_a_decision_only")),
+        ("MESSAGE_SEND_DEFERRED", Test("a_send_that_finds_no_token_runs_again_when_the_bucket_will_hold_one")),
+        ("MESSAGE_SEND_NOTED", Test("a_person_zone_overrides_the_workspace_zone_and_an_invalid_one_falls_back_and_says_so")),
         ("MESSAGE_FEEDBACK_DELIVERED", Test(SEND_PATH)),
-        ("MESSAGE_FEEDBACK_BOUNCED_HARD", Pending(384)),
-        ("MESSAGE_FEEDBACK_BOUNCED_SOFT", Pending(384)),
-        ("MESSAGE_FEEDBACK_COMPLAINED", Pending(384)),
-        ("SUPPRESSION_FEEDBACK_ORGANIZATION", Pending(384)),
-        ("SUPPRESSION_FEEDBACK_WORKSPACE", Pending(384)),
-        ("SUPPRESSION_FEEDBACK_UNABLE", Pending(384)),
-        ("WEBHOOK_CALL_SUCCEEDED", Pending(384)),
-        ("WEBHOOK_CALL_FAILED", Pending(384)),
-        ("SYNC_UPSERT_SUCCEEDED", Pending(384)),
-        ("SYNC_UPSERT_FAILED", Pending(384)),
-        ("SYNC_REMOVE_SUCCEEDED", Pending(384)),
-        ("SYNC_REMOVE_FAILED", Pending(384)),
-        ("EVENT_FORWARD_RETRY", Pending(384)),
-        ("EVENT_FORWARD_DEAD", Pending(384)),
-        ("SYNC_RECORD_APPLIED", Pending(384)),
-        ("SYNC_RECORD_DELETED", Pending(384)),
-        ("SYNC_RECORD_REJECTED", Pending(384)),
+        ("MESSAGE_FEEDBACK_BOUNCED_HARD", Test("message_feedback_bounced_hard")),
+        ("MESSAGE_FEEDBACK_BOUNCED_SOFT", Test("message_feedback_bounced_soft")),
+        ("MESSAGE_FEEDBACK_COMPLAINED", Test("message_feedback_complained")),
+        ("SUPPRESSION_FEEDBACK_ORGANIZATION", Test("message_feedback_bounced_hard")),
+        ("SUPPRESSION_FEEDBACK_WORKSPACE", Test("message_feedback_complained")),
+        ("SUPPRESSION_FEEDBACK_UNABLE", Test("a_message_without_a_stored_hash_writes_the_event_but_suppresses_nobody")),
+        ("WEBHOOK_CALL_SUCCEEDED", Test("an_outcome_writes_the_event_and_the_decision_and_wakes_a_waiting_enrollment")),
+        ("WEBHOOK_CALL_FAILED", Test("a_failure_wakes_only_a_wait_for_the_failed_event")),
+        ("SYNC_UPSERT_SUCCEEDED", Test("an_upsert_sends_exactly_the_listed_traits_under_the_key_and_records_its_outcome")),
+        ("SYNC_UPSERT_FAILED", Test("a_person_without_the_key_ends_missing_key_with_no_call_and_no_attempt")),
+        ("SYNC_REMOVE_SUCCEEDED", Test("a_remove_deletes_the_profile_under_the_same_key")),
+        ("SYNC_REMOVE_FAILED", Test("a_4xx_is_terminal_and_the_last_attempt_of_a_5xx_is_recorded_as_a_failure")),
+        ("EVENT_FORWARD_RETRY", Test("a_retry_reuses_the_key_backs_off_and_leaves_a_job_for_the_next_attempt")),
+        ("EVENT_FORWARD_DEAD", Test("a_terminal_answer_is_dead_at_once_and_a_redrive_delivers_it_without_a_flow")),
+        ("SYNC_RECORD_APPLIED", Test("a_batch_applies_deletes_and_rejects_and_records_each_under_the_run_trace")),
+        ("SYNC_RECORD_DELETED", Test("a_removed_record_appends_a_deleted_decision_with_the_reason_it_was_removed_for")),
+        ("SYNC_RECORD_REJECTED", Test("a_batch_applies_deletes_and_rejects_and_records_each_under_the_run_trace")),
         ("SEGMENT_ENTERED", Test(SEND_PATH)),
-        ("SEGMENT_EXITED", Pending(384)),
-        ("SEGMENT_REFRESH_SKIPPED", Pending(384)),
-        ("SEGMENT_REFRESH_FAILED", Pending(384)),
-        ("SEGMENT_REEVALUATE_FAILED", Pending(384)),
-        ("JOB_ATTEMPT_FAILED", Pending(384)),
-        ("JOB_ATTEMPT_EXHAUSTED", Pending(384)),
-        ("JOB_ATTEMPT_LEASE_EXPIRED", Pending(384)),
-        ("JOB_RETRY_REQUEUED", Pending(384)),
+        ("SEGMENT_EXITED", Test("a_refresh_enters_and_exits_people_with_events_decisions_and_counts")),
+        ("SEGMENT_REFRESH_SKIPPED", Test("an_archived_segment_is_skipped_with_a_decision_and_changes_nothing")),
+        ("SEGMENT_REFRESH_FAILED", Test("a_definition_that_no_longer_compiles_leaves_the_members_and_records_a_failure")),
+        ("SEGMENT_REEVALUATE_FAILED", Test("a_definition_that_no_longer_compiles_is_recorded_and_the_others_still_commit")),
+        ("JOB_ATTEMPT_FAILED", Test("a_failed_workspace_job_leaves_a_job_attempt_decision_and_an_instance_job_none")),
+        ("JOB_ATTEMPT_EXHAUSTED", Test("a_failed_workspace_job_leaves_a_job_attempt_decision_and_an_instance_job_none")),
+        ("JOB_ATTEMPT_LEASE_EXPIRED", Test("a_reaped_workspace_job_leaves_a_lease_expired_or_exhausted_decision")),
+        ("JOB_RETRY_REQUEUED", Test("retrying_a_dead_workspace_job_requeues_it_under_its_trace_and_audits_and_records_it")),
     ];
 
     fn crates_dir() -> PathBuf {
@@ -165,6 +163,7 @@ mod tests {
     }
 
     const DECISION_ACCEPTANCE_SUITES: &[&str] = &[
+        "crates/zirv-flow/src/e2e/trace.rs",
         "crates/zirv-flow-api/src/flows/acceptance.rs",
         "crates/zirv-flow-jobs/src/kinds/delivery_send/mod.rs",
         "crates/zirv-flow-jobs/src/kinds/delivery_sync.rs",
@@ -728,9 +727,7 @@ mod tests {
         for name in names {
             let entries = table.iter().filter(|(row, _)| row == name).count();
             if entries == 0 {
-                problems.push(format!(
-                    "{name} has no test, no Untestable and no Pending entry"
-                ));
+                problems.push(format!("{name} has no test or Untestable entry"));
             } else if entries > 1 {
                 problems.push(format!("{name} has {entries} entries"));
             }
@@ -982,9 +979,9 @@ mod tests {
         ];
         assert!(coverage_problems(fine, &names, &tests).is_empty());
         let stray: &[(&str, Coverage)] = &[
-            ("A_ROW", Pending(384)),
-            ("B_ROW", Pending(384)),
-            ("C", Pending(1)),
+            ("A_ROW", Test("real_test")),
+            ("B_ROW", Test("real_test")),
+            ("C", Test("real_test")),
         ];
         assert_eq!(coverage_problems(stray, &names, &tests).len(), 1);
     }
@@ -1006,11 +1003,9 @@ mod tests {
     }
 
     #[test]
-    fn the_pending_rows_are_all_for_384() {
+    fn every_registry_row_has_a_producing_test() {
         for (row, coverage) in COVERAGE {
-            if let Coverage::Pending(issue) = coverage {
-                assert_eq!(*issue, 384, "{row}");
-            }
+            assert!(matches!(coverage, Coverage::Test(_)), "{row}: {coverage:?}");
         }
     }
 

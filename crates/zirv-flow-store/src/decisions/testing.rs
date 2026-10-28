@@ -233,6 +233,60 @@ where
     assert_decisions_hold_no_personal_data(&decision_pool).await;
 }
 
+/// Checks a producing fixture's exact decision and its connection to the originating cause.
+/// The external cause is the root when the fixture starts at an API or operator action.
+pub async fn assert_fixture(
+    pool: &PgPool,
+    workspace: zirv_flow_core::WorkspaceId,
+    trace: &zirv_flow_core::TraceContext,
+    triple: (&str, &str, Option<&str>),
+    subjects: Value,
+) {
+    let (records, truncated) = crate::list_trace(pool, workspace, trace.trace_id, 1000)
+        .await
+        .expect("the fixture trace");
+    assert!(!truncated);
+    let matching: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            (
+                record.action.as_str(),
+                record.outcome.as_str(),
+                record.reason.as_deref(),
+            ) == triple
+                && record.subject_ids == subjects
+        })
+        .collect();
+    assert_eq!(matching.len(), 1, "{triple:?} {subjects}: {records:?}");
+    assert_eq!(matching[0].cause, trace.cause);
+    let mut known = hashbrown::HashSet::from([trace.cause.id.clone()]);
+    let mut remaining: Vec<_> = records.iter().collect();
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        remaining.retain(|record| {
+            assert_eq!(record.trace_id, trace.trace_id);
+            if !known.contains(&record.cause.id) {
+                return true;
+            }
+            known.insert(record.id.to_string());
+            known.extend(
+                record
+                    .subject_ids
+                    .as_object()
+                    .expect("subjects")
+                    .values()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned),
+            );
+            false
+        });
+        assert!(
+            remaining.len() < before,
+            "disconnected fixture: {remaining:?}"
+        );
+    }
+}
+
 /// Seeds every marker into its own data class in an existing workspace. The returned person
 /// can be used by the suite's consent, segment, flow, delivery and erasure operations.
 pub async fn seed_personal_data(pool: &PgPool, workspace: zirv_flow_core::WorkspaceId) -> Uuid {

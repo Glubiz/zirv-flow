@@ -2176,6 +2176,14 @@ pub(super) mod tests {
                     .await,
                 0
             );
+
+            let step: Uuid = sqlx::query_scalar("SELECT id FROM step_executions WHERE enrollment_id = $1 AND node_id = 'wait'")
+                .bind(id).fetch_one(&env.pool).await.unwrap();
+            let subjects = json!({"flow": flow, "enrollment": id, "person": ada, "version": 1, "node": "wait", "step_execution": step});
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &done.trace,
+                ("flow.wake", "event", None), subjects.clone()).await;
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &done.trace,
+                ("flow.wait", "waiting", Some("until_event")), subjects).await;
         })
         .await;
     }
@@ -2215,6 +2223,14 @@ pub(super) mod tests {
                     .await,
                 0
             );
+
+            let step: Uuid = sqlx::query_scalar("SELECT id FROM step_executions WHERE enrollment_id = $1 AND node_id = 'wait'")
+                .bind(id).fetch_one(&env.pool).await.unwrap();
+            let subjects = json!({"flow": flow, "enrollment": id, "person": ada, "version": 1, "node": "wait", "step_execution": step});
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &done.trace,
+                ("flow.wake", "timeout", None), subjects.clone()).await;
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &done.trace,
+                ("flow.wait", "waiting", Some("until_event")), subjects).await;
         })
         .await;
     }
@@ -2784,6 +2800,24 @@ pub(super) mod tests {
             .unwrap();
             assert_eq!(reason, "timezone_fallback");
             assert_eq!(env.enrollment(id).await.status, EnrollmentStatus::Waiting);
+
+            let enrollment = env.enrollment(id).await;
+            let step: Uuid = sqlx::query_scalar(
+                "SELECT id FROM step_executions WHERE enrollment_id = $1 AND node_id = 'until'",
+            )
+            .bind(id)
+            .fetch_one(&env.pool)
+            .await
+            .unwrap();
+            zirv_flow_store::decision_testing::assert_fixture(
+                &env.pool,
+                env.ws,
+                &enrollment.trace,
+                ("flow.wait", "waiting", Some("until_time")),
+                json!({"flow": flow, "enrollment": id,
+                    "person": ada, "version": 1, "node": "until", "step_execution": step}),
+            )
+            .await;
         })
         .await;
     }
@@ -3145,6 +3179,212 @@ pub(super) mod tests {
                     .any(|(_, _, node)| node.as_deref() == Some("bump")),
                 "step decisions carry their node"
             );
+        })
+        .await;
+    }
+
+    async fn branch_fixture(pool: PgPool, selected: Option<usize>) {
+        let env = Env::new(pool).await;
+        env.define_trait("plan", TraitType::String).await;
+        let person = env
+            .person(PERSONAL_DATA.email, json!({"plan": "pro"}))
+            .await;
+        let count = selected.map_or(10, |index| 10.max(index + 1));
+        let conditions: Vec<_> = (0..count).map(|index| json!({
+            "trait": "plan", "op": "eq", "value": if selected == Some(index) { "pro" } else { "free" }
+        })).collect();
+        let mut edges: Vec<_> = (0..count)
+            .map(|index| {
+                edge(
+                    &format!("case-{index}"),
+                    "pick",
+                    &format!("case_{index}"),
+                    "end",
+                )
+            })
+            .collect();
+        edges.push(edge("otherwise", "pick", "else", "end"));
+        let flow = env
+            .flow(
+                "Branch fixture",
+                json!({"v": 1, "nodes": [
+            {"id": "pick", "type": "branch", "conditions": conditions},
+            {"id": "end", "type": "exit"}
+        ], "edges": edges}),
+            )
+            .await;
+        let enrolled = env.enroll(flow, 1, &[person]).await;
+        let enrollment = &enrolled.enrolled[0];
+        env.run_due().await;
+        let step: Uuid = sqlx::query_scalar(
+            "SELECT id FROM step_executions WHERE enrollment_id = $1 AND node_id = 'pick'",
+        )
+        .bind(enrollment.enrollment)
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let subjects = json!({"flow": flow, "person": person,
+            "enrollment": enrollment.enrollment, "version": 1, "node": "pick", "step_execution": step});
+        let outcome = selected.map_or_else(
+            || "else".to_owned(),
+            |index| {
+                if index >= 10 {
+                    "case_more".to_owned()
+                } else {
+                    format!("case_{index}")
+                }
+            },
+        );
+        zirv_flow_store::decision_testing::assert_fixture(
+            &env.pool,
+            env.ws,
+            &enrollment.trace,
+            ("flow.branch", &outcome, None),
+            subjects.clone(),
+        )
+        .await;
+        for index in 0..count {
+            let outcome = if selected == Some(index) {
+                "matched"
+            } else {
+                "unmatched"
+            };
+            let reason = if index >= 10 {
+                "case_more".to_owned()
+            } else {
+                format!("case_{index}")
+            };
+            zirv_flow_store::decision_testing::assert_fixture(
+                &env.pool,
+                env.ws,
+                &enrollment.trace,
+                ("flow.branch.condition", outcome, Some(&reason)),
+                subjects.clone(),
+            )
+            .await;
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_1(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(1)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_2(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(2)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_3(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(3)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_4(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(4)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_5(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(5)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_6(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(6)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_7(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(7)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_8(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(8)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_9(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, Some(9)).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_else(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            branch_fixture(pool, None).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_step_failed(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            let env = Env::new(pool).await;
+            let person = env.person(PERSONAL_DATA.email, json!({})).await;
+            let flow = env.flow("Invalid stored time", json!({"v": 1, "nodes": [
+                {"id": "wait", "type": "wait.until_time", "when": {"kind": "date_time", "at": "soon"}},
+                {"id": "end", "type": "exit"}
+            ], "edges": [edge("next", "wait", "next", "end")]})).await;
+            let enrolled = env.enroll(flow, 1, &[person]).await;
+            let enrollment = &enrolled.enrolled[0];
+            env.run_due().await;
+            let step: Uuid = sqlx::query_scalar("SELECT id FROM step_executions WHERE enrollment_id = $1 AND node_id = 'wait'")
+                .bind(enrollment.enrollment).fetch_one(&env.pool).await.unwrap();
+            let subjects = json!({"flow": flow, "enrollment": enrollment.enrollment, "person": person,
+                "version": 1, "node": "wait", "step_execution": step});
+            for action in ["flow.step", "flow.enrollment"] {
+                zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &enrollment.trace,
+                    (action, "failed", Some("invalid_time")), subjects.clone()).await;
+            }
+        }).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn flow_branch_case_more(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            // The API rejects this size; the worker must still label an oversized stored graph.
+            branch_fixture(pool, Some(10)).await;
         })
         .await;
     }

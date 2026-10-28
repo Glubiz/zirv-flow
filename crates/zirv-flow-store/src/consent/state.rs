@@ -1785,4 +1785,46 @@ mod tests {
         })
         .await;
     }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn consent_superseded(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "fixture").await;
+            let person = person(&pool, ws, PERSONAL_DATA.email).await;
+            set(
+                &pool,
+                ws,
+                &change(person, None, ConsentStatus::Subscribed, T2),
+                &TraceContext::root(Cause::api("newer")),
+            )
+            .await;
+            let trace = TraceContext::root(Cause::api("late"));
+            let outcome = set(
+                &pool,
+                ws,
+                &change(person, None, ConsentStatus::Unsubscribed, T1),
+                &trace,
+            )
+            .await;
+            assert_eq!(outcome, ConsentOutcome::Superseded);
+            let change: Uuid = sqlx::query_scalar(
+                "SELECT id FROM consent_changes WHERE person_id = $1 AND occurred_at = $2",
+            )
+            .bind(person)
+            .bind(T1)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &trace,
+                ("consent.change", "superseded", Some("api")),
+                json!({"person": person, "consent_change": change}),
+            )
+            .await;
+        })
+        .await;
+    }
 }

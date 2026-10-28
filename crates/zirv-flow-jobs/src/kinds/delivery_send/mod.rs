@@ -2431,6 +2431,10 @@ mod tests {
             assert_eq!(message.status, "sent");
             assert_eq!(env.sent().len(), 2);
             assert_eq!(env.sent()[1].key, queued.message.to_string());
+
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &queued.enrolled.trace,
+                ("message.send", "deferred", Some("rate_limit")), json!({"message": queued.message,
+                    "enrollment": queued.enrolled.enrollment, "template": template, "destination": env.destination})).await;
         })
         .await;
     }
@@ -2711,7 +2715,12 @@ mod tests {
             env.subscribe(person).await;
             let queued = env.queue(person, template, 1).await;
             env.attempt().await.unwrap_err();
-            bury_the_jobs(&env).await;
+            let dead: (String, i32) =
+                sqlx::query_as("SELECT state, attempts FROM jobs WHERE kind = 'delivery.send'")
+                    .fetch_one(&env.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(dead, ("dead".into(), 1));
             assert_eq!(env.message(queued.message).await.status, "pending");
 
             let ended = end_orphaned_messages(&env.pool, env.clock.now())
@@ -2739,6 +2748,13 @@ mod tests {
                     Some("internal_error".to_owned())
                 )
             );
+            assert_message_fixture(
+                &env,
+                &message,
+                ("message.send", "failed", Some("internal_error")),
+            )
+            .await;
+            assert_message_fixture(&env, &message, ("send.gate", "blocked", Some("job"))).await;
             assert!(env.sent().is_empty());
             let again = end_orphaned_messages(&env.pool, env.clock.now())
                 .await
@@ -4471,6 +4487,10 @@ mod tests {
                 ],
                 "the deferral stays in the log after the message ends"
             );
+
+            zirv_flow_store::decision_testing::assert_fixture(&env.pool, env.ws, &queued.enrolled.trace,
+                ("message.send", "deferred", Some("quiet_hours")), json!({"message": queued.message,
+                    "enrollment": queued.enrolled.enrollment, "template": template, "destination": env.destination})).await;
         })
         .await;
     }
@@ -4777,6 +4797,19 @@ mod tests {
                 "a receipt holds no slot"
             );
             assert_eq!(env.sent().len(), 2);
+
+            assert_message_fixture(
+                &env,
+                &skipped,
+                ("message.send", "skipped", Some("frequency_cap")),
+            )
+            .await;
+            assert_message_fixture(
+                &env,
+                &skipped,
+                ("send.gate", "blocked", Some("frequency_cap")),
+            )
+            .await;
         })
         .await;
     }
@@ -5952,6 +5985,88 @@ mod tests {
                 ("failed", Some("render_error"))
             );
             assert!(env.sent().is_empty());
+
+            assert_message_fixture(
+                &env,
+                &message,
+                ("message.send", "failed", Some("render_error")),
+            )
+            .await;
+            assert_message_fixture(&env, &message, ("send.gate", "blocked", Some("render"))).await;
+        })
+        .await;
+    }
+
+    async fn assert_message_fixture(
+        env: &Env,
+        message: &zirv_flow_store::Message,
+        triple: (&str, &str, Option<&str>),
+    ) {
+        let mut conn = env.pool.acquire().await.unwrap();
+        let enrollment = zirv_flow_store::find_enrollment(&mut conn, env.ws, message.enrollment_id)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(conn);
+        let event: Uuid = sqlx::query_scalar(
+            "SELECT id FROM events WHERE source = 'flows' AND properties ->> 'message_id' = $1",
+        )
+        .bind(message.id.to_string())
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+        let subjects = json!({"message": message.id, "enrollment": message.enrollment_id,
+            "person": message.person_id, "template": message.template_id, "destination": message.destination_id,
+            "event": event, "flow": message.flow_id.unwrap(), "version": message.flow_version.unwrap(), "node": message.node_id});
+        zirv_flow_store::decision_testing::assert_fixture(
+            &env.pool,
+            env.ws,
+            &enrollment.trace,
+            triple,
+            subjects,
+        )
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_send_retry_exhausted(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::{
+                FakeProvider, FakeProviderOptions, FakeProviderScript,
+            };
+            let fake = FakeProvider::start(FakeProviderOptions::default()).await;
+            let env = provider_env(pool, "exhausted", &fake).await;
+            let template = env.plain_template("transactional").await;
+            let person = env.person(PERSONAL_DATA.email).await;
+            let queued = env.queue(person, template, 2).await;
+            for _ in 0..2 {
+                fake.script(FakeProviderScript::Status {
+                    status: 503,
+                    body: json!({}),
+                    retry_after: None,
+                });
+            }
+            env.attempt().await.unwrap_err();
+            env.attempt().await.unwrap();
+            let message = env.message(queued.message).await;
+            assert_eq!(
+                (message.status.as_str(), message.reason.as_deref()),
+                ("failed", Some("http_5xx"))
+            );
+            assert_eq!(
+                env.attempts_of(queued.message).await,
+                [("retryable".into(), 1), ("retryable".into(), 2)]
+            );
+            assert_eq!(
+                env.count("SELECT count(*) FROM jobs WHERE kind = 'delivery.send'")
+                    .await,
+                0
+            );
+            assert_message_fixture(&env, &message, ("message.send", "failed", Some("http_5xx")))
+                .await;
+            assert_message_fixture(&env, &message, ("send.gate", "blocked", Some("delivery")))
+                .await;
         })
         .await;
     }

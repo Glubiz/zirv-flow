@@ -106,7 +106,7 @@ function attemptLabel(record: Labelled): string {
 }
 
 /**
- * What a send decision says in plain words, or none for a decision this map does not know. The
+ * What a decision says in plain words, or none for an action this map does not know. The
  * record's own codes are shown beside it, so nothing is lost when the words are missing.
  */
 export function recordLabel(record: Labelled): string | null {
@@ -126,6 +126,6 @@ export function recordLabel(record: Labelled): string | null {
       if ("destination" in record.subject_ids) return `Attempt to reach the destination: ${record.outcome.replaceAll("_", " ")}`;
       return attemptLabel(record);
     default:
-      return MAIL_EVENTS[record.action] ? `${MAIL_EVENTS[record.action]}${record.reason === "hard" || record.reason === "soft" ? ` (${record.reason})` : ""}` : null;
+      return MAIL_EVENTS[record.action] ? `${MAIL_EVENTS[record.action]}${record.reason === "hard" || record.reason === "soft" ? ` (${record.reason})` : ""}` : actionLabel(record.action);
   }
 }

@@ -524,149 +524,162 @@ mod tests {
     #[sqlx::test]
     #[ignore = "requires PostgreSQL; set DATABASE_URL"]
     async fn an_anonymous_person_is_merged_into_the_identified_one(pool: PgPool) {
-        let ws = workspace(&pool, "one").await;
-        let identified = apply_one(
-            &pool,
-            ws,
-            record(
-                "crm",
-                "1",
-                &[("external:user_id", "u")],
-                json!({"plan": "pro"}),
-            ),
-        )
-        .await;
-        let anonymous = apply_one(
-            &pool,
-            ws,
-            record(
-                "web",
-                "2",
-                &[("anonymous_id", "a")],
-                json!({"city": "Aarhus"}),
-            ),
-        )
-        .await;
-        assert_ne!(identified, anonymous);
-        let anonymous_identity: Uuid =
-            sqlx::query_scalar("SELECT id FROM identities WHERE kind = 'anonymous_id'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        let anonymous_record: Uuid =
-            sqlx::query_scalar("SELECT id FROM source_records WHERE record_key = '2'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        // An open conflict between the two stops needing review once they are one person.
-        sqlx::query(
-            "INSERT INTO identity_conflicts \
+        crate::decision_testing::checked(pool, |pool| async move {
+            let ws = workspace(&pool, "one").await;
+            let identified = apply_one(
+                &pool,
+                ws,
+                record(
+                    "crm",
+                    "1",
+                    &[("external:user_id", "u")],
+                    json!({"plan": "pro"}),
+                ),
+            )
+            .await;
+            let anonymous = apply_one(
+                &pool,
+                ws,
+                record(
+                    "web",
+                    "2",
+                    &[("anonymous_id", "a")],
+                    json!({"city": "Aarhus"}),
+                ),
+            )
+            .await;
+            assert_ne!(identified, anonymous);
+            let anonymous_identity: Uuid =
+                sqlx::query_scalar("SELECT id FROM identities WHERE kind = 'anonymous_id'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let anonymous_record: Uuid =
+                sqlx::query_scalar("SELECT id FROM source_records WHERE record_key = '2'")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            // An open conflict between the two stops needing review once they are one person.
+            sqlx::query(
+                "INSERT INTO identity_conflicts \
                 (id, workspace_id, person_id, other_person_id, kind, source_record_id, reason) \
              VALUES ($1, $2, $3, $4, 'anonymous_id', $5, 'merge_deferred')",
-        )
-        .bind(Uuid::now_v7())
-        .bind(ws.as_uuid())
-        .bind(identified)
-        .bind(anonymous)
-        .bind(anonymous_record)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let both = record(
-            "app",
-            "3",
-            &[("external:user_id", "u"), ("anonymous_id", "a")],
-            json!({}),
-        );
-
-        let survivor = apply_one(&pool, ws, both.clone()).await;
-
-        assert_eq!(survivor, identified);
-        assert_eq!(merged_into(&pool, anonymous).await, Some(identified));
-        assert_eq!(merged_into(&pool, identified).await, None);
-        let kinds: Vec<String> = list_identities(&pool, ws, identified)
+            )
+            .bind(Uuid::now_v7())
+            .bind(ws.as_uuid())
+            .bind(identified)
+            .bind(anonymous)
+            .bind(anonymous_record)
+            .execute(&pool)
             .await
-            .unwrap()
-            .into_iter()
-            .map(|identity| identity.kind)
-            .collect();
-        assert_eq!(kinds, ["anonymous_id", "external:user_id"]);
-        let left_behind: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM source_records WHERE person_id = $1")
+            .unwrap();
+            let both = record(
+                "app",
+                "3",
+                &[("external:user_id", "u"), ("anonymous_id", "a")],
+                json!({}),
+            );
+
+            let survivor = apply_one(&pool, ws, both.clone()).await;
+
+            assert_eq!(survivor, identified);
+            assert_eq!(merged_into(&pool, anonymous).await, Some(identified));
+            assert_eq!(merged_into(&pool, identified).await, None);
+            let kinds: Vec<String> = list_identities(&pool, ws, identified)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|identity| identity.kind)
+                .collect();
+            assert_eq!(kinds, ["anonymous_id", "external:user_id"]);
+            let left_behind: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM source_records WHERE person_id = $1")
+                    .bind(anonymous)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(left_behind, 0);
+            let survivor_person = find_person(&pool, ws, identified).await.unwrap().unwrap();
+            assert_eq!(
+                survivor_person.traits,
+                json!({"plan": "pro", "city": "Aarhus"})
+            );
+            let through_loser = find_person(&pool, ws, anonymous).await.unwrap().unwrap();
+            assert_eq!(through_loser.id, identified);
+            let loser_traits: Value = sqlx::query_scalar("SELECT traits FROM people WHERE id = $1")
                 .bind(anonymous)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(left_behind, 0);
-        let survivor_person = find_person(&pool, ws, identified).await.unwrap().unwrap();
-        assert_eq!(
-            survivor_person.traits,
-            json!({"plan": "pro", "city": "Aarhus"})
-        );
-        let through_loser = find_person(&pool, ws, anonymous).await.unwrap().unwrap();
-        assert_eq!(through_loser.id, identified);
-        let loser_traits: Value = sqlx::query_scalar("SELECT traits FROM people WHERE id = $1")
-            .bind(anonymous)
+            assert_eq!(loser_traits, json!({}));
+
+            let (identity_ids, record_ids, trace_id): (Vec<Uuid>, Vec<Uuid>, Uuid) =
+                sqlx::query_as(
+                    "SELECT identity_ids, source_record_ids, trace_id FROM person_merges \
+             WHERE survivor_person_id = $1 AND merged_person_id = $2",
+                )
+                .bind(identified)
+                .bind(anonymous)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(identity_ids, [anonymous_identity]);
+            assert_eq!(record_ids, [anonymous_record]);
+            assert_eq!(trace_id, both.trace.trace_id.as_uuid());
+            let (decisions, _) = list_trace(&pool, ws, both.trace.trace_id, 20)
+                .await
+                .unwrap();
+            let merge = decisions
+                .iter()
+                .find(|d| d.action == "person.merge")
+                .expect("a person.merge decision");
+            assert_eq!(merge.outcome, "merged");
+            assert_eq!(merge.subject_ids["survivor"], identified.to_string());
+            assert_eq!(merge.subject_ids["merged"], anonymous.to_string());
+            assert!(merge.subject_ids["merge"].is_string());
+            let payload: Value = sqlx::query_scalar(
+                "SELECT payload FROM jobs WHERE kind = 'person.merge.rewrite' AND trace_id = $1",
+            )
+            .bind(both.trace.trace_id.as_uuid())
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(loser_traits, json!({}));
-
-        let (identity_ids, record_ids, trace_id): (Vec<Uuid>, Vec<Uuid>, Uuid) = sqlx::query_as(
-            "SELECT identity_ids, source_record_ids, trace_id FROM person_merges \
-             WHERE survivor_person_id = $1 AND merged_person_id = $2",
-        )
-        .bind(identified)
-        .bind(anonymous)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(identity_ids, [anonymous_identity]);
-        assert_eq!(record_ids, [anonymous_record]);
-        assert_eq!(trace_id, both.trace.trace_id.as_uuid());
-        let (decisions, _) = list_trace(&pool, ws, both.trace.trace_id, 20)
-            .await
-            .unwrap();
-        let merge = decisions
-            .iter()
-            .find(|d| d.action == "person.merge")
-            .expect("a person.merge decision");
-        assert_eq!(merge.outcome, "merged");
-        assert_eq!(merge.subject_ids["survivor"], identified.to_string());
-        assert_eq!(merge.subject_ids["merged"], anonymous.to_string());
-        assert!(merge.subject_ids["merge"].is_string());
-        let payload: Value = sqlx::query_scalar(
-            "SELECT payload FROM jobs WHERE kind = 'person.merge.rewrite' AND trace_id = $1",
-        )
-        .bind(both.trace.trace_id.as_uuid())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            payload,
-            json!({"workspace_id": ws, "merged_person_id": anonymous})
-        );
-        let conflicts = list_identity_conflicts(&pool, ws, identified)
-            .await
-            .unwrap();
-        assert_eq!(conflicts[0].resolution.as_deref(), Some("merged"));
-        assert!(conflicts[0].resolved_at.is_some());
-        // Both sides are marked in the merge class on the merge's trace, so the next pass
-        // closes any row a concurrent refresh opened for the loser.
-        let marks: Vec<(Uuid, bool, Option<Uuid>)> = sqlx::query_as(
-            "SELECT person_id, (classes & 32) = 32, trace_id FROM person_changes \
+            assert_eq!(
+                payload,
+                json!({"workspace_id": ws, "merged_person_id": anonymous})
+            );
+            let conflicts = list_identity_conflicts(&pool, ws, identified)
+                .await
+                .unwrap();
+            assert_eq!(conflicts[0].resolution.as_deref(), Some("merged"));
+            assert!(conflicts[0].resolved_at.is_some());
+            // Both sides are marked in the merge class on the merge's trace, so the next pass
+            // closes any row a concurrent refresh opened for the loser.
+            let marks: Vec<(Uuid, bool, Option<Uuid>)> = sqlx::query_as(
+                "SELECT person_id, (classes & 32) = 32, trace_id FROM person_changes \
              WHERE person_id = ANY($1) ORDER BY person_id",
-        )
-        .bind([anonymous, identified])
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        let mut expected = vec![
-            (anonymous, true, Some(both.trace.trace_id.as_uuid())),
-            (identified, true, Some(both.trace.trace_id.as_uuid())),
-        ];
-        expected.sort();
-        assert_eq!(marks, expected);
+            )
+            .bind([anonymous, identified])
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let mut expected = vec![
+                (anonymous, true, Some(both.trace.trace_id.as_uuid())),
+                (identified, true, Some(both.trace.trace_id.as_uuid())),
+            ];
+            expected.sort();
+            assert_eq!(marks, expected);
+
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &both.trace,
+                ("trait.change", "changed", Some("merged")),
+                json!({"person": identified}),
+            )
+            .await;
+        })
+        .await;
     }
 
     #[sqlx::test]

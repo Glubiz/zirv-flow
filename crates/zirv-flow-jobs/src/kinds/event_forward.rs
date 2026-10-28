@@ -864,6 +864,14 @@ mod tests {
                 env.attempts().await,
                 [(1, "retryable".to_owned()), (2, "delivered".to_owned())]
             );
+
+            let (outbox, rule): (Uuid, Uuid) = sqlx::query_as("SELECT id, rule_id FROM forwarding_outbox WHERE event_id = $1")
+                .bind(event).fetch_one(&env.pool).await.unwrap();
+            let rows: Vec<(String, String, Option<String>, Value)> = sqlx::query_as(
+                "SELECT action, outcome, reason, subject_ids FROM decision_records WHERE action = 'event.forward'"
+            ).fetch_all(&env.pool).await.unwrap();
+            assert_eq!(rows, vec![("event.forward".into(), "retry".into(), Some("http_5xx".into()),
+                json!({"destination": env.destination, "event": event, "outbox": outbox, "rule": rule}))]);
         })
         .await;
     }
@@ -965,6 +973,14 @@ mod tests {
                 0
             );
             assert_eq!(env.count("SELECT count(*) FROM enrollments").await, 0);
+
+            let (outbox, rule): (Uuid, Uuid) = sqlx::query_as("SELECT id, rule_id FROM forwarding_outbox WHERE event_id = $1")
+                .bind(event).fetch_one(&env.pool).await.unwrap();
+            let rows: Vec<(String, String, Option<String>, Value)> = sqlx::query_as(
+                "SELECT action, outcome, reason, subject_ids FROM decision_records WHERE action = 'event.forward'"
+            ).fetch_all(&env.pool).await.unwrap();
+            assert_eq!(rows, vec![("event.forward".into(), "dead".into(), Some("http_4xx".into()),
+                json!({"destination": env.destination, "event": event, "outbox": outbox, "rule": rule}))]);
         })
         .await;
     }

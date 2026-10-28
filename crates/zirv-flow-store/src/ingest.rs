@@ -1695,6 +1695,19 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(kinds, ["record"]);
+
+            let reject: Uuid = sqlx::query_scalar("SELECT id FROM ingest_rejects")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &trace,
+                ("record.rejected", "rejected", Some("apply_failed")),
+                json!({"reject": reject}),
+            )
+            .await;
         })
         .await;
     }

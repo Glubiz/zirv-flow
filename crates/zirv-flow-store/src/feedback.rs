@@ -922,4 +922,94 @@ mod tests {
         })
         .await;
     }
+
+    async fn feedback_fixture(
+        pool: PgPool,
+        event: FeedbackEvent,
+        reason: &str,
+        suppression: Option<&str>,
+    ) {
+        let ws = workspace(&pool, "feedback-fixture").await;
+        let sent = sent(&pool, ws, Some([9; 32])).await;
+        let trace = trace();
+        let outcome =
+            record_provider_feedback(&pool, &feedback(ws, &sent, event, Some("fixture"), &trace))
+                .await
+                .unwrap();
+        let FeedbackOutcome::Recorded {
+            event: Some(event), ..
+        } = outcome
+        else {
+            panic!("{outcome:?}");
+        };
+        let enrollment: Uuid =
+            sqlx::query_scalar("SELECT enrollment_id FROM messages WHERE id = $1")
+                .bind(sent.message)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let subjects = json!({"message": sent.message, "person": sent.person,
+            "enrollment": enrollment, "destination": sent.destination});
+        let mut feedback_subjects = subjects.clone();
+        feedback_subjects["event"] = json!(event);
+        crate::decision_testing::assert_fixture(
+            &pool,
+            ws,
+            &trace,
+            ("message.feedback", "recorded", Some(reason)),
+            feedback_subjects,
+        )
+        .await;
+        if let Some(reason) = suppression {
+            crate::decision_testing::assert_fixture(
+                &pool,
+                ws,
+                &trace,
+                ("suppression.feedback", "added", Some(reason)),
+                subjects,
+            )
+            .await;
+        } else {
+            assert_eq!(count(&pool, "SELECT count(*) FROM suppressions").await, 0);
+        }
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_feedback_bounced_hard(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            feedback_fixture(
+                pool,
+                FeedbackEvent::BouncedHard,
+                "bounced_hard",
+                Some("organization_hard_bounce"),
+            )
+            .await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_feedback_bounced_soft(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            feedback_fixture(pool, FeedbackEvent::BouncedSoft, "bounced_soft", None).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn message_feedback_complained(pool: PgPool) {
+        crate::decision_testing::checked(pool, |pool| async move {
+            feedback_fixture(
+                pool,
+                FeedbackEvent::Complained,
+                "complained",
+                Some("workspace_complaint"),
+            )
+            .await;
+        })
+        .await;
+    }
 }

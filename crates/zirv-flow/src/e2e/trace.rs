@@ -39,6 +39,68 @@ pub(super) const GATES: &[&str] = &[
     "delivery",
 ];
 
+/// A transient send retries twice, fails on its last attempt, and a signed hard-bounce
+/// webhook suppresses the address on the same trace.
+const FAILING: &[(&str, &str, Option<&str>)] = &[
+    ("event.accepted", "valid", None),
+    ("segment.entered", "entered", Some("data_change")),
+    ("flow.enroll", "enrolled", None),
+    ("flow.step", "enqueued", Some("inputs_fresh")),
+    ("flow.step", "waiting", Some("wait.duration")),
+    ("flow.wait", "waiting", Some("duration")),
+    ("job.attempt", "failed", Some("job_error")),
+    ("job.attempt", "failed", Some("job_error")),
+    ("send.gate", "passed", Some("enrollment")),
+    ("send.gate", "passed", Some("template")),
+    ("send.gate", "passed", Some("sender")),
+    ("send.gate", "passed", Some("address")),
+    ("send.gate", "passed", Some("render")),
+    ("send.gate", "passed", Some("rate_limit")),
+    ("send.gate", "blocked", Some("delivery")),
+    ("message.send", "failed", Some("http_5xx")),
+    ("message.feedback", "recorded", Some("bounced_hard")),
+    (
+        "suppression.feedback",
+        "added",
+        Some("organization_hard_bounce"),
+    ),
+];
+
+pub(super) fn failing_complete(records: &[Value]) -> Result<(), String> {
+    let actual: Vec<_> = records
+        .iter()
+        .map(|record| {
+            (
+                text(record, "action").unwrap_or_default(),
+                text(record, "outcome").unwrap_or_default(),
+                text(record, "reason"),
+            )
+        })
+        .collect();
+    if actual != FAILING {
+        return Err(format!("the failing send decisions differ: {actual:?}"));
+    }
+    for (index, record) in records
+        .iter()
+        .filter(|record| text(record, "action") == Some("job.attempt"))
+        .enumerate()
+    {
+        if record["attempt"].as_u64() != Some(index as u64 + 1)
+            || record["job_id"] != records[6]["job_id"]
+        {
+            return Err("the failing send retries are not consecutive attempts of one job".into());
+        }
+    }
+    let send = records
+        .iter()
+        .find(|record| text(record, "action") == Some("message.send"))
+        .unwrap();
+    if send["attempt"] != 3 || send["job_id"] != records[6]["job_id"] {
+        return Err("the failed send is not the last attempt of the retrying job".into());
+    }
+    one_tree(records)
+}
+
 /// How many messages the scenario sends, and how many it stops at the consent gate.
 const SENT: usize = 2;
 const SKIPPED: usize = 1;
@@ -253,8 +315,19 @@ pub(super) fn committed() -> Value {
 /// With `ZIRV_FLOW_BLESS` set, writes `trace` as the fixture; otherwise it must equal the
 /// committed one.
 pub(super) fn bless_or_compare(trace: &Value) {
+    bless_or_compare_at(trace, fixture_path());
+}
+
+fn failing_fixture_path() -> PathBuf {
+    fixture_path().with_file_name("failing-send-path-trace.json")
+}
+
+pub(super) fn bless_failing_or_compare(trace: &Value) {
+    bless_or_compare_at(trace, failing_fixture_path());
+}
+
+fn bless_or_compare_at(trace: &Value, path: PathBuf) {
     if std::env::var_os("ZIRV_FLOW_BLESS").is_some() {
-        let path = fixture_path();
         let parent = path.parent().expect("the fixture has a directory");
         std::fs::create_dir_all(parent).expect("the fixture directory is made");
         let mut text = serde_json::to_string_pretty(trace).expect("the trace serializes");
@@ -262,9 +335,10 @@ pub(super) fn bless_or_compare(trace: &Value) {
         std::fs::write(&path, text).expect("the fixture is written");
         return;
     }
+    let text = std::fs::read_to_string(path).expect("the trace fixture exists");
+    let committed: Value = serde_json::from_str(&text).expect("the trace fixture is JSON");
     assert_eq!(
-        &committed(),
-        trace,
+        &committed, trace,
         "the trace differs from the committed fixture; regenerate it with ZIRV_FLOW_BLESS=1 \
          cargo nextest run -p zirv-flow e2e and review the diff"
     );
@@ -273,6 +347,30 @@ pub(super) fn bless_or_compare(trace: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_failing_tree_requires_every_attempt_the_failed_send_and_the_feedback() {
+        let fixture: Value =
+            serde_json::from_str(&std::fs::read_to_string(failing_fixture_path()).unwrap())
+                .unwrap();
+        let records = records_of(&fixture);
+        assert_eq!(failing_complete(&records), Ok(()));
+        for index in 0..records.len() {
+            let mut missing = records.clone();
+            missing.remove(index);
+            assert!(
+                failing_complete(&missing).is_err(),
+                "missing record {index}"
+            );
+        }
+        let mut broken = records;
+        broken[17]["cause"]["id"] = json!("unreachable");
+        assert!(
+            failing_complete(&broken)
+                .unwrap_err()
+                .contains("not one tree")
+        );
+    }
 
     #[test]
     fn a_trace_with_any_one_required_decision_removed_fails_naming_its_action() {
@@ -396,5 +494,182 @@ mod tests {
             first["records"][0]["id"]
         );
         assert_eq!(first["records"][1]["recorded_at"], "2031-01-01T00:00:01Z");
+    }
+
+    async fn event_fixture(pool: sqlx::PgPool, outcome: &str, replayed: bool) {
+        use zirv_flow_core::events::{EventMode, UnplannedPolicy};
+        use zirv_flow_core::{
+            Cause, HmacPurpose, HmacRoot, MasterKey, Slug, TraceContext, WorkspaceName,
+        };
+        use zirv_flow_store::{EventOutcome, EventPolicy, EventRecord};
+
+        let ws = zirv_flow_store::create_workspace(
+            &pool,
+            &WorkspaceName::parse("Events").unwrap(),
+            &Slug::parse("events").unwrap(),
+        )
+        .await
+        .unwrap()
+        .id;
+        let key = HmacRoot::bootstrap_from(&MasterKey::generate()).hmac_key(HmacPurpose::Redaction);
+        let mut input = EventRecord {
+            source_record_id: None,
+            source: "fixture".into(),
+            identifiers: vec![(
+                "email".into(),
+                zirv_flow_store::decision_testing::PERSONAL_DATA
+                    .email
+                    .into(),
+            )],
+            name: "seed".into(),
+            properties: Default::default(),
+            timestamp: None,
+            received_at: time::OffsetDateTime::now_utc(),
+            message_id: None,
+            trace: TraceContext::root(Cause::api("seed")),
+        };
+        let seeded = zirv_flow_store::apply_event_batch(&pool, ws, &key, &[input.clone()])
+            .await
+            .unwrap();
+        let EventOutcome::Accepted {
+            person_id: person, ..
+        } = seeded[0]
+        else {
+            panic!("seeded person");
+        };
+        input.name = "fixture".into();
+        input.trace = TraceContext::root(Cause::api("fixture"));
+        if outcome == "flagged" {
+            zirv_flow_store::create_event_schema(
+                &pool,
+                ws,
+                &zirv_flow_store::NewEventSchema {
+                    name: input.name.clone(),
+                    mode: if replayed {
+                        EventMode::Block
+                    } else {
+                        EventMode::Warn
+                    },
+                    description: String::new(),
+                    properties: serde_json::from_value(json!([
+                        {"name": "total", "type": "number", "required": true}
+                    ]))
+                    .unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+            let mut tx = zirv_flow_store::begin(&pool).await.unwrap();
+            zirv_flow_store::publish_schema_draft(&mut tx, ws, &input.name, None)
+                .await
+                .unwrap();
+            zirv_flow_store::commit(tx).await.unwrap();
+        } else if replayed {
+            zirv_flow_store::set_event_policy(
+                &pool,
+                ws,
+                &EventPolicy {
+                    unplanned: UnplannedPolicy::Reject,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let applied = zirv_flow_store::apply_event_batch(&pool, ws, &key, &[input.clone()])
+            .await
+            .unwrap();
+        let (trace, triple, subjects) = if replayed {
+            let EventOutcome::Rejected {
+                reject_id: reject, ..
+            } = applied[0]
+            else {
+                panic!("rejected event");
+            };
+            if outcome == "flagged" {
+                let mut conn = pool.acquire().await.unwrap();
+                zirv_flow_store::update_event_schema(
+                    &mut conn,
+                    ws,
+                    &input.name,
+                    &zirv_flow_store::EventSchemaUpdate {
+                        mode: Some(EventMode::Warn),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            } else {
+                zirv_flow_store::set_event_policy(&pool, ws, &EventPolicy::default())
+                    .await
+                    .unwrap();
+            }
+            let trace = TraceContext::root(Cause::definition_change(uuid::Uuid::now_v7()));
+            let result = zirv_flow_store::replay_rejects(&pool, ws, &key, &[reject], &trace, false)
+                .await
+                .unwrap();
+            assert_eq!(result.stored(), 1);
+            let event: uuid::Uuid =
+                sqlx::query_scalar("SELECT replay_event_id FROM ingest_rejects WHERE id = $1")
+                    .bind(reject)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            (
+                trace,
+                ("event.replayed", outcome, None),
+                json!({"reject": reject, "event": event, "person": person}),
+            )
+        } else {
+            let EventOutcome::Accepted {
+                event_id: event, ..
+            } = applied[0]
+            else {
+                panic!("accepted event");
+            };
+            (
+                input.trace,
+                ("event.accepted", outcome, None),
+                json!({"event": event, "person": person}),
+            )
+        };
+        zirv_flow_store::decision_testing::assert_fixture(&pool, ws, &trace, triple, subjects)
+            .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn event_accepted_flagged(pool: sqlx::PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            event_fixture(pool, "flagged", false).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn event_accepted_unplanned(pool: sqlx::PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            event_fixture(pool, "unplanned", false).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn event_replayed_flagged(pool: sqlx::PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            event_fixture(pool, "flagged", true).await;
+        })
+        .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn event_replayed_unplanned(pool: sqlx::PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            event_fixture(pool, "unplanned", true).await;
+        })
+        .await;
     }
 }

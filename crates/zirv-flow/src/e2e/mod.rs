@@ -120,10 +120,15 @@ mod tests {
     }
 
     /// Posts a signed delivery event of the fake provider for `message`.
-    async fn deliver_feedback(world: &World, destination: &str, message: uuid::Uuid) -> Reply {
+    async fn deliver_feedback(
+        world: &World,
+        destination: &str,
+        message: uuid::Uuid,
+        event: &str,
+    ) -> Reply {
         let config = world.provider_config();
         let (_, verification) = provider_feedback_of(&config).expect("a feedback scheme");
-        let body = json!({"event": "delivered", "id": "evt-1", "meta": {"message_id": message}})
+        let body = json!({"event": event, "id": "evt-1", "meta": {"message_id": message}, "bounce": {"kind": "permanent"}})
             .to_string()
             .into_bytes();
         let headers = sign_provider_feedback(
@@ -353,7 +358,7 @@ mod tests {
                     .fetch_one(&world.pool)
                     .await
                     .expect("the receipt message");
-            let feedback = deliver_feedback(&world, &provider, receipt).await;
+            let feedback = deliver_feedback(&world, &provider, receipt, "delivered").await;
             assert_eq!(feedback.status, StatusCode::ACCEPTED);
             assert_eq!(
                 world
@@ -777,5 +782,116 @@ mod tests {
             world.finish().await;
         })
         .await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires PostgreSQL; set DATABASE_URL"]
+    async fn the_failing_send_and_its_trace_hold_end_to_end(pool: PgPool) {
+        zirv_flow_store::decision_testing::checked(pool, |pool| async move {
+            use zirv_flow_connectors::destinations::FakeProviderScript;
+
+            let world = World::start(pool, PUBLIC_URL).await;
+            let (sender, _) = world
+                .verified_sender("example.com", "news@example.com")
+                .await;
+            let provider = world.provider_destination().await;
+            let template = world.template("Failing send", html_doc(&sender)).await;
+            world.event_schema("order_placed").await;
+            let segment = world
+                .segment(PERSONAL_DATA.segment_name, json!({"v": 1, "event": "order_placed"}))
+                .await;
+            let graph = json!({"v": 1, "nodes": [
+                send_node("send", &template, &provider),
+                {"id": "pause", "type": "wait.duration", "seconds": 86400},
+                {"id": "end", "type": "exit"}
+            ], "edges": [edge("send", "pause"), edge("pause", "end")]});
+            let settings = json!({
+                "trigger": {"type": "segment", "segment_id": segment, "on": "entered"},
+                "reentry": {"mode": "once"}
+            });
+            let flow = world.flow("Failing send", graph, settings).await;
+            let person = world.subscribed_person(ADDRESS).await;
+            for _ in 0..3 {
+                world.provider.script(FakeProviderScript::Status {
+                    status: 503,
+                    body: json!({}),
+                    retry_after: Some(60),
+                });
+            }
+            let trace_id = world.track_order(ADDRESS).await;
+            world.settle().await;
+            assert_eq!(world.provider.requests(), 1);
+            let (job, message): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
+                "SELECT id, (payload ->> 'message_id')::uuid FROM jobs WHERE kind = 'delivery.send'",
+            )
+            .fetch_one(&world.pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE jobs SET max_attempts = 3, run_at = now() WHERE id = $1")
+                .bind(job)
+                .execute(&world.pool)
+                .await
+                .unwrap();
+            world.settle().await;
+            assert_eq!(world.provider.requests(), 2);
+
+            sqlx::query("UPDATE jobs SET run_at = now() WHERE id = $1")
+                .bind(job)
+                .execute(&world.pool)
+                .await
+                .unwrap();
+            world.settle().await;
+            assert_eq!(world.provider.requests(), 3);
+            assert!(world.provider.accepted().is_empty());
+            assert_eq!(
+                world.count("SELECT count(*) FROM jobs WHERE kind = 'delivery.send'").await,
+                0,
+            );
+            let outcome: (String, Option<String>) =
+                sqlx::query_as("SELECT status, reason FROM messages WHERE id = $1")
+                    .bind(message)
+                    .fetch_one(&world.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(outcome, ("failed".into(), Some("http_5xx".into())));
+            let feedback = deliver_feedback(&world, &provider, message, "bounced").await;
+            assert_eq!(feedback.status, StatusCode::ACCEPTED);
+            assert_eq!(
+                world.count("SELECT count(*) FROM suppressions WHERE scope = 'organization' AND reason = 'hard_bounce'").await,
+                1,
+            );
+            let attempts: Vec<(i32, String)> = sqlx::query_as(
+                "SELECT attempt, outcome FROM delivery_attempts WHERE subject_id = $1 ORDER BY attempt",
+            )
+            .bind(message)
+            .fetch_all(&world.pool)
+            .await
+            .unwrap();
+            assert_eq!(attempts, vec![
+                (1, "retryable".into()), (2, "retryable".into()), (3, "retryable".into())
+            ]);
+            let body = world
+                .api_ok("GET", &format!("/traces/{trace_id}"), None, StatusCode::OK)
+                .await;
+            assert_eq!(body["truncated"], false);
+            let records = trace::records_of(&body);
+            assert_eq!(trace::failing_complete(&records), Ok(()));
+            for record in records.iter().filter(|record| {
+                matches!(record["action"].as_str(), Some("message.send" | "message.feedback" | "suppression.feedback"))
+            }) {
+                assert_eq!(record["subject_ids"]["message"], message.to_string());
+                assert_eq!(record["subject_ids"]["person"], person.to_string());
+                assert_eq!(record["subject_ids"]["destination"], provider);
+                assert_eq!(record["cause"], records[2]["cause"]);
+                assert_eq!(
+                    record["subject_ids"]["enrollment"],
+                    records[2]["subject_ids"]["enrollment"],
+                );
+            }
+            assert_eq!(records[2]["subject_ids"]["flow"], flow);
+            zirv_flow_store::decision_testing::assert_no_personal_data(&body);
+            trace::bless_failing_or_compare(&trace::normalised(&trace_id, records));
+            world.finish().await;
+        }).await;
     }
 }
