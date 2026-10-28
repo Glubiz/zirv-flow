@@ -18,7 +18,7 @@ use super::{CsvImportDetailBody, ImportLimits, SAMPLE_ROWS};
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, may_view_pii, path_id};
-use crate::idempotency::{self, Keyed, Opened, ReplayedProblem, RequestHash};
+use crate::idempotency::{self, ConflictProblem, Keyed, RequestHash, UnhashedEntry, lease};
 use crate::problem::{ApiError, Problem};
 use crate::trace::request_trace;
 
@@ -335,6 +335,13 @@ async fn drain(
 /// see values. The import exists as `uploading` (hidden from the history) while the body
 /// arrives, each 1 MiB chunk is stored on its own, and an upload that is refused, breaks off
 /// or stalls for 60 seconds is deleted with its chunks. Audited as `import.created`.
+///
+/// Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours.
+/// While the first request runs, the same key answers `409 idempotency_key_in_flight` with
+/// `Retry-After`; once it has stored the import, the same key and file answer
+/// `409 idempotency_key_replayed` with the import's id and no body, as the answer holds rows of
+/// the file; the same key with another file is `422 idempotency_key_reused`. The key belongs to
+/// the caller that sent it.
 #[utoipa::path(
     post,
     operation_id = "upload_import",
@@ -347,7 +354,7 @@ async fn drain(
         ("source" = Option<String>, Query, description = "The source records are written under: a-z, 0-9, _ and -; default csv"),
         ("stream" = Option<String>, Query, description = "The stream records are written under; default the file name without its extension"),
         ("delimiter" = Option<String>, Query, description = "comma, semicolon or tab; detected when absent"),
-        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours")
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused`")
     ),
     request_body(content = String, content_type = "text/csv", description = "The CSV file"),
     responses(
@@ -357,10 +364,10 @@ async fn drain(
         (status = 403, description = "A key without the write scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
         (status = 408, description = "No byte arrived for 60 seconds; the upload was abandoned and nothing was kept", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it uploaded the import, with resource_id as the import's id; the response is not kept", body = ConflictProblem, content_type = "application/problem+json"),
         (status = 413, description = "The file is over imports.max_file_bytes", body = Problem, content_type = "application/problem+json"),
         (status = 415, description = "The content type is not text/csv", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The Idempotency-Key already uploaded an import (`idempotency_key_replayed`); resource_id is the import's id and the body is not kept, as it holds rows of the file", body = ReplayedProblem, content_type = "application/problem+json"),
-        (status = 422, description = "Not UTF-8, empty, a header with blank or repeated names, or an Idempotency-Key that is invalid or was used for another file (`idempotency_key_reused`)", body = Problem, content_type = "application/problem+json")
+        (status = 422, description = "Not UTF-8, empty, or a header with blank or repeated names", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -388,17 +395,21 @@ pub(crate) async fn upload(
     if declared.is_some_and(|length| length > limits.max_file_bytes) {
         return Err(too_large());
     }
-    let keyed = Keyed::of(request.headers(), "upload_import")?;
+    let keyed = Keyed::of(request.headers(), "upload_import", &principal)?;
     let mut request_hash = RequestHash::new(request.method(), request.uri());
-    // The file streams to the database, so the hash is built as it arrives. A key that was used
-    // before reads the body only to compare it.
-    let guard = match idempotency::open(&state.pool, workspace.id, keyed).await? {
-        Opened::Free(guard) => guard,
-        Opened::Seen(seen) => {
-            drain(request.into_body(), limits, &mut request_hash).await?;
-            return Ok(seen.answer(request_hash.finish()));
-        }
-    };
+    // The file streams to the database, so the hash is built as it arrives and bound to the
+    // reservation once the body is in. A key whose import finished reads the body only to compare
+    // it.
+    let reservation =
+        match idempotency::reserve_unhashed(&state.pool, workspace.id, keyed, lease::IMPORT).await?
+        {
+            UnhashedEntry::Go(reservation) => reservation,
+            UnhashedEntry::Answer(response) => return Ok(response),
+            UnhashedEntry::Done(done) => {
+                drain(request.into_body(), limits, &mut request_hash).await?;
+                return Ok(done.answer(request_hash.finish()));
+            }
+        };
 
     let trace = request_trace();
     let mut upload = ImportUpload::begin(
@@ -429,6 +440,12 @@ pub(crate) async fn upload(
             return Err(error);
         }
     };
+    if let Some(reservation) = &reservation
+        && let Err(error) = reservation.bind_hash(request_hash.finish()).await
+    {
+        upload.abort().await;
+        return Err(error);
+    }
     let (import, mut tx) = upload
         .finish(&UploadScan {
             delimiter: char::from(scanned.delimiter),
@@ -436,24 +453,33 @@ pub(crate) async fn upload(
             rows_total: scanned.rows,
         })
         .await?;
-    admin::audit(
-        &mut tx,
-        &principal.context(),
-        Some(workspace.id),
-        "import.created",
-        Some(("import", import.id)),
-        json!({ "rows": import.rows_total, "bytes": import.size_bytes }),
-    )
-    .await?;
-    zirv_flow_store::commit(tx).await?;
-    idempotency::finish(
-        guard,
-        request_hash.finish(),
-        StatusCode::CREATED,
-        import.id,
-        None,
-    )
-    .await?;
+    let committed = async {
+        admin::audit(
+            &mut tx,
+            &principal.context(),
+            Some(workspace.id),
+            "import.created",
+            Some(("import", import.id)),
+            json!({ "rows": import.rows_total, "bytes": import.size_bytes }),
+        )
+        .await?;
+        idempotency::complete(
+            reservation.as_ref(),
+            &mut tx,
+            StatusCode::CREATED,
+            import.id,
+        )
+        .await?;
+        zirv_flow_store::commit(tx).await?;
+        Ok::<(), ApiError>(())
+    }
+    .await;
+    if let Err(error) = committed {
+        // The finishing statement rolled back with the transaction; the half-finished import goes.
+        zirv_flow_store::discard_unfinished_import(&state.pool, workspace.id, import.id).await;
+        return Err(error);
+    }
+    idempotency::finish(reservation);
     let may_see = may_view_pii(&state, &principal, workspace.id).await;
     Ok((
         StatusCode::CREATED,

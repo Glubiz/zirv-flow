@@ -66,7 +66,7 @@ use crate::auth::{Need, Principal, authorize, path_id};
 use crate::flows::crud::{FlowDetailBody, check_document};
 use crate::flows::test_mode::simulation::{SimulationBody, simulate};
 use crate::flows::{flow_error, issue_problems, parse_graph, parse_settings};
-use crate::idempotency::{self, Keyed, RequestHash};
+use crate::idempotency::{self, ConflictProblem, Entry, Keyed, RequestHash, lease};
 use crate::imports::MappingBody;
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem, SegmentIssueProblem};
@@ -751,6 +751,14 @@ async fn dry_run_manifest(
 /// refused. Every attempt is a gated model call: it counts against the
 /// budget and the rate limit, and with the assistant off, nothing is read or sent. A reverse
 /// proxy in front needs a read timeout of at least (1 + `ai.max_repair_attempts`) x 60 s + 30 s.
+///
+/// Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours, so a
+/// retry after a timeout does not spend the budget twice. While the first request runs, the same
+/// key answers `409 idempotency_key_in_flight` with `Retry-After`; once it has stored a draft
+/// (valid or not), the same key and body answer `409 idempotency_key_replayed` with the draft's id
+/// and no body, as the draft may hold values from the workspace; the same key with another body
+/// is `422 idempotency_key_reused`. The key belongs to the caller that sent it. A failed run
+/// stores nothing and leaves the key free.
 #[utoipa::path(
     post,
     operation_id = "create_ai_draft",
@@ -758,7 +766,7 @@ async fn dry_run_manifest(
     tag = "ai",
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
-        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours, so a retry after a timeout does not spend the budget twice")
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused`")
     ),
     request_body = DraftRequest,
     responses(
@@ -767,9 +775,9 @@ async fn dry_run_manifest(
         (status = 402, description = "The workspace's monthly AI budget is spent (`ai_budget_exceeded`); nothing was sent", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not an editor, not an admin for a mapping or manifest draft, or an API key (`ai_user_required`)", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, source or stream, or no access", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`), or the Idempotency-Key already ran a draft (`idempotency_key_replayed`; `resource_id` is the draft's id and the body is not kept, as it may hold values from the workspace)", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "The assistant is off (`ai_disabled`), the source does not use a manifest, or the template is archived (`template_archived`)", body = ConflictProblem, content_type = "application/problem+json"),
         (status = 413, description = "The body is over 160 KiB", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "The Idempotency-Key is invalid or reused (`idempotency_key_reused`), or a request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)", body = Problem, content_type = "application/problem+json"),
+        (status = 422, description = "A request that breaks a rule, naming the field, such as a missing prompt, `sample_required` or `sample_not_supported`; for a template `ai_template_too_large` (the document is over 96 KiB) or `ai_template_unsupported` (not an email template, a block layout of a code email, or, without the personal-data opt-in, a `visible_if` too deep or too large to mask)", body = Problem, content_type = "application/problem+json"),
         (status = 429, description = "Too many AI calls (`ai_rate_limited`); try again in a minute", body = Problem, content_type = "application/problem+json"),
         (status = 502, description = "The model provider failed (`ai_provider_error`), the source did, or (a template draft) the render host answered unusably (`render_protocol`)", body = Problem, content_type = "application/problem+json"),
         (status = 503, description = "The server has no master key to open the provider key, or (a template draft) the render host stopped (`render_child_exited`) or rendering is not available (`render_unavailable`)", body = Problem, content_type = "application/problem+json")
@@ -797,10 +805,18 @@ pub(crate) async fn create(
     check_request(&request)?;
     // A retry of a draft that already ran answers from the key and spends nothing.
     let request_hash = RequestHash::of_json(&method, &uri, &request)?;
-    let keyed = Keyed::of(&headers, "create_ai_draft")?;
-    let guard = match idempotency::enter(&state.pool, workspace.id, keyed, request_hash).await? {
-        Ok(guard) => guard,
-        Err(replay) => return Ok(replay),
+    let keyed = Keyed::of(&headers, "create_ai_draft", &principal)?;
+    let reservation = match idempotency::reserve(
+        &state.pool,
+        workspace.id,
+        keyed,
+        request_hash,
+        lease::draft(state.ai.config.max_repair_attempts),
+    )
+    .await?
+    {
+        Entry::Go(reservation) => reservation,
+        Entry::Answer(response) => return Ok(response),
     };
     // The assistant being off is the first answer, before anything is read.
     let dispatcher = Dispatcher::open(&state, Some(user), workspace.id, kind.as_str())
@@ -1065,6 +1081,7 @@ pub(crate) async fn create(
                 },
             )
             .await?;
+            idempotency::complete(reservation.as_ref(), &mut tx, StatusCode::CREATED, id).await?;
             zirv_flow_store::commit(tx).await?;
             // A segment has no dry run on the server: the builder shows the live count of the draft.
             let dry_run = match (kind, &stream, source_id) {
@@ -1116,6 +1133,7 @@ pub(crate) async fn create(
                 },
             )
             .await?;
+            idempotency::complete(reservation.as_ref(), &mut tx, StatusCode::CREATED, id).await?;
             zirv_flow_store::commit(tx).await?;
             run_outcome(kind, "invalid");
             DraftBody {
@@ -1142,7 +1160,7 @@ pub(crate) async fn create(
             return Err(error);
         }
     };
-    idempotency::finish(guard, request_hash, StatusCode::CREATED, body.id, None).await?;
+    idempotency::finish(reservation);
     Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 

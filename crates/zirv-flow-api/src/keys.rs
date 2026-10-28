@@ -14,7 +14,7 @@ use zirv_flow_store::ApiKey;
 use crate::AppState;
 use crate::admin;
 use crate::auth::{Need, Principal, authorize, path_id};
-use crate::idempotency::{self, Keyed, ReplayedProblem, RequestHash};
+use crate::idempotency::{self, ConflictProblem, Entry, Keyed, RequestHash, lease};
 use crate::json::ApiJson;
 use crate::problem::{ApiError, Problem};
 
@@ -121,10 +121,14 @@ pub(crate) async fn list(
     Ok(Json(keys.iter().map(ApiKeyBody::from).collect()))
 }
 
-//// Creates a key and returns its secret, once. Send an `Idempotency-Key` header (1 to 255
-/// characters) to make a retry safe for 24 hours: the same key with the same body answers
-/// `409 idempotency_key_replayed` with the id of the key it created and never shows the secret
-/// again; the same key with another body is `422 idempotency_key_reused`.
+/// Creates a key and returns its secret, once.
+///
+/// Send an `Idempotency-Key` header (1 to 255 characters) to make a retry safe for 24 hours:
+/// while the first request runs, the same key
+/// answers `409 idempotency_key_in_flight` with `Retry-After`; once it has created the key, the
+/// same key with the same body answers `409 idempotency_key_replayed` with the id of the key it
+/// created and never shows the secret again; the same key with another body is
+/// `422 idempotency_key_reused`. The key belongs to the caller that sent it.
 #[utoipa::path(
     post,
     operation_id = "create_api_key",
@@ -132,7 +136,7 @@ pub(crate) async fn list(
     tag = "api-keys",
     params(
         ("ws" = Uuid, Path, description = "Workspace id"),
-        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours")
+        ("Idempotency-Key" = Option<String>, Header, description = "1 to 255 characters; makes a retry safe for 24 hours. A key first used for another request answers 422 `idempotency_key_reused`")
     ),
     request_body = CreateApiKeyRequest,
     responses(
@@ -140,8 +144,8 @@ pub(crate) async fn list(
         (status = 401, description = "Not authenticated", body = Problem, content_type = "application/problem+json"),
         (status = 403, description = "Not a workspace admin, a missing scope, or a missing CSRF token", body = Problem, content_type = "application/problem+json"),
         (status = 404, description = "No such workspace, or no access to it", body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "The Idempotency-Key already created a key (`idempotency_key_replayed`); resource_id is its id and the secret is not shown again", body = ReplayedProblem, content_type = "application/problem+json"),
-        (status = 422, description = "Invalid name or scopes, or the Idempotency-Key is invalid or reused (`idempotency_key_reused`)", body = Problem, content_type = "application/problem+json")
+        (status = 409, description = "The Idempotency-Key is in use: `idempotency_key_in_flight` while the first request runs (see Retry-After), or `idempotency_key_replayed` once it created a key, with resource_id as its id and no secret", body = ConflictProblem, content_type = "application/problem+json"),
+        (status = 422, description = "Invalid name or scopes", body = Problem, content_type = "application/problem+json")
     ),
     security(("session" = []), ("api_key" = []))
 )]
@@ -161,27 +165,32 @@ pub(crate) async fn create(
         .map(|scope| scope.parse::<Scope>())
         .collect::<Result<Vec<_>, _>>()?;
     let request_hash = RequestHash::of_json(&method, &uri, &body)?;
-    let keyed = Keyed::of(&headers, "create_api_key")?;
-    let guard = match idempotency::enter(&state.pool, workspace.id, keyed, request_hash).await? {
-        Ok(guard) => guard,
-        Err(replay) => return Ok(replay),
-    };
-    let created = admin::create_api_key(
-        &state.pool,
+    let keyed = Keyed::of(&headers, "create_api_key", &principal)?;
+    let reservation =
+        match idempotency::reserve(&state.pool, workspace.id, keyed, request_hash, lease::QUICK)
+            .await?
+        {
+            Entry::Go(reservation) => reservation,
+            Entry::Answer(response) => return Ok(response),
+        };
+    let mut tx = zirv_flow_store::begin(&state.pool).await?;
+    let created = admin::create_api_key_in(
+        &mut tx,
         &principal.context(),
         workspace.id,
         &body.name,
         &scopes,
     )
     .await?;
-    idempotency::finish(
-        guard,
-        request_hash,
+    idempotency::complete(
+        reservation.as_ref(),
+        &mut tx,
         StatusCode::CREATED,
         created.key.id.as_uuid(),
-        None,
     )
     .await?;
+    zirv_flow_store::commit(tx).await?;
+    idempotency::finish(reservation);
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -193,7 +202,7 @@ pub(crate) async fn create(
         .into_response())
 }
 
-// Revokes a key. Revoked keys are refused with 401 from then on.
+/// Revokes a key. Revoked keys are refused with 401 from then on.
 #[utoipa::path(
     delete,
     operation_id = "revoke_api_key",

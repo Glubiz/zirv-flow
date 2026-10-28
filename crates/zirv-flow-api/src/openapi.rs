@@ -1023,6 +1023,12 @@ mod tests {
                         operation["responses"]["422"].is_object(),
                         "{id} does not document the reused key"
                     );
+                    assert_eq!(
+                        operation["responses"]["409"]["content"]["application/problem+json"]["schema"]
+                            ["$ref"],
+                        "#/components/schemas/ConflictProblem",
+                        "{id} does not document the in-flight and replay 409"
+                    );
                 }
                 if header {
                     documented.push(id.to_owned());
@@ -1032,5 +1038,20 @@ mod tests {
         for id in IDEMPOTENT_CREATES {
             assert!(documented.iter().any(|documented| documented == id), "{id}");
         }
+    }
+
+    #[test]
+    fn the_conflict_schema_is_one_of_the_problem_and_the_replay() {
+        let document = serde_json::to_value(openapi()).unwrap();
+
+        let one_of = &document["components"]["schemas"]["ConflictProblem"]["oneOf"];
+
+        assert_eq!(
+            one_of,
+            &serde_json::json!([
+                {"$ref": "#/components/schemas/Problem"},
+                {"$ref": "#/components/schemas/ReplayedProblem"}
+            ])
+        );
     }
 }
