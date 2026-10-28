@@ -14,8 +14,16 @@ const PREFIX: &str = "zirv_flow_";
 const RULES_FILE: &str = "docs/operations/alerts.rules.yml";
 const RUNBOOKS_FILE: &str = "docs/operations/runbooks.md";
 
-/// The doc pages whose backticked configuration keys must exist in `config.rs`.
-const DOC_PAGES: [&str; 1] = [RUNBOOKS_FILE];
+const COMPLIANCE_FILE: &str = "docs/guide/compliance.md";
+const COMPLIANCE_TESTS_FILE: &str = "docs/guide/compliance-tests.md";
+const ROUTES_FILE: &str = "crates/zirv-flow-api/src/rbac.rs";
+
+/// The doc pages whose backticked configuration keys and metric names must exist in the code.
+const DOC_PAGES: [&str; 3] = [RUNBOOKS_FILE, COMPLIANCE_FILE, COMPLIANCE_TESTS_FILE];
+
+/// The compliance pages: their routes and relative links are checked, and the guide's claim ids
+/// must match the claim-to-test map.
+const COMPLIANCE_PAGES: [&str; 2] = [COMPLIANCE_FILE, COMPLIANCE_TESTS_FILE];
 
 /// The parts every runbook section has, in order.
 const RUNBOOK_PARTS: [&str; 7] = [
@@ -548,6 +556,225 @@ fn unknown_config_keys(page: &str, keys: &[&str], job_kinds: &BTreeSet<&str>) ->
     unknown.into_iter().collect()
 }
 
+/// Path parameters carry different names in different places; only their position matters.
+fn normalise_path(path: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for c in path.chars() {
+        match c {
+            '{' => {
+                inside = true;
+                out.push_str("{}");
+            }
+            '}' => inside = false,
+            _ if inside => {}
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The `(METHOD, path)` rows of the route table's source, parameter names normalised.
+fn route_rows(source: &str) -> BTreeSet<(String, String)> {
+    let mut rows = BTreeSet::new();
+    for line in source.lines() {
+        let line = line.trim_start();
+        for method in ["Get", "Post", "Put", "Patch", "Delete"] {
+            let Some(rest) = line.strip_prefix(method) else {
+                continue;
+            };
+            let Some(path) = rest
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next())
+            else {
+                continue;
+            };
+            if rest.starts_with(char::is_whitespace) && path.starts_with('/') {
+                rows.insert((method.to_ascii_uppercase(), normalise_path(path)));
+            }
+        }
+    }
+    rows
+}
+
+/// The backticked spans of `page` that name a route: an optional HTTP method, then a path that
+/// starts with `/api/` or `/u/`.
+fn routes_named(page: &str) -> Vec<(Option<String>, String)> {
+    let mut found = Vec::new();
+    for (index, span) in page.split('`').enumerate() {
+        if index % 2 == 0 {
+            continue;
+        }
+        let (method, path) = match span.split_once(' ') {
+            Some((method, path)) if ["GET", "POST", "PUT", "PATCH", "DELETE"].contains(&method) => {
+                (Some(method.to_owned()), path)
+            }
+            _ => (None, span),
+        };
+        let path = path.split('?').next().unwrap_or_default();
+        if (path.starts_with("/api/") || path.starts_with("/u/")) && !path.contains(' ') {
+            found.push((method, normalise_path(path)));
+        }
+    }
+    found
+}
+
+/// The routes `page` names that the route table does not have.
+fn unknown_routes(page: &str, rows: &BTreeSet<(String, String)>) -> Vec<String> {
+    let mut unknown = BTreeSet::new();
+    for (method, path) in routes_named(page) {
+        let known = match &method {
+            Some(method) => rows.contains(&(method.clone(), path.clone())),
+            None => rows.iter().any(|(_, known)| *known == path),
+        };
+        if !known {
+            unknown.insert(format!("{} {path}", method.unwrap_or_default()));
+        }
+    }
+    unknown.into_iter().collect()
+}
+
+/// The claim ids (`E` and digits, as a whole word) in `text`.
+fn claim_ids(text: &str) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (at, c) in chars.iter().enumerate() {
+        let starts = *c == 'E' && (at == 0 || !chars[at - 1].is_ascii_alphanumeric());
+        if !starts {
+            continue;
+        }
+        let digits: String = chars[at + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let next = chars.get(at + 1 + digits.len());
+        if !digits.is_empty() && !next.is_some_and(|c| c.is_ascii_alphanumeric()) {
+            ids.insert(format!("E{digits}"));
+        }
+    }
+    ids
+}
+
+/// One row of the claim-to-test map.
+#[derive(Debug, PartialEq)]
+struct TestRow {
+    id: String,
+    test: String,
+    file: String,
+}
+
+/// The rows of the map: `| Id | Claim | `test` | `file` |`.
+fn test_rows(page: &str) -> Vec<TestRow> {
+    page.lines()
+        .filter_map(|line| {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            let [_, id, _, test, file, _] = cells.as_slice() else {
+                return None;
+            };
+            let unquote = |cell: &str| cell.strip_prefix('`')?.strip_suffix('`').map(str::to_owned);
+            Some(TestRow {
+                id: (claim_ids(id) == BTreeSet::from([(*id).to_owned()]))
+                    .then(|| (*id).to_owned())?,
+                test: unquote(test)?,
+                file: unquote(file)?,
+            })
+        })
+        .collect()
+}
+
+/// Whether `source` defines a test function `name`: the function is declared with that exact name
+/// and a test attribute sits in the attribute lines directly above it.
+fn test_defined(source: &str, name: &str) -> bool {
+    let lines: Vec<&str> = source.lines().collect();
+    let declared = format!("fn {name}(");
+    lines.iter().enumerate().any(|(at, line)| {
+        line.contains(&declared)
+            && lines[..at]
+                .iter()
+                .rev()
+                .take_while(|above| {
+                    let above = above.trim();
+                    above.starts_with("#[") || above.starts_with("///")
+                })
+                .any(|above| {
+                    let above = above.trim();
+                    above == "#[test]"
+                        || above.starts_with("#[sqlx::test")
+                        || above.starts_with("#[tokio::test")
+                })
+    })
+}
+
+/// A heading's anchor on the hosting site: lowercase, spaces to hyphens, punctuation dropped.
+fn slug(heading: &str) -> String {
+    heading
+        .trim()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            '-' | '_' => Some(c),
+            c if c.is_alphanumeric() => Some(c.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The anchors a Markdown file offers: its headings and its explicit `id="..."` attributes.
+fn anchors_of(markdown: &str) -> BTreeSet<String> {
+    let mut anchors = BTreeSet::new();
+    let mut fenced = false;
+    for line in markdown.lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+        }
+        if fenced {
+            continue;
+        }
+        let heading = line.trim_start_matches('#');
+        if heading.len() < line.len() && heading.starts_with(' ') {
+            anchors.insert(slug(heading));
+        }
+        for (at, _) in line.match_indices("id=\"") {
+            if let Some(id) = line[at + 4..].split('"').next() {
+                anchors.insert(id.to_owned());
+            }
+        }
+    }
+    anchors
+}
+
+/// The relative link targets in `text` as `(path, fragment)`; the path is empty for a link within
+/// the page. Links to other sites and mail addresses are not relative.
+fn link_targets(text: &str) -> Vec<(String, Option<String>)> {
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices("](") {
+        let Some(target) = text[at + 2..].split(')').next() else {
+            continue;
+        };
+        if target.contains("://") || target.starts_with("mailto:") || target.is_empty() {
+            continue;
+        }
+        match target.split_once('#') {
+            Some((path, fragment)) => found.push((path.to_owned(), Some(fragment.to_owned()))),
+            None => found.push((target.to_owned(), None)),
+        }
+    }
+    found
+}
+
+/// The links of `text` that `resolves` refuses.
+fn link_problems(text: &str, resolves: impl Fn(&str, Option<&str>) -> bool) -> Vec<String> {
+    link_targets(text)
+        .into_iter()
+        .filter(|(path, fragment)| !resolves(path, fragment.as_deref()))
+        .map(|(path, fragment)| match fragment {
+            Some(fragment) => format!("{path}#{fragment}"),
+            None => path,
+        })
+        .collect()
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -1009,5 +1236,196 @@ groups:
 
             assert!(unknown.is_empty(), "{page} names unknown keys: {unknown:?}");
         }
+    }
+
+    const ROUTE_SOURCE: &str = "    Get    \"/api/v1/workspaces/{ws}/audit\" => ADMIN;
+    Post   \"/u/{token}\" => PUBLIC @ not_audited(\"x\");
+    // Get \"/api/v1/commented\" => ADMIN;
+    Getter \"/api/v1/not-a-row\" => ADMIN;
+";
+
+    #[test]
+    fn route_rows_read_the_table_and_ignore_comments_and_other_words() {
+        let rows = route_rows(ROUTE_SOURCE);
+
+        assert_eq!(
+            rows.into_iter().collect::<Vec<_>>(),
+            [
+                ("GET".to_owned(), "/api/v1/workspaces/{}/audit".to_owned()),
+                ("POST".to_owned(), "/u/{}".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_route_the_table_lacks_or_has_under_another_method_is_unknown() {
+        let rows = route_rows(ROUTE_SOURCE);
+        let page = "Read `GET /api/v1/workspaces/{ws}/audit`, `/u/{token}`,             `POST /api/v1/workspaces/{ws}/audit`, `GET /api/v1/gone` and `{{ system.url }}`.";
+
+        let unknown = unknown_routes(page, &rows);
+
+        assert_eq!(
+            unknown,
+            ["GET /api/v1/gone", "POST /api/v1/workspaces/{}/audit"]
+        );
+    }
+
+    #[test]
+    fn claim_ids_are_whole_words() {
+        let ids = claim_ids("E1, E20 and (E3). Not CE4, E5x or E.");
+
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["E1", "E20", "E3"]);
+    }
+
+    #[test]
+    fn a_test_counts_only_with_a_test_attribute_and_its_exact_name() {
+        let source = "#[sqlx::test]
+#[ignore = \"x\"]
+async fn the_real_one(pool: P) {}
+            fn helper_not_a_test() {}
+#[test]
+fn another() {}
+";
+
+        assert!(test_defined(source, "the_real_one"));
+        assert!(test_defined(source, "another"));
+        assert!(!test_defined(source, "helper_not_a_test"));
+        assert!(!test_defined(source, "real_one"));
+        assert!(!test_defined(source, "missing"));
+    }
+
+    #[test]
+    fn the_map_rows_are_read_and_other_table_rows_are_not() {
+        let page = "| Id | Claim | Test | File |
+| --- | --- | --- | --- |
+            | E1 | A claim | `a_test` | `crates/x.rs` |
+| E2, E3 | Two | `b` | `c.rs` |
+            | E4 | No quotes | b | c.rs |
+";
+
+        let rows = test_rows(page);
+
+        assert_eq!(
+            rows,
+            [TestRow {
+                id: "E1".into(),
+                test: "a_test".into(),
+                file: "crates/x.rs".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn anchors_come_from_headings_and_ids_and_links_are_checked_against_them() {
+        let target = "# Title
+## 10.1 Destinations and the `send` pipeline
+```
+# not a heading
+```
+<a id=\"kept\"></a>
+";
+        let anchors = anchors_of(target);
+        let resolves = |path: &str, fragment: Option<&str>| {
+            path == "here.md" && fragment.is_none_or(|f| anchors.contains(f))
+        };
+        let text = "[ok](here.md#101-destinations-and-the-send-pipeline) [id](here.md#kept)             [no file](gone.md) [no anchor](here.md#nowhere) [web](https://example.test/x)             [mail](mailto:a@example.test)";
+
+        let problems = link_problems(text, resolves);
+
+        assert_eq!(problems, ["gone.md", "here.md#nowhere"]);
+        assert!(!anchors.contains("not-a-heading"));
+    }
+
+    #[test]
+    fn the_compliance_pages_name_only_routes_that_exist() {
+        let rows = route_rows(&read(ROUTES_FILE));
+        assert!(rows.len() > 100, "the route table was not read");
+
+        for page in COMPLIANCE_PAGES {
+            let unknown = unknown_routes(&read(page), &rows);
+
+            assert!(
+                unknown.is_empty(),
+                "{page} names unknown routes: {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_series_a_doc_page_names_is_emitted_by_the_code() {
+        let emitted = emitted_series();
+
+        for page in DOC_PAGES {
+            let unknown: Vec<String> = names_in(&read(page))
+                .into_iter()
+                .filter(|name| resolve(name, &emitted).is_none())
+                .collect();
+
+            assert!(
+                unknown.is_empty(),
+                "{page} names series the code does not emit: {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_compliance_pages_link_only_to_files_and_anchors_that_exist() {
+        for page in COMPLIANCE_PAGES {
+            let dir = Path::new(page).parent().unwrap_or(Path::new("."));
+            let own = read(page);
+            let resolves = |path: &str, fragment: Option<&str>| {
+                let target = if path.is_empty() {
+                    root().join(page)
+                } else {
+                    root().join(dir).join(path)
+                };
+                if !target.exists() {
+                    return false;
+                }
+                match fragment {
+                    Some(fragment) if path.is_empty() => anchors_of(&own).contains(fragment),
+                    Some(fragment) if path.ends_with(".md") => std::fs::read_to_string(&target)
+                        .is_ok_and(|text| anchors_of(&text).contains(fragment)),
+                    _ => true,
+                }
+            };
+
+            let problems = link_problems(&own, resolves);
+
+            assert!(problems.is_empty(), "{page} has broken links: {problems:?}");
+        }
+    }
+
+    #[test]
+    fn the_guide_and_the_claim_to_test_map_name_the_same_claims() {
+        let rows = test_rows(&read(COMPLIANCE_TESTS_FILE));
+        let in_map: BTreeSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+        let in_guide = claim_ids(&read(COMPLIANCE_FILE));
+
+        assert_eq!(in_guide, in_map, "claim ids of the guide and of the map");
+        assert!(in_map.contains("E1") && in_map.contains("E20"));
+    }
+
+    #[test]
+    fn every_test_the_map_names_exists_in_the_file_it_names() {
+        let rows = test_rows(&read(COMPLIANCE_TESTS_FILE));
+        assert!(rows.len() > 80, "the map was not read");
+
+        let missing: Vec<String> = rows
+            .iter()
+            .filter(|row| {
+                !row.file.starts_with("crates/")
+                    || !test_defined(
+                        &std::fs::read_to_string(root().join(&row.file)).unwrap_or_default(),
+                        &row.test,
+                    )
+            })
+            .map(|row| format!("{}: {} in {}", row.id, row.test, row.file))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "tests the code does not have: {missing:#?}"
+        );
     }
 }
